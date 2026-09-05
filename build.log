@@ -3,9 +3,9 @@ src/audiothurgist.cpp:138:20: warning: 'gLabelPtrs' defined but not used [-Wunus
   138 | static const char* gLabelPtrs[kMaxFiles];        /* → gFiles[], for the browser */
       |                    ^~~~~~~~~~
 In function 'void ScanSD()',
-    inlined from 'int main()' at src/audiothurgist.cpp:570:11:
-src/audiothurgist.cpp:498:16: warning: 'char* strncpy(char*, const char*, size_t)' output may be truncated copying 127 bytes from a string of length 255 [-Wstringop-truncation]
-  498 |         strncpy(gFiles[gNumFiles], gFno.fname, 127);
+    inlined from 'int main()' at src/audiothurgist.cpp:641:11:
+src/audiothurgist.cpp:569:16: warning: 'char* strncpy(char*, const char*, size_t)' output may be truncated copying 127 bytes from a string of length 255 [-Wstringop-truncation]
+  569 |         strncpy(gFiles[gNumFiles], gFno.fname, 127);
       |         ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 arm-none-eabi-g++ build/startup_stm32h750xx.o build/diskio.o build/ff.o build/ff_gen_drv.o build/ccsbcs.o build/audiothurgist.o build/clock_follower.o build/clock_pll.o build/cv_edge.o build/cv_router.o build/musical_clock.o build/param_lock_manager.o build/cdc_transport.o build/describe.o build/descriptor.o build/host.o build/host_link.o build/json_check.o build/action_gesture.o build/beat_pip.o build/catch_pip.o build/clip_indicator.o build/color_morph_arc.o build/field.o build/fill.o build/pip.o build/selector.o build/slot_indicator.o build/sparkle.o build/panel.o build/perf_renderer.o build/ring_frame.o build/fs_extension.o build/sd_card.o build/button_bank.o build/control_loop.o build/cv_matrix.o build/led_render.o build/pager.o build/preset_gesture_ui.o build/presets.o build/settings.o build/virtual_knob.o build/alchemy_lab_v2.o build/alchemy_lab_v2_layout.o build/cv_jack.o build/mcp4728.o build/pca9557.o build/trigger_jack.o build/v2_calibration.o build/v2_factory_cal.o build/ws2812.o build/reverbsc.o  -mcpu=cortex-m7 -mthumb -mfpu=fpv5-d16 -mfloat-abi=hard --specs=nano.specs --specs=nosys.specs -Tsrc/audiothurgist.lds -L../alchemy-sdk/vendor/libDaisy/build -ldaisy -lc -lm -lnosys -Wl,-Map=build/audiothurgist.map,--cref -Wl,--gc-sections -Wl,--print-memory-usage -o build/audiothurgist.elf
 /usr/lib/gcc/arm-none-eabi/13.2.1/../../../arm-none-eabi/bin/ld: /usr/lib/gcc/arm-none-eabi/13.2.1/../../../arm-none-eabi/lib/thumb/v7e-m+dp/hard/libc_nano.a(libc_a-closer.o): in function `_close_r':
@@ -34,8 +34,8 @@ arm-none-eabi-g++ build/startup_stm32h750xx.o build/diskio.o build/ff.o build/ff
 /usr/lib/gcc/arm-none-eabi/13.2.1/../../../arm-none-eabi/bin/ld: /usr/lib/gcc/arm-none-eabi/13.2.1/../../../arm-none-eabi/lib/thumb/v7e-m+dp/hard/libc_nano.a(libc_a-writer.o): note: the message above does not take linker garbage collection into account
 Memory region         Used Size  Region Size  %age Used
            FLASH:           0 B       128 KB      0.00%
-         DTCMRAM:       70600 B       128 KB     53.86%
-            SRAM:      262720 B       480 KB     53.45%
+         DTCMRAM:       70688 B       128 KB     53.93%
+            SRAM:      264832 B       480 KB     53.88%
       RAM_D2_DMA:       18204 B        32 KB     55.55%
           RAM_D2:       32256 B       256 KB     12.30%
           RAM_D3:           0 B        64 KB      0.00%

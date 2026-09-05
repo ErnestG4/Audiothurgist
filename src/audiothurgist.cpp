@@ -1,5 +1,5 @@
 /**
- * audiothurgist.cpp — M1.5: the Amen, from the card.
+ * audiothurgist.cpp — M2: the Brain (clock sync + class gates).
  *
  * BreakFix engine on Alchemy Lab v2, now reading the SD card and blooming
  * reverb in the cluster zone. Boots playing the first WAV on the card (the
@@ -86,7 +86,7 @@ static hostlink::FsExtension fs_ext(sd);  /* browser SD file list */
 static constexpr uint8_t kClockChan = 0u;
 static MusicalClock  gClock(kClockPpqnInternal, 4u);
 static ClockFollower gFollower(gClock);
-static CvEdge        gClkEdge;
+static CvGate        gClkEdge;   /* unipolar-gate Schmitt: V2 CV rests at 0.5, +5 V ≈ 0.75 */
 static uint32_t gLastPulseUs = 0u;
 static float    gP2Ref       = -1e9f;   /* tempo-knob engages on movement */
 static volatile bool gNeedNativeTempo = false;  /* set on load (audio) → clock (poll) */
@@ -110,7 +110,7 @@ static Presets     presets(hw.seed.qspi);
 static ControlLoop loop(hw);
 static Pager       pager(hw.buttons[kButtonB1], 1, kNumPots); /* B1 owns pages (M4: 2nd page) */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.3.2-m2", "m2");
+                           "0.3.3-m2", "m2");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -163,6 +163,62 @@ struct SampleSel : Serializable
     }
 };
 static SampleSel gSample;
+
+/* Browser dropdown: which classifier labels the steps. Switching re-labels
+ * the PLAYING material live (gates + ring colors) without regenerating the
+ * pattern, so the lenses can be A/B'd on the same break. */
+static const char* kClassDisp =
+    "{\"kind\":\"enum\",\"labels\":[\"Hockman 3-band\",\"Legacy 120/900 (hi/lo)\",\"Two-band lo/hi\"]}";
+struct ClassSel : Serializable
+{
+    uint8_t       mode  = 0;
+    volatile bool dirty = false;
+    size_t   SerializedSize() const override { return 1u; }
+    void     Serialize(uint8_t* o) const override { o[0] = mode; }
+    bool     Deserialize(const uint8_t* in) override
+    {
+        uint8_t m = in[0] > 2 ? 0 : in[0];
+        if(m != mode) { mode = m; dirty = true; }
+        return true;
+    }
+    uint32_t SchemaHash() const override { return 0x434C5331u; /* 'CLS1' */ }
+    bool     Describe(hostlink::ComponentWriter& w) const override
+    {
+        w.Label("Classifier");
+        return w.Field("class.mode", "Mode", 0, hostlink::FieldType::Enum,
+                       0.f, kClassDisp, 3u);
+    }
+};
+static ClassSel      gClass;
+static uint8_t       gReclassBuf[bb::Engine::kMaxSlices];
+static volatile bool gReclass = false;   /* control: labels ready → audio memcpy */
+
+/* Browser dropdown: external clock PPQN on J3 (all divide the 96-PPQN NCO). */
+static const uint32_t kPpqnTable[4] = {24u, 4u, 2u, 1u};
+static const char* kPpqnDisp =
+    "{\"kind\":\"enum\",\"labels\":[\"24 PPQN (MIDI/DIN)\",\"4 PPQN (16ths)\",\"2 PPQN (8ths)\",\"1 PPQN (quarters)\"]}";
+struct ClockSel : Serializable
+{
+    uint8_t       sel   = 0;
+    volatile bool dirty = false;
+    size_t   SerializedSize() const override { return 1u; }
+    void     Serialize(uint8_t* o) const override { o[0] = sel; }
+    bool     Deserialize(const uint8_t* in) override
+    {
+        uint8_t v = in[0] > 3 ? 0 : in[0];
+        if(v != sel) { sel = v; dirty = true; }
+        return true;
+    }
+    uint32_t SchemaHash() const override { return 0x434C4B31u; /* 'CLK1' */ }
+    bool     Describe(hostlink::ComponentWriter& w) const override
+    {
+        w.Label("Clock In");
+        return w.Field("clock.ppqn", "PPQN", 0, hostlink::FieldType::Enum,
+                       0.f, kPpqnDisp, 4u);
+    }
+};
+static ClockSel gClockSel;
+static volatile float gClkFlash = 0.f;   /* B1 white flash per detected pulse */
 
 static constexpr uint8_t P_CHOP  = kPotTopLeft;
 static constexpr uint8_t P_TEMPO = kPotTopRight;
@@ -223,7 +279,12 @@ static inline Rgb ClassColor(uint8_t c)
 }
 
 /* ── class analysis over the engine's grid (mirrors its math) ───────── */
-static void ClassifySteps(const float* x, int len, uint8_t* cls)
+/* Classifier modes (browser dropdown "Classifier"; hardware tie-in later):
+ *  0 Hockman 3-band  — kick <325 Hz, snare 325–4000 Hz, hat >4000 Hz
+ *  1 Legacy 120/900  — the original split: snares mostly land in "hat", so
+ *                      it behaves as hi/lo — musically its own lens (Amen!)
+ *  2 Two-band lo/hi  — kick <325 Hz vs everything else, no snare class */
+static void ClassifySteps(const float* x, int len, uint8_t* cls, int mode)
 {
     float dur = (float)len / kSr;
     int   bars = 1;
@@ -233,11 +294,10 @@ static void ClassifySteps(const float* x, int len, uint8_t* cls)
     if(nsl < 1) nsl = 1;
     int   step = len / nsl;
     float lpK = 0.f, lpM = 0.f;
-    /* Band edges per Hockman & Davies (DAFx-15): kick ≈ 50–325 Hz, snare ≈
-     * 430–5000 Hz. The old 120/900 split put nearly all snare energy in the
-     * HAT band, so class 1 starved and the gate outs collapsed to hi/lo. */
-    float aK = 1.f - expf(-2.f * 3.14159f * 325.f / kSr);
-    float aM = 1.f - expf(-2.f * 3.14159f * 4000.f / kSr);
+    const float fK = (mode == 1) ? 120.f : 325.f;
+    const float fM = (mode == 1) ? 900.f : 4000.f;
+    float aK = 1.f - expf(-2.f * 3.14159f * fK / kSr);
+    float aM = 1.f - expf(-2.f * 3.14159f * fM / kSr);
     static float eL[bb::Engine::kMaxSlices], eM[bb::Engine::kMaxSlices],
         eH[bb::Engine::kMaxSlices];
     for(int s = 0; s < nsl; s++)
@@ -261,8 +321,9 @@ static void ClassifySteps(const float* x, int len, uint8_t* cls)
     for(int s = 0; s < nsl; s++)
     {
         float l = eL[s] / mL, m = eM[s] / mM, h = eH[s] / mH;
-        cls[s] = (eL[s] + eM[s] + eH[s] < 1e-7f)
-                     ? 3 : ((l >= m && l >= h) ? 0 : (m >= h ? 1 : 2));
+        if(eL[s] + eM[s] + eH[s] < 1e-7f) cls[s] = 3;
+        else if(mode == 2)                  cls[s] = (l >= (m > h ? m : h)) ? 0 : 2;
+        else                                cls[s] = (l >= m && l >= h) ? 0 : (m >= h ? 1 : 2);
     }
 }
 
@@ -286,6 +347,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
     if(gPendReslice) { engine.Reslice();   gPendReslice = false; }
     if(gPendReroll)  { engine.RerollFill(); gPendReroll  = false; }
     if(gScrubReq)    { engine.Scrub(gScrubDir); gScrubReq = false; }
+    if(gReclass)     { memcpy(engine.stepClass, gReclassBuf, sizeof gReclassBuf); gReclass = false; }
 
     int n = (int)size;
     if(n > kScratch) n = kScratch;
@@ -378,7 +440,7 @@ static void OnPoll(uint32_t /*t_ms*/)
     const uint32_t now_us = daisy::System::GetUs();
     gClkEdge.Tick(loop.Cv(), loop.NumCv(), now_us);
     const bool rose = gClkEdge.JustRose(kClockChan);
-    if(rose) gLastPulseUs = now_us;
+    if(rose) { gLastPulseUs = now_us; gClkFlash = 1.f; }
     const bool ext = gLastPulseUs && (now_us - gLastPulseUs) < 2000000u;
     if(ext)
     {
@@ -477,10 +539,19 @@ static void OnRender(uint32_t /*t_ms*/)
     /* P2/P4/P5/P6 arcs are drawn by the framework's per-knob Ring styles
      * (PerfRenderer, before this hook); we only overdraw P1 (bar) + P3. */
 
-    /* B1 pulses on load; steady dim otherwise. */
+    /* B1: clock indicator — white flash per detected pulse, green base while
+     * the follower is locked, amber pulse on sample load. */
     gLoadFlash *= 0.90f;
-    float lf = gLoadFlash;
-    hw.leds.SetButtonPair(kButtonB1, Rgb{(uint8_t)(20 + 200 * lf), (uint8_t)(12 + 120 * lf), 4});
+    gClkFlash  *= 0.80f;
+    {
+        const float lf = gLoadFlash, cf = gClkFlash;
+        const bool  locked = gFollower.Locked();
+        auto c8 = [](float v) { return (uint8_t)(v > 255.f ? 255.f : (v < 0.f ? 0.f : v)); };
+        hw.leds.SetButtonPair(kButtonB1,
+            Rgb{c8((locked ? 6.f : 20.f) + 200.f * lf + 220.f * cf),
+                c8((locked ? 120.f : 12.f) + 120.f * lf + 220.f * cf),
+                c8(4.f + 220.f * cf)});
+    }
     hw.leds.SetButtonPair(kButtonB2, gFlowing ? Rgb{20, 160, 60} : Rgb{6, 10, 6});
     hw.leds.SetButtonPair(kButtonB3, Rgb{12, 6, 2});
 }
@@ -544,7 +615,7 @@ static void ServiceLoad()
         gPendN = gDet.Detect(gLoad, len, kSr, gPendOnsets, kMaxOnsets, nullptr);
     }
 
-    ClassifySteps(gLoad, len, gPendClass);
+    ClassifySteps(gLoad, len, gPendClass, gClass.mode);
     gPendLen   = len;
     gCurFile   = gLoadIdx;
     gLoadFlash = 1.f;
@@ -612,7 +683,7 @@ int main()
                     gPendOnsets[no++] = cues[i];
             }
             static uint8_t cls[bb::Engine::kMaxSlices];
-            ClassifySteps(gPlay, len, cls);
+            ClassifySteps(gPlay, len, cls, gClass.mode);
             engine.SetMaterial(gPlay, len, kSr, gPendOnsets, no, cls);
             gCurFile = 0;
             loaded   = true;
@@ -624,18 +695,23 @@ int main()
         static uint8_t cls[bb::Engine::kMaxSlices];
         int onsets[kMaxOnsets];
         int no = gDet.Detect(gPlay, len, kSr, onsets, kMaxOnsets, nullptr);
-        ClassifySteps(gPlay, len, cls);
+        ClassifySteps(gPlay, len, cls, gClass.mode);
         engine.SetMaterial(gPlay, len, kSr, onsets, no, cls);
     }
 
     gClock.SetBpm(engine.NativeBpm());
     gClock.Start();
     gFollower.SetLossPolicy(ClockLossPolicy::Freewheel);
+    gFollower.SetAutoStart(true);
+    gFollower.Enable(kPpqnTable[gClockSel.sel]);   /* constructed DISABLED — v0.3.x never followed */
+    gClkEdge.Init(kNumCvInputs);   /* edge detector needs Init (channels) — never called in v0.3.x */
 
     host.Extend(fs_ext);
     host.Jacks(jk1, jk2, jk3, jk4, jk5, jk6, jk7, jk8, jk9, jk10);
     presets.Manage(pager);
     if(gNumFiles > 0) presets.Manage(gSample);
+    presets.Manage(gClass);
+    presets.Manage(gClockSel);
 
     loop.Use(pager).Use(perform).Use(host)
         .OnPoll(OnPoll).OnFrame(OnFrame).OnRender(OnRender);
@@ -653,6 +729,17 @@ int main()
             gSample.dirty = false;
             gLoadIdx = gSample.idx < gNumFiles ? gSample.idx : 0;
             gLoadReq = true;
+        }
+        if(gClass.dirty && !gReclass && !gApply && engine.bufLen > 0)
+        {
+            gClass.dirty = false;
+            ClassifySteps(gPlay, engine.bufLen, gReclassBuf, gClass.mode);
+            gReclass = true;
+        }
+        if(gClockSel.dirty)
+        {
+            gClockSel.dirty = false;
+            gFollower.SetExtPpqn(kPpqnTable[gClockSel.sel]);
         }
         ServiceLoad();
     }
