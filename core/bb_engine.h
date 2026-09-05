@@ -129,6 +129,10 @@ struct Engine
     bool     flowRegen    = false; // hold-to-flow: new fill each bar wrap
 
     double  barPhase   = 0.; // playhead sweep of the ring, [0,1)
+    bool    extPhase   = false; // true: barPhase is set by the shell (clock
+                               // sync); false: engine self-advances (internal)
+    uint8_t gateFired  = 0;    // per-trigger class bitmask (1<<class); the
+                               // shell reads+clears it to raise CV gates
     float   barSeconds = 2.f; // GRID duration: our tempo, not the file's
     float   nativeStep = 0.f; // source samples per source 16th
     float   bpm        = 0.f; // 0 = native tempo
@@ -325,9 +329,13 @@ struct Engine
         // Quantized cell sequencing: the grid clock runs at OUR tempo; the
         // pattern (a Brocot tiling of cells) says which source cell each grid
         // position plays. Everything lands on step boundaries.
-        double dp = (double)blockSec / (double)barSeconds;
-        barPhase += dp;
-        barPhase -= floor(barPhase);
+        if(!extPhase)
+        {
+            double dp = (double)blockSec / (double)barSeconds;
+            barPhase += dp;
+            barPhase -= floor(barPhase);
+        }
+        // (extPhase: the shell has written barPhase from the musical clock)
         int step = (int)(barPhase * (double)nSlices);
         if(step >= nSlices) step = nSlices - 1;
         if(step != curStep)
@@ -376,6 +384,7 @@ struct Engine
     void TriggerStep(int k)
     {
         int s = stepSrc[k];
+        gateFired |= (uint8_t)(1u << (stepClass[s] & 3));
         // VARISPEED: rate follows tempo like a record — each slot consumes
         // exactly one slice of source (slotSamples × rate == nativeStep), so
         // the continuity branch holds at EVERY tempo: verbatim runs stay

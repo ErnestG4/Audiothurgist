@@ -26,6 +26,10 @@
 #include "alchemy/surface/virtual_knob.h"
 #include "alchemy/surface/page.h"
 #include "alchemy/surface/pager.h"
+#include "alchemy/surface/jack.h"
+#include "alchemy/control/musical_clock.h"
+#include "alchemy/control/clock_follower.h"
+#include "alchemy/control/cv_edge.h"
 #include "alchemy/host_link/host.h"
 #include "alchemy/storage/sd_card.h"
 #include "alchemy/storage/fs_extension.h"
@@ -76,11 +80,37 @@ static bb::Engine  engine;
 static AlchemyLab  hw;
 static SdCard      sd;
 static hostlink::FsExtension fs_ext(sd);  /* browser SD file list */
+
+/* Clock: J3 (cv chan 0) = external clock in (24 PPQN); internal from P2 else.
+ * The engine's playhead is always driven from this clock (extPhase). */
+static constexpr uint8_t kClockChan = 0u;
+static MusicalClock  gClock(kClockPpqnInternal, 4u);
+static ClockFollower gFollower(gClock);
+static CvEdge        gClkEdge;
+static uint32_t gLastPulseUs = 0u;
+static float    gP2Ref       = -1e9f;   /* tempo-knob engages on movement */
+static volatile bool gNeedNativeTempo = false;  /* set on load (audio) → clock (poll) */
+
+/* Per-class gate outs: J6/J7/J8 = kick/snare/hat (cv jacks). */
+static constexpr int kGateSamps = (int)(0.006f * kSr);  /* 6 ms */
+static int gGateCd[3] = {0, 0, 0};
+
+/* Jack descriptors (browser labels; HYBRID/BRAIN map fills in at M3). */
+static Jack jk1 ("audio_l", "Audio In L",  JackSig::AudioIn);
+static Jack jk2 ("audio_r", "Audio In R",  JackSig::AudioIn);
+static Jack jk3 ("clock",   "Clock In",    JackSig::Trig);
+static Jack jk4 ("j4",      "— (v/oct)",   JackSig::Voct);
+static Jack jk5 ("j5",      "— (trig)",    JackSig::Trig);
+static Jack jk6 ("kick",    "Kick Gate",   JackSig::Gate);
+static Jack jk7 ("snare",   "Snare Gate",  JackSig::Gate);
+static Jack jk8 ("hat",     "Hat Gate",    JackSig::Gate);
+static Jack jk9 ("out_l",   "Audio Out L", JackSig::AudioOut);
+static Jack jk10("out_r",   "Audio Out R", JackSig::AudioOut);
 static Presets     presets(hw.seed.qspi);
 static ControlLoop loop(hw);
 static Pager       pager(hw.buttons[kButtonB1], 1, kNumPots); /* B1 owns pages (M4: 2nd page) */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.2.4-m2app", "m2app");
+                           "0.3.0-m2", "m2");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -246,6 +276,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
     {
         float* t = gPlay; gPlay = gLoad; gLoad = t;
         engine.SetMaterial(gPlay, gPendLen, kSr, gPendOnsets, gPendN, gPendClass);
+        gNeedNativeTempo = true;
         gApply = false;
     }
 
@@ -255,7 +286,28 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
 
     int n = (int)size;
     if(n > kScratch) n = kScratch;
+
+    /* Drive the engine playhead from the musical clock (internal or followed).
+     * Loop spans M musical bars (nSlices/16); phase is continuous across them. */
+    engine.extPhase = true;
+    int M = engine.nSlices / 16; if(M < 1) M = 1;
+    double lp = (double)(gClock.Bar() % (uint32_t)M) / (double)M
+                + (double)gClock.BarPhase() / (double)M;
+    lp -= floor(lp);
+    engine.barPhase = lp;
+
     engine.Process(gMono, n);
+
+    /* per-class trigger bitmask → CV gates on J6/J7/J8 */
+    uint8_t gf = engine.gateFired; engine.gateFired = 0;
+    for(int c = 0; c < 3; c++)
+    {
+        if(gf & (1u << c)) gGateCd[c] = kGateSamps;
+        if(c == 0) hw.j6.SetVolts(gGateCd[0] > 0 ? 5.f : 0.f);
+        if(c == 1) hw.j7.SetVolts(gGateCd[1] > 0 ? 5.f : 0.f);
+        if(c == 2) hw.j8.SetVolts(gGateCd[2] > 0 ? 5.f : 0.f);
+        if(gGateCd[c] > 0) gGateCd[c] -= n;
+    }
 
     const float v = gVol, send = gVerbSend;
     for(int i = 0; i < n; i++)
@@ -279,10 +331,9 @@ static void OnFrame()
     engine.patternKnob = pk;
     gVerbSend = pk < 0.22f ? (0.22f - pk) / 0.22f * 0.75f : 0.f;
 
-    float b  = k_tempo.Value();
-    float nb = engine.NativeBpm();
-    b        = (b > nb - 2.f && b < nb + 2.f) ? nb : (float)((int)(b + 0.5f));
-    if(b < engine.bpm - 0.4f || b > engine.bpm + 0.4f) engine.SetBpm(b);
+    /* Varispeed follows the musical clock (internal BPM or external follow). */
+    float cb = gClock.Bpm();
+    if(cb < engine.bpm - 0.4f || cb > engine.bpm + 0.4f) engine.SetBpm(cb);
 
     engine.pitch = exp2f(k_pitch.Value() / 12.f);   /* ±12 semitones */
     gVol         = k_vol.Norm();
@@ -311,6 +362,39 @@ static void OnFrame()
 
 static void OnPoll(uint32_t /*t_ms*/)
 {
+    if(gNeedNativeTempo)
+    {
+        gNeedNativeTempo = false;
+        gClock.SetBpm(engine.NativeBpm());
+        gP2Ref = -1e9f;   /* re-latch: P2 re-engages on movement */
+    }
+
+    /* Clock pipeline (spec §7): edge intake → follower → NCO tick. */
+    const uint32_t now_us = daisy::System::GetUs();
+    gClkEdge.Tick(loop.Cv(), loop.NumCv(), now_us);
+    const bool rose = gClkEdge.JustRose(kClockChan);
+    if(rose) gLastPulseUs = now_us;
+    const bool ext = gLastPulseUs && (now_us - gLastPulseUs) < 2000000u;
+    if(ext)
+    {
+        if(rose) gFollower.OnPulse(gClkEdge.LastRiseUs(kClockChan));
+        gFollower.Update(now_us);
+    }
+    else
+    {
+        /* Internal tempo from P2, engaging only once the knob moves (so a
+         * fresh load keeps playing at its native tempo). Native detent. */
+        float pv = k_tempo.Value();
+        if(gP2Ref < -1e8f) gP2Ref = pv;
+        if(pv > gP2Ref + 1.f || pv < gP2Ref - 1.f)
+        {
+            float nb = engine.NativeBpm();
+            float b  = (pv > nb - 2.f && pv < nb + 2.f) ? nb : (float)((int)(pv + 0.5f));
+            gClock.SetBpm(b);
+        }
+    }
+    gClock.Tick(now_us);
+
     IButton& b2 = hw.buttons[kButtonB2];
     IButton& b3 = hw.buttons[kButtonB3];
     /* B1 belongs to the Pager (page switch). */
@@ -449,6 +533,9 @@ static void ServiceLoad()
 int main()
 {
     hw.Init();
+    hw.j6.EnableCvOutput();   /* kick gate  */
+    hw.j7.EnableCvOutput();   /* snare gate */
+    hw.j8.EnableCvOutput();   /* hat gate   */
     sd.Init();
     sd.EnsureMounted(0);
 
@@ -520,7 +607,12 @@ int main()
         engine.SetMaterial(gPlay, len, kSr, onsets, no, cls);
     }
 
+    gClock.SetBpm(engine.NativeBpm());
+    gClock.Start();
+    gFollower.SetLossPolicy(ClockLossPolicy::Freewheel);
+
     host.Extend(fs_ext);
+    host.Jacks(jk1, jk2, jk3, jk4, jk5, jk6, jk7, jk8, jk9, jk10);
     presets.Manage(pager);
     if(gNumFiles > 0) presets.Manage(gSample);
 
