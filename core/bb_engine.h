@@ -133,6 +133,8 @@ struct Engine
                                // sync); false: engine self-advances (internal)
     uint8_t gateFired  = 0;    // per-trigger class bitmask (1<<class); the
                                // shell reads+clears it to raise CV gates
+    int8_t  gateSlice[4] = {-1, -1, -1, -1}; // source slice of the last trigger
+                               // per class (pure data; shell maps to velocity)
     float   barSeconds = 2.f; // GRID duration: our tempo, not the file's
     float   nativeStep = 0.f; // source samples per source 16th
     float   bpm        = 0.f; // 0 = native tempo
@@ -385,6 +387,7 @@ struct Engine
     {
         int s = stepSrc[k];
         gateFired |= (uint8_t)(1u << (stepClass[s] & 3));
+        gateSlice[stepClass[s] & 3] = (int8_t)s;
         // VARISPEED: rate follows tempo like a record — each slot consumes
         // exactly one slice of source (slotSamples × rate == nativeStep), so
         // the continuity branch holds at EVERY tempo: verbatim runs stay
