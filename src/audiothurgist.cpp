@@ -36,6 +36,8 @@
 #include "alchemy/host_link/host.h"
 #include "alchemy/storage/sd_card.h"
 #include "alchemy/storage/fs_extension.h"
+#include "alchemy/host_link/extension.h"
+#include "alchemy/host_link/frame.h"
 #include "alchemy/surface/serializable.h"
 #include "alchemy/host_link/component_writer.h"
 
@@ -106,6 +108,18 @@ static float          gSal[bb::Engine::kMaxSlices];        /* live per-slice sal
 static float          gPendSal[bb::Engine::kMaxSlices];    /* staged with a load */
 static float          gReclassSal[bb::Engine::kMaxSlices]; /* staged with a reclassify */
 
+/* ── Web frontend state (HostLink extension 0x60–0x6F, see StateExt) ────
+ * Per-slice envelope (8 min/max pairs, u8 with 128 = 0) computed at load on
+ * the control thread; a 1 KB ring of the mono output decimated ×4 for the
+ * scope, written by the audio thread. gMatGen bumps on every material swap so
+ * the page knows when to refetch the envelope. */
+static constexpr int kEnvPts = 8;
+static uint8_t ALCHEMY_SDRAM_BSS gEnv[bb::Engine::kMaxSlices][kEnvPts][2];
+static uint8_t ALCHEMY_SDRAM_BSS gPendEnv[bb::Engine::kMaxSlices][kEnvPts][2];
+static volatile uint8_t  gMatGen  = 0;
+static int8_t            gScope[1024];
+static volatile uint16_t gScopeW  = 0;
+
 /* Jack descriptors (browser labels; HYBRID/BRAIN map fills in at M3). */
 Jack jk1 ("audio_l", "Audio In L",  JackSig::AudioIn);
 Jack jk2 ("audio_r", "Audio In R",  JackSig::AudioIn);
@@ -127,7 +141,7 @@ static ParamLock<2 * kNumPots> locks(hw.buttons[kButtonB1], pager);
 Settings           settings(hw, &pager);
 void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.6.0-m4", "m4");
+                           "0.7.0-web", "web");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -444,6 +458,31 @@ static void ClassifySteps(const float* x, int len, uint8_t* cls, int mode,
     }
 }
 
+/* Per-slice min/max envelope over the engine's grid (same bar rule). */
+static void ComputeEnvelope(const float* x, int len, uint8_t env[][kEnvPts][2])
+{
+    float dur = (float)len / kSr;
+    int   bars = 1;
+    while(dur / (float)bars >= 3.2f && bars < 16) bars <<= 1;
+    int nsl = bars * 16;
+    while(nsl > bb::Engine::kMaxSlices) nsl /= 2;
+    if(nsl < 1) nsl = 1;
+    memset(env, 128, (size_t)bb::Engine::kMaxSlices * kEnvPts * 2);
+    for(int s = 0; s < nsl; s++)
+    {
+        const int a = (int)((long long)len * s / nsl), b = (int)((long long)len * (s + 1) / nsl);
+        for(int p = 0; p < kEnvPts; p++)
+        {
+            const int pa = a + (b - a) * p / kEnvPts, pb = a + (b - a) * (p + 1) / kEnvPts;
+            float mn = 0.f, mx = 0.f;
+            for(int i = pa; i < pb; i++) { float v = x[i]; if(v < mn) mn = v; if(v > mx) mx = v; }
+            int lo = (int)(mn * 127.f) + 128, hi = (int)(mx * 127.f) + 128;
+            env[s][p][0] = (uint8_t)(lo < 0 ? 0 : lo > 255 ? 255 : lo);
+            env[s][p][1] = (uint8_t)(hi < 0 ? 0 : hi > 255 ? 255 : hi);
+        }
+    }
+}
+
 /* ── audio ──────────────────────────────────────────────────────────── */
 static float gMono[kScratch];
 
@@ -458,6 +497,8 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
         float* t = gPlay; gPlay = gLoad; gLoad = t;
         engine.SetMaterial(gPlay, gPendLen, kSr, gPendOnsets, gPendN, gPendClass);
         memcpy(gSal, gPendSal, sizeof gSal);
+        memcpy(gEnv, gPendEnv, sizeof gEnv);
+        gMatGen = (uint8_t)(gMatGen + 1u);
         gNeedNativeTempo = true;
         gLastLp = -1.;   /* new nSlices → new phase geometry; do not hold */
         gApply = false;
@@ -550,6 +591,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
         if(r > 1.f) r = 1.f; else if(r < -1.f) r = -1.f;
         out[0][i] = l;
         out[1][i] = r;
+        if((i & 3) == 0) { gScope[gScopeW & 1023u] = (int8_t)(l * 127.f); gScopeW = (uint16_t)(gScopeW + 1u); }
     }
 }
 
@@ -871,11 +913,118 @@ static void ServiceLoad()
     }
 
     ClassifySteps(gLoad, len, gPendClass, gClass.mode, gPendSal);
+    ComputeEnvelope(gLoad, len, gPendEnv);
     gPendLen   = len;
     gCurFile   = gLoadIdx;
     gLoadFlash = 1.f;
     gApply     = true;     /* audio thread swaps + SetMaterial */
 }
+
+/* ── StateExt: the web frontend's window into the instrument ────────────
+ * HostLink extension claiming 0x60–0x6F. All handlers run on the control
+ * thread; engine arrays are read as-is (a torn read is one frame of pixels).
+ *   0x60 GET_STATE  → u8 status, u8 nSlices, u8 curStep, u8 flags
+ *                     (b0 muted b1 ext b2 locked b3 flowing b4 brainPage),
+ *                     u8 matGen, u8 grammar, u8 classifier, u8 curFile,
+ *                     u8 chop(0..255), u8 histN, u8 histDepth, u8 callFlash,
+ *                     f32 bpm, f32 mult, i8 stepSrc[64], u8 stepClass[64]
+ *   0x61 GET_ENV    ← u8 first, u8 count(≤30) → u8 status, u8 first, u8 n,
+ *                     then n × (8 × {u8 min, u8 max})
+ *   0x62 SCOPE      → u8 status, u16 n(256), i8 samples[256] (×4 decimated)
+ *   0x63 ACTION     ← u8 op [,args]: 0 dice · 1 reslice · 2 mute toggle ·
+ *                     3 punch(u8 step, u8 slice) · 4 flow(u8 on) ·
+ *                     5 scrub(u8 depth) · 6 load(u8 fileIdx)      → u8 status */
+struct StateExt : hostlink::IHostlinkExtension
+{
+    uint8_t FirstCmd() const override { return 0x60u; }
+    uint8_t LastCmd()  const override { return 0x6Fu; }
+    const char* DescriptorRootJson() const override
+    {
+        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99}";
+    }
+    void Handle(const hostlink::ParsedFrame& f, hostlink::FrameWriter& w, uint32_t) override
+    {
+        switch(f.type)
+        {
+            case 0x60u:
+            {
+                w.U8(0u);
+                const int ns = engine.nSlices;
+                int cur = (int)(engine.barPhase * (double)(ns > 0 ? ns : 1)); if(cur >= ns) cur = ns > 0 ? ns - 1 : 0;
+                uint8_t flags = (engine.muted ? 1u : 0u) | (gWasExt ? 2u : 0u)
+                              | ((gWasExt && gFollower.Locked()) ? 4u : 0u)
+                              | (gFlowing ? 8u : 0u) | (pager.Page() ? 16u : 0u);
+                w.U8((uint8_t)ns); w.U8((uint8_t)cur); w.U8(flags); w.U8(gMatGen);
+                w.U8(gGrammar.mode); w.U8(gClass.mode); w.U8((uint8_t)(gCurFile < 0 ? 255 : gCurFile));
+                w.U8((uint8_t)(k_chop.Norm() * 255.f));
+                int depth = engine.histN > 0 ? (engine.histHead - engine.histPos + bb::Engine::kHist) % bb::Engine::kHist : 0;
+                w.U8((uint8_t)engine.histN); w.U8((uint8_t)depth);
+                w.U8((uint8_t)(gCallFlashT > 0 ? (gCallFlash & 0x7F) : 255));
+                float bpm = engine.bpm, mult = gClkMult; uint32_t u;
+                memcpy(&u, &bpm, 4); w.U32(u); memcpy(&u, &mult, 4); w.U32(u);
+                w.Bytes((const uint8_t*)engine.stepSrc, bb::Engine::kMaxSlices);
+                w.Bytes(engine.stepClass, bb::Engine::kMaxSlices);
+                return;
+            }
+            case 0x61u:
+            {
+                const uint8_t first = f.len >= 1 ? f.body[0] : 0u;
+                uint8_t n = f.len >= 2 ? f.body[1] : 30u;
+                if(first >= bb::Engine::kMaxSlices) { w.U8(2u); return; }   /* BAD_ARGS */
+                if(n > 30u) n = 30u;
+                if(first + n > bb::Engine::kMaxSlices) n = (uint8_t)(bb::Engine::kMaxSlices - first);
+                w.U8(0u); w.U8(first); w.U8(n);
+                w.Bytes(&gEnv[first][0][0], (size_t)n * kEnvPts * 2u);
+                return;
+            }
+            case 0x62u:
+            {
+                uint8_t buf[256];
+                const uint16_t wpos = gScopeW;
+                for(int i = 0; i < 256; i++) buf[i] = (uint8_t)gScope[(wpos - 256 + i) & 1023u];
+                w.U8(0u); w.U16(256u); w.Bytes(buf, 256u);
+                return;
+            }
+            case 0x63u:
+            {
+                if(f.len < 1) { w.U8(2u); return; }   /* BAD_ARGS */
+                const uint8_t op = f.body[0];
+                switch(op)
+                {
+                    case 0: gPendReroll = true; break;
+                    case 1: gPendReslice = true; break;
+                    case 2: engine.muted = !engine.muted; break;
+                    case 3:
+                        if(f.len >= 3 && f.body[1] < engine.nSlices && f.body[2] < engine.nSlices)
+                        {
+                            const int st = f.body[1];
+                            engine.stepSrc[st] = (int8_t)f.body[2]; engine.stepRev[st] = false;
+                            engine.stepRatN[st] = 0; engine.stepRatAccel[st] = false; engine.stepJit[st] = 0;
+                            gCallFlash = st; gCallFlashT = 6;
+                        }
+                        break;
+                    case 4: gFlowing = f.len >= 2 && f.body[1]; engine.flowRegen = gFlowing; break;
+                    case 5:
+                        if(f.len >= 2 && engine.histN > 1)
+                        {
+                            int cur = (engine.histHead - engine.histPos + bb::Engine::kHist) % bb::Engine::kHist;
+                            int tgt = f.body[1]; if(tgt > engine.histN - 1) tgt = engine.histN - 1;
+                            gScrubDir = cur - tgt; gScrubReq = true;
+                        }
+                        break;
+                    case 6:
+                        if(f.len >= 2 && f.body[1] < gNumFiles && !gLoadReq && !gApply) { gLoadIdx = f.body[1]; gLoadReq = true; }
+                        break;
+                    default: w.U8(2u); return;   /* BAD_ARGS */
+                }
+                w.U8(0u);
+                return;
+            }
+            default: w.U8(1u); return;   /* UNSUPPORTED */
+        }
+    }
+};
+static StateExt gStateExt;
 
 int main()
 {
@@ -940,6 +1089,7 @@ int main()
             static uint8_t cls[bb::Engine::kMaxSlices];
             ClassifySteps(gPlay, len, cls, gClass.mode, gSal);
             engine.SetMaterial(gPlay, len, kSr, gPendOnsets, no, cls);
+            ComputeEnvelope(gPlay, len, gEnv);
             gCurFile = 0;
             loaded   = true;
         }
@@ -952,6 +1102,7 @@ int main()
         int no = gDet.Detect(gPlay, len, kSr, onsets, kMaxOnsets, nullptr);
         ClassifySteps(gPlay, len, cls, gClass.mode, gSal);
         engine.SetMaterial(gPlay, len, kSr, onsets, no, cls);
+        ComputeEnvelope(gPlay, len, gEnv);
     }
 
     gClock.SetBpm(engine.NativeBpm());
@@ -966,6 +1117,7 @@ int main()
     gClkEdge.Init(kNumCvInputs);   /* edge detector needs Init (channels) — never called in v0.3.x */
 
     host.Extend(fs_ext);
+    host.Extend(gStateExt);          /* web frontend: state / envelope / scope / actions */
     DescribeManual(host);            /* jacks + help text + the manual (Attach) */
 
     settings.UseBrightness();
