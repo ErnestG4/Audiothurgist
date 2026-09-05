@@ -53,6 +53,7 @@
 #include "bb_engine.h"
 #include "bb_onset.h"
 #include "bb_condition.h"
+#include "bb_classify.h" /* uses capicola's Analyzer (Matthew Nielsen, AGPL) — THIRD_PARTY.md */
 #include "bb_testbreak.h"
 
 using namespace alchemy;
@@ -141,7 +142,7 @@ static ParamLock<2 * kNumPots> locks(hw.buttons[kButtonB1], pager);
 Settings           settings(hw, &pager);
 void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.7.1-reviewed", "web");
+                           "0.7.2-density", "web");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -200,7 +201,7 @@ static SampleSel gSample;
  * the PLAYING material live (gates + ring colors) without regenerating the
  * pattern, so the lenses can be A/B'd on the same break. */
 static const char* kClassDisp =
-    "{\"kind\":\"enum\",\"labels\":[\"Hockman 3-band\",\"Legacy 120/900 (hi/lo)\",\"Two-band lo/hi\"]}";
+    "{\"kind\":\"enum\",\"labels\":[\"Hockman 3-band\",\"Legacy 120/900 (hi/lo)\",\"Two-band lo/hi\",\"Density (keyframes)\"]}";
 struct ClassSel
 {
     uint8_t       mode  = 0;
@@ -294,7 +295,7 @@ struct Options : Serializable
     bool Deserialize(const uint8_t* in) override
     {
         uint8_t v;
-        v = in[0] > 2 ? 0 : in[0]; if(v != gClass.mode)    { gClass.mode = v;    gClass.dirty = true; }
+        v = in[0] > 3 ? 0 : in[0]; if(v != gClass.mode)    { gClass.mode = v;    gClass.dirty = true; }
         v = in[1] > 3 ? 0 : in[1]; if(v != gClockSel.sel)  { gClockSel.sel = v;  gClockSel.dirty = true; }
         gVoiceSel.sel   = in[2] > 1 ? 0 : in[2];
         gGateLen.sel    = in[3] > 3 ? 0 : in[3];
@@ -307,7 +308,7 @@ struct Options : Serializable
     {
         using hostlink::FieldType;
         w.Label("Options");
-        bool ok = w.Field("class.mode",   "Classifier",  0, FieldType::Enum, 0.f, kClassDisp,   3u);
+        bool ok = w.Field("class.mode",   "Classifier",  0, FieldType::Enum, 0.f, kClassDisp,   4u);
         ok &=     w.Field("clock.ppqn",   "Clock In",    1, FieldType::Enum, 0.f, kPpqnDisp,    4u);
         ok &=     w.Field("voice.mode",   "Voice",       2, FieldType::Enum, 0.f, kVoiceDisp,   2u);
         ok &=     w.Field("gate.len",     "Gate Length", 3, FieldType::Enum, 0.f, kGateLenDisp, 4u);
@@ -401,61 +402,11 @@ VirtualKnob b_rot   = VirtualKnob(kPotBottomRight, "Rotation").Linear(0.f, 1.f).
 Page brain = Page(1).Name("Brain").Color("#3a9fe0")
                  .Knobs(b_x, b_y, b_kick, b_snare, b_hat, b_rot);
 
-/* ── class analysis over the engine's grid (mirrors its math) ───────── */
-/* Classifier modes (browser dropdown "Classifier"; hardware tie-in later):
- *  0 Hockman 3-band  — kick <325 Hz, snare 325–4000 Hz, hat >4000 Hz
- *  1 Legacy 120/900  — the original split: snares mostly land in "hat", so
- *                      it behaves as hi/lo — musically its own lens (Amen!)
- *  2 Two-band lo/hi  — kick <325 Hz vs everything else, no snare class */
+/* ── class analysis: core/bb_classify.h (pure, host-tested) ─────────── */
 static void ClassifySteps(const float* x, int len, uint8_t* cls, int mode,
                           float* sal = nullptr)
 {
-    float dur = (float)len / kSr;
-    int   bars = 1;
-    while(dur / (float)bars >= 3.2f && bars < 16) bars <<= 1;
-    int nsl = bars * 16;
-    while(nsl > bb::Engine::kMaxSlices) nsl /= 2;
-    if(nsl < 1) nsl = 1;
-    int   step = len / nsl;
-    float lpK = 0.f, lpM = 0.f;
-    const float fK = (mode == 1) ? 120.f : 325.f;
-    const float fM = (mode == 1) ? 900.f : 4000.f;
-    float aK = 1.f - expf(-2.f * 3.14159f * fK / kSr);
-    float aM = 1.f - expf(-2.f * 3.14159f * fM / kSr);
-    static float eL[bb::Engine::kMaxSlices], eM[bb::Engine::kMaxSlices],
-        eH[bb::Engine::kMaxSlices];
-    for(int s = 0; s < nsl; s++)
-    {
-        const float* p = x + s * step;
-        int n = (s == nsl - 1) ? len - s * step : step;
-        double sl = 0, sm = 0, sh = 0;
-        for(int i = 0; i < n; i++)
-        {
-            float v = p[i];
-            lpK += aK * (v - lpK);
-            lpM += aM * (v - lpM);
-            float mid = lpM - lpK, hi = v - lpM;
-            sl += lpK * lpK; sm += mid * mid; sh += hi * hi;
-        }
-        eL[s] = (float)(sl / n); eM[s] = (float)(sm / n); eH[s] = (float)(sh / n);
-    }
-    float mL = 1e-12f, mM = 1e-12f, mH = 1e-12f;
-    for(int s = 0; s < nsl; s++) { mL += eL[s]; mM += eM[s]; mH += eH[s]; }
-    if(sal) /* salience: loudness of the step relative to the loop's loudest */
-    {
-        float mx = 1e-12f;
-        for(int s = 0; s < nsl; s++) { float e = sqrtf(eL[s] + eM[s] + eH[s]); if(e > mx) mx = e; }
-        for(int s = 0; s < bb::Engine::kMaxSlices; s++)
-            sal[s] = s < nsl ? sqrtf(eL[s] + eM[s] + eH[s]) / mx : 0.f;
-    }
-    mL /= nsl; mM /= nsl; mH /= nsl;
-    for(int s = 0; s < nsl; s++)
-    {
-        float l = eL[s] / mL, m = eM[s] / mM, h = eH[s] / mH;
-        if(eL[s] + eM[s] + eH[s] < 1e-7f) cls[s] = 3;
-        else if(mode == 2)                  cls[s] = (l >= (m > h ? m : h)) ? 0 : 2;
-        else                                cls[s] = (l >= m && l >= h) ? 0 : (m >= h ? 1 : 2);
-    }
+    bb::ClassifySteps(x, len, kSr, cls, mode, sal);
 }
 
 /* Per-slice min/max envelope over the engine's grid (same bar rule). */

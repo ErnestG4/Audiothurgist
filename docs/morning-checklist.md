@@ -28,6 +28,7 @@ iteration list for the day.
 - [ ] Options → Gate Length: 6 ms · 20 ms · 50 ms · **Hold to next hit** (lane stays high, clean retrigger on re-hit).
 - [ ] Options → Gate Level → **Velocity**: ghost notes ≈1.5–2.5 V, backbeats ≈5 V (scope or an envelope's depth).
 - [ ] Options → Classifier on the Amen with gates patched: **Hockman 3-band** vs **Legacy 120/900 (hi/lo)** vs **Two-band lo/hi** — ring colours change live, pattern does not. Which does the rack prefer? (Note: the Amen does *not* pitch down spectrally — measured. The hi/lo nesting is real but Apache scores higher.)
+- [ ] **Density (keyframes)** — the fourth lens, Matthew's extrema analysis (v0.7.2): no band filters, just how many significant peaks each step has. Expect kicks sparse / hats dense; snares are the uncertain middle. Does it agree with Hockman on the obvious hits, and does it find anything the bands miss? Two constants to tune by ear if it reads "hat" everywhere: the deadband (3 % of peak) and the kick/hat ratios (0.6 / 1.67 × median).
 
 ## 3. Voice — M3 (stage 3)
 - [ ] KeyStep Pro → J4 (v/oct) + J5 (gate). The key that outputs **0 V toggles mute** (ring dims).

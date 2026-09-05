@@ -71,14 +71,31 @@ stores salience (peak value) for free. Concrete plan:
   in over the fade) is exactly "the patch that samples is the patch that
   performs".
 
-### L2 — Extrema density is a free fourth classifier lens
+### L2 — Extrema density is a free fourth classifier lens — **built, v0.7.2**
 Keyframe spacing = instantaneous bandwidth. Hats are dense, kicks sparse,
 snares in between. Offline at load: run the `Analyzer` once, count
-keyframes per grid step ÷ step length → a per-step **density**. Expose as
-Options → Classifier → **Density** alongside Hockman / Legacy hi-lo /
-Two-band, and A/B it with the same gate patch. Also a natural LED brightness
-per slice, and (Matthew's own further-work item) transient detection by
-jumps in keyframe spacing.
+keyframes per grid step ÷ step length → a per-step **density**. Exposed as
+Options → Classifier → **Density (keyframes)** (`core/bb_classify.h`).
+
+**Measured on the canon** (`tests/classify_check.cpp`, Amen / Apache /
+Funky Drummer / Hot Pants) before shipping — three things the data forced:
+1. A *global* deadband fails both ways: small → the ride carpet makes every
+   step "hat"; large → quiet hat-only steps fall under it and read "kick".
+   The deadband must be relative to **each step's own peak** (floored at 5 %
+   of the loop's). Then it reads the bandwidth of whatever dominates the
+   step regardless of level.
+2. The lens is a **brightness ranking**, not a band detector: a kick under
+   an equally loud mid layer reads as that layer (Apache's bongos flatten
+   it). So the split is by rank — sparsest 30 % kick, densest 45 % hat —
+   which guarantees gate spread on any break.
+3. Deadband 0.2 / 0.35 / 0.5 of the step peak agree with Hockman 58 / 58 /
+   55 % on average; 0.2 wins on the Amen (60 %). The disagreements are the
+   point: it is a different lens. Kicks land where Hockman's do on the Amen
+   and Funky Drummer; the hat/snare boundary is where it differs.
+
+Still open from this lesson: LED brightness per slice from density, and
+transient detection by jumps in keyframe spacing (Matthew's further-work
+item — relevant to M5).
 
 ### L3 — Measure crossfades in keyframes, not samples
 Our continuity window (160 samples) and choke fades are fixed. The paper's

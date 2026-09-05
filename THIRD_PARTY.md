@@ -21,9 +21,11 @@ of use in the source.
 - **Authorship:** the engine is Matthew's human-authored work (see the AI
   policy in his README). Audiothurgist uses it as a library and does not
   re-derive it. What we use, and how, is listed in `docs/keyframe-lessons.md`.
-- **Status:** vendored 2026-09-05 at commit `f2b7415` with Matthew's
-  permission requested; nothing from it is compiled into the firmware yet.
-  When a component is first used, add the file and purpose here.
+- **Status:** vendored 2026-09-05 at commit `f2b7415` with Matthew's full
+  permission and encouragement. Components in use:
+  - `Analyzer.h` + `SparseLine.h` + `DeluxeLine.h` — offline extrema
+    analysis at load for the **Density** classifier lens (keyframes per
+    step as a bandwidth estimate; `docs/keyframe-lessons.md` L2).
 
 ## Hermetic Modular alchemy-sdk, libDaisy, DaisySP-LGPL
 
