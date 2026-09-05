@@ -7,7 +7,7 @@
  * analysis run off the audio thread; a double buffer swaps in the callback.
  * Record from J1/J2 is M1.6.
  *
- *   P1 Chop · P2 Tempo · P3 History · P4 Pitch · P5 Space/gate · P6 Volume
+ *   P1 Chop · P2 Tempo · P3 History · P4 Pitch · P5 Sample-select · P6 Volume
  *   B1 = page · B2 tap refill / hold flow · B3 tap reslice / hold load-next
  *
  * DMA law (SDK's SdCard header confirms our Pod-era finding): every buffer
@@ -76,7 +76,7 @@ static Presets     presets(hw.seed.qspi);
 static ControlLoop loop(hw);
 static Pager       pager(hw.buttons[kButtonB1], 1, kNumPots); /* B1 owns pages (M4: 2nd page) */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.2.1-m2app", "m2app");
+                           "0.2.2-m2app", "m2app");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -100,6 +100,8 @@ static volatile float gLoadFlash = 0.f;
 
 static bool  gFlowing = false;
 static float gLastP3  = -1.f;
+static int   gSelFile = 0;                       /* P5 highlights this file */
+static const char* gLabelPtrs[kMaxFiles];        /* → gFiles[], for the browser */
 
 static constexpr uint8_t P_CHOP  = kPotTopLeft;
 static constexpr uint8_t P_TEMPO = kPotTopRight;
@@ -126,13 +128,13 @@ static VirtualKnob k_hist  = VirtualKnob(P_HIST,  "History").Linear(0.f, 1.f)
 static VirtualKnob k_pitch = VirtualKnob(P_PITCH, "Pitch").Linear(-12.f, 12.f)
                                  .Unit("st").Ident("pitch")
                                  .Ring(Bipolar(kPitchP, kPitchN, kPitchC));
-static VirtualKnob k_space = VirtualKnob(P_SPACE, "Space").Linear(0.f, 1.f)
-                                 .Ident("space").Ring(Level(kSpaceCol));
+static VirtualKnob k_sample = VirtualKnob(P_SPACE, "Sample").Linear(0.f, 1.f)
+                                 .Ident("sample").Ring(Level(kSpaceCol));
 static VirtualKnob k_vol   = VirtualKnob(P_VOL,   "Volume").Linear(0.f, 1.f)
                                  .Ident("volume").Ring(Level(kVolCol));
 
 static Page perform = Page(0).Name("Perform").Color("#eb7414")
-                          .Knobs(k_chop, k_tempo, k_hist, k_pitch, k_space, k_vol);
+                          .Knobs(k_chop, k_tempo, k_hist, k_pitch, k_sample, k_vol);
 
 using Rgb = LedPanel::Rgb;
 static constexpr Rgb kKick  {235,  70,  20};
@@ -251,9 +253,18 @@ static void OnFrame()
     b        = (b > nb - 2.f && b < nb + 2.f) ? nb : (float)((int)(b + 0.5f));
     if(b < engine.bpm - 0.4f || b > engine.bpm + 0.4f) engine.SetBpm(b);
 
-    engine.pitch    = exp2f(k_pitch.Value() / 12.f);   /* ±12 semitones */
-    engine.sliceExt = 1.0f + 0.5f * k_space.Norm();
-    gVol            = k_vol.Norm();
+    engine.pitch = exp2f(k_pitch.Value() / 12.f);   /* ±12 semitones */
+    gVol         = k_vol.Norm();
+
+    /* P5 highlights a file (Selector value = index once labelled; Norm
+     * fallback before the card is scanned). Loading is on B3-hold. */
+    if(gNumFiles > 0)
+    {
+        int idx = (int)(k_sample.Value() + 0.5f);
+        if(idx < 0) idx = 0;
+        if(idx > gNumFiles - 1) idx = gNumFiles - 1;
+        gSelFile = idx;
+    }
 
     float p3 = k_hist.Norm();
     if(engine.histN > 1 && (p3 > gLastP3 + 0.02f || p3 < gLastP3 - 0.02f))
@@ -290,7 +301,7 @@ static void OnPoll(uint32_t /*t_ms*/)
     if(b3.Pressed() && b3.TimeHeldMs() > 400.f && !s_b3_loaded
        && gNumFiles > 0 && !gLoadReq && !gApply)
     {
-        gLoadIdx    = (gCurFile + 1) % gNumFiles;
+        gLoadIdx    = gSelFile;
         gLoadReq    = true;
         s_b3_loaded = true;
     }
@@ -418,6 +429,12 @@ int main()
 
     /* Boot material: first WAV on the card, else the synth break. */
     ScanSD();
+    if(gNumFiles > 0)
+    {
+        for(int i = 0; i < gNumFiles; i++) gLabelPtrs[i] = gFiles[i];
+        uint8_t n = gNumFiles > 255 ? 255 : (uint8_t)gNumFiles;
+        k_sample.Selector(n).Labels(gLabelPtrs, n);
+    }
     int  len = 0;
     bool loaded = false;
     if(gNumFiles > 0)
