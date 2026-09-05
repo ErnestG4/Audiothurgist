@@ -347,3 +347,12 @@ motif memory.
 The 1 o'clock double-time illusion. The ~10 o'clock dice-and-grin zone.
 The native-tempo detent. Patterns hold until asked. Every control means one
 thing. No wrong notes — only notes that haven't been repeated yet.
+
+
+## Addendum 2026-09-05 — keyframe lessons
+
+Matthew Nielsen's DAFx26 paper and capicola were digested; see
+`docs/keyframe-lessons.md`. The no-stretch rule in §1 stands as the default
+(repitch is the genre) but is now under review as an *Option* (M7 candidate),
+and §5.2 live-slice is proposed to be driven by his TKEO detector. Routing/
+Depth mod pages are proposed in place of jack-maps-as-presets (§3.3).
