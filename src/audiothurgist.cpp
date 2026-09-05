@@ -107,8 +107,8 @@ static float          gReclassSal[bb::Engine::kMaxSlices]; /* staged with a recl
 static Jack jk1 ("audio_l", "Audio In L",  JackSig::AudioIn);
 static Jack jk2 ("audio_r", "Audio In R",  JackSig::AudioIn);
 static Jack jk3 ("clock",   "Clock In",    JackSig::Trig);
-static Jack jk4 ("j4",      "— (v/oct)",   JackSig::Voct);
-static Jack jk5 ("j5",      "— (trig)",    JackSig::Trig);
+static Jack jk4 ("voct",    "V/Oct",       JackSig::Voct);
+static Jack jk5 ("gate",    "Gate",        JackSig::Gate);
 static Jack jk6 ("kick",    "Kick Gate",   JackSig::Gate);
 static Jack jk7 ("snare",   "Snare Gate",  JackSig::Gate);
 static Jack jk8 ("hat",     "Hat Gate",    JackSig::Gate);
@@ -118,7 +118,7 @@ static Presets     presets(hw.seed.qspi);
 static ControlLoop loop(hw);
 static Pager       pager(hw.buttons[kButtonB1], 1, kNumPots); /* B1 owns pages (M4: 2nd page) */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.3.6-night", "night");
+                           "0.4.0-m3", "m3");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -226,6 +226,42 @@ struct ClockSel : Serializable
     }
 };
 static ClockSel gClockSel;
+
+/* ── Voice (M3): J4 v/oct + J5 gate → the MONO keymap (spec §6.3) ──────
+ * Each gate rising edge samples v/oct once, quantises with note-CENTER
+ * windows (boundaries are the knife-edge bug class), and dispatches by
+ * range relative to 0 V: 0 = mute toggle · 1 = gap · 2..11 = latched
+ * modifier keyswitches · 12..23 reserved · 24..39 = sixteen slice keys
+ * spread across the loop. Replace-don't-layer; CHOKE vs PUNCH dropdown. */
+static constexpr uint8_t kVoiceVoctChan = 1u;  /* J4 */
+static constexpr uint8_t kVoiceGateChan = 2u;  /* J5 */
+enum : uint32_t { kModRev = 1u << 0, kModHalf = 1u << 1, kModDouble = 1u << 2,
+                  kModPunch = 1u << 3, kModRat = 1u << 4 };
+static uint32_t       gMods      = 0u;    /* latched keyswitch state */
+static int            gLastNote  = -1;
+static volatile bool  gCallReq   = false; /* control → audio handshake */
+static volatile int   gCallIdx   = 0;
+static volatile float gCallMul   = 1.f;
+static volatile bool  gCallRev = false, gCallPunch = false, gCallRat = false;
+static volatile int   gCallFlash = -1;    /* ring: called step flashes */
+static volatile int   gCallFlashT = 0;
+static const char* kVoiceDisp =
+    "{\"kind\":\"enum\",\"labels\":[\"Choke (momentary)\",\"Punch (writes the bar)\"]}";
+struct VoiceSel : Serializable
+{
+    uint8_t  sel = 0;
+    size_t   SerializedSize() const override { return 1u; }
+    void     Serialize(uint8_t* o) const override { o[0] = sel; }
+    bool     Deserialize(const uint8_t* in) override { sel = in[0] > 1 ? 0 : in[0]; return true; }
+    uint32_t SchemaHash() const override { return 0x564F4331u; /* 'VOC1' */ }
+    bool     Describe(hostlink::ComponentWriter& w) const override
+    {
+        w.Label("Voice");
+        return w.Field("voice.mode", "Mode", 0, hostlink::FieldType::Enum,
+                       0.f, kVoiceDisp, 2u);
+    }
+};
+static VoiceSel gVoiceSel;
 
 /* ── musical branch: gate shaping dropdowns (read live by audio/poll) ── */
 static const char* kGateLenDisp =
@@ -412,6 +448,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
     if(gPendReroll)  { engine.RerollFill(); gPendReroll  = false; }
     if(gScrubReq)    { engine.Scrub(gScrubDir); gScrubReq = false; }
     if(gReclass)     { memcpy(engine.stepClass, gReclassBuf, sizeof gReclassBuf); memcpy(gSal, gReclassSal, sizeof gSal); gReclass = false; }
+    if(gCallReq)     { engine.CallSlice(gCallIdx, gCallMul, gCallRev, gCallPunch, gCallRat); gCallReq = false; }
 
     int n = (int)size;
     if(n > kScratch) n = kScratch;
@@ -608,6 +645,28 @@ static void OnPoll(uint32_t /*t_ms*/)
     }
     gClock.Tick(now_us);
 
+    /* Voice keymap: sample v/oct at each gate edge (MONO, latched mods). */
+    if(gClkEdge.JustRose(kVoiceGateChan))
+    {
+        const float nf = hw.cv[kVoiceVoctChan].Volts() * 12.f;
+        int n = (int)floorf(nf + 0.5f);
+        if(fabsf(nf - (float)n) < 0.4f) gLastNote = n;   /* inside the note-center window */
+        else n = gLastNote;                                /* on a boundary: keep last */
+        if(n == 0)                       engine.muted = !engine.muted;
+        else if(n >= 2 && n <= 11)       gMods ^= (1u << (n - 2));
+        else if(n >= 24 && n <= 39 && engine.nSlices > 0)
+        {
+            const int k = n - 24;
+            gCallIdx   = (k * engine.nSlices) / 16;      /* 16 keys span the loop */
+            gCallMul   = ((gMods & kModHalf) ? 0.5f : 1.f) * ((gMods & kModDouble) ? 2.f : 1.f);
+            gCallRev   = (gMods & kModRev) != 0;
+            gCallPunch = ((gVoiceSel.sel == 1) != ((gMods & kModPunch) != 0));
+            gCallRat   = (gMods & kModRat) != 0;
+            gCallFlash = gCallIdx; gCallFlashT = 6;
+            gCallReq   = true;
+        }
+    }
+
     /* Gate CV writes — control thread (I²C-safe), on CHANGE only so J6's
      * MCP4728 isn't hit with a WriteAll+LDAC transaction every millisecond. */
     static float s_lastV[3] = {-1.f, -1.f, -1.f};
@@ -668,11 +727,14 @@ static void OnRender(uint32_t /*t_ms*/)
         int s = base + i;
         Rgb c;
         if(s >= ns) c = kRest;
+        else if(gCallFlashT > 0 && s == gCallFlash) c = Rgb{120, 160, 255}; /* voice call */
         else if(s == cur) c = kPlay;
         else { int8_t src = engine.stepSrc[s]; c = (src < 0) ? kRest : ClassColor(engine.stepClass[src]); }
+        if(engine.muted) { c.r >>= 2; c.g >>= 2; c.b >>= 2; }   /* muted: dim the bar */
         hw.leds.SetRingByOffset(P_CHOP, i, c);
     }
 
+    if(gCallFlashT > 0) gCallFlashT--;
     float hist_lvl = 1.f;
     if(engine.histN > 1)
     {
@@ -862,6 +924,7 @@ int main()
     if(gNumFiles > 0) presets.Manage(gSample);
     presets.Manage(gClass);
     presets.Manage(gClockSel);
+    presets.Manage(gVoiceSel);
     presets.Manage(gGateLen);
     presets.Manage(gGateLvlSel);
 
