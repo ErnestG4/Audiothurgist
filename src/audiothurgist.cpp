@@ -110,7 +110,7 @@ static Presets     presets(hw.seed.qspi);
 static ControlLoop loop(hw);
 static Pager       pager(hw.buttons[kButtonB1], 1, kNumPots); /* B1 owns pages (M4: 2nd page) */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.3.4-m2", "m2");
+                           "0.3.5-dsp", "dsp");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -221,6 +221,15 @@ static ClockSel gClockSel;
 static volatile float gClkFlash = 0.f;   /* B1 white flash per detected pulse */
 static volatile float gClkMult  = 1.f;   /* P2 while following: ÷4 ÷2 ×1 ×2 ×4 */
 static bool           gWasExt   = false; /* ext/internal transition tracking */
+/* NCO rate snapshot taken on the CONTROL thread (same thread as the PLL's
+ * SetTicksPerUs, so no torn double read) and consumed by the audio thread as
+ * an atomic float: the engine's varispeed rate is derived from it every block
+ * so slice playback advances EXACTLY as fast as the phase does. */
+static volatile float gTpu      = 0.f;
+static double         gLastLp   = -1.;   /* phase guard memory; -1 = re-arm */
+static float          gP2ExtRef = -1.f;  /* P2 while following: engage on move */
+static bool           gP2ExtEng = false;
+static int            gMultZone = 2;     /* 0..4 → ÷4 ÷2 ×1 ×2 ×4 (hysteresis) */
 
 static constexpr uint8_t P_CHOP  = kPotTopLeft;
 static constexpr uint8_t P_TEMPO = kPotTopRight;
@@ -343,6 +352,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
         float* t = gPlay; gPlay = gLoad; gLoad = t;
         engine.SetMaterial(gPlay, gPendLen, kSr, gPendOnsets, gPendN, gPendClass);
         gNeedNativeTempo = true;
+        gLastLp = -1.;   /* new nSlices → new phase geometry; do not hold */
         gApply = false;
     }
 
@@ -362,15 +372,36 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
      * as a clock multiplier/divider while following. */
     engine.extPhase = true;
     {
+        const float  mult  = gClkMult;
         const double tick  = ((double)gClock.MasterTick() + gClock.FracTick())
-                             * (double)gClkMult;
+                             * (double)mult;
         const double loopT = (double)engine.nSlices * ((double)gClock.Ppqn() / 4.0);
         double lp = loopT > 0. ? fmod(tick, loopT) / loopT : 0.;
-        /* monotonic guard: only a true wrap (big drop) may move backward; a
-         * sub-step backward wobble from a torn read is held in place */
-        static double s_lastLp = 0.;
-        if(lp < s_lastLp && (s_lastLp - lp) < 0.5) lp = s_lastLp;
-        s_lastLp = lp;
+
+        /* RATE == PHASE ADVANCE, exactly. barSeconds feeds the varispeed rate
+         * (and the ratchet countdown) in the engine; deriving it here, per
+         * block, from the very ticks/µs the NCO integrates means a verbatim
+         * run's voice position never drifts from the step grid. (SetBpm from
+         * the control thread was integer-quantised while the PLL's rate is
+         * continuous — ~20 samples/step of drift at 0.4 BPM, blowing the
+         * 160-sample continuity window every ~8 steps: the ext-clock stutter.)
+         * tpu == 0 while the follower acquires lock: phase is frozen and no
+         * step can fire, so the previous barSeconds is simply left alone. */
+        const float tpu = gTpu;
+        if(tpu > 0.f && loopT > 0.)
+            engine.barSeconds = (float)(loopT / ((double)tpu * 1e6 * (double)mult));
+
+        /* Monotonic guard, half-a-step wide: a torn MasterTick/FracTick read
+         * is at most ±1 tick (1/24 step) and must not fire a backward step
+         * (double trigger + a bogus flow-reroll). Anything larger backward is
+         * a legitimate jump (new material, multiplier zone, transport reset)
+         * and must pass immediately — a 0.5-loop guard held the playhead
+         * silent for up to half a loop after those. */
+        static float s_lastMult = 1.f;
+        if(mult != s_lastMult) { s_lastMult = mult; gLastLp = -1.; }
+        const double thr = 0.5 / (double)(engine.nSlices > 0 ? engine.nSlices : 1);
+        if(gLastLp >= 0. && lp < gLastLp && (gLastLp - lp) < thr) lp = gLastLp;
+        gLastLp = lp;
         engine.barPhase = lp;
     }
 
@@ -411,9 +442,12 @@ static void OnFrame()
     engine.patternKnob = pk;
     gVerbSend = pk < 0.22f ? (0.22f - pk) / 0.22f * 0.75f : 0.f;
 
-    /* Varispeed follows the musical clock (internal BPM or external follow). */
-    float cb = gClock.Bpm() * gClkMult;
-    if(cb < engine.bpm - 0.4f || cb > engine.bpm + 0.4f) engine.SetBpm(cb);
+    /* Varispeed follows the musical clock: snapshot the NCO rate here (same
+     * thread as the PLL writes it — no torn double) for the audio thread to
+     * derive barSeconds from every block. engine.bpm is telemetry only now;
+     * SetBpm's integer-quantised barSeconds must NOT be written from here. */
+    gTpu       = (float)gClock.TicksPerUs();
+    engine.bpm = gClock.Bpm() * gClkMult;
 
     engine.pitch = exp2f(k_pitch.Value() / 12.f);   /* ±12 semitones */
     gVol         = k_vol.Norm();
@@ -457,7 +491,9 @@ static void OnPoll(uint32_t /*t_ms*/)
     const bool ext = gLastPulseUs && (now_us - gLastPulseUs) < 2000000u;
     if(ext && !gWasExt)
     {
-        gFollower.Enable(kPpqnTable[gClockSel.sel]);   /* (re)arm the PLL */
+        gFollower.Enable(kPpqnTable[gClockSel.sel]);   /* arm the PLL (stops the
+                                                          NCO until 3 pulses lock) */
+        gP2ExtRef = -1.f; gP2ExtEng = false; gMultZone = 2; gClkMult = 1.f;
     }
     if(!ext && gWasExt)
     {
@@ -475,11 +511,25 @@ static void OnPoll(uint32_t /*t_ms*/)
     {
         if(rose) gFollower.OnPulse(gClkEdge.LastRiseUs(kClockChan));
         gFollower.Update(now_us);
-        /* Spec §6.4: while following, P2 is a clock multiplier/divider
-         * around the followed tempo — wide ×1 detent in the middle. */
+        /* Spec §6.4: while following, P2 is a clock multiplier/divider around
+         * the followed tempo — wide ×1 detent in the middle. It ENGAGES only
+         * once the knob moves (an uncaught/stored P2 at boot otherwise lands
+         * on ÷4 and the loop crawls), and zones carry ±0.02 hysteresis so pot
+         * noise on an edge can't flip the multiplier back and forth. */
         const float p = k_tempo.Norm();
-        gClkMult = p < 0.15f ? 0.25f : p < 0.35f ? 0.5f
-                 : p < 0.65f ? 1.f   : p < 0.85f ? 2.f : 4.f;
+        if(gP2ExtRef < 0.f) gP2ExtRef = p;
+        if(!gP2ExtEng && (p > gP2ExtRef + 0.03f || p < gP2ExtRef - 0.03f))
+            gP2ExtEng = true;
+        if(gP2ExtEng)
+        {
+            static const float kB[4]  = {0.15f, 0.35f, 0.65f, 0.85f};
+            static const float kM[5]  = {0.25f, 0.5f, 1.f, 2.f, 4.f};
+            int z = gMultZone;
+            while(z < 4 && p > kB[z] + 0.02f)     z++;
+            while(z > 0 && p < kB[z - 1] - 0.02f) z--;
+            gMultZone = z;
+            gClkMult  = kM[z];
+        }
     }
     else
     {
@@ -738,7 +788,11 @@ int main()
     gClock.Start();
     gFollower.SetLossPolicy(ClockLossPolicy::Freewheel);
     gFollower.SetAutoStart(true);
-    gFollower.Enable(kPpqnTable[gClockSel.sel]);   /* constructed DISABLED — v0.3.x never followed */
+    /* NOT gFollower.Enable() here: Enable() does SetSteered(true) + Stop() +
+     * SetTicksPerUs(0) while it waits for lock, and SetBpm is a no-op while
+     * steered — arming at boot froze unpatched playback after one step
+     * (v0.3.3/0.3.4). The PLL is armed on the internal→ext transition in
+     * OnPoll, exactly when a clock actually appears. */
     gClkEdge.Init(kNumCvInputs);   /* edge detector needs Init (channels) — never called in v0.3.x */
 
     host.Extend(fs_ext);
