@@ -93,7 +93,7 @@ static volatile bool gNeedNativeTempo = false;  /* set on load (audio) → clock
 
 /* Per-class gate outs: J6/J7/J8 = kick/snare/hat (cv jacks). */
 static constexpr int kGateSamps = (int)(0.006f * kSr);  /* 6 ms */
-static int gGateCd[3] = {0, 0, 0};
+static volatile int gGateCd[3] = {0, 0, 0};   /* audio arms/decrements; poll reads */
 
 /* Jack descriptors (browser labels; HYBRID/BRAIN map fills in at M3). */
 static Jack jk1 ("audio_l", "Audio In L",  JackSig::AudioIn);
@@ -110,7 +110,7 @@ static Presets     presets(hw.seed.qspi);
 static ControlLoop loop(hw);
 static Pager       pager(hw.buttons[kButtonB1], 1, kNumPots); /* B1 owns pages (M4: 2nd page) */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.3.0-m2", "m2");
+                           "0.3.1-m2", "m2");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -298,15 +298,17 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
 
     engine.Process(gMono, n);
 
-    /* per-class trigger bitmask → CV gates on J6/J7/J8 */
+    /* per-class trigger bitmask → ARM gate countdowns (sample-accurate).
+     * The CV writes themselves happen in OnPoll, never here: J3–J6 are
+     * MCP4728 channels and CvJack::SetVolts on them is synchronous I²C
+     * (WriteAll + PulseLdac through the PCA9557). Blocking I²C inside the
+     * audio ISR deadlocks the module on the first callback — the v0.3.0
+     * boot hang. J7/J8 are STM DACs but stay on the same path for uniformity. */
     uint8_t gf = engine.gateFired; engine.gateFired = 0;
     for(int c = 0; c < 3; c++)
     {
-        if(gf & (1u << c)) gGateCd[c] = kGateSamps;
-        if(c == 0) hw.j6.SetVolts(gGateCd[0] > 0 ? 5.f : 0.f);
-        if(c == 1) hw.j7.SetVolts(gGateCd[1] > 0 ? 5.f : 0.f);
-        if(c == 2) hw.j8.SetVolts(gGateCd[2] > 0 ? 5.f : 0.f);
-        if(gGateCd[c] > 0) gGateCd[c] -= n;
+        if(gf & (1u << c))      gGateCd[c] = kGateSamps;
+        else if(gGateCd[c] > 0) gGateCd[c] -= n;
     }
 
     const float v = gVol, send = gVerbSend;
@@ -394,6 +396,22 @@ static void OnPoll(uint32_t /*t_ms*/)
         }
     }
     gClock.Tick(now_us);
+
+    /* Gate CV writes — control thread (I²C-safe), on CHANGE only so J6's
+     * MCP4728 isn't hit with a WriteAll+LDAC transaction every millisecond. */
+    static bool s_gateHi[3] = {false, false, false};
+    for(int c = 0; c < 3; c++)
+    {
+        const bool hi = gGateCd[c] > 0;
+        if(hi != s_gateHi[c])
+        {
+            s_gateHi[c]   = hi;
+            const float v = hi ? 5.f : 0.f;
+            if(c == 0)      hw.j6.SetVolts(v);
+            else if(c == 1) hw.j7.SetVolts(v);
+            else            hw.j8.SetVolts(v);
+        }
+    }
 
     IButton& b2 = hw.buttons[kButtonB2];
     IButton& b3 = hw.buttons[kButtonB3];
