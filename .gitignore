@@ -6,3 +6,4 @@ build/
 *.hex
 *.map
 *.lst
+build.log
