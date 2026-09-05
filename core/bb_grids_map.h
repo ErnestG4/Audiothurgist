@@ -231,7 +231,8 @@ inline uint8_t GridsMix(uint8_t a, uint8_t b, uint8_t bal) // U8Mix
 inline uint8_t GridsReadDrumMap(uint8_t step, uint8_t instrument, uint8_t x, uint8_t y)
 {
     uint8_t i = x >> 6, j = y >> 6;
-    if(i > 3) i = 3; if(j > 3) j = 3;
+    if(i > 3) i = 3;
+    if(j > 3) j = 3;
     const uint8_t* a = kGridsNodes[kGridsMap[i][j]];
     const uint8_t* b = kGridsNodes[kGridsMap[i + 1][j]];
     const uint8_t* c = kGridsNodes[kGridsMap[i][j + 1]];

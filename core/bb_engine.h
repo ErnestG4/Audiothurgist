@@ -290,8 +290,10 @@ struct Engine
         for(int c = 0; c < 3; c++) pat.langDens[c] = langDens[c];
         pat.Generate(nSlices, stepsPerBeat, stepClass, knob, cs, fs, patternMode);
         jitRng.Seed(cs ^ (fs * 0x9E3779B97F4A7C15ULL));
-        loopCount  = 0;
-        fillActive = false;
+        loopCount        = 0;
+        fillActive       = false;
+        ratchetCountdown = -1; // a pending double would read the NEW stepSrc
+        ratchetLeft      = 0;  // (possibly a rest) — drop it with the old pattern
         FlattenAll();
     }
     void RerollFill() // button 1: same chop, new arrangement
@@ -357,6 +359,7 @@ struct Engine
         curStep            = -1;
         ratchetCountdown   = -1;
         ratchetLeft        = 0;
+        callCountdown      = -1; // a ratcheted Voice call from the OLD material
         loopCount          = 0;
         fillActive         = false;
     }
@@ -449,16 +452,25 @@ struct Engine
             if(wrapped)
             {
                 if(flowRegen) RerollFill();
-                else if(patternMode == 1 && pat.fillStart >= 0)
+                else if(patternMode == 1 && pat.fillStart >= 0
+                        && pat.fillStart < nSlices)
                 {
                     // Collins fill hyperperiod: every 4th loop plays the fill
-                    // layer's last bar; the next downbeat snaps back verbatim
+                    // layer's last bar; the next downbeat snaps back verbatim.
+                    // Only the fill REGION is re-flattened (cells are half-bar
+                    // aligned, fillStart is bar aligned) so Voice/web punches
+                    // in the rest of the loop survive the toggle.
                     loopCount++;
                     bool want = (loopCount & 3) == 3;
                     if(want != fillActive)
                     {
                         fillActive = want;
-                        FlattenAll();
+                        if(want)
+                            FlattenRange(pat.fillStart, nSlices, pat.fsrc, pat.flen,
+                                         pat.frev, pat.fratN, pat.fratAccel, pat.frep);
+                        else
+                            FlattenRange(pat.fillStart, nSlices, pat.src, pat.len,
+                                         pat.rev, pat.ratN, pat.ratAccel, pat.rep);
                     }
                 }
             }

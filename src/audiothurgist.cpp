@@ -141,7 +141,7 @@ static ParamLock<2 * kNumPots> locks(hw.buttons[kButtonB1], pager);
 Settings           settings(hw, &pager);
 void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.7.0-web", "web");
+                           "0.7.1-reviewed", "web");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -663,8 +663,10 @@ static void OnPoll(uint32_t /*t_ms*/)
     const bool rose = gClkEdge.JustRose(kClockChan);
     if(rose) { gLastPulseUs = now_us; gClkFlash = 1.f; }
     const bool ext = gLastPulseUs && (now_us - gLastPulseUs) < 2000000u;
+    static float gPreExtBpm = 120.f;
     if(ext && !gWasExt)
     {
+        gPreExtBpm = gClock.Bpm();                     /* tempo to fall back on */
         gFollower.Enable(kPpqnTable[gClockSel.sel]);   /* arm the PLL (stops the
                                                           NCO until 3 pulses lock) */
         gP2ExtRef = -1.f; gP2ExtEng = false; gMultZone = 2; gClkMult = 1.f;
@@ -676,6 +678,15 @@ static void OnPoll(uint32_t /*t_ms*/)
          * the freewheeled tempo until P2 moves (re-latch), like a fresh load. */
         gFollower.Disable();
         gClock.SetSteered(false);
+        /* Lost BEFORE lock (cable bounce, master stopped within the first
+         * three pulses): Enable() had stopped the NCO at rate 0 and only a
+         * lock restarts it — Disable() does not. Restart at the pre-clock
+         * tempo or the module stays silent until reboot (review finding). */
+        if(!gClock.Running() || gClock.TicksPerUs() <= 0.)
+        {
+            gClock.SetBpm(gPreExtBpm);
+            gClock.Start();
+        }
         gP2Ref   = -1e9f;
         gClkMult = 1.f;
     }
@@ -765,10 +776,17 @@ static void OnPoll(uint32_t /*t_ms*/)
      * chord: while both are down (or Settings is open) none of the single-
      * button gestures may fire, and the releases that end the chord must
      * not read as taps. */
-    static bool s_chord = false;
+    static bool s_chord       = false;
+    static bool s_wasSettings = false;
     if(b2.Pressed() && b3.Pressed()) s_chord = true;
     if(!b2.Pressed() && !b3.Pressed()) s_chord = false;
-    if(s_chord || settings.IsActive())
+    /* Settings leaves on the RISING edge of B2 or B3 (single button, so no
+     * chord) and IsActive() is already false by the time we run — without
+     * this latch the exit tap reads as dice / reslice / a hold-load. Stay
+     * quiet until both buttons are up again. */
+    if(settings.IsActive()) s_wasSettings = true;
+    if(s_wasSettings && !b2.Pressed() && !b3.Pressed()) s_wasSettings = false;
+    if(s_chord || settings.IsActive() || s_wasSettings)
     {
         if(gFlowing) { gFlowing = false; engine.flowRegen = false; }
         return;

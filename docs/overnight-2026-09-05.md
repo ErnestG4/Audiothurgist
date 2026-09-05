@@ -46,6 +46,27 @@ All flash via the web flasher (HostLink is up on the current build).
 6. **Classic grammar is byte-identical** under the new Grammar switch
    (1,575 seed/knob cases hashed, `tests/grammar_check.cpp`).
 
+## Post-review (v0.7.1-reviewed)
+
+An adversarial pass over the whole overnight diff (audio-thread safety,
+bounds, control logic, grammar identity, HostLink byte layouts) returned GO
+with three fixes, all landed in the final binary, none in the audio thread:
+
+- **Clock lost before lock left the NCO stopped until reboot** (patch J3 with
+  the master stopped, or a bounce on insertion). Now restarts at the
+  pre-clock tempo.
+- **Leaving Settings fired the exit tap** as dice / reslice / hold-load. Now
+  latched quiet until both buttons are up.
+- **Collins' fill toggle re-flattened the whole loop**, erasing Voice/web
+  punches every 4th loop. Now only the fill region re-flattens.
+- Plus two one-liners: pending ratchets/calls are dropped across a pattern
+  or material change (previously a dud retrigger, no fault).
+
+Left open (low): history scrub replays with the *current* grammar/Brain
+params; the preset schema includes the SD file list, so blobs saved with a
+card don't load cardless; Brain-page densities start at their stored value
+(0 on a fresh unit → Grids/Euclid silent until the pots are picked up).
+
 ## Control map now
 
 | | Perform page | Brain page (B1 tap) |
