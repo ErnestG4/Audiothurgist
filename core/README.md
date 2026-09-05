@@ -1,0 +1,16 @@
+# core/ — the BreakFix engine (vendored)
+
+These headers are the pure, header-only DSP engine shared with
+[BreakFix](https://codeberg.org/combust/BreakFix) (the Daisy Pod original).
+"One core, many main()s": `src/audiothurgist.cpp` is the Alchemy Lab main().
+No libDaisy, no SDK types, no allocation in the audio path.
+
+- `bb_engine.h` — grid clock, per-step triggers, voices, varispeed, history
+- `bb_pattern.h` — Brocot cell tiling + fill moves (the pattern brain)
+- `bb_gas.h` — Coulomb-gas β engine (Phase 0 analysis; dormant in triggering)
+- `bb_onset.h` — spectral-flux onset detection + attack refine
+- `bb_condition.h` — load conditioning: trim, normalize, 4-bar cap, bar snap
+- `bb_testbreak.h` — synthesized boot break · `bb_rng.h` — xorshift + gaussian
+- `wav_loader.h` — FatFs WAV → mono float loader (shared with BreakFix's Pod shell)
+
+Synced from BreakFix; Audiothurgist is now the living copy.
