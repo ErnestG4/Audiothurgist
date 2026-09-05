@@ -1,5 +1,7 @@
 #pragma once
 #include <cstdint>
+#include <cstring>
+#include <cmath>
 #include "bb_rng.h"
 
 namespace bb {
@@ -10,6 +12,15 @@ namespace bb {
 // controls: play in place (verbatim), repeat the previous cell (motif/roll),
 // or swap with a same-drum-class cell elsewhere. Everything tiles, everything
 // lands on the grid: the pieces always fit.
+//
+// Two GRAMMARS share this struct (Generate's `mode`):
+//   0 Classic — the shipped BreakFix generator, byte-identical.
+//   1 Collins — the Chop Codex upgrades (Collins 2001, "Algorithmic
+//     Composition Methods for Breakbeat Science" + "Further Automatic
+//     Breakbeat Cutting Methods"): position-in-phrase weighted moves, odd
+//     cut figures (3+3+2 …), a fill bar with snap-back, 1-cell stutter as a
+//     rare phrase terminator, WarpCut-style geometric rolls, and repitch
+//     jitter on repeats (applied by the engine).
 struct Pattern
 {
     static constexpr int kMaxSteps = 64;
@@ -19,9 +30,24 @@ struct Pattern
     bool   rev[kMaxSteps];
     bool   rat[kMaxSteps]; // 32nd ratchet double — real rolls at burst cores
 
+    // Extended per-cell data (Classic derives them from rat[]; Collins sets):
+    int8_t ratN[kMaxSteps];     // retriggers after the attack: 0, 1 (=rat), 2..3 = geometric series
+    bool   ratAccel[kMaxSteps]; // series gaps halve (accel) or double (decel)
+    bool   rep[kMaxSteps];      // cell was a repeat move — engine may repitch-jitter it
+
+    // Fill layer (Collins only): alternative cells for [fillStart, nSteps),
+    // played on every 4th loop by the engine, then it snaps back to the base.
+    int    fillStart = -1;
+    int8_t fsrc[kMaxSteps];
+    int8_t flen[kMaxSteps];
+    bool   frev[kMaxSteps];
+    int8_t fratN[kMaxSteps];
+    bool   fratAccel[kMaxSteps];
+    bool   frep[kMaxSteps];
+
     // v: 1 = big cells, verbatim … 0 = micro cells, heavy repeats/reversal
     void Generate(int nSteps, int stepsPerBeat, const uint8_t* cls, float v,
-                  uint64_t cellSeed, uint64_t fillSeed)
+                  uint64_t cellSeed, uint64_t fillSeed, int mode = 0)
     {
         Rng cr, fr;
         cr.Seed(cellSeed);
@@ -32,7 +58,21 @@ struct Pattern
             len[i] = 0;
             rev[i] = false;
             rat[i] = false;
+            ratN[i]     = 0;
+            ratAccel[i] = false;
+            rep[i]      = false;
         }
+        fillStart = -1;
+
+        if(mode == 1)
+        {
+            float vc = v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
+            if(vc > 0.96f) vc = 1.f;
+            GenerateCollins(nSteps, stepsPerBeat, cls, vc, cr, fr);
+            return;
+        }
+
+        // ── Classic (mode 0) — UNCHANGED below ─────────────────────────
         // staged macro-curve: five anchored zones, piecewise-lerped, so the
         // knob travels verbatim → DJ-edit → chop → rolls → micro-madness
         // instead of flipping between two regimes
@@ -184,6 +224,238 @@ struct Pattern
                        && fr.Uniform() < 0.5f;
             prevSrc = s;
             pos += cl;
+        }
+        // Classic post-pass: express rat[] in the extended form (no RNG use,
+        // outputs above untouched) so the engine has one flatten path.
+        for(int i = 0; i < kMaxSteps; i++) ratN[i] = rat[i] ? 1 : 0;
+    }
+
+    // ── Collins grammar (mode 1) ───────────────────────────────────────
+    //
+    // Structure = per HALF-BAR cut figures ("cut lengths should be odd and
+    // ≤ half a bar": 3s and 5s resolve into an even remainder, 3+3+2 is the
+    // idiom); which figure comes from the CELL seed (reslice changes the
+    // cuts) and moves within cells from the FILL seed (refill changes the
+    // arrangement), exactly as Classic divides the labour.
+    //
+    // Position in the phrase (U = 0 at loop start … 1 at end) weights every
+    // move — Collins' single most audible improvement: faithful, long cells
+    // early; swaps and repeats mid; rolls and 1-cell stutters only near the
+    // end. The last bar (or last half of a 1-bar loop) also exists as a FILL
+    // variant with boosted chaos, cross-class swaps and rolls; the engine
+    // plays it every 4th loop and the next downbeat snaps back verbatim.
+    struct Fig
+    {
+        int8_t n;
+        int8_t c[8];
+    };
+
+    void GenerateCollins(int nSteps, int spb, const uint8_t* cls, float vc, Rng& cr, Rng& fr)
+    {
+        //                 v=0     .25    .5     .75    1
+        const float aPlace[]  = {0.10f, 0.25f, 0.45f, 0.60f, 1.00f};
+        const float aRep[]    = {0.65f, 0.55f, 0.25f, 0.03f, 0.00f};
+        const float aRev[]    = {0.25f, 0.12f, 0.03f, 0.00f, 0.00f};
+        const float aStrict[] = {0.20f, 0.60f, 0.90f, 1.00f, 1.00f};
+        const float aCell[]   = {0.90f, 1.40f, 1.90f, 2.40f, 2.90f};
+        int   zi = (int)(vc * 4.f);
+        if(zi > 3) zi = 3;
+        float zt = vc * 4.f - (float)zi;
+        auto  lerp = [&](const float* a) { return a[zi] + zt * (a[zi + 1] - a[zi]); };
+        const float pInPlace    = lerp(aPlace);
+        const float pRepeat     = lerp(aRep);
+        const float pReverse    = lerp(aRev);
+        const float classStrict = lerp(aStrict);
+        const float cellF       = lerp(aCell);
+        const float repShare    = pRepeat / (1.f - pInPlace + 1e-6f);
+
+        const int barSteps = 4 * spb;      // 16
+        const int half     = barSteps / 2; // 8 — figures live here
+        int       B        = nSteps / barSteps;
+        if(B < 1) B = 1;
+        // fill region: last bar, or the second half of a 1-bar loop; both are
+        // half-bar aligned so base and fill layers never straddle a cell
+        fillStart = (B >= 2) ? (B - 1) * barSteps : (nSteps >= 2 * half ? half : -1);
+
+        // cluster field (same as Classic): burst centers from the cell seed
+        const float clusterAmt = vc < 0.35f ? (0.35f - vc) / 0.35f : 0.f;
+        uint8_t     centers[kMaxSteps];
+        int         nCent = 0;
+        if(clusterAmt > 0.01f)
+        {
+            for(int b0 = 0; b0 < nSteps; b0 += barSteps)
+            {
+                int nc = 1 + (cr.Uniform() < 0.5f ? 1 : 0);
+                for(int j = 0; j < nc && nCent < kMaxSteps; j++)
+                    centers[nCent++] =
+                        (uint8_t)(b0 + (int)(cr.Uniform() * (float)barSteps));
+            }
+        }
+        auto activity = [&](int p) -> float {
+            if(nCent == 0) return 1.f;
+            int best = 1 << 30;
+            for(int j = 0; j < nCent; j++)
+            {
+                int d = p - (int)centers[j];
+                if(d < 0) d = -d;
+                int dw = nSteps - d;
+                if(dw < d) d = dw;
+                if(d < best) best = d;
+            }
+            float x = (float)best / 2.5f;
+            return expf(-x * x);
+        };
+
+        // Cut figures per half-bar, by size pool (Collins: odd cuts ≤ half
+        // a bar; 7s "reveal too much of the original").
+        static const Fig kBig[]     = {{1, {8}}, {2, {4, 4}}};
+        static const Fig kMid[]     = {{3, {3, 3, 2}}, {2, {5, 3}}, {2, {3, 5}},
+                                       {3, {2, 3, 3}}, {3, {3, 2, 3}}, {2, {6, 2}}};
+        static const Fig kSmall[]   = {{4, {2, 2, 2, 2}}, {4, {3, 3, 1, 1}}, {4, {2, 2, 3, 1}},
+                                       {5, {2, 1, 2, 1, 2}}, {4, {3, 1, 3, 1}}};
+        static const Fig kMicro[]   = {{8, {1, 1, 1, 1, 1, 1, 1, 1}}, {6, {2, 1, 1, 2, 1, 1}},
+                                       {6, {1, 1, 2, 1, 1, 2}}, {6, {2, 2, 1, 1, 1, 1}}};
+        static const Fig kStutter[] = {{3, {6, 1, 1}}, {4, {3, 3, 1, 1}},
+                                       {5, {2, 2, 2, 1, 1}}, {8, {1, 1, 1, 1, 1, 1, 1, 1}}};
+        static const Fig* const kPools[4] = {kBig, kMid, kSmall, kMicro};
+        static const int        kPoolN[4] = {2, 6, 5, 4};
+
+        // Generate cells over [from, to) into the given layer.
+        auto genRange = [&](int from, int to, bool fillMode, int8_t* S, int8_t* L,
+                            bool* R, int8_t* RN, bool* RA, bool* RP, int prevSrc) {
+            for(int hb = from; hb < to; hb += half)
+            {
+                const float U = (float)hb / (float)nSteps; // phrase position
+                // figure size: big early, smaller late, smaller in the fill
+                float tEff = cellF * (1.f - 0.35f * U) * (fillMode ? 0.6f : 1.f);
+                int   pool = tEff >= 2.4f ? 0 : tEff >= 1.75f ? 1 : tEff >= 1.2f ? 2 : 3;
+                if(vc < 1.f)
+                {
+                    if(pool < 3 && cr.Uniform() < 0.35f) pool++;
+                    else if(pool > 0 && cr.Uniform() < 0.15f) pool--;
+                }
+                const bool lastHalf = (hb + half >= nSteps);
+                const bool stutter  = lastHalf && vc < 0.96f && cr.Uniform() < 0.2f;
+                const Fig* fig;
+                if(vc >= 1.f)
+                    fig = &kBig[0];
+                else if(stutter)
+                    fig = &kStutter[pool];
+                else
+                    fig = &kPools[pool][(int)(cr.Uniform() * (float)kPoolN[pool]) % kPoolN[pool]];
+
+                int pos = hb;
+                for(int ci = 0; ci < fig->n && pos < to; ci++)
+                {
+                    int cl = fig->c[ci];
+                    if(pos + cl > to) cl = to - pos;
+                    const bool  stutterCell = stutter && (ci >= fig->n - 2);
+                    const float Uc = (float)pos / (float)nSteps;
+                    const float a  = clusterAmt > 0.01f ? activity(pos) : 1.f;
+
+                    // cluster space: rests and hat ticks away from burst cores
+                    const float away = clusterAmt > 0.01f ? clusterAmt * (1.f - a) : 0.f;
+                    if(!stutterCell && away > 0.f && fr.Uniform() < away * 0.85f)
+                    {
+                        if(cl == 1 && fr.Uniform() < 0.45f)
+                        {
+                            int s = pos;
+                            for(int t = 0; t < 6; t++)
+                            {
+                                int cand = (int)(fr.Uniform() * (float)nSteps);
+                                if(!cls || cls[cand] == 2) { s = cand; break; }
+                            }
+                            S[pos] = (int8_t)s; L[pos] = 1; R[pos] = fr.Uniform() < 0.10f;
+                            RN[pos] = 0; RA[pos] = false; RP[pos] = false;
+                            prevSrc = s;
+                        }
+                        else
+                        {
+                            S[pos] = -2; L[pos] = (int8_t)cl;
+                            R[pos] = false; RN[pos] = 0; RA[pos] = false; RP[pos] = false;
+                        }
+                        pos += cl;
+                        continue;
+                    }
+
+                    // position-weighted move mix: faithful early, restless late
+                    float placeE = pInPlace + (1.f - pInPlace) * 0.55f * (1.f - Uc);
+                    if(fillMode) placeE *= 0.4f;
+                    float repE = repShare + 0.25f * Uc + clusterAmt * a * 0.3f + (fillMode ? 0.15f : 0.f);
+                    if(repE > 0.9f) repE = 0.9f;
+                    float strictE = fillMode ? classStrict * 0.3f : classStrict;
+                    float revE    = pReverse * (fillMode ? 2.f : 1.f) * (1.f + Uc);
+
+                    int  s;
+                    bool isRep = false;
+                    if(stutterCell)
+                    {
+                        s     = prevSrc; // the stutter IS the roll
+                        isRep = true;
+                    }
+                    else if(fr.Uniform() < placeE)
+                        s = pos;
+                    else if(fr.Uniform() < repE)
+                    {
+                        s     = prevSrc;
+                        isRep = true;
+                    }
+                    else
+                    {
+                        s = pos;
+                        const bool strict = fr.Uniform() < strictE;
+                        const int  span   = nSteps - cl + 1;
+                        for(int tries = 0; tries < 8 && span > 1; tries++)
+                        {
+                            int cand = (int)(fr.Uniform() * (float)span);
+                            if(cand == pos) continue;
+                            if(!strict || !cls || cls[cand] == cls[pos]) { s = cand; break; }
+                        }
+                    }
+                    S[pos]  = (int8_t)s;
+                    L[pos]  = (int8_t)cl;
+                    R[pos]  = !stutterCell && fr.Uniform() < revE;
+                    RP[pos] = isRep;
+
+                    // rolls (WarpCut: plain / even double / geometric series) on
+                    // short cells — mostly near the phrase end and at burst cores
+                    int8_t rn = 0;
+                    bool   ra = false;
+                    if(!stutterCell && cl <= 2 && vc < 0.96f)
+                    {
+                        float rollP = (Uc > 0.75f ? 0.45f : 0.08f) * (1.f - 0.6f * vc)
+                                      + (clusterAmt > 0.01f && a > 0.5f ? 0.35f : 0.f)
+                                      + (fillMode ? 0.15f : 0.f);
+                        if(fr.Uniform() < rollP)
+                        {
+                            if(fr.Uniform() < 0.5f) rn = 1;                          // even double
+                            else { rn = (int8_t)(2 + (fr.Uniform() < 0.5f ? 1 : 0)); // geometric
+                                   ra = fr.Uniform() < 0.6f; }
+                        }
+                    }
+                    RN[pos] = rn;
+                    RA[pos] = ra;
+                    prevSrc = s;
+                    pos += cl;
+                }
+            }
+        };
+
+        // base layer over the whole loop
+        genRange(0, nSteps, false, src, len, rev, ratN, ratAccel, rep, 0);
+        // fill layer: copy base, regenerate the fill region with the boosts
+        if(fillStart >= 0)
+        {
+            memcpy(fsrc, src, sizeof src);
+            memcpy(flen, len, sizeof len);
+            memcpy(frev, rev, sizeof rev);
+            memcpy(fratN, ratN, sizeof ratN);
+            memcpy(fratAccel, ratAccel, sizeof ratAccel);
+            memcpy(frep, rep, sizeof rep);
+            int pv = 0;
+            for(int c = 0; c < fillStart; c++)
+                if(src[c] >= 0) pv = src[c];
+            genRange(fillStart, nSteps, true, fsrc, flen, frev, fratN, fratAccel, frep, pv);
         }
     }
 };

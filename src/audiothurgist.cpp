@@ -110,7 +110,7 @@ static Presets     presets(hw.seed.qspi);
 static ControlLoop loop(hw);
 static Pager       pager(hw.buttons[kButtonB1], 1, kNumPots); /* B1 owns pages (M4: 2nd page) */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.3.4-m2", "m2");
+                           "0.4.0-jungle", "jungle");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -218,6 +218,37 @@ struct ClockSel : Serializable
     }
 };
 static ClockSel gClockSel;
+
+/* ── GRAMMAR (jungle branch) ────────────────────────────────────────────
+ * Browser dropdown: which pattern grammar the engine speaks. Classic is the
+ * shipped BreakFix generator (byte-identical); Collins adds the Chop Codex
+ * upgrades (position-weighted moves, odd cuts, fill + snap-back, stutter
+ * terminator, geometric rolls, repeat repitch). Switching rerolls the fill
+ * so it is audible immediately. Hardware tie-in later. */
+static const char* kGrammarDisp =
+    "{\"kind\":\"enum\",\"labels\":[\"Classic\",\"Collins\"]}";
+struct GrammarSel : Serializable
+{
+    uint8_t       mode  = 0;
+    volatile bool dirty = false;
+    size_t   SerializedSize() const override { return 1u; }
+    void     Serialize(uint8_t* o) const override { o[0] = mode; }
+    bool     Deserialize(const uint8_t* in) override
+    {
+        uint8_t m = in[0] > 1 ? 0 : in[0];
+        if(m != mode) { mode = m; dirty = true; }
+        return true;
+    }
+    uint32_t SchemaHash() const override { return 0x47524D31u; /* 'GRM1' */ }
+    bool     Describe(hostlink::ComponentWriter& w) const override
+    {
+        w.Label("Grammar");
+        return w.Field("grammar.mode", "Mode", 0, hostlink::FieldType::Enum,
+                       0.f, kGrammarDisp, 2u);
+    }
+};
+static GrammarSel gGrammar;
+/* ── end GRAMMAR ───────────────────────────────────────────────────────── */
 static volatile float gClkFlash = 0.f;   /* B1 white flash per detected pulse */
 static volatile float gClkMult  = 1.f;   /* P2 while following: ÷4 ÷2 ×1 ×2 ×4 */
 static bool           gWasExt   = false; /* ext/internal transition tracking */
@@ -747,6 +778,7 @@ int main()
     if(gNumFiles > 0) presets.Manage(gSample);
     presets.Manage(gClass);
     presets.Manage(gClockSel);
+    presets.Manage(gGrammar);   /* GRAMMAR (jungle branch) */
 
     loop.Use(pager).Use(perform).Use(host)
         .OnPoll(OnPoll).OnFrame(OnFrame).OnRender(OnRender);
@@ -775,6 +807,13 @@ int main()
         {
             gClockSel.dirty = false;
             gFollower.SetExtPpqn(kPpqnTable[gClockSel.sel]);
+        }
+        /* GRAMMAR (jungle branch): mode → engine, reroll so it's audible now */
+        if(gGrammar.dirty && !gPendReroll)
+        {
+            gGrammar.dirty     = false;
+            engine.patternMode = gGrammar.mode;
+            gPendReroll        = true;
         }
         ServiceLoad();
     }
