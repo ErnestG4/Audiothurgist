@@ -185,8 +185,19 @@ struct Engine
     // never exceed one slice before the next attack snaps back to the grid.
     int8_t stepSrc[kMaxSlices];
     bool   stepRev[kMaxSlices];
-    bool   stepRat[kMaxSlices];
-    int    ratchetK = -1; // step whose 32nd double is pending
+    int8_t stepRatN[kMaxSlices];     // retriggers after the attack: 0 none,
+                                     // 1 = 32nd double (Classic), 2..3 =
+                                     // geometric series (Collins WarpCut)
+    bool   stepRatAccel[kMaxSlices]; // series gaps halve (accel) or double
+    int8_t stepJit[kMaxSlices];      // per-cell repitch jitter ×0.001 on Collins
+                                     // repeats (anti machine-gun); 0 in Classic
+    int    ratchetK    = -1;         // step whose retrigger series is pending
+    int    ratchetLeft = 0, ratchetIval = 0;
+    bool   ratchetAccel = false;
+    int    patternMode = 0;   // 0 Classic, 1 Collins — see bb_pattern.h
+    int    loopCount   = 0;   // wraps since (re)generation: fill hyperperiod
+    bool   fillActive  = false;
+    Rng    jitRng;
 
     // Pattern history: every generated pattern is a tiny {seeds, knob} tuple,
     // so the last 16 rolls — taps, reslices, and each bar of flow — replay
@@ -229,33 +240,56 @@ struct Engine
         ApplyPattern(patternKnob, cellSeed, fillSeed);
     }
 
-    void ApplyPattern(float knob, uint64_t cs, uint64_t fs)
+    // Flatten cells of one layer over [from, to) into per-step triggers.
+    void FlattenRange(int from, int to, const int8_t* S, const int8_t* L,
+                      const bool* R, const int8_t* RN, const bool* RA, const bool* RP)
     {
-        pat.Generate(nSlices, stepsPerBeat, stepClass, knob, cs, fs);
-        int c = 0;
-        while(c < nSlices)
+        int c = from;
+        while(c < to)
         {
-            int L = pat.len[c] > 0 ? pat.len[c] : 1;
-            if(c + L > nSlices) L = nSlices - c;
-            for(int j = 0; j < L; j++)
+            int Lc = L[c] > 0 ? L[c] : 1;
+            if(c + Lc > to) Lc = to - c;
+            // one jitter per CELL so continuity holds inside the cell
+            int8_t jit = (patternMode == 1 && RP[c])
+                             ? (int8_t)((jitRng.Uniform() - 0.5f) * 30.f) : 0;
+            for(int j = 0; j < Lc; j++)
             {
-                if(pat.src[c] >= 0)
+                if(S[c] >= 0)
                 {
-                    int s = pat.src[c] + (pat.rev[c] ? (L - 1 - j) : j);
+                    int s = S[c] + (R[c] ? (Lc - 1 - j) : j);
                     if(s >= nSlices) s -= nSlices; // wrap, don't stutter the tail
-                    stepSrc[c + j] = (int8_t)s;
-                    stepRev[c + j] = pat.rev[c];
-                    stepRat[c + j] = pat.rat[c];
+                    stepSrc[c + j]      = (int8_t)s;
+                    stepRev[c + j]      = R[c];
+                    stepRatN[c + j]     = RN[c];
+                    stepRatAccel[c + j] = RA[c];
+                    stepJit[c + j]      = jit;
                 }
                 else
                 {
-                    stepSrc[c + j] = -1; // rest or unfilled: silence
-                    stepRev[c + j] = false;
-                    stepRat[c + j] = false;
+                    stepSrc[c + j]      = -1; // rest or unfilled: silence
+                    stepRev[c + j]      = false;
+                    stepRatN[c + j]     = 0;
+                    stepRatAccel[c + j] = false;
+                    stepJit[c + j]      = 0;
                 }
             }
-            c += L;
+            c += Lc;
         }
+    }
+    void FlattenAll()
+    {
+        FlattenRange(0, nSlices, pat.src, pat.len, pat.rev, pat.ratN, pat.ratAccel, pat.rep);
+        if(fillActive && pat.fillStart >= 0 && pat.fillStart < nSlices)
+            FlattenRange(pat.fillStart, nSlices, pat.fsrc, pat.flen, pat.frev,
+                         pat.fratN, pat.fratAccel, pat.frep);
+    }
+    void ApplyPattern(float knob, uint64_t cs, uint64_t fs)
+    {
+        pat.Generate(nSlices, stepsPerBeat, stepClass, knob, cs, fs, patternMode);
+        jitRng.Seed(cs ^ (fs * 0x9E3779B97F4A7C15ULL));
+        loopCount  = 0;
+        fillActive = false;
+        FlattenAll();
     }
     void RerollFill() // button 1: same chop, new arrangement
     {
@@ -319,6 +353,9 @@ struct Engine
         gas.clusterBunches = bars;
         curStep            = -1;
         ratchetCountdown   = -1;
+        ratchetLeft        = 0;
+        loopCount          = 0;
+        fillActive         = false;
     }
 
     void Process(float* out, int n)
@@ -345,22 +382,57 @@ struct Engine
             bool wrapped = step < curStep;
             curStep          = step;
             ratchetCountdown = -1; // a new step supersedes any pending double
-            if(wrapped && flowRegen) RerollFill();
+            if(wrapped)
+            {
+                if(flowRegen) RerollFill();
+                else if(patternMode == 1 && pat.fillStart >= 0)
+                {
+                    // Collins fill hyperperiod: every 4th loop plays the fill
+                    // layer's last bar; the next downbeat snaps back verbatim
+                    loopCount++;
+                    bool want = (loopCount & 3) == 3;
+                    if(want != fillActive)
+                    {
+                        fillActive = want;
+                        FlattenAll();
+                    }
+                }
+            }
             if(stepSrc[step] >= 0)
             {
                 TriggerStep(step);
-                if(stepRat[step])
+                if(stepRatN[step] > 0)
                 {
-                    ratchetCountdown =
-                        (int)(barSeconds * sr / (float)nSlices * 0.5f);
-                    ratchetK = step;
+                    float stepS  = barSeconds * sr / (float)nSlices;
+                    ratchetLeft  = stepRatN[step];
+                    ratchetAccel = stepRatAccel[step];
+                    // single double: at +½ step (Classic, unchanged). Series:
+                    // accel gaps ½,¼,⅛ of a step; decel starts small so the
+                    // whole series still fits inside the step (⅛,¼,½).
+                    ratchetIval = (ratchetAccel || ratchetLeft == 1)
+                                      ? (int)(stepS * 0.5f)
+                                      : (int)(stepS / (float)(1 << ratchetLeft));
+                    if(ratchetIval < 72) ratchetIval = 72; // ≥1.5 ms
+                    ratchetCountdown = ratchetIval;
+                    ratchetK         = step;
                 }
             }
         }
         if(ratchetCountdown >= 0)
         {
             ratchetCountdown -= n;
-            if(ratchetCountdown < 0 && ratchetK >= 0) TriggerStep(ratchetK);
+            if(ratchetCountdown < 0 && ratchetK >= 0)
+            {
+                TriggerStep(ratchetK);
+                if(--ratchetLeft > 0)
+                {
+                    ratchetIval = ratchetAccel ? (ratchetIval >> 1) : (ratchetIval << 1);
+                    if(ratchetIval < 72) ratchetIval = 72;
+                    ratchetCountdown = ratchetIval;
+                }
+                else
+                    ratchetCountdown = -1;
+            }
         }
 
         for(int v = 0; v < kVoices; v++)
@@ -396,6 +468,7 @@ struct Engine
         // internally when v4.0 tried this — that bug class is dead.)
         float gridStepSamp = barSeconds * sr / (float)nSlices;
         float rate         = pitch * (nativeStep / gridStepSamp);
+        if(stepJit[k]) rate *= 1.f + 0.001f * (float)stepJit[k]; // Collins ±1.5%
         Slice cell         = slices[s];
         if(cell.len < 64) return;
 
