@@ -110,7 +110,7 @@ static Presets     presets(hw.seed.qspi);
 static ControlLoop loop(hw);
 static Pager       pager(hw.buttons[kButtonB1], 1, kNumPots); /* B1 owns pages (M4: 2nd page) */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.3.1-m2", "m2");
+                           "0.3.2-m2", "m2");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -233,8 +233,11 @@ static void ClassifySteps(const float* x, int len, uint8_t* cls)
     if(nsl < 1) nsl = 1;
     int   step = len / nsl;
     float lpK = 0.f, lpM = 0.f;
-    float aK = 1.f - expf(-2.f * 3.14159f * 120.f / kSr);
-    float aM = 1.f - expf(-2.f * 3.14159f * 900.f / kSr);
+    /* Band edges per Hockman & Davies (DAFx-15): kick ≈ 50–325 Hz, snare ≈
+     * 430–5000 Hz. The old 120/900 split put nearly all snare energy in the
+     * HAT band, so class 1 starved and the gate outs collapsed to hi/lo. */
+    float aK = 1.f - expf(-2.f * 3.14159f * 325.f / kSr);
+    float aM = 1.f - expf(-2.f * 3.14159f * 4000.f / kSr);
     static float eL[bb::Engine::kMaxSlices], eM[bb::Engine::kMaxSlices],
         eH[bb::Engine::kMaxSlices];
     for(int s = 0; s < nsl; s++)
