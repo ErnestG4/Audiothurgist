@@ -91,9 +91,17 @@ static uint32_t gLastPulseUs = 0u;
 static float    gP2Ref       = -1e9f;   /* tempo-knob engages on movement */
 static volatile bool gNeedNativeTempo = false;  /* set on load (audio) → clock (poll) */
 
-/* Per-class gate outs: J6/J7/J8 = kick/snare/hat (cv jacks). */
-static constexpr int kGateSamps = (int)(0.006f * kSr);  /* 6 ms */
-static volatile int gGateCd[3] = {0, 0, 0};   /* audio arms/decrements; poll reads */
+/* Per-class gate outs: J6/J7/J8 = kick/snare/hat (cv jacks).
+ * ── musical branch: Gate Length + Gate Level (velocity from salience) ── */
+static constexpr int kGateHold = 1 << 28;            /* "hold to next hit" sentinel */
+static const int kGateLenSamps[4] = { (int)(0.006f * kSr), (int)(0.020f * kSr),
+                                      (int)(0.050f * kSr), kGateHold };
+static volatile int   gGateCd[3]     = {0, 0, 0};    /* audio arms/decrements; poll reads */
+static volatile float gGateLvl[3]    = {5.f, 5.f, 5.f}; /* volts for the current gate */
+static volatile bool  gGateRetrig[3] = {false, false, false}; /* Hold mode: fired while high */
+static float          gSal[bb::Engine::kMaxSlices];        /* live per-slice salience 0..1 */
+static float          gPendSal[bb::Engine::kMaxSlices];    /* staged with a load */
+static float          gReclassSal[bb::Engine::kMaxSlices]; /* staged with a reclassify */
 
 /* Jack descriptors (browser labels; HYBRID/BRAIN map fills in at M3). */
 static Jack jk1 ("audio_l", "Audio In L",  JackSig::AudioIn);
@@ -110,7 +118,7 @@ static Presets     presets(hw.seed.qspi);
 static ControlLoop loop(hw);
 static Pager       pager(hw.buttons[kButtonB1], 1, kNumPots); /* B1 owns pages (M4: 2nd page) */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.3.4-m2", "m2");
+                           "0.3.5-musical", "musical");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -218,6 +226,41 @@ struct ClockSel : Serializable
     }
 };
 static ClockSel gClockSel;
+
+/* ── musical branch: gate shaping dropdowns (read live by audio/poll) ── */
+static const char* kGateLenDisp =
+    "{\"kind\":\"enum\",\"labels\":[\"6 ms trig\",\"20 ms\",\"50 ms\",\"Hold to next hit\"]}";
+struct GateLenSel : Serializable
+{
+    uint8_t sel = 0;
+    size_t   SerializedSize() const override { return 1u; }
+    void     Serialize(uint8_t* o) const override { o[0] = sel; }
+    bool     Deserialize(const uint8_t* in) override { sel = in[0] > 3 ? 0 : in[0]; return true; }
+    uint32_t SchemaHash() const override { return 0x47544C31u; /* 'GTL1' */ }
+    bool     Describe(hostlink::ComponentWriter& w) const override
+    {
+        w.Label("Gate Length");
+        return w.Field("gate.len", "Length", 0, hostlink::FieldType::Enum, 0.f, kGateLenDisp, 4u);
+    }
+};
+static GateLenSel gGateLen;
+
+static const char* kGateLvlDisp =
+    "{\"kind\":\"enum\",\"labels\":[\"Fixed 5 V\",\"Velocity (1.5–5 V)\"]}";
+struct GateLvlSel : Serializable
+{
+    uint8_t sel = 0;
+    size_t   SerializedSize() const override { return 1u; }
+    void     Serialize(uint8_t* o) const override { o[0] = sel; }
+    bool     Deserialize(const uint8_t* in) override { sel = in[0] > 1 ? 0 : in[0]; return true; }
+    uint32_t SchemaHash() const override { return 0x47544C56u; /* 'GTLV' */ }
+    bool     Describe(hostlink::ComponentWriter& w) const override
+    {
+        w.Label("Gate Level");
+        return w.Field("gate.lvl", "Level", 0, hostlink::FieldType::Enum, 0.f, kGateLvlDisp, 2u);
+    }
+};
+static GateLvlSel gGateLvlSel;
 static volatile float gClkFlash = 0.f;   /* B1 white flash per detected pulse */
 static volatile float gClkMult  = 1.f;   /* P2 while following: ÷4 ÷2 ×1 ×2 ×4 */
 static bool           gWasExt   = false; /* ext/internal transition tracking */
@@ -286,7 +329,8 @@ static inline Rgb ClassColor(uint8_t c)
  *  1 Legacy 120/900  — the original split: snares mostly land in "hat", so
  *                      it behaves as hi/lo — musically its own lens (Amen!)
  *  2 Two-band lo/hi  — kick <325 Hz vs everything else, no snare class */
-static void ClassifySteps(const float* x, int len, uint8_t* cls, int mode)
+static void ClassifySteps(const float* x, int len, uint8_t* cls, int mode,
+                          float* sal = nullptr)
 {
     float dur = (float)len / kSr;
     int   bars = 1;
@@ -319,6 +363,13 @@ static void ClassifySteps(const float* x, int len, uint8_t* cls, int mode)
     }
     float mL = 1e-12f, mM = 1e-12f, mH = 1e-12f;
     for(int s = 0; s < nsl; s++) { mL += eL[s]; mM += eM[s]; mH += eH[s]; }
+    if(sal) /* salience: loudness of the step relative to the loop's loudest */
+    {
+        float mx = 1e-12f;
+        for(int s = 0; s < nsl; s++) { float e = sqrtf(eL[s] + eM[s] + eH[s]); if(e > mx) mx = e; }
+        for(int s = 0; s < bb::Engine::kMaxSlices; s++)
+            sal[s] = s < nsl ? sqrtf(eL[s] + eM[s] + eH[s]) / mx : 0.f;
+    }
     mL /= nsl; mM /= nsl; mH /= nsl;
     for(int s = 0; s < nsl; s++)
     {
@@ -342,6 +393,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
     {
         float* t = gPlay; gPlay = gLoad; gLoad = t;
         engine.SetMaterial(gPlay, gPendLen, kSr, gPendOnsets, gPendN, gPendClass);
+        memcpy(gSal, gPendSal, sizeof gSal);
         gNeedNativeTempo = true;
         gApply = false;
     }
@@ -349,7 +401,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
     if(gPendReslice) { engine.Reslice();   gPendReslice = false; }
     if(gPendReroll)  { engine.RerollFill(); gPendReroll  = false; }
     if(gScrubReq)    { engine.Scrub(gScrubDir); gScrubReq = false; }
-    if(gReclass)     { memcpy(engine.stepClass, gReclassBuf, sizeof gReclassBuf); gReclass = false; }
+    if(gReclass)     { memcpy(engine.stepClass, gReclassBuf, sizeof gReclassBuf); memcpy(gSal, gReclassSal, sizeof gSal); gReclass = false; }
 
     int n = (int)size;
     if(n > kScratch) n = kScratch;
@@ -383,10 +435,19 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
      * audio ISR deadlocks the module on the first callback — the v0.3.0
      * boot hang. J7/J8 are STM DACs but stay on the same path for uniformity. */
     uint8_t gf = engine.gateFired; engine.gateFired = 0;
+    const int  glen = kGateLenSamps[gGateLen.sel & 3];
+    const bool vel  = gGateLvlSel.sel == 1;
     for(int c = 0; c < 3; c++)
     {
-        if(gf & (1u << c))      gGateCd[c] = kGateSamps;
-        else if(gGateCd[c] > 0) gGateCd[c] -= n;
+        if(gf & (1u << c))
+        {
+            if(gGateCd[c] > 0 && glen == kGateHold) gGateRetrig[c] = true; /* re-hit while held */
+            gGateCd[c] = glen;
+            int sl = engine.gateSlice[c];
+            float sa = (sl >= 0 && sl < bb::Engine::kMaxSlices) ? gSal[sl] : 1.f;
+            gGateLvl[c] = vel ? 1.5f + 3.5f * sa : 5.f;
+        }
+        else if(gGateCd[c] > 0 && glen != kGateHold) gGateCd[c] -= n;
     }
 
     const float v = gVol, send = gVerbSend;
@@ -499,14 +560,14 @@ static void OnPoll(uint32_t /*t_ms*/)
 
     /* Gate CV writes — control thread (I²C-safe), on CHANGE only so J6's
      * MCP4728 isn't hit with a WriteAll+LDAC transaction every millisecond. */
-    static bool s_gateHi[3] = {false, false, false};
+    static float s_lastV[3] = {-1.f, -1.f, -1.f};
     for(int c = 0; c < 3; c++)
     {
-        const bool hi = gGateCd[c] > 0;
-        if(hi != s_gateHi[c])
+        float v = gGateCd[c] > 0 ? gGateLvl[c] : 0.f;
+        if(gGateRetrig[c]) { v = 0.f; gGateRetrig[c] = false; } /* 1 ms low, then back up */
+        if(v != s_lastV[c])
         {
-            s_gateHi[c]   = hi;
-            const float v = hi ? 5.f : 0.f;
+            s_lastV[c] = v;
             if(c == 0)      hw.j6.SetVolts(v);
             else if(c == 1) hw.j7.SetVolts(v);
             else            hw.j8.SetVolts(v);
@@ -650,7 +711,7 @@ static void ServiceLoad()
         gPendN = gDet.Detect(gLoad, len, kSr, gPendOnsets, kMaxOnsets, nullptr);
     }
 
-    ClassifySteps(gLoad, len, gPendClass, gClass.mode);
+    ClassifySteps(gLoad, len, gPendClass, gClass.mode, gPendSal);
     gPendLen   = len;
     gCurFile   = gLoadIdx;
     gLoadFlash = 1.f;
@@ -718,7 +779,7 @@ int main()
                     gPendOnsets[no++] = cues[i];
             }
             static uint8_t cls[bb::Engine::kMaxSlices];
-            ClassifySteps(gPlay, len, cls, gClass.mode);
+            ClassifySteps(gPlay, len, cls, gClass.mode, gSal);
             engine.SetMaterial(gPlay, len, kSr, gPendOnsets, no, cls);
             gCurFile = 0;
             loaded   = true;
@@ -730,7 +791,7 @@ int main()
         static uint8_t cls[bb::Engine::kMaxSlices];
         int onsets[kMaxOnsets];
         int no = gDet.Detect(gPlay, len, kSr, onsets, kMaxOnsets, nullptr);
-        ClassifySteps(gPlay, len, cls, gClass.mode);
+        ClassifySteps(gPlay, len, cls, gClass.mode, gSal);
         engine.SetMaterial(gPlay, len, kSr, onsets, no, cls);
     }
 
@@ -747,6 +808,8 @@ int main()
     if(gNumFiles > 0) presets.Manage(gSample);
     presets.Manage(gClass);
     presets.Manage(gClockSel);
+    presets.Manage(gGateLen);
+    presets.Manage(gGateLvlSel);
 
     loop.Use(pager).Use(perform).Use(host)
         .OnPoll(OnPoll).OnFrame(OnFrame).OnRender(OnRender);
@@ -768,7 +831,7 @@ int main()
         if(gClass.dirty && !gReclass && !gApply && engine.bufLen > 0)
         {
             gClass.dirty = false;
-            ClassifySteps(gPlay, engine.bufLen, gReclassBuf, gClass.mode);
+            ClassifySteps(gPlay, engine.bufLen, gReclassBuf, gClass.mode, gReclassSal);
             gReclass = true;
         }
         if(gClockSel.dirty)
