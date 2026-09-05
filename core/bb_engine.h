@@ -358,12 +358,73 @@ struct Engine
         fillActive         = false;
     }
 
+    // ── Voice role (M3): the rack plays slices ────────────────────────
+    // Replace-don't-layer: a call chokes everything sounding and fires the
+    // slice; PUNCH additionally writes it into the looping bar at the current
+    // step (playing IS editing). muted silences pattern steps only — the
+    // playhead keeps running so unmute lands in time; calls still sound.
+    bool  muted         = false;
+    int   callCountdown = -1;   // pending 32nd double for a ratcheted call
+    int   callIdx       = -1;
+    float callRate      = 1.f;
+    bool  callRev       = false;
+
+    void FireSlice(int idx, float rate, bool rev)
+    {
+        Slice cell = slices[idx];
+        if(cell.len < 64) return;
+        gateFired |= (uint8_t)(1u << (stepClass[idx] & 3));
+        gateSlice[stepClass[idx] & 3] = (int8_t)idx;
+        Voice*   v    = &voices[0];
+        uint32_t best = 0;
+        for(int i = 0; i < kVoices; i++)
+        {
+            if(!voices[i].active) { v = &voices[i]; break; }
+            if(voices[i].age >= best) { best = voices[i].age; v = &voices[i]; }
+        }
+        for(int i = 0; i < kVoices; i++)
+            if(&voices[i] != v) voices[i].Choke(bufLen);
+        v->Trigger(cell, rate, rev, bufLen, sliceExt);
+        trigFlash++;
+    }
+
+    void CallSlice(int idx, float rateMul, bool rev, bool punch, bool ratchet)
+    {
+        if(!buf || nSlices < 1) return;
+        if(idx < 0) idx = 0;
+        if(idx >= nSlices) idx = nSlices - 1;
+        float gridStepSamp = barSeconds * sr / (float)nSlices;
+        float rate         = pitch * (nativeStep / gridStepSamp) * rateMul;
+        FireSlice(idx, rate, rev);
+        if(punch && curStep >= 0 && curStep < nSlices)
+        {
+            stepSrc[curStep] = (int8_t)idx;
+            stepRev[curStep] = rev;
+            stepRatN[curStep]     = 0;      /* a punched hit is plain: no roll, no jitter */
+            stepRatAccel[curStep] = false;
+            stepJit[curStep]      = 0;
+        }
+        if(ratchet)
+        {
+            callCountdown = (int)(gridStepSamp * 0.5f);
+            callIdx = idx; callRate = rate; callRev = rev;
+        }
+        else callCountdown = -1;
+    }
+
     void Process(float* out, int n)
     {
         for(int i = 0; i < n; i++) out[i] = 0.f;
         if(!buf || bufLen < 2 || nSlices < 1) return;
 
         float blockSec = (float)n / sr;
+
+        // Voice: service a pending ratcheted-call double (32nd later)
+        if(callCountdown >= 0)
+        {
+            callCountdown -= n;
+            if(callCountdown < 0 && callIdx >= 0) FireSlice(callIdx, callRate, callRev);
+        }
 
         // Quantized cell sequencing: the grid clock runs at OUR tempo; the
         // pattern (a Brocot tiling of cells) says which source cell each grid
@@ -398,7 +459,7 @@ struct Engine
                     }
                 }
             }
-            if(stepSrc[step] >= 0)
+            if(!muted && stepSrc[step] >= 0)   /* Voice: mute silences pattern steps only */
             {
                 TriggerStep(step);
                 if(stepRatN[step] > 0)
