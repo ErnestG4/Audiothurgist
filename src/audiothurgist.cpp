@@ -28,6 +28,7 @@
 #include "alchemy/surface/pager.h"
 #include "alchemy/host_link/host.h"
 #include "alchemy/storage/sd_card.h"
+#include "alchemy/storage/fs_extension.h"
 
 #include "ff.h"
 #include "Effects/reverbsc.h"
@@ -72,11 +73,12 @@ static float* gLoad = gBufB;   /* loader fills this */
 static bb::Engine  engine;
 static AlchemyLab  hw;
 static SdCard      sd;
+static hostlink::FsExtension fs_ext(sd);  /* browser SD file list */
 static Presets     presets(hw.seed.qspi);
 static ControlLoop loop(hw);
 static Pager       pager(hw.buttons[kButtonB1], 1, kNumPots); /* B1 owns pages (M4: 2nd page) */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.2.2-m2app", "m2app");
+                           "0.2.3-m2app", "m2app");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -431,9 +433,11 @@ int main()
     ScanSD();
     if(gNumFiles > 0)
     {
-        for(int i = 0; i < gNumFiles; i++) gLabelPtrs[i] = gFiles[i];
+        /* Numeric selector (labels would blow the 192-byte per-knob hint
+         * buffer at 60 files — the file NAMES live in the browser's SD
+         * file list via FsExtension instead). */
         uint8_t n = gNumFiles > 255 ? 255 : (uint8_t)gNumFiles;
-        k_sample.Selector(n).Labels(gLabelPtrs, n);
+        k_sample.Selector(n);
     }
     int  len = 0;
     bool loaded = false;
@@ -471,6 +475,7 @@ int main()
         engine.SetMaterial(gPlay, len, kSr, onsets, no, cls);
     }
 
+    host.Extend(fs_ext);
     presets.Manage(pager);
 
     loop.Use(pager).Use(perform).Use(host)
