@@ -3,6 +3,7 @@
 #include <cstring>
 #include <cmath>
 #include "bb_rng.h"
+#include "bb_grids_map.h"
 
 namespace bb {
 
@@ -38,6 +39,11 @@ struct Pattern
     // Fill layer (Collins only): alternative cells for [fillStart, nSteps),
     // played on every 4th loop by the engine, then it snaps back to the base.
     int    fillStart = -1;
+
+    // Language params (modes 2 Grids / 3 Euclid) — set by the engine before
+    // Generate. Grids map coordinates 0..1, per-class densities 0..1,
+    // rotation 0..1 (Euclid).
+    float langX = 0.5f, langY = 0.5f, langDens[3] = {0.5f, 0.5f, 0.5f}, langRot = 0.f;
     int8_t fsrc[kMaxSteps];
     int8_t flen[kMaxSteps];
     bool   frev[kMaxSteps];
@@ -69,6 +75,13 @@ struct Pattern
             float vc = v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
             if(vc > 0.96f) vc = 1.f;
             GenerateCollins(nSteps, stepsPerBeat, cls, vc, cr, fr);
+            return;
+        }
+        if(mode == 2 || mode == 3)
+        {
+            float vc = v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
+            if(vc > 0.96f) vc = 1.f;
+            GenerateLang(nSteps, cls, vc, mode, fr);
             return;
         }
 
@@ -249,6 +262,74 @@ struct Pattern
         int8_t n;
         int8_t c[8];
     };
+
+    // ── Languages (M4): Grids / Euclid as per-step CLASS fire-flags, spoken
+    // through the break's own class-matched slices. Every step is a 1-step
+    // cell: firing steps play the in-place slice if its class matches, else
+    // the nearest slice of the firing class; silent steps are rests. The chop
+    // knob keeps a meaning — FAITHFULNESS of slice choice: full right = in
+    // place/nearest, lower = same-class swaps from anywhere in the loop (fill
+    // seed → B2 rerolls them). Otherwise deterministic from map/densities.
+    void GenerateLang(int nSteps, const uint8_t* cls, float vc, int mode, Rng& fr)
+    {
+        const int bar = 16;
+        uint8_t   fire[kMaxSteps];
+        for(int s = 0; s < nSteps; s++)
+        {
+            uint8_t f = 0;
+            if(mode == 2)
+            {
+                const uint8_t x  = (uint8_t)(langX * 255.f + 0.5f);
+                const uint8_t y  = (uint8_t)(langY * 255.f + 0.5f);
+                const uint8_t gs = (uint8_t)(s % kGridsSteps);
+                for(int c = 0; c < 3; c++)
+                {
+                    const uint8_t dens = (uint8_t)(langDens[c] * 255.f + 0.5f);
+                    if(GridsReadDrumMap(gs, (uint8_t)c, x, y) > (uint8_t)(255 - dens))
+                        f |= (uint8_t)(1u << c);
+                }
+            }
+            else
+            {
+                const int rot = (int)(langRot * (float)bar + 0.5f) % bar;
+                const int i   = ((s % bar) - rot + bar) % bar;
+                for(int c = 0; c < 3; c++)
+                {
+                    const int k = (int)(langDens[c] * (float)bar + 0.5f);
+                    // Bjorklund-equivalent maximally-even spacing (Toussaint E(k,16))
+                    if(k > 0 && ((i + 1) * k / bar) != (i * k / bar)) f |= (uint8_t)(1u << c);
+                }
+            }
+            fire[s] = f;
+        }
+        int8_t byClass[3][kMaxSteps];
+        int    nBy[3] = {0, 0, 0};
+        for(int s = 0; s < nSteps; s++)
+        {
+            int c = cls ? (cls[s] & 3) : 3;
+            if(c < 3) byClass[c][nBy[c]++] = (int8_t)s;
+        }
+        const float swapP = (1.f - vc) * 0.8f;
+        for(int s = 0; s < nSteps; s++)
+        {
+            len[s] = 1;
+            const uint8_t f = fire[s];
+            if(!f) { src[s] = -2; continue; }              // rest
+            const int c = (f & 1) ? 0 : (f & 2) ? 1 : 2;  // kick > snare > hat
+            int pick = -1;
+            if(cls && (cls[s] & 3) == c) pick = s;         // in place
+            else if(cls)                                   // nearest of that class
+                for(int d = 1; d < nSteps && pick < 0; d++)
+                {
+                    if(s - d >= 0     && (cls[s - d] & 3) == c) { pick = s - d; break; }
+                    if(s + d < nSteps && (cls[s + d] & 3) == c) { pick = s + d; break; }
+                }
+            if(pick < 0) pick = s;
+            if(nBy[c] > 1 && fr.Uniform() < swapP)
+                pick = byClass[c][(int)(fr.Uniform() * (float)nBy[c]) % nBy[c]];
+            src[s] = (int8_t)pick;
+        }
+    }
 
     void GenerateCollins(int nSteps, int spb, const uint8_t* cls, float vc, Rng& cr, Rng& fr)
     {

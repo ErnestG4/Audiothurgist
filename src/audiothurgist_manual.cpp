@@ -16,7 +16,8 @@
 using namespace alchemy;
 
 extern VirtualKnob k_chop, k_tempo, k_hist, k_pitch, k_sample, k_vol;
-extern Page        perform;
+extern VirtualKnob b_x, b_y, b_kick, b_snare, b_hat, b_rot;
+extern Page        perform, brain;
 extern Settings    settings;
 extern Jack        jk1, jk2, jk3, jk4, jk5, jk6, jk7, jk8, jk9, jk10;
 
@@ -63,6 +64,17 @@ static Manual manual =
             "holds until P2 moves. Gates on J6/J7/J8 follow the classifier's "
             "labels; Gate Length and Gate Level (velocity from each slice's "
             "loudness) live in Options.")
+        .Section("languages", "Pattern languages (Grammar, in Options)",
+            "**Classic** is BreakFix's Brocot cell grammar. **Collins** adds "
+            "the breakbeat-science upgrades: faithful early in the phrase, "
+            "restless toward its end; 3+3+2 odd cuts; a fill on every fourth "
+            "loop that snaps back on the downbeat; stutter terminators; "
+            "accelerating rolls. **Grids** speaks Mutable Instruments' drum "
+            "map through your break's own kicks, snares and hats — Map X/Y "
+            "and three densities on the **Brain** page (B1). **Euclid** "
+            "spaces each class's hits evenly with Rotation. In both, the Chop "
+            "knob sets how faithfully slices are chosen: full right plays "
+            "each class's own nearest hit, lower swaps within the class.")
         .Section("cards", "Cards and loading",
             "FAT32 microSD, WAVs in the root, 1–4 bar breaks are ideal "
             "(longer files trim to their first four bars; levels normalise on "
@@ -74,6 +86,14 @@ void DescribeManual(hostlink::Host& host)
 {
     perform.Help("The performance page: everything BreakFix was, plus tempo "
                  "as a turntable, history as a dial, and file selection.");
+    brain.Help("The pattern-language console. Live for Grids and Euclid "
+               "(Grammar, in Options); a change regenerates the pattern.");
+    b_x.Help("**Map X** — Grids drum-map coordinate.");
+    b_y.Help("**Map Y** — Grids drum-map coordinate.");
+    b_kick.Help("**Kick density** — Grids threshold / Euclid hits per bar.");
+    b_snare.Help("**Snare density** — Grids threshold / Euclid hits per bar.");
+    b_hat.Help("**Hat density** — Grids threshold / Euclid hits per bar.");
+    b_rot.Help("**Rotation** — Euclid: rotates every class's hits together.");
 
     k_chop.Help("**Chop character** — the journey from verbatim (full right) "
                 "to rolls, bursts and reverb (full left).")

@@ -194,7 +194,8 @@ struct Engine
     int    ratchetK    = -1;         // step whose retrigger series is pending
     int    ratchetLeft = 0, ratchetIval = 0;
     bool   ratchetAccel = false;
-    int    patternMode = 0;   // 0 Classic, 1 Collins — see bb_pattern.h
+    int    patternMode = 0;   // 0 Classic, 1 Collins, 2 Grids, 3 Euclid — see bb_pattern.h
+    float  langX = 0.5f, langY = 0.5f, langDens[3] = {0.5f, 0.5f, 0.5f}, langRot = 0.f;
     int    loopCount   = 0;   // wraps since (re)generation: fill hyperperiod
     bool   fillActive  = false;
     Rng    jitRng;
@@ -285,6 +286,8 @@ struct Engine
     }
     void ApplyPattern(float knob, uint64_t cs, uint64_t fs)
     {
+        pat.langX = langX; pat.langY = langY; pat.langRot = langRot;
+        for(int c = 0; c < 3; c++) pat.langDens[c] = langDens[c];
         pat.Generate(nSlices, stepsPerBeat, stepClass, knob, cs, fs, patternMode);
         jitRng.Seed(cs ^ (fs * 0x9E3779B97F4A7C15ULL));
         loopCount  = 0;

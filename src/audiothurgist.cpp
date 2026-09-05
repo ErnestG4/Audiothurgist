@@ -119,21 +119,22 @@ Jack jk9 ("out_l",   "Audio Out L", JackSig::AudioOut);
 Jack jk10("out_r",   "Audio Out R", JackSig::AudioOut);
 static Presets     presets(hw.seed.qspi);
 static ControlLoop loop(hw);
-static Pager       pager(hw.buttons[kButtonB1], 1, kNumPots); /* B1 owns pages (M4: 2nd page) */
+static Pager       pager(hw.buttons[kButtonB1], 2, kNumPots); /* B1 tap: Perform ↔ Brain */
 /* Hold B1 + turn a pot: record that pot's motion as a loop (16 s @ 30 Hz,
  * 5.8 KB, saved with presets). Values compose into knob.Norm() automatically. */
-static ParamLock<kNumPots> locks(hw.buttons[kButtonB1], pager);
+static ParamLock<2 * kNumPots> locks(hw.buttons[kButtonB1], pager);
 /* Settings screen: B2+B3 held 2 s enters; brightness + the preset gesture. */
 Settings           settings(hw, &pager);
 void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.5.0-m6", "m6");
+                           "0.6.0-m4", "m4");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
 static volatile float gVerbSend = 0.f;
 
 static volatile bool gPendReroll  = false;
+static volatile bool gPendRegen   = false;   /* same seeds, new language params */
 static volatile bool gPendReslice = false;
 static volatile int  gScrubDir    = 0;
 static volatile bool gScrubReq    = false;
@@ -255,7 +256,7 @@ static GateLvlSel gGateLvlSel;
  * terminator, geometric rolls, repeat repitch). Switching rerolls the fill
  * so it is audible immediately. Hardware tie-in later. */
 static const char* kGrammarDisp =
-    "{\"kind\":\"enum\",\"labels\":[\"Classic\",\"Collins\"]}";
+    "{\"kind\":\"enum\",\"labels\":[\"Classic\",\"Collins\",\"Grids\",\"Euclid\"]}";
 struct GrammarSel
 {
     uint8_t       mode  = 0;
@@ -284,7 +285,7 @@ struct Options : Serializable
         gVoiceSel.sel   = in[2] > 1 ? 0 : in[2];
         gGateLen.sel    = in[3] > 3 ? 0 : in[3];
         gGateLvlSel.sel = in[4] > 1 ? 0 : in[4];
-        v = in[5] > 1 ? 0 : in[5]; if(v != gGrammar.mode)  { gGrammar.mode = v;  gGrammar.dirty = true; }
+        v = in[5] > 3 ? 0 : in[5]; if(v != gGrammar.mode)  { gGrammar.mode = v;  gGrammar.dirty = true; }
         return true;
     }
     uint32_t SchemaHash() const override { return 0x4F505431u; /* 'OPT1' */ }
@@ -297,7 +298,7 @@ struct Options : Serializable
         ok &=     w.Field("voice.mode",   "Voice",       2, FieldType::Enum, 0.f, kVoiceDisp,   2u);
         ok &=     w.Field("gate.len",     "Gate Length", 3, FieldType::Enum, 0.f, kGateLenDisp, 4u);
         ok &=     w.Field("gate.lvl",     "Gate Level",  4, FieldType::Enum, 0.f, kGateLvlDisp, 2u);
-        ok &=     w.Field("grammar.mode", "Grammar",     5, FieldType::Enum, 0.f, kGrammarDisp, 2u);
+        ok &=     w.Field("grammar.mode", "Grammar",     5, FieldType::Enum, 0.f, kGrammarDisp, 4u);
         return ok;
     }
 };
@@ -373,6 +374,18 @@ static inline Rgb ClassColor(uint8_t c)
         default: return kOther;
     }
 }
+
+/* ── Brain page (M4): the pattern-language console. Grids reads Map X/Y +
+ * three densities (Mutable's map, verbatim); Euclid reads densities as
+ * hits-per-bar + Rotation. Classic/Collins ignore these. B1 switches pages. */
+VirtualKnob b_x     = VirtualKnob(kPotTopLeft,     "Map X").Linear(0.f, 1.f).Ident("lang.x").Ring(Level(kTempoCol));
+VirtualKnob b_y     = VirtualKnob(kPotTopRight,    "Map Y").Linear(0.f, 1.f).Ident("lang.y").Ring(Level(kTempoCol));
+VirtualKnob b_kick  = VirtualKnob(kPotMiddleLeft,  "Kick").Linear(0.f, 1.f).Ident("lang.kick").Ring(Level(kKick));
+VirtualKnob b_snare = VirtualKnob(kPotMiddleRight, "Snare").Linear(0.f, 1.f).Ident("lang.snare").Ring(Level(kSnare));
+VirtualKnob b_hat   = VirtualKnob(kPotBottomLeft,  "Hat").Linear(0.f, 1.f).Ident("lang.hat").Ring(Level(kHat));
+VirtualKnob b_rot   = VirtualKnob(kPotBottomRight, "Rotation").Linear(0.f, 1.f).Ident("lang.rot").Ring(Level(kSpaceCol));
+Page brain = Page(1).Name("Brain").Color("#3a9fe0")
+                 .Knobs(b_x, b_y, b_kick, b_snare, b_hat, b_rot);
 
 /* ── class analysis over the engine's grid (mirrors its math) ───────── */
 /* Classifier modes (browser dropdown "Classifier"; hardware tie-in later):
@@ -452,6 +465,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
 
     if(gPendReslice) { engine.Reslice();   gPendReslice = false; }
     if(gPendReroll)  { engine.RerollFill(); gPendReroll  = false; }
+    if(gPendRegen)   { engine.RegenPattern(); gPendRegen = false; }
     if(gScrubReq)    { engine.Scrub(gScrubDir); gScrubReq = false; }
     if(gReclass)     { memcpy(engine.stepClass, gReclassBuf, sizeof gReclassBuf); memcpy(gSal, gReclassSal, sizeof gSal); gReclass = false; }
     if(gCallReq)     { engine.CallSlice(gCallIdx, gCallMul, gCallRev, gCallPunch, gCallRat); gCallReq = false; }
@@ -564,6 +578,20 @@ static void OnFrame()
         if(idx < 0) idx = 0;
         if(idx > gNumFiles - 1) idx = gNumFiles - 1;
         gSelFile = idx;
+    }
+
+    /* Brain page → language params; a change re-generates the pattern with
+     * the SAME seeds (Grids/Euclid are deterministic from these). */
+    {
+        static float s_l[6] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
+        const float  l[6]   = { b_x.Norm(), b_y.Norm(), b_kick.Norm(),
+                                b_snare.Norm(), b_hat.Norm(), b_rot.Norm() };
+        bool ch = false;
+        for(int i = 0; i < 6; i++) if(fabsf(l[i] - s_l[i]) > 0.01f) { s_l[i] = l[i]; ch = true; }
+        engine.langX = l[0]; engine.langY = l[1];
+        engine.langDens[0] = l[2]; engine.langDens[1] = l[3]; engine.langDens[2] = l[4];
+        engine.langRot = l[5];
+        if(ch && gGrammar.mode >= 2 && !gPendReroll) gPendRegen = true;
     }
 
     float p3 = k_hist.Norm();
@@ -736,11 +764,12 @@ static void OnPoll(uint32_t /*t_ms*/)
 static void OnRender(uint32_t /*t_ms*/)
 {
     if(settings.IsActive()) return;   /* the hook fires inside Settings too */
+    const bool perfPage = pager.Page() == 0;   /* Brain page keeps its own arcs */
     int ns  = engine.nSlices > 0 ? engine.nSlices : 1;
     int cur = (int)(engine.barPhase * (double)ns);
     if(cur >= ns) cur = ns - 1;
     int base = (cur / 16) * 16;
-    for(int i = 0; i < 16; i++)
+    if(perfPage) for(int i = 0; i < 16; i++)
     {
         int s = base + i;
         Rgb c;
@@ -760,7 +789,7 @@ static void OnRender(uint32_t /*t_ms*/)
                     % bb::Engine::kHist;
         hist_lvl = (float)(engine.histN - 1 - depth) / (float)(engine.histN - 1);
     }
-    DrawLevelArc(hw.leds, P_HIST, kAlchemyLabArcGeometry, hist_lvl,
+    if(perfPage) DrawLevelArc(hw.leds, P_HIST, kAlchemyLabArcGeometry, hist_lvl,
                  {0.5f, 0.99f}, kHistLo, kHistMid, kHistHi);
     /* P2/P4/P5/P6 arcs are drawn by the framework's per-knob Ring styles
      * (PerfRenderer, before this hook); we only overdraw P1 (bar) + P3. */
@@ -949,7 +978,7 @@ int main()
     presets.Manage(settings);
     presets.UseNames();              /* renameable preset names, from the browser */
 
-    loop.Use(pager).Use(locks).Use(settings).Use(perform).Use(host)
+    loop.Use(pager).Use(locks).Use(settings).Use(perform).Use(brain).Use(host)
         .OnPoll(OnPoll).OnFrame(OnFrame).OnRender(OnRender);
 
     presets.Init();
