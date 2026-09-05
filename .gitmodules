@@ -1,0 +1,3 @@
+[submodule "vendor/capicola"]
+	path = vendor/capicola
+	url = https://github.com/heavylight-industries/capicola.git

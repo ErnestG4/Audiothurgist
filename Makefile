@@ -28,6 +28,7 @@ CPP_SOURCES += $(DAISYSP_LGPL)/Source/Effects/reverbsc.cpp
 C_INCLUDES += \
     -Isrc \
     -Icore \
+    -Ivendor/capicola/lib \
     -I$(ALCHEMY_DIR)/framework/include \
     -I$(ALCHEMY_DIR)/hardware/include \
     -I$(ALCHEMY_DIR)/hardware/alchemy-lab/$(BOARD)/include \
