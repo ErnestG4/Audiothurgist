@@ -8,7 +8,8 @@
  * Record from J1/J2 is M1.6.
  *
  *   P1 Chop · P2 Tempo · P3 History · P4 Pitch · P5 Sample-select · P6 Volume
- *   B1 = page · B2 tap refill / hold flow · B3 tap reslice / hold load-next
+ *   B1 hold + turn a pot = record a motion loop (ParamLock) · B2 tap refill /
+ *   hold flow · B3 tap reslice / hold load · B2+B3 held 2 s = Settings
  *
  * DMA law (SDK's SdCard header confirms our Pod-era finding): every buffer
  * SDMMC touches must live in SDRAM, not DTCM. BOOT_SRAM puts plain .bss in
@@ -27,6 +28,8 @@
 #include "alchemy/surface/page.h"
 #include "alchemy/surface/pager.h"
 #include "alchemy/surface/jack.h"
+#include "alchemy/surface/param_lock.h"
+#include "alchemy/surface/settings.h"
 #include "alchemy/control/musical_clock.h"
 #include "alchemy/control/clock_follower.h"
 #include "alchemy/control/cv_edge.h"
@@ -104,21 +107,27 @@ static float          gPendSal[bb::Engine::kMaxSlices];    /* staged with a load
 static float          gReclassSal[bb::Engine::kMaxSlices]; /* staged with a reclassify */
 
 /* Jack descriptors (browser labels; HYBRID/BRAIN map fills in at M3). */
-static Jack jk1 ("audio_l", "Audio In L",  JackSig::AudioIn);
-static Jack jk2 ("audio_r", "Audio In R",  JackSig::AudioIn);
-static Jack jk3 ("clock",   "Clock In",    JackSig::Trig);
-static Jack jk4 ("voct",    "V/Oct",       JackSig::Voct);
-static Jack jk5 ("gate",    "Gate",        JackSig::Gate);
-static Jack jk6 ("kick",    "Kick Gate",   JackSig::Gate);
-static Jack jk7 ("snare",   "Snare Gate",  JackSig::Gate);
-static Jack jk8 ("hat",     "Hat Gate",    JackSig::Gate);
-static Jack jk9 ("out_l",   "Audio Out L", JackSig::AudioOut);
-static Jack jk10("out_r",   "Audio Out R", JackSig::AudioOut);
+Jack jk1 ("audio_l", "Audio In L",  JackSig::AudioIn);
+Jack jk2 ("audio_r", "Audio In R",  JackSig::AudioIn);
+Jack jk3 ("clock",   "Clock In",    JackSig::Trig);
+Jack jk4 ("voct",    "V/Oct",       JackSig::Voct);
+Jack jk5 ("gate",    "Gate",        JackSig::Gate);
+Jack jk6 ("kick",    "Kick Gate",   JackSig::Gate);
+Jack jk7 ("snare",   "Snare Gate",  JackSig::Gate);
+Jack jk8 ("hat",     "Hat Gate",    JackSig::Gate);
+Jack jk9 ("out_l",   "Audio Out L", JackSig::AudioOut);
+Jack jk10("out_r",   "Audio Out R", JackSig::AudioOut);
 static Presets     presets(hw.seed.qspi);
 static ControlLoop loop(hw);
 static Pager       pager(hw.buttons[kButtonB1], 1, kNumPots); /* B1 owns pages (M4: 2nd page) */
+/* Hold B1 + turn a pot: record that pot's motion as a loop (16 s @ 30 Hz,
+ * 5.8 KB, saved with presets). Values compose into knob.Norm() automatically. */
+static ParamLock<kNumPots> locks(hw.buttons[kButtonB1], pager);
+/* Settings screen: B2+B3 held 2 s enters; brightness + the preset gesture. */
+Settings           settings(hw, &pager);
+void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.4.2-night", "night");
+                           "0.5.0-m6", "m6");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -177,25 +186,10 @@ static SampleSel gSample;
  * pattern, so the lenses can be A/B'd on the same break. */
 static const char* kClassDisp =
     "{\"kind\":\"enum\",\"labels\":[\"Hockman 3-band\",\"Legacy 120/900 (hi/lo)\",\"Two-band lo/hi\"]}";
-struct ClassSel : Serializable
+struct ClassSel
 {
     uint8_t       mode  = 0;
     volatile bool dirty = false;
-    size_t   SerializedSize() const override { return 1u; }
-    void     Serialize(uint8_t* o) const override { o[0] = mode; }
-    bool     Deserialize(const uint8_t* in) override
-    {
-        uint8_t m = in[0] > 2 ? 0 : in[0];
-        if(m != mode) { mode = m; dirty = true; }
-        return true;
-    }
-    uint32_t SchemaHash() const override { return 0x434C5331u; /* 'CLS1' */ }
-    bool     Describe(hostlink::ComponentWriter& w) const override
-    {
-        w.Label("Classifier");
-        return w.Field("class.mode", "Mode", 0, hostlink::FieldType::Enum,
-                       0.f, kClassDisp, 3u);
-    }
 };
 static ClassSel      gClass;
 static uint8_t       gReclassBuf[bb::Engine::kMaxSlices];
@@ -205,25 +199,10 @@ static volatile bool gReclass = false;   /* control: labels ready → audio memc
 static const uint32_t kPpqnTable[4] = {24u, 4u, 2u, 1u};
 static const char* kPpqnDisp =
     "{\"kind\":\"enum\",\"labels\":[\"24 PPQN (MIDI/DIN)\",\"4 PPQN (16ths)\",\"2 PPQN (8ths)\",\"1 PPQN (quarters)\"]}";
-struct ClockSel : Serializable
+struct ClockSel
 {
     uint8_t       sel   = 0;
     volatile bool dirty = false;
-    size_t   SerializedSize() const override { return 1u; }
-    void     Serialize(uint8_t* o) const override { o[0] = sel; }
-    bool     Deserialize(const uint8_t* in) override
-    {
-        uint8_t v = in[0] > 3 ? 0 : in[0];
-        if(v != sel) { sel = v; dirty = true; }
-        return true;
-    }
-    uint32_t SchemaHash() const override { return 0x434C4B31u; /* 'CLK1' */ }
-    bool     Describe(hostlink::ComponentWriter& w) const override
-    {
-        w.Label("Clock In");
-        return w.Field("clock.ppqn", "PPQN", 0, hostlink::FieldType::Enum,
-                       0.f, kPpqnDisp, 4u);
-    }
 };
 static ClockSel gClockSel;
 
@@ -247,54 +226,26 @@ static volatile int   gCallFlash = -1;    /* ring: called step flashes */
 static volatile int   gCallFlashT = 0;
 static const char* kVoiceDisp =
     "{\"kind\":\"enum\",\"labels\":[\"Choke (momentary)\",\"Punch (writes the bar)\"]}";
-struct VoiceSel : Serializable
+struct VoiceSel
 {
-    uint8_t  sel = 0;
-    size_t   SerializedSize() const override { return 1u; }
-    void     Serialize(uint8_t* o) const override { o[0] = sel; }
-    bool     Deserialize(const uint8_t* in) override { sel = in[0] > 1 ? 0 : in[0]; return true; }
-    uint32_t SchemaHash() const override { return 0x564F4331u; /* 'VOC1' */ }
-    bool     Describe(hostlink::ComponentWriter& w) const override
-    {
-        w.Label("Voice");
-        return w.Field("voice.mode", "Mode", 0, hostlink::FieldType::Enum,
-                       0.f, kVoiceDisp, 2u);
-    }
+    uint8_t sel = 0;
 };
 static VoiceSel gVoiceSel;
 
 /* ── musical branch: gate shaping dropdowns (read live by audio/poll) ── */
 static const char* kGateLenDisp =
     "{\"kind\":\"enum\",\"labels\":[\"6 ms trig\",\"20 ms\",\"50 ms\",\"Hold to next hit\"]}";
-struct GateLenSel : Serializable
+struct GateLenSel
 {
     uint8_t sel = 0;
-    size_t   SerializedSize() const override { return 1u; }
-    void     Serialize(uint8_t* o) const override { o[0] = sel; }
-    bool     Deserialize(const uint8_t* in) override { sel = in[0] > 3 ? 0 : in[0]; return true; }
-    uint32_t SchemaHash() const override { return 0x47544C31u; /* 'GTL1' */ }
-    bool     Describe(hostlink::ComponentWriter& w) const override
-    {
-        w.Label("Gate Length");
-        return w.Field("gate.len", "Length", 0, hostlink::FieldType::Enum, 0.f, kGateLenDisp, 4u);
-    }
 };
 static GateLenSel gGateLen;
 
 static const char* kGateLvlDisp =
     "{\"kind\":\"enum\",\"labels\":[\"Fixed 5 V\",\"Velocity (1.5–5 V)\"]}";
-struct GateLvlSel : Serializable
+struct GateLvlSel
 {
     uint8_t sel = 0;
-    size_t   SerializedSize() const override { return 1u; }
-    void     Serialize(uint8_t* o) const override { o[0] = sel; }
-    bool     Deserialize(const uint8_t* in) override { sel = in[0] > 1 ? 0 : in[0]; return true; }
-    uint32_t SchemaHash() const override { return 0x47544C56u; /* 'GTLV' */ }
-    bool     Describe(hostlink::ComponentWriter& w) const override
-    {
-        w.Label("Gate Level");
-        return w.Field("gate.lvl", "Level", 0, hostlink::FieldType::Enum, 0.f, kGateLvlDisp, 2u);
-    }
 };
 static GateLvlSel gGateLvlSel;
 /* ── GRAMMAR (jungle branch) ────────────────────────────────────────────
@@ -305,27 +256,52 @@ static GateLvlSel gGateLvlSel;
  * so it is audible immediately. Hardware tie-in later. */
 static const char* kGrammarDisp =
     "{\"kind\":\"enum\",\"labels\":[\"Classic\",\"Collins\"]}";
-struct GrammarSel : Serializable
+struct GrammarSel
 {
     uint8_t       mode  = 0;
     volatile bool dirty = false;
-    size_t   SerializedSize() const override { return 1u; }
-    void     Serialize(uint8_t* o) const override { o[0] = mode; }
-    bool     Deserialize(const uint8_t* in) override
-    {
-        uint8_t m = in[0] > 1 ? 0 : in[0];
-        if(m != mode) { mode = m; dirty = true; }
-        return true;
-    }
-    uint32_t SchemaHash() const override { return 0x47524D31u; /* 'GRM1' */ }
-    bool     Describe(hostlink::ComponentWriter& w) const override
-    {
-        w.Label("Grammar");
-        return w.Field("grammar.mode", "Mode", 0, hostlink::FieldType::Enum,
-                       0.f, kGrammarDisp, 2u);
-    }
 };
 static GrammarSel gGrammar;
+
+/* ── Options: ONE preset-managed component for the six one-byte selectors.
+ * The SDK caps managed components at kPresetMaxManaged (8); six separate
+ * Serializables plus pager/sample/locks/settings would blow it. Same
+ * labels, same live semantics: the browser edits bytes 0..5, Deserialize
+ * fans them out to the plain structs above and raises their dirty flags. */
+struct Options : Serializable
+{
+    size_t SerializedSize() const override { return 6u; }
+    void   Serialize(uint8_t* o) const override
+    {
+        o[0] = gClass.mode; o[1] = gClockSel.sel; o[2] = gVoiceSel.sel;
+        o[3] = gGateLen.sel; o[4] = gGateLvlSel.sel; o[5] = gGrammar.mode;
+    }
+    bool Deserialize(const uint8_t* in) override
+    {
+        uint8_t v;
+        v = in[0] > 2 ? 0 : in[0]; if(v != gClass.mode)    { gClass.mode = v;    gClass.dirty = true; }
+        v = in[1] > 3 ? 0 : in[1]; if(v != gClockSel.sel)  { gClockSel.sel = v;  gClockSel.dirty = true; }
+        gVoiceSel.sel   = in[2] > 1 ? 0 : in[2];
+        gGateLen.sel    = in[3] > 3 ? 0 : in[3];
+        gGateLvlSel.sel = in[4] > 1 ? 0 : in[4];
+        v = in[5] > 1 ? 0 : in[5]; if(v != gGrammar.mode)  { gGrammar.mode = v;  gGrammar.dirty = true; }
+        return true;
+    }
+    uint32_t SchemaHash() const override { return 0x4F505431u; /* 'OPT1' */ }
+    bool     Describe(hostlink::ComponentWriter& w) const override
+    {
+        using hostlink::FieldType;
+        w.Label("Options");
+        bool ok = w.Field("class.mode",   "Classifier",  0, FieldType::Enum, 0.f, kClassDisp,   3u);
+        ok &=     w.Field("clock.ppqn",   "Clock In",    1, FieldType::Enum, 0.f, kPpqnDisp,    4u);
+        ok &=     w.Field("voice.mode",   "Voice",       2, FieldType::Enum, 0.f, kVoiceDisp,   2u);
+        ok &=     w.Field("gate.len",     "Gate Length", 3, FieldType::Enum, 0.f, kGateLenDisp, 4u);
+        ok &=     w.Field("gate.lvl",     "Gate Level",  4, FieldType::Enum, 0.f, kGateLvlDisp, 2u);
+        ok &=     w.Field("grammar.mode", "Grammar",     5, FieldType::Enum, 0.f, kGrammarDisp, 2u);
+        return ok;
+    }
+};
+static Options gOptions;
 /* ── end GRAMMAR ───────────────────────────────────────────────────────── */
 static volatile float gClkFlash = 0.f;   /* B1 white flash per detected pulse */
 static volatile float gClkMult  = 1.f;   /* P2 while following: ÷4 ÷2 ×1 ×2 ×4 */
@@ -356,21 +332,21 @@ static constexpr LedPanel::Rgb kPitchP  { 40, 200, 120};
 static constexpr LedPanel::Rgb kPitchN  {235,  70,  20};
 static constexpr LedPanel::Rgb kPitchC  { 60,  60,  70};
 
-static VirtualKnob k_chop  = VirtualKnob(P_CHOP,  "Chop").Linear(0.f, 1.f)
+VirtualKnob k_chop  = VirtualKnob(P_CHOP,  "Chop").Linear(0.f, 1.f)
                                  .Ident("chop").Ring(Level(kChopCol));
-static VirtualKnob k_tempo = VirtualKnob(P_TEMPO, "Tempo").Linear(70.f, 180.f)
+VirtualKnob k_tempo = VirtualKnob(P_TEMPO, "Tempo").Linear(70.f, 180.f)
                                  .Unit("BPM").Ident("tempo").Ring(Level(kTempoCol));
-static VirtualKnob k_hist  = VirtualKnob(P_HIST,  "History").Linear(0.f, 1.f)
+VirtualKnob k_hist  = VirtualKnob(P_HIST,  "History").Linear(0.f, 1.f)
                                  .Ident("history").Ring(Level(LedPanel::Rgb{120, 55, 190}));
-static VirtualKnob k_pitch = VirtualKnob(P_PITCH, "Pitch").Linear(-12.f, 12.f)
+VirtualKnob k_pitch = VirtualKnob(P_PITCH, "Pitch").Linear(-12.f, 12.f)
                                  .Unit("st").Ident("pitch")
                                  .Ring(Bipolar(kPitchP, kPitchN, kPitchC));
-static VirtualKnob k_sample = VirtualKnob(P_SPACE, "Sample").Linear(0.f, 1.f)
+VirtualKnob k_sample = VirtualKnob(P_SPACE, "Sample").Linear(0.f, 1.f)
                                  .Ident("sample").Ring(Level(kSpaceCol));
-static VirtualKnob k_vol   = VirtualKnob(P_VOL,   "Volume").Linear(0.f, 1.f)
+VirtualKnob k_vol   = VirtualKnob(P_VOL,   "Volume").Linear(0.f, 1.f)
                                  .Ident("volume").Ring(Level(kVolCol));
 
-static Page perform = Page(0).Name("Perform").Color("#eb7414")
+Page perform = Page(0).Name("Perform").Color("#eb7414")
                           .Knobs(k_chop, k_tempo, k_hist, k_pitch, k_sample, k_vol);
 
 using Rgb = LedPanel::Rgb;
@@ -715,7 +691,18 @@ static void OnPoll(uint32_t /*t_ms*/)
 
     IButton& b2 = hw.buttons[kButtonB2];
     IButton& b3 = hw.buttons[kButtonB3];
-    /* B1 belongs to the Pager (page switch). */
+    /* B1 belongs to the Pager + ParamLock. B2+B3 together is the Settings
+     * chord: while both are down (or Settings is open) none of the single-
+     * button gestures may fire, and the releases that end the chord must
+     * not read as taps. */
+    static bool s_chord = false;
+    if(b2.Pressed() && b3.Pressed()) s_chord = true;
+    if(!b2.Pressed() && !b3.Pressed()) s_chord = false;
+    if(s_chord || settings.IsActive())
+    {
+        if(gFlowing) { gFlowing = false; engine.flowRegen = false; }
+        return;
+    }
 
     /* B2: tap = refill (dice), hold = flow. */
     if(b2.Pressed() && !gFlowing && b2.TimeHeldMs() > 300.f)
@@ -748,6 +735,7 @@ static void OnPoll(uint32_t /*t_ms*/)
 /* ── render ─────────────────────────────────────────────────────────── */
 static void OnRender(uint32_t /*t_ms*/)
 {
+    if(settings.IsActive()) return;   /* the hook fires inside Settings too */
     int ns  = engine.nSlices > 0 ? engine.nSlices : 1;
     int cur = (int)(engine.barPhase * (double)ns);
     if(cur >= ns) cur = ns - 1;
@@ -949,17 +937,19 @@ int main()
     gClkEdge.Init(kNumCvInputs);   /* edge detector needs Init (channels) — never called in v0.3.x */
 
     host.Extend(fs_ext);
-    host.Jacks(jk1, jk2, jk3, jk4, jk5, jk6, jk7, jk8, jk9, jk10);
-    presets.Manage(pager);
-    if(gNumFiles > 0) presets.Manage(gSample);
-    presets.Manage(gClass);
-    presets.Manage(gClockSel);
-    presets.Manage(gVoiceSel);
-    presets.Manage(gGateLen);
-    presets.Manage(gGateLvlSel);
-    presets.Manage(gGrammar);   /* GRAMMAR (jungle branch) */
+    DescribeManual(host);            /* jacks + help text + the manual (Attach) */
 
-    loop.Use(pager).Use(perform).Use(host)
+    settings.UseBrightness();
+    settings.UsePresets(presets);
+    settings.Page(0).Name("Setup");
+    presets.Manage(pager);
+    presets.Manage(locks);
+    if(gNumFiles > 0) presets.Manage(gSample);
+    presets.Manage(gOptions);        /* classifier, clock PPQN, voice, gates, grammar */
+    presets.Manage(settings);
+    presets.UseNames();              /* renameable preset names, from the browser */
+
+    loop.Use(pager).Use(locks).Use(settings).Use(perform).Use(host)
         .OnPoll(OnPoll).OnFrame(OnFrame).OnRender(OnRender);
 
     presets.Init();

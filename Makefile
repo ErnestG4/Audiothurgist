@@ -20,7 +20,7 @@ ALCHEMY_DIR  = ../alchemy-sdk
 LIBDAISY_DIR = $(ALCHEMY_DIR)/vendor/libDaisy
 DAISYSP_LGPL = ../DaisySP/DaisySP-LGPL
 
-CPP_SOURCES = src/audiothurgist.cpp
+CPP_SOURCES = src/audiothurgist.cpp src/audiothurgist_manual.cpp
 CPP_SOURCES += $(sort $(shell find $(ALCHEMY_DIR)/framework/src -name '*.cpp'))
 CPP_SOURCES += $(sort $(wildcard $(ALCHEMY_DIR)/hardware/alchemy-lab/$(BOARD)/src/*.cpp))
 CPP_SOURCES += $(DAISYSP_LGPL)/Source/Effects/reverbsc.cpp
