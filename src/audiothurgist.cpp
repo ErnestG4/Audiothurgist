@@ -110,7 +110,7 @@ static Presets     presets(hw.seed.qspi);
 static ControlLoop loop(hw);
 static Pager       pager(hw.buttons[kButtonB1], 1, kNumPots); /* B1 owns pages (M4: 2nd page) */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.3.3-m2", "m2");
+                           "0.3.4-m2", "m2");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -219,6 +219,8 @@ struct ClockSel : Serializable
 };
 static ClockSel gClockSel;
 static volatile float gClkFlash = 0.f;   /* B1 white flash per detected pulse */
+static volatile float gClkMult  = 1.f;   /* P2 while following: ÷4 ÷2 ×1 ×2 ×4 */
+static bool           gWasExt   = false; /* ext/internal transition tracking */
 
 static constexpr uint8_t P_CHOP  = kPotTopLeft;
 static constexpr uint8_t P_TEMPO = kPotTopRight;
@@ -353,13 +355,24 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
     if(n > kScratch) n = kScratch;
 
     /* Drive the engine playhead from the musical clock (internal or followed).
-     * Loop spans M musical bars (nSlices/16); phase is continuous across them. */
+     * Position comes from the single monotonic MasterTick counter (+ FracTick),
+     * NOT Bar()/BarPhase() read separately: those tore at bar boundaries under
+     * the 1 ms tick and fired a spurious last-step ("skips"). One 16th = Ppqn/4
+     * ticks; the loop = nSlices 16ths. gClkMult scales the rate when P2 acts
+     * as a clock multiplier/divider while following. */
     engine.extPhase = true;
-    int M = engine.nSlices / 16; if(M < 1) M = 1;
-    double lp = (double)(gClock.Bar() % (uint32_t)M) / (double)M
-                + (double)gClock.BarPhase() / (double)M;
-    lp -= floor(lp);
-    engine.barPhase = lp;
+    {
+        const double tick  = ((double)gClock.MasterTick() + gClock.FracTick())
+                             * (double)gClkMult;
+        const double loopT = (double)engine.nSlices * ((double)gClock.Ppqn() / 4.0);
+        double lp = loopT > 0. ? fmod(tick, loopT) / loopT : 0.;
+        /* monotonic guard: only a true wrap (big drop) may move backward; a
+         * sub-step backward wobble from a torn read is held in place */
+        static double s_lastLp = 0.;
+        if(lp < s_lastLp && (s_lastLp - lp) < 0.5) lp = s_lastLp;
+        s_lastLp = lp;
+        engine.barPhase = lp;
+    }
 
     engine.Process(gMono, n);
 
@@ -399,7 +412,7 @@ static void OnFrame()
     gVerbSend = pk < 0.22f ? (0.22f - pk) / 0.22f * 0.75f : 0.f;
 
     /* Varispeed follows the musical clock (internal BPM or external follow). */
-    float cb = gClock.Bpm();
+    float cb = gClock.Bpm() * gClkMult;
     if(cb < engine.bpm - 0.4f || cb > engine.bpm + 0.4f) engine.SetBpm(cb);
 
     engine.pitch = exp2f(k_pitch.Value() / 12.f);   /* ±12 semitones */
@@ -442,13 +455,35 @@ static void OnPoll(uint32_t /*t_ms*/)
     const bool rose = gClkEdge.JustRose(kClockChan);
     if(rose) { gLastPulseUs = now_us; gClkFlash = 1.f; }
     const bool ext = gLastPulseUs && (now_us - gLastPulseUs) < 2000000u;
+    if(ext && !gWasExt)
+    {
+        gFollower.Enable(kPpqnTable[gClockSel.sel]);   /* (re)arm the PLL */
+    }
+    if(!ext && gWasExt)
+    {
+        /* Clock gone: the follower had flagged the NCO as STEERED, which makes
+         * SetBpm a no-op — un-steer or P2 can never take the clock back. Keep
+         * the freewheeled tempo until P2 moves (re-latch), like a fresh load. */
+        gFollower.Disable();
+        gClock.SetSteered(false);
+        gP2Ref   = -1e9f;
+        gClkMult = 1.f;
+    }
+    gWasExt = ext;
+
     if(ext)
     {
         if(rose) gFollower.OnPulse(gClkEdge.LastRiseUs(kClockChan));
         gFollower.Update(now_us);
+        /* Spec §6.4: while following, P2 is a clock multiplier/divider
+         * around the followed tempo — wide ×1 detent in the middle. */
+        const float p = k_tempo.Norm();
+        gClkMult = p < 0.15f ? 0.25f : p < 0.35f ? 0.5f
+                 : p < 0.65f ? 1.f   : p < 0.85f ? 2.f : 4.f;
     }
     else
     {
+        gClkMult = 1.f;
         /* Internal tempo from P2, engaging only once the knob moves (so a
          * fresh load keeps playing at its native tempo). Native detent. */
         float pv = k_tempo.Value();
@@ -545,7 +580,7 @@ static void OnRender(uint32_t /*t_ms*/)
     gClkFlash  *= 0.80f;
     {
         const float lf = gLoadFlash, cf = gClkFlash;
-        const bool  locked = gFollower.Locked();
+        const bool  locked = gWasExt && gFollower.Locked();
         auto c8 = [](float v) { return (uint8_t)(v > 255.f ? 255.f : (v < 0.f ? 0.f : v)); };
         hw.leds.SetButtonPair(kButtonB1,
             Rgb{c8((locked ? 6.f : 20.f) + 200.f * lf + 220.f * cf),
