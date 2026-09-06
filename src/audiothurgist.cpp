@@ -536,7 +536,8 @@ static void ComputeDensity(const float* x, int len, float* dens, int nsl = 0)
 /* Slice count for material: the Bars override, else the backbeat estimate
  * (core/bb_bars.h), else 0 = the engine's duration prior. Always bars × 16,
  * halved while over kMaxSlices (an 8-bar loop becomes an 8th grid). */
-static int SliceCountFor(const float* x, int len, const int* onsets, int n, int condBars /* SLICE */)
+static int SliceCountFor(const float* x, int len, const int* onsets, int n, int condBars /* SLICE */,
+                         int* barsOut = nullptr /* SLICE: the bar count behind the slice count */)
 {
     int bars = 0;
     if(gBars.sel >= 1) bars = 1 << (gBars.sel - 1);
@@ -557,18 +558,28 @@ static int SliceCountFor(const float* x, int len, const int* onsets, int n, int 
             }
         }
     }
-    if(bars <= 0) return 0;
+    if(bars <= 0)
+    {
+        /* the duration prior's own bar count, for callers that need it */
+        if(barsOut) { int pb = 1; const float dur = (float)len / kSr; while(dur / (float)pb >= 3.2f && pb < 16) pb <<= 1; *barsOut = pb; }
+        return 0;
+    }
+    if(barsOut) *barsOut = bars;
     int nsl = bars * 16;
     while(nsl > bb::Engine::kMaxSlices) nsl /= 2;
     return nsl;
 }
 
 /* SLICE: the material's 16th swing against the grid it will play on (Options
- * → Swing: Auto), from core/bb_swing.h; 0.5 = straight. */
-static float SwingFor(int len, const int* onsets, int n, int nslHint)
+ * → Swing: Auto), from core/bb_swing.h; 0.5 = straight. Only when that grid
+ * IS the material's 16th grid: past 4 bars (and under the "8 bars (8th
+ * grid)" override) the slices are 8ths, and straight 16th hats at 0.5 and
+ * 0.75 of an 8th-step cell would read as a swung cluster (review). */
+static float SwingFor(int len, const int* onsets, int n, int nslHint, int bars)
 {
     if(gSwing.sel != 1) return 0.5f;
     const int nsl = nslHint >= 1 ? nslHint : bb::GridSlices(len, kSr);
+    if(bars <= 0 || bars * 16 != nsl) return 0.5f;
     return bb::EstimateSwing(onsets, n, (float)len / (float)nsl).p;
 }
 
@@ -1198,8 +1209,9 @@ static void ServiceLoad()
         gPendN = gDet.Detect(gLoad, len, kSr, gPendOnsets, kMaxOnsets, nullptr);
     }
 
-    gPendHint  = SliceCountFor(gLoad, len, gPendOnsets, gPendN, gCondBars);
-    gPendSwing = SwingFor(len, gPendOnsets, gPendN, gPendHint);   /* SLICE */
+    int barsN  = 0;
+    gPendHint  = SliceCountFor(gLoad, len, gPendOnsets, gPendN, gCondBars, &barsN);
+    gPendSwing = SwingFor(len, gPendOnsets, gPendN, gPendHint, barsN);   /* SLICE */
     ClassifySteps(gLoad, len, gPendClass, gClass.mode, gPendSal, gPendHint, gPendBands /* GATES */);
     ComputeDensity(gLoad, len, gPendDens, gPendHint);   /* PLAY */
     ComputeEnvelope(gLoad, len, gPendEnv, gPendHint);
@@ -1433,6 +1445,8 @@ int main()
         static uint8_t cls[bb::Engine::kMaxSlices];
         int onsets[kMaxOnsets];
         int no = gDet.Detect(gPlay, len, kSr, onsets, kMaxOnsets, nullptr);
+        memcpy(gPendOnsets, onsets, sizeof(int) * (size_t)no);   /* SLICE: a later Bars/Swing/Onsets
+        gPendN = no; gPendCues = false;                              re-apply needs the table (review) */
         ClassifySteps(gPlay, len, cls, gClass.mode, gSal, 0, engine.stepBands /* GATES */);
         memcpy(engine.sliceSal, gSal, sizeof engine.sliceSal);   /* review M3 */
         engine.SetMaterial(gPlay, len, kSr, onsets, no, cls);
@@ -1499,8 +1513,9 @@ int main()
         if(gBars.dirty && !gApply && !gReapply && !gLoadReq && !gReclass && engine.bufLen > 0)
         {
             gBars.dirty = false;
-            const int nsl = SliceCountFor(gPlay, engine.bufLen, gPendOnsets, gPendN, gCondBars);
-            gPendSwing = SwingFor(engine.bufLen, gPendOnsets, gPendN, nsl);   /* SLICE */
+            int barsN = 0;
+            const int nsl = SliceCountFor(gPlay, engine.bufLen, gPendOnsets, gPendN, gCondBars, &barsN);
+            gPendSwing = SwingFor(engine.bufLen, gPendOnsets, gPendN, nsl, barsN);   /* SLICE */
             ClassifySteps(gPlay, engine.bufLen, gPendClass, gClass.mode, gPendSal, nsl, gPendBands /* GATES */);
             ComputeDensity(gPlay, engine.bufLen, gPendDens, nsl);   /* PLAY */
             ComputeEnvelope(gPlay, engine.bufLen, gPendEnv, nsl);
@@ -1520,8 +1535,9 @@ int main()
                 if(!gPendCues) gPendN = gDet.Detect(gPlay, engine.bufLen, kSr, gPendOnsets, kMaxOnsets, nullptr);
             }
             gSwing.dirty  = false;
-            const int nsl = SliceCountFor(gPlay, engine.bufLen, gPendOnsets, gPendN, gCondBars);
-            gPendSwing    = SwingFor(engine.bufLen, gPendOnsets, gPendN, nsl);
+            int barsN = 0;
+            const int nsl = SliceCountFor(gPlay, engine.bufLen, gPendOnsets, gPendN, gCondBars, &barsN);
+            gPendSwing    = SwingFor(engine.bufLen, gPendOnsets, gPendN, nsl, barsN);
             ClassifySteps(gPlay, engine.bufLen, gPendClass, gClass.mode, gPendSal, nsl, gPendBands /* GATES */);
             ComputeDensity(gPlay, engine.bufLen, gPendDens, nsl);   /* PLAY */
             ComputeEnvelope(gPlay, engine.bufLen, gPendEnv, nsl);
