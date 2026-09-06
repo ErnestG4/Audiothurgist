@@ -37,6 +37,8 @@ struct Pattern
     int8_t ratN[kMaxSteps];     // retriggers after the attack: 0, 1 (=rat), 2..3 = geometric series
     bool   ratAccel[kMaxSteps]; // series gaps halve (accel) or double (decel)
     bool   rep[kMaxSteps];      // cell was a repeat move — engine may repitch-jitter it
+    bool   accent[kMaxSteps];   // grammar accent (Grids: map level > 192) — the gates
+                                // may raise velocity for it (GATES package reads it)
 
     // Fill layer (Collins only): alternative cells for [fillStart, nSteps),
     // played on every 4th loop by the engine, then it snaps back to the base.
@@ -69,6 +71,7 @@ struct Pattern
             ratN[i]     = 0;
             ratAccel[i] = false;
             rep[i]      = false;
+            accent[i]   = false;
         }
         fillStart = -1;
 

@@ -195,6 +195,7 @@ struct Engine
                                       // source slice after the previous step's,
                                       // verbatim through the continuity branch;
                                       // raises no gate and is not a "hit"
+    bool   stepAccent[kMaxSlices] = {}; // grammar accent on this step (Pattern::accent)
     bool   stepHit[kMaxSlices] = {};  // the source slice begins with a detected
                                       // onset (a drum's "open"); from the load's
                                       // onset table. All true when none given.
@@ -258,7 +259,8 @@ struct Engine
 
     // Flatten cells of one layer over [from, to) into per-step triggers.
     void FlattenRange(int from, int to, const int8_t* S, const int8_t* L,
-                      const bool* R, const int8_t* RN, const bool* RA, const bool* RP)
+                      const bool* R, const int8_t* RN, const bool* RA, const bool* RP,
+                      const bool* AC = nullptr)
     {
         int c = from;
         while(c < to)
@@ -280,6 +282,7 @@ struct Engine
                     stepRatAccel[c + j] = RA[c];
                     stepJit[c + j]      = jit;
                     stepCont[c + j]     = false;
+                    stepAccent[c + j]   = AC ? AC[c] : false;
                 }
                 else
                 {
@@ -303,6 +306,7 @@ struct Engine
                     stepRatAccel[c + j] = false;
                     stepJit[c + j]      = 0;
                     stepCont[c + j]     = cont;
+                    stepAccent[c + j]   = false;
                 }
             }
             c += Lc;
@@ -310,7 +314,8 @@ struct Engine
     }
     void FlattenAll()
     {
-        FlattenRange(0, nSlices, pat.src, pat.len, pat.rev, pat.ratN, pat.ratAccel, pat.rep);
+        FlattenRange(0, nSlices, pat.src, pat.len, pat.rev, pat.ratN, pat.ratAccel, pat.rep,
+                     pat.accent);
         if(fillActive && pat.fillStart >= 0 && pat.fillStart < nSlices)
             FlattenRange(pat.fillStart, nSlices, pat.fsrc, pat.flen, pat.frev,
                          pat.fratN, pat.fratAccel, pat.frep);
@@ -462,6 +467,7 @@ struct Engine
             stepRatAccel[curStep] = false;
             stepJit[curStep]      = 0;
             stepCont[curStep]     = false;
+            stepAccent[curStep]   = false;
         }
         if(ratchet)
         {
@@ -523,7 +529,7 @@ struct Engine
                                          pat.frev, pat.fratN, pat.fratAccel, pat.frep);
                         else
                             FlattenRange(pat.fillStart, nSlices, pat.src, pat.len,
-                                         pat.rev, pat.ratN, pat.ratAccel, pat.rep);
+                                         pat.rev, pat.ratN, pat.ratAccel, pat.rep, pat.accent);
                     }
                 }
             }
