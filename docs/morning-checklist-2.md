@@ -1,7 +1,10 @@
 # Morning checklist 2 — the night of 2026-09-06 ("until noon")
 
-Flash `Desktop\Audiothurgist-flash\audiothurgist.bin` (= stage 14, **v0.9.0-round2**).
-Previous stages remain for bisecting (stage 13 = v0.8.0 Round 1 only). The
+Flash `Desktop\Audiothurgist-flash\audiothurgist.bin` (= stage 15, **v0.9.1-reviewed**:
+round 2 plus an adversarial review's fixes — two real bugs in the new
+loop conditioning, a clock keep-alive so loads no longer freeze the
+playhead, DTCM back to 64 %). Stage 14 is the unreviewed round-2 build,
+stage 13 = v0.8.0 Round 1 only, for bisecting. The
 web app is new too: `cd ~/Daisy/Audiothurgist/web && python3 -m http.server 8080`
 → http://localhost:8080 (close `/program` first). Press **Demo** to see it
 without the module. Every package has a longer test script in
