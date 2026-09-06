@@ -6,49 +6,77 @@
 <title>Audiothurgist</title>
 <!--
   Audiothurgist — the instrument's face in a browser.
-  Speaks HostLink over WebSerial (framing ported from alchemy-sdk's
-  tools/hostlink-cli/hostlink.mjs) plus the firmware's StateExt (0x60–0x6F).
-  No dependencies. Needs a secure context (https:// or http://localhost) and a
-  Chromium browser with Web Serial. Close Hermetic's /program tab first — one
-  page holds the port at a time.
+  Speaks HostLink over WebSerial (hostlink.js) plus the firmware's StateExt
+  (0x60–0x6F). No dependencies; serve web/ as static files from a secure
+  context (https:// or http://localhost) in a Chromium browser. Close
+  Hermetic's /program tab first — one page holds the port at a time.
+  Append ?demo to the URL to drive the page from the fake module in demo.js.
 -->
 <style>
-  :root{--bg:#0e0e10;--panel:#161618;--line:#26262a;--ink:#e8e6df;--mute:#8a887f;
-        --accent:#eb7414;--kick:#eb4614;--snare:#28c878;--hat:#e6c828;--other:#3c78e6;--call:#78a0ff}
-  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);
-    font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-  header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--line)}
-  h1{font-size:18px;margin:0;letter-spacing:.02em} h1 span{color:var(--accent)}
-  .pill{padding:3px 9px;border:1px solid var(--line);border-radius:999px;color:var(--mute);font-size:12px}
-  .pill.ok{color:#9be0b0;border-color:#2c5d3b} .pill.warn{color:#ffcf80;border-color:#6b4a12}
-  button{background:#1f1f24;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:8px 12px;
-    font:inherit;cursor:pointer} button:hover{border-color:#3a3a42} button.on{background:var(--accent);color:#111;border-color:var(--accent)}
+  :root{--bg:#0e0e10;--panel:#161618;--line:#26262a;--ink:#e8e6df;--mute:#8a887f;--dim:#5e5c55;
+        --accent:#eb7414;--brain:#3a9fe0;--kick:#eb4614;--snare:#28c878;--hat:#e6c828;--other:#3c78e6;--call:#78a0ff;--lock:#ffd54a}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  header{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line)}
+  h1{font-size:18px;margin:0 6px 0 0;letter-spacing:.02em} h1 span{color:var(--accent)}
+  .pill{padding:3px 9px;border:1px solid var(--line);border-radius:999px;color:var(--mute);font-size:12px;white-space:nowrap}
+  .pill.ok{color:#9be0b0;border-color:#2c5d3b} .pill.warn{color:#ffcf80;border-color:#6b4a12} .pill.brain{color:#9fd0f5;border-color:#245a80}
+  button{background:#1f1f24;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:8px 12px;font:inherit;cursor:pointer;touch-action:manipulation}
+  button:hover{border-color:#3a3a42} button:disabled{opacity:.45;cursor:default}
+  button.on{background:var(--accent);color:#111;border-color:var(--accent)}
   button.primary{background:var(--accent);color:#111;border-color:var(--accent);font-weight:600}
-  main{display:grid;gap:12px;padding:12px 14px;max-width:1200px;margin:0 auto}
+  button.mini{padding:4px 9px;font-size:12px;border-radius:6px}
+  nav{display:flex;gap:4px;padding:8px 14px 0} nav button{border-radius:8px 8px 0 0;border-bottom:none;color:var(--mute)} nav button.on{background:var(--panel);color:var(--ink);border-color:var(--line)}
+  main{display:none;gap:12px;padding:12px 14px;max-width:1200px;margin:0 auto} main.show{display:grid}
   @media(min-width:900px){main{grid-template-columns:1fr 1fr}.wide{grid-column:1/-1}}
   section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px;min-width:0}
-  section h2{font-size:12px;text-transform:uppercase;letter-spacing:.12em;color:var(--mute);margin:0 0 8px}
+  section h2{font-size:12px;text-transform:uppercase;letter-spacing:.12em;color:var(--mute);margin:0 0 8px;display:flex;justify-content:space-between;align-items:center;gap:8px}
   canvas{width:100%;display:block;border-radius:8px;background:#0a0a0c;touch-action:manipulation}
   .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
   .kv{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:13px;color:var(--mute)} .kv b{color:var(--ink);font-weight:500}
   label.ctl{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--mute);min-width:140px}
   input[type=range]{width:100%} select{background:#1f1f24;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font:inherit;max-width:100%}
+  select.inline{padding:2px 6px;font-size:12px}
   #notice{background:#2a1c10;border:1px solid #6b4a12;color:#ffcf80;padding:10px 12px;border-radius:10px;margin:12px 14px 0;display:none}
-  .legend{display:flex;gap:12px;font-size:12px;color:var(--mute)} .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+  .legend{display:flex;flex-wrap:wrap;gap:10px;font-size:12px;color:var(--mute)} .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
   footer{color:var(--mute);font-size:12px;padding:8px 14px 20px}
+  /* Controls panel */
+  .btns{display:grid;grid-template-columns:auto 1fr;gap:6px 10px;font-size:13px;align-items:start}
+  .btns .b{font-weight:700;color:var(--ink);padding-top:2px} .btns .g{display:grid;gap:4px}
+  .gest{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;color:var(--mute)} .gest em{color:var(--ink);font-style:normal} .gest .how{color:var(--dim);font-size:12px;min-width:90px}
+  .gest.live em{color:#9be0b0}
+  .knobs{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:10px}
+  .knob{border:1px solid var(--line);border-radius:10px;padding:6px 8px;min-height:58px;background:#121214}
+  .knob.inert{opacity:.5} .knob .n{display:flex;align-items:center;gap:6px;font-weight:600} .knob .n .p{color:var(--mute);font-weight:500;font-size:12px}
+  .knob .m{font-size:12px;color:var(--mute);margin-top:2px} .knob .v{font-size:12px;color:var(--ink)}
+  .knob .lk{margin-left:auto;font-size:11px;color:#111;background:var(--lock);border-radius:6px;padding:1px 6px;font-weight:600}
+  .zones{display:inline-flex;gap:2px} .zones span{padding:0 5px;border-radius:5px;background:#1f1f24;color:var(--mute)} .zones span.on{background:var(--accent);color:#111;font-weight:600}
+  .page-perform .knob{border-color:#3a2a1a} .page-brain .knob{border-color:#1a2e3f}
+  /* Options */
+  .grp{margin-bottom:8px} .grp h3{font-size:12px;color:var(--mute);margin:8px 0 4px;text-transform:uppercase;letter-spacing:.1em}
+  .opt{display:grid;grid-template-columns:minmax(110px,1fr) 2fr;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid #1d1d21;font-size:13px}
+  .opt:last-child{border-bottom:none} .opt.busy{opacity:.5}
+  /* Manual */
+  .man{max-width:760px;font-size:14px;line-height:1.55} .man h3{margin:14px 0 6px;font-size:15px} .man h4{margin:10px 0 4px;font-size:13px;color:var(--mute);text-transform:uppercase;letter-spacing:.08em}
+  .man p{margin:6px 0} .man code{background:#1f1f24;padding:1px 4px;border-radius:4px;font-size:12px} .man .tag{color:var(--mute);font-style:italic}
+  .man dl{margin:4px 0} .man dt{font-weight:600;margin-top:6px} .man dd{margin:0 0 4px 0;color:#c9c7bf}
 </style>
 </head>
 <body>
 <header>
   <h1><span>Audio</span>thurgist</h1>
   <button id="connect" class="primary">Connect</button>
+  <button id="demo" class="mini" title="drive the page from a fake module (demo.js) — no hardware needed">Demo</button>
   <span id="modpill" class="pill">not connected</span>
+  <span id="pagepill" class="pill">page: —</span>
   <span id="syncpill" class="pill">clock: —</span>
   <span id="bpmpill" class="pill">— BPM</span>
+  <span id="linkpill" class="pill" title="request round-trip (last / worst in the last second) · requests per second · queued">link: —</span>
   <span id="diagpill" class="pill" title="worst control-loop gap and audio callback in the last second; playhead jumps > 1.5 steps and pattern regenerations since boot">diag: —</span>
 </header>
 <div id="notice"></div>
-<main>
+<nav><button id="tab_play" class="on">Play</button><button id="tab_opts">Options</button><button id="tab_man">Manual</button></nav>
+
+<main id="play" class="show">
   <section class="wide">
     <h2>The bar</h2>
     <div class="row" style="align-items:flex-start;gap:14px">
@@ -64,6 +92,8 @@
           <span>grammar</span><b id="k_gram">—</b><span>classifier</span><b id="k_cls">—</b>
           <span>chop</span><b id="k_chop">—</b><span>history</span><b id="k_hist">—</b>
           <span>sample</span><b id="k_file">—</b><span>page</span><b id="k_page">—</b>
+          <span>native</span><b id="k_native">—</b><span>grid</span><b id="k_grid">—</b>
+          <span>bars</span><b id="k_bars">—</b><span>clock</span><b id="k_clock">—</b>
         </div>
       </div>
     </div>
@@ -72,245 +102,403 @@
     <h2>Slices — click a slice to select it, then click a step above to punch it in</h2>
     <canvas id="wave" style="height:160px"></canvas>
   </section>
+  <section id="controls">
+    <h2>Controls <span id="ctl_page" class="pill">—</span></h2>
+    <div class="btns">
+      <div class="b">B1</div><div class="g">
+        <div class="gest"><span class="how">tap</span><em id="g_b1tap">page Perform ↔ Brain</em><button id="b_page" class="mini">Switch page</button></div>
+        <div class="gest"><span class="how">hold 300 ms + turn a pot</span><em>record a motion lock on that pot</em><span>· hold + nudge again clears it</span><button id="b_clear" class="mini">Clear locks</button></div>
+        <div class="gest"><span class="how">LED</span><span>white flash per clock pulse · green while locked to the clock</span></div>
+      </div>
+      <div class="b">B2</div><div class="g">
+        <div class="gest"><span class="how">tap</span><em>Dice — a new fill</em><button id="b_dice" class="mini">🎲 Dice</button></div>
+        <div class="gest" id="g_flow"><span class="how">hold &gt; 300 ms</span><em>Flow — a new fill every bar while held</em><button id="b_flow" class="mini">Flow</button></div>
+      </div>
+      <div class="b">B3</div><div class="g">
+        <div class="gest"><span class="how">tap</span><em>Reslice — re-splice the burst centres</em><button id="b_reslice" class="mini">✂ Reslice</button></div>
+        <div class="gest"><span class="how">hold &gt; 400 ms</span><em>Load the file highlighted by P5 (Sample)</em><button id="b_load" class="mini">Load selected</button></div>
+      </div>
+      <div class="b">B2+B3</div><div class="g">
+        <div class="gest"><span class="how">hold 2 s</span><em>Settings — brightness, preset save/load</em><span>· B2 or B3 leaves · no host action</span></div>
+      </div>
+      <div class="b">host</div><div class="g">
+        <div class="gest"><span class="how">no button</span><button id="b_mute" class="mini">Mute</button><span>the J4/J5 mute key does the same</span></div>
+      </div>
+    </div>
+    <div id="knobs" class="knobs"></div>
+  </section>
   <section>
     <h2>Scope — output</h2>
     <canvas id="scope" style="height:120px"></canvas>
-  </section>
-  <section>
-    <h2>Play</h2>
-    <div class="row" style="margin-bottom:10px">
-      <button id="b_dice">🎲 Dice</button><button id="b_reslice">✂ Reslice</button>
-      <button id="b_mute">Mute</button><button id="b_flow">Flow</button>
-    </div>
+    <h2 style="margin-top:12px">Play</h2>
     <div class="row">
       <label class="ctl">History (older ← → now)<input id="hist" type="range" min="0" max="0" value="0"></label>
       <label class="ctl">Sample<select id="sample"><option>—</option></select></label>
     </div>
+    <p style="font-size:12px;color:var(--mute);margin:8px 0 0">Picking a file here loads it at once (ACTION 6); on the panel P5 highlights and B3-hold loads.</p>
   </section>
 </main>
+
+<main id="opts">
+  <section class="wide">
+    <h2>Options <span id="opt_status" class="pill">—</span></h2>
+    <p style="font-size:12px;color:var(--mute);margin:0 0 8px">Labels come from the module's descriptor; a change is written live (GET_LIVE → BLOB to <code>live</code>) and is not saved until a preset is saved from Settings or <code>/program</code>.</p>
+    <div id="optgroups"><p style="color:var(--mute)">Connect to read the options.</p></div>
+  </section>
+</main>
+
+<main id="man">
+  <section class="wide"><h2>Manual</h2><div id="manual" class="man"><p style="color:var(--mute)">Connect to read the module's manual from its descriptor.</p></div></section>
+</main>
+
 <footer>Runs over the module's front USB-C. Hermetic's <code>/program</code> keeps flashing, presets and settings; this page is the instrument's window. Sources: codeberg.org/combust/Audiothurgist</footer>
 
+<script src="hostlink.js"></script>
+<script src="demo.js"></script>
 <script>
 'use strict';
-/* ───────────── HostLink framing — faithful port of hostlink.mjs ───────────── */
-const PROTO = 1;
-const CMD = { hello: 0x01, getDescriptor: 0x02, reboot: 0x40, state: 0x60, env: 0x61, scope: 0x62, action: 0x63 };
-const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let i = 0; i < 256; i++) { let c = i; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[i] = c >>> 0; } return t; })();
-function crc32(buf, seed = 0) { let crc = ~seed >>> 0; for (let i = 0; i < buf.length; i++) crc = (CRC_TABLE[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8)) >>> 0; return ~crc >>> 0; }
-function cobsEncode(input) {
-  const out = new Uint8Array(input.length + Math.ceil(input.length / 254) + 1);
-  let o = 0, codeAt = o++, code = 1;
-  for (let i = 0; i < input.length; i++) {
-    if (input[i] === 0) { out[codeAt] = code; codeAt = o++; code = 1; }
-    else { out[o++] = input[i]; if (++code === 0xff) { out[codeAt] = code; codeAt = o++; code = 1; } }
-  }
-  out[codeAt] = code; return out.subarray(0, o);
-}
-function cobsDecode(input) {
-  if (input.length === 0) return null;
-  const out = new Uint8Array(input.length); let o = 0, i = 0;
-  while (i < input.length) {
-    const code = input[i++]; if (code === 0) return null;
-    const run = code - 1; if (i + run > input.length) return null;
-    for (let k = 0; k < run; k++) { const b = input[i++]; if (b === 0) return null; out[o++] = b; }
-    if (code !== 0xff && i < input.length) out[o++] = 0;
-  }
-  return out.subarray(0, o);
-}
-function buildFrame(type, seq, body) {
-  const dec = new Uint8Array(6 + body.length + 4); const dv = new DataView(dec.buffer);
-  dec[0] = PROTO; dec[1] = type; dv.setUint16(2, seq, true); dv.setUint16(4, body.length, true); dec.set(body, 6);
-  dv.setUint32(6 + body.length, crc32(dec.subarray(0, 6 + body.length)), true);
-  const enc = cobsEncode(dec); const out = new Uint8Array(enc.length + 1); out.set(enc); out[enc.length] = 0; return out;
-}
-class FrameParser {
-  constructor() { this.acc = []; }
-  push(byte, onFrame) {
-    if (byte !== 0) { this.acc.push(byte); return; }
-    const chunk = Uint8Array.from(this.acc); this.acc = [];
-    if (chunk.length === 0) return;
-    const dec = cobsDecode(chunk); if (!dec || dec.length < 10) return;
-    const dv = new DataView(dec.buffer, dec.byteOffset, dec.byteLength);
-    const bodyLen = dec.length - 10;
-    const ok = dec[0] === PROTO && dv.getUint16(4, true) === bodyLen && crc32(dec.subarray(0, dec.length - 4)) === dv.getUint32(dec.length - 4, true);
-    onFrame({ type: dec[1], seq: dv.getUint16(2, true), body: dec.subarray(6, 6 + bodyLen), ok });
-  }
-}
-
-/* ───────────── Link: one outstanding request at a time, matched by seq ───────────── */
-class Link {
-  constructor(port) { this.port = port; this.seq = 1; this.parser = new FrameParser(); this.pending = null; this.queue = []; this.closed = false; }
-  async start() {
-    this.writer = this.port.writable.getWriter();
-    this.readLoop();
-  }
-  async readLoop() {
-    while (this.port.readable && !this.closed) {
-      const reader = this.port.readable.getReader(); this.reader = reader;
-      try { for (;;) { const { value, done } = await reader.read(); if (done) break; for (const b of value) this.parser.push(b, f => this.onFrame(f)); } }
-      catch (e) { if (!this.closed) console.warn('read', e); }
-      finally { reader.releaseLock(); }
-    }
-  }
-  onFrame(f) {
-    const p = this.pending; if (!p || f.seq !== p.seq) return;
-    clearTimeout(p.timer); this.pending = null;
-    if (!f.ok) p.reject(new Error('bad frame')); else if (f.type === 0xff) p.reject(new Error('ERR frame'));
-    else if (f.body.length && f.body[0] !== 0) p.reject(new Error('device status ' + f.body[0])); else p.resolve(f.body);
-    this.pump();
-  }
-  request(type, body = new Uint8Array(0), timeoutMs = 1500) {
-    return new Promise((resolve, reject) => { this.queue.push({ type, body, resolve, reject, timeoutMs }); this.pump(); });
-  }
-  pump() {
-    if (this.pending || !this.queue.length || this.closed) return;
-    const q = this.queue.shift(); const seq = this.seq = (this.seq % 0xfffe) + 1;
-    this.pending = { seq, resolve: q.resolve, reject: q.reject, timer: setTimeout(() => { if (this.pending && this.pending.seq === seq) { this.pending = null; q.reject(new Error('timeout')); this.pump(); } }, q.timeoutMs) };
-    this.writer.write(buildFrame(q.type, seq, q.body)).catch(e => { clearTimeout(this.pending?.timer); this.pending = null; q.reject(e); });
-  }
-  async close() { this.closed = true; try { await this.reader?.cancel(); } catch {} try { this.writer?.releaseLock(); } catch {} try { await this.port.close(); } catch {} }
-}
-const u16 = (b, at) => b[at] | (b[at + 1] << 8);
-const u32 = (b, at) => (b[at] | (b[at + 1] << 8) | (b[at + 2] << 16) | (b[at + 3] << 24)) >>> 0;
-const f32 = (b, at) => new DataView(b.buffer, b.byteOffset + at, 4).getFloat32(0, true);
-function readStr(b, at) { const n = b[at]; return [new TextDecoder('ascii').decode(b.subarray(at + 1, at + 1 + n)), at + 1 + n]; }
-async function hello(link) {
-  const b = await link.request(CMD.hello); let at = 5;
-  const uid = Array.from(b.subarray(at, at + 12)).map(x => x.toString(16).padStart(2, '0')).join(''); at += 12;
-  const schema = u32(b, at); at += 4; const cap = u32(b, at); at += 4; const dlen = u32(b, at); at += 4; const dcrc = u32(b, at); at += 4;
-  const maxBody = u16(b, at); at += 2; const liveSize = u16(b, at); at += 2;
-  let id, name, fw, git, sdk; [id, at] = readStr(b, at); [name, at] = readStr(b, at); [fw, at] = readStr(b, at); [git, at] = readStr(b, at); [sdk, at] = readStr(b, at);
-  return { board: b[2], slots: b[3], uid, schema, cap, descriptorLen: dlen, descriptorCrc: dcrc, maxBody, liveSize, id, name, fw, git, sdk };
-}
-async function getDescriptor(link, info) {
-  if (!info.descriptorLen) return null;
-  const chunkMax = info.maxBody - 7; const parts = []; let off = 0;
-  while (off < info.descriptorLen) {
-    const req = new Uint8Array(6); const dv = new DataView(req.buffer); dv.setUint32(0, off, true); dv.setUint16(4, chunkMax, true);
-    const b = await link.request(CMD.getDescriptor, req); const n = u16(b, 5); if (!n) break;
-    parts.push(b.slice(7, 7 + n)); off += n;
-  }
-  const all = new Uint8Array(parts.reduce((s, p) => s + p.length, 0)); let o = 0; for (const p of parts) { all.set(p, o); o += p.length; }
-  if (crc32(all) !== info.descriptorCrc) throw new Error('descriptor CRC mismatch');
-  return JSON.parse(new TextDecoder('utf-8').decode(all));
-}
+const { CMD, ACT, Link, hello, getDescriptor, getLive, setLive, parseState, fetchEnv, parseScope, fieldLabels, pagerInfo, optionsInfo, manualInfo } = HL;
+const $ = id => document.getElementById(id);
+const COL = ['#eb4614', '#28c878', '#e6c828', '#3c78e6'];
 
 /* ───────────── App state ───────────── */
-const $ = id => document.getElementById(id);
-const COL = { 0: '#eb4614', 1: '#28c878', 2: '#e6c828', 3: '#3c78e6' };
-let link = null, info = null, desc = null, polling = false;
-let st = null;           // last GET_STATE
-let env = null;          // Uint8Array nSlices*16
-let envGen = -1;
-let scope = null;        // Int8Array 256
-let selSlice = -1;
+let link = null, info = null, desc = null, live = null;
+let st = null, env = null, envGen = -1, scope = null, selSlice = -1;
 let labels = { grammar: [], classifier: [], sample: [] };
+let pager = null, opts = null, manual = null;
+let demoDevice = null;
 
-function findFieldLabels(node, id, out) {
-  if (!node || typeof node !== 'object') return;
-  if (Array.isArray(node)) { node.forEach(n => findFieldLabels(n, id, out)); return; }
-  if (node.id === id && node.disp && Array.isArray(node.disp.labels)) { out.push(...node.disp.labels); return; }
-  for (const k in node) findFieldLabels(node[k], id, out);
-}
-function parseState(b) {
-  return { nSlices: b[1], cur: b[2], flags: b[3], matGen: b[4], grammar: b[5], cls: b[6], file: b[7], chop: b[8],
-           histN: b[9], histDepth: b[10], callFlash: b[11], bpm: f32(b, 12), mult: f32(b, 16),
-           src: Int8Array.from(b.subarray(20, 84)), stepClass: b.slice(84, 148),
-           diag: b.length >= 156 ? { gap: u16(b, 148), audio: u16(b, 150), jumps: u16(b, 152), regens: u16(b, 154) } : null };
-}
-async function fetchEnv(n) {
-  const out = new Uint8Array(64 * 16);
-  for (let first = 0; first < n; first += 30) {
-    const cnt = Math.min(30, n - first);
-    const b = await link.request(CMD.env, Uint8Array.of(first, cnt));
-    out.set(b.subarray(3, 3 + b[2] * 16), first * 16);
-  }
-  return out;
-}
-async function pollLoop() {
-  let tick = 0;
-  while (polling && link && !link.closed) {
-    try {
-      st = parseState(await link.request(CMD.state));
-      if (st.matGen !== envGen) { env = await fetchEnv(st.nSlices); envGen = st.matGen; selSlice = -1; }
-      if ((tick++ & 1) === 0) { const b = await link.request(CMD.scope); scope = Int8Array.from(b.subarray(3, 3 + u16(b, 1))); }
-      render();
-    } catch (e) { console.warn('poll', e.message); await new Promise(r => setTimeout(r, 200)); }
-    await new Promise(r => setTimeout(r, 70));
-  }
-}
-async function action(op, ...args) { if (!link) return; try { await link.request(CMD.action, Uint8Array.of(op, ...args)); } catch (e) { console.warn('action', e.message); } }
+/* ───────────── Notice / tabs ───────────── */
+function notice(msg) { const n = $('notice'); n.style.display = msg ? 'block' : 'none'; n.textContent = msg || ''; }
+const TABS = { tab_play: 'play', tab_opts: 'opts', tab_man: 'man' };
+function showTab(t) { for (const k in TABS) { $(k).classList.toggle('on', k === t); $(TABS[k]).classList.toggle('show', k === t); } }
+for (const t in TABS) $(t).onclick = () => { showTab(t); history.replaceState(null, '', '#' + TABS[t]); };
+{ const t = Object.keys(TABS).find(k => '#' + TABS[k] === location.hash); if (t) showTab(t); }
 
-/* ───────────── Drawing ───────────── */
-function fit(c) { const r = c.getBoundingClientRect(), d = window.devicePixelRatio || 1; if (c.width !== Math.round(r.width * d) || c.height !== Math.round(r.height * d)) { c.width = Math.round(r.width * d); c.height = Math.round(r.height * d); } const g = c.getContext('2d'); g.setTransform(d, 0, 0, d, 0, 0); return [g, r.width, r.height]; }
+/* ───────────── Rendering: dirty flags + one rAF ─────────────
+ * Nothing draws on arrival; frames flag what changed and a single
+ * requestAnimationFrame draws only those parts. Canvas backing stores are
+ * sized by ResizeObserver, never measured in the draw loop. */
+const D = { bar: 1, wave: 2, scope: 4, text: 8, controls: 16, all: 31 };
+let dirty = 0, rafPending = false;
+function invalidate(m) { dirty |= m; if (!rafPending) { rafPending = true; requestAnimationFrame(draw); } }
+const canvases = ['ring', 'strip', 'wave', 'scope'].map($);
+function sizeCanvas(c) {
+  const r = c.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(r.width * d)), h = Math.max(1, Math.round(r.height * d));
+  if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+  c._cw = r.width; c._ch = r.height; c._d = d;
+}
+if ('ResizeObserver' in window) { const ro = new ResizeObserver(es => { for (const e of es) sizeCanvas(e.target); invalidate(D.all); }); canvases.forEach(c => ro.observe(c)); }
+else window.addEventListener('resize', () => { canvases.forEach(sizeCanvas); invalidate(D.all); });
+canvases.forEach(sizeCanvas);
+function ctx(c) { if (!c._cw) sizeCanvas(c); const g = c.getContext('2d'); g.setTransform(c._d, 0, 0, c._d, 0, 0); return [g, c._cw, c._ch]; }
 function stepColor(s) { if (!st || s >= st.nSlices) return '#141416'; const src = st.src[s]; return src < 0 ? '#141416' : COL[st.stepClass[src] & 3]; }
-function render() {
+/* Scope polls only while its canvas is on screen. */
+let scopeVisible = true;
+if ('IntersectionObserver' in window) new IntersectionObserver(es => { scopeVisible = es[0].isIntersecting; }).observe($('scope'));
+
+function draw() {
+  rafPending = false; const m = dirty; dirty = 0;
   if (!st) return;
   const ns = Math.max(1, st.nSlices), cur = Math.min(st.cur, ns - 1), base = Math.floor(cur / 16) * 16;
-  const muted = st.flags & 1, ext = st.flags & 2, locked = st.flags & 4, flowing = st.flags & 8, brain = st.flags & 16;
-  // ring
-  { const [g, w, h] = fit($('ring')); g.clearRect(0, 0, w, h); const cx = w / 2, cy = h / 2, R = Math.min(w, h) * 0.42;
+  if (m & D.bar) {
+    const [g, w, h] = ctx($('ring')); g.clearRect(0, 0, w, h); const cx = w / 2, cy = h / 2, R = Math.min(w, h) * 0.42;
     for (let i = 0; i < 16; i++) { const s = base + i, a = -Math.PI / 2 + i * Math.PI * 2 / 16; let col = stepColor(s);
       if (st.callFlash !== 255 && s === st.callFlash) col = '#78a0ff'; else if (s === cur) col = '#ffffff';
-      g.beginPath(); g.arc(cx + Math.cos(a) * R, cy + Math.sin(a) * R, Math.max(4, R * 0.11), 0, Math.PI * 2); g.fillStyle = col; g.globalAlpha = muted ? 0.35 : 1; g.fill(); g.globalAlpha = 1; }
-    g.fillStyle = '#e8e6df'; g.textAlign = 'center'; g.font = '600 20px system-ui'; g.fillText(st.bpm.toFixed(0), cx, cy + 6); g.font = '11px system-ui'; g.fillStyle = '#8a887f'; g.fillText(muted ? 'MUTED' : (st.mult !== 1 ? '×' + st.mult : 'BPM'), cx, cy + 22); }
-  // strip
-  { const c = $('strip'); const [g, w, h] = fit(c); g.clearRect(0, 0, w, h); const cw = w / ns;
-    for (let s = 0; s < ns; s++) { g.fillStyle = stepColor(s); g.globalAlpha = muted ? 0.35 : 1; g.fillRect(s * cw + 1, 6, Math.max(1, cw - 2), h - 12); g.globalAlpha = 1;
-      if (s % 16 === 0) { g.fillStyle = '#2a2a30'; g.fillRect(s * cw, 0, 1, h); } }
-    if (st.callFlash !== 255) { g.strokeStyle = '#78a0ff'; g.lineWidth = 2; g.strokeRect(st.callFlash * cw + 1, 2, cw - 2, h - 4); }
-    g.strokeStyle = '#fff'; g.lineWidth = 2; g.strokeRect(cur * cw + 1, 2, cw - 2, h - 4); }
-  // waveform
-  { const [g, w, h] = fit($('wave')); g.clearRect(0, 0, w, h); const cw = w / ns, mid = h / 2; const playing = st.src[cur];
+      g.beginPath(); g.arc(cx + Math.cos(a) * R, cy + Math.sin(a) * R, Math.max(4, R * 0.11), 0, Math.PI * 2); g.fillStyle = col; g.globalAlpha = st.muted ? 0.35 : 1; g.fill(); g.globalAlpha = 1; }
+    g.fillStyle = '#e8e6df'; g.textAlign = 'center'; g.font = '600 20px system-ui'; g.fillText(st.bpm.toFixed(0), cx, cy + 6);
+    g.font = '11px system-ui'; g.fillStyle = '#8a887f'; g.fillText(st.muted ? 'MUTED' : (st.mult !== 1 ? multLabel(st.mult) : 'BPM'), cx, cy + 22);
+    const c = $('strip'); const [g2, w2, h2] = ctx(c); g2.clearRect(0, 0, w2, h2); const cw = w2 / ns;
+    for (let s = 0; s < ns; s++) { g2.fillStyle = stepColor(s); g2.globalAlpha = st.muted ? 0.35 : 1; g2.fillRect(s * cw + 1, 6, Math.max(1, cw - 2), h2 - 12); g2.globalAlpha = 1;
+      if (s % 16 === 0) { g2.fillStyle = '#2a2a30'; g2.fillRect(s * cw, 0, 1, h2); } }
+    if (st.callFlash !== 255) { g2.strokeStyle = '#78a0ff'; g2.lineWidth = 2; g2.strokeRect(st.callFlash * cw + 1, 2, cw - 2, h2 - 4); }
+    g2.strokeStyle = '#fff'; g2.lineWidth = 2; g2.strokeRect(cur * cw + 1, 2, cw - 2, h2 - 4);
+  }
+  if (m & D.wave) {
+    const [g, w, h] = ctx($('wave')); g.clearRect(0, 0, w, h); const cw = w / ns, mid = h / 2; const playing = st.src[cur];
     for (let s = 0; s < ns; s++) { const cls = st.stepClass[s] & 3; g.fillStyle = COL[cls]; g.globalAlpha = 0.18; g.fillRect(s * cw, 0, cw, h); g.globalAlpha = 1;
       if (env) { g.fillStyle = COL[cls]; for (let p = 0; p < 8; p++) { const mn = (env[s * 16 + p * 2] - 128) / 127, mx = (env[s * 16 + p * 2 + 1] - 128) / 127; const x0 = s * cw + p * cw / 8; g.fillRect(x0, mid - mx * mid * 0.92, Math.max(1, cw / 8 - 0.5), Math.max(1, (mx - mn) * mid * 0.92)); } }
       g.fillStyle = '#2a2a30'; g.fillRect(s * cw, 0, 1, h); }
     if (playing >= 0) { g.strokeStyle = '#fff'; g.lineWidth = 2; g.strokeRect(playing * cw + 1, 1, cw - 2, h - 2); }
-    if (selSlice >= 0) { g.strokeStyle = '#ffd54a'; g.lineWidth = 2; g.setLineDash([4, 3]); g.strokeRect(selSlice * cw + 1, 1, cw - 2, h - 2); g.setLineDash([]); } }
-  // scope
-  { const [g, w, h] = fit($('scope')); g.clearRect(0, 0, w, h); g.strokeStyle = '#2a2a30'; g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
-    if (scope) { g.strokeStyle = '#9be0b0'; g.lineWidth = 1.5; g.beginPath(); for (let i = 0; i < scope.length; i++) { const x = i / (scope.length - 1) * w, y = h / 2 - scope[i] / 127 * h / 2 * 0.95; i ? g.lineTo(x, y) : g.moveTo(x, y); } g.stroke(); } }
-  // text + controls
-  $('k_gram').textContent = labels.grammar[st.grammar] ?? st.grammar; $('k_cls').textContent = labels.classifier[st.cls] ?? st.cls;
-  $('k_chop').textContent = Math.round(st.chop / 2.55) + '%'; $('k_hist').textContent = st.histN ? `${st.histN - st.histDepth}/${st.histN}` : '—';
-  $('k_file').textContent = st.file === 255 ? 'synth break' : (labels.sample[st.file] ?? st.file); $('k_page').textContent = brain ? 'Brain' : 'Perform';
-  $('b_mute').classList.toggle('on', !!muted); $('b_flow').classList.toggle('on', !!flowing);
-  $('bpmpill').textContent = st.bpm.toFixed(1) + ' BPM' + (st.mult !== 1 ? ' ×' + st.mult : '');
-  if (st.diag) { const d = st.diag, dp = $('diagpill');
-    dp.textContent = `poll gap ${(d.gap / 1000).toFixed(1)} ms · audio ${d.audio} µs · jumps ${d.jumps} · regens ${d.regens}`;
-    dp.className = 'pill ' + (d.gap > 4000 || d.audio > 400 ? 'warn' : 'ok'); }
-  const sp = $('syncpill'); sp.textContent = ext ? (locked ? 'clock: locked' : 'clock: following') : 'clock: internal'; sp.className = 'pill ' + (ext ? (locked ? 'ok' : 'warn') : '');
-  const hs = $('hist'); if (document.activeElement !== hs) { hs.max = Math.max(0, st.histN - 1); hs.value = Math.max(0, st.histN - 1 - st.histDepth); }
+    if (selSlice >= 0) { g.strokeStyle = '#ffd54a'; g.lineWidth = 2; g.setLineDash([4, 3]); g.strokeRect(selSlice * cw + 1, 1, cw - 2, h - 2); g.setLineDash([]); }
+  }
+  if (m & D.scope) {
+    const [g, w, h] = ctx($('scope')); g.clearRect(0, 0, w, h); g.strokeStyle = '#2a2a30'; g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
+    if (scope) { g.strokeStyle = '#9be0b0'; g.lineWidth = 1.5; g.beginPath(); for (let i = 0; i < scope.length; i++) { const x = i / (scope.length - 1) * w, y = h / 2 - scope[i] / 127 * h / 2 * 0.95; i ? g.lineTo(x, y) : g.moveTo(x, y); } g.stroke(); }
+  }
+  if (m & D.text) drawText();
+  if (m & D.controls) drawControls();
+}
+/* Text nodes only touched when the string changes (no layout for equal text). */
+const lastText = new Map();
+function setText(id, s) { if (lastText.get(id) !== s) { lastText.set(id, s); $(id).textContent = s; } }
+function setPill(id, s, cls) { setText(id, s); const el = $(id); const c = 'pill ' + (cls || ''); if (el.className !== c) el.className = c; }
+const multLabel = m => m >= 1 ? '×' + m : '÷' + Math.round(1 / m);
+function drawText() {
+  setText('k_gram', labels.grammar[st.grammar] ?? String(st.grammar)); setText('k_cls', labels.classifier[st.cls] ?? String(st.cls));
+  setText('k_chop', Math.round(st.chop / 2.55) + '%'); setText('k_hist', st.histN ? `${st.histN - st.histDepth}/${st.histN}` : '—');
+  setText('k_file', st.file === 255 ? 'synth break' : (labels.sample[st.file] ?? String(st.file))); setText('k_page', st.brain ? 'Brain' : 'Perform');
+  setText('k_native', st.nativeBpm != null ? st.nativeBpm.toFixed(1) + ' BPM' : '— (needs v0.8.0)');
+  setText('k_grid', st.gridBars != null ? `${st.gridBars} bar${st.gridBars === 1 ? '' : 's'} · ${st.nSlices} steps` : st.nSlices + ' steps');
+  const barsSel = $('k_bars').firstElementChild;
+  if (!barsSel) setText('k_bars', st.barsOpt != null ? (optLabel('bars', st.barsOpt) ?? String(st.barsOpt)) : '—');
+  let clk = st.ext ? (st.locked ? 'locked' : 'following') : 'internal';
+  if (st.ext) clk += ' · ' + multLabel(st.mult) + (st.multZone != null ? ` (zone ${st.multZone})` : '');
+  if (st.jitterUs != null && st.ext) clk += ` · jitter ${st.jitterUs} µs`;
+  setText('k_clock', clk);
+  $('b_mute').classList.toggle('on', st.muted); $('b_flow').classList.toggle('on', st.flowing); $('g_flow').classList.toggle('live', st.flowing);
+  setPill('bpmpill', st.bpm.toFixed(1) + ' BPM' + (st.mult !== 1 ? ' ' + multLabel(st.mult) : ''), '');
+  setPill('pagepill', 'page: ' + (st.brain ? 'Brain' : 'Perform'), st.brain ? 'brain' : '');
+  if (st.diag) { const d = st.diag; setPill('diagpill', `poll gap ${(d.gap / 1000).toFixed(1)} ms · audio ${d.audio} µs · jumps ${d.jumps} · regens ${d.regens}`, d.gap > 4000 || d.audio > 400 ? 'warn' : 'ok'); }
+  setPill('syncpill', st.ext ? (st.locked ? 'clock: locked' : 'clock: following') : 'clock: internal', st.ext ? (st.locked ? 'ok' : 'warn') : '');
+  const hs = $('hist'); if (document.activeElement !== hs) { const mx = Math.max(0, st.histN - 1), v = Math.max(0, st.histN - 1 - st.histDepth); if (+hs.max !== mx) hs.max = mx; if (+hs.value !== v) hs.value = v; }
   const sel = $('sample'); if (document.activeElement !== sel && st.file !== 255 && sel.value !== String(st.file)) sel.value = String(st.file);
 }
 
-/* ───────────── Interaction ───────────── */
-$('wave').addEventListener('click', e => { if (!st) return; const r = e.currentTarget.getBoundingClientRect(); const s = Math.floor((e.clientX - r.left) / r.width * st.nSlices); selSlice = (selSlice === s) ? -1 : s; render(); });
-$('strip').addEventListener('click', e => { if (!st) return; const r = e.currentTarget.getBoundingClientRect(); const step = Math.floor((e.clientX - r.left) / r.width * st.nSlices); if (selSlice >= 0) action(3, step, selSlice); });
-$('b_dice').onclick = () => action(0); $('b_reslice').onclick = () => action(1); $('b_mute').onclick = () => action(2);
-$('b_flow').onclick = () => action(4, st && (st.flags & 8) ? 0 : 1);
-$('hist').addEventListener('change', e => { if (!st) return; action(5, Math.max(0, st.histN - 1 - +e.target.value)); });
-$('sample').addEventListener('change', e => action(6, +e.target.value));
-window.addEventListener('resize', () => render());
-
-async function connect() {
-  if (link) { polling = false; await link.close(); link = null; $('connect').textContent = 'Connect'; $('modpill').textContent = 'not connected'; $('modpill').className = 'pill'; return; }
-  try {
-    const port = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x0483 }] });
-    await port.open({ baudRate: 115200 });
-    link = new Link(port); await link.start();
-    info = await hello(link);
-    $('modpill').textContent = `${info.name} ${info.fw}`; $('modpill').className = 'pill ok'; $('connect').textContent = 'Disconnect';
-    desc = await getDescriptor(link, info).catch(e => { console.warn(e); return null; });
-    labels = { grammar: [], classifier: [], sample: [] };
-    if (desc) { findFieldLabels(desc, 'grammar.mode', labels.grammar); findFieldLabels(desc, 'class.mode', labels.classifier); findFieldLabels(desc, 'sample.idx', labels.sample); }
-    const sel = $('sample'); sel.innerHTML = labels.sample.length ? labels.sample.map((n, i) => `<option value="${i}">${n.replace(/</g, '&lt;')}</option>`).join('') : '<option>—</option>';
-    if (!desc || !desc.audiothurgist) { $('notice').style.display = 'block'; $('notice').textContent = 'Connected, but this firmware does not advertise the Audiothurgist state extension (0x60). Flash v0.7.0+ for the live view.'; }
-    polling = true; pollLoop();
-  } catch (e) { $('notice').style.display = 'block'; $('notice').textContent = 'Connect failed: ' + e.message; if (link) { await link.close(); link = null; } }
+/* ───────────── Controls panel: what the buttons and knobs do right now ─────────────
+ * Button semantics mirror OnPoll in src/audiothurgist.cpp; knob names and
+ * help come from the descriptor's pager when present. The meaning of each
+ * knob depends on the page (flags bit 4), the grammar and the clock. */
+const KNOB_FALLBACK = [['Chop', 'Tempo', 'History', 'Pitch', 'Sample', 'Volume'], ['Map X', 'Map Y', 'Kick', 'Snare', 'Hat', 'Rotation']];
+const knobCells = [];
+(function buildKnobs() {
+  const host = $('knobs');
+  for (let p = 0; p < 6; p++) {
+    const el = document.createElement('div'); el.className = 'knob';
+    el.innerHTML = `<div class="n"><span class="p">P${p + 1}</span><span class="name"></span><span class="lk" hidden>lock</span></div><div class="v"></div><div class="m"></div>`;
+    host.appendChild(el); knobCells.push({ el, name: el.querySelector('.name'), lk: el.querySelector('.lk'), v: el.querySelector('.v'), m: el.querySelector('.m') });
+  }
+})();
+function knobMeaning(page, pot) {
+  const gram = st.grammar, gname = labels.grammar[gram] ?? ('grammar ' + gram), gridsLike = gram >= 2;
+  if (page === 0) switch (pot) {
+    case 0: return gridsLike ? ['slice-choice faithfulness: full right = each class plays its own nearest hit, lower = swaps within the class', `${Math.round(st.chop / 2.55)}%`]
+                             : ['the journey: verbatim (right) → beat swaps → chops → rolls → cluster + reverb (left)', `${Math.round(st.chop / 2.55)}%`];
+    case 1: if (st.ext) { const z = st.multZone != null ? st.multZone : [0.25, 0.5, 1, 2, 4].indexOf(st.mult);
+              return ['clock multiplier while following (engages once moved)', ['÷4', '÷2', '×1', '×2', '×4'].map((l, i) => `<span class="${i === z ? 'on' : ''}">${l}</span>`).join(''), true]; }
+            return ['internal tempo 60–200 BPM; snaps to the break\'s own tempo within ±2; engages once moved', st.bpm.toFixed(1) + ' BPM' + (st.nativeBpm != null ? ` · native ${st.nativeBpm.toFixed(1)}` : '')];
+    case 2: return ['the last sixteen patterns: counter-clockwise older, full clockwise now', st.histN ? `${st.histN - st.histDepth}/${st.histN}` : 'empty'];
+    case 3: return ['±12 semitones; onsets stay on the grid, the kit retunes', ''];
+    case 4: return ['highlights a file on the card; hold B3 to load it', st.file === 255 ? 'synth break' : (labels.sample[st.file] ?? '')];
+    case 5: return ['output level; the reverb tail rides the cluster zone', ''];
+  }
+  const inert = !gridsLike ? `inert in ${gname} (Brain knobs are live in Grids and Euclid)` : null;
+  switch (pot) {
+    case 0: case 1: return inert ? [inert, '', false, true] : gram === 2 ? ['Grids drum-map coordinate', ''] : ['unused in Euclid', '', false, true];
+    case 2: case 3: case 4: return inert ? [inert, '', false, true] : gram === 2 ? ['Grids density threshold for this class', ''] : ['Euclid hits per bar for this class', ''];
+    case 5: return inert ? [inert, '', false, true] : gram === 3 ? ['rotates every class\'s hits together', ''] : ['unused in Grids', '', false, true];
+  }
 }
-$('connect').onclick = connect;
-if (!('serial' in navigator)) { $('notice').style.display = 'block'; $('notice').textContent = 'Web Serial is not available here. Use Chrome/Edge/Opera on https:// or http://localhost — file:// will not work.'; $('connect').disabled = true; }
+let ctlSig = '';
+function drawControls() {
+  const page = st.brain ? 1 : 0;
+  const sig = [page, st.grammar, st.ext, st.locked, st.mult, st.multZone, st.lockMask, st.flowing, st.muted, st.file, st.histN, st.histDepth, st.chop, Math.round(st.bpm), st.nSlices, labels.sample.length].join('|');
+  if (sig === ctlSig) return; ctlSig = sig;
+  $('knobs').className = 'knobs page-' + (page ? 'brain' : 'perform');
+  const pname = (pager && pager.names[page]) || (page ? 'Brain' : 'Perform');
+  setPill('ctl_page', pname + ' page', page ? 'brain' : '');
+  setText('g_b1tap', page ? `page → ${(pager && pager.names[0]) || 'Perform'} (now ${pname})` : `page → ${(pager && pager.names[1]) || 'Brain'} (now ${pname})`);
+  $('b_page').textContent = page ? 'To Perform' : 'To Brain';
+  for (let p = 0; p < 6; p++) {
+    const cell = knobCells[p], f = pager && pager.knobs[page + ':' + p];
+    cell.name.textContent = (f && f.name) || KNOB_FALLBACK[page][p];
+    cell.el.title = f && f.help ? f.help.replace(/\*\*?/g, '') : '';
+    const [meaning, value, html, inert] = knobMeaning(page, p);
+    cell.m.textContent = meaning; if (html) cell.v.innerHTML = '<span class="zones">' + value + '</span>'; else cell.v.textContent = value;
+    cell.el.classList.toggle('inert', !!inert);
+    const locked = st.lockMask != null && (st.lockMask & (1 << (page * 6 + p)));
+    cell.lk.hidden = !locked; cell.el.style.borderColor = locked ? 'var(--lock)' : '';
+  }
+  const anyLock = st.lockMask != null && st.lockMask !== 0;
+  $('b_clear').disabled = !anyLock; $('b_clear').textContent = anyLock ? `Clear locks (${popcount(st.lockMask)})` : 'Clear locks';
+  $('b_flow').textContent = st.flowing ? 'Flow: on' : 'Flow';
+}
+const popcount = n => { let c = 0; while (n) { c += n & 1; n >>= 1; } return c; };
+
+/* ───────────── Polling ─────────────
+ * State ~10 Hz, scope ~5 Hz while visible, envelope only when matGen moves.
+ * Each stream keeps at most one request outstanding; user actions go out
+ * `urgent` and are pumped before any queued poll. Paused while hidden. */
+const poll = { on: false, timer: null, tState: 0, tScope: 0, tLink: 0, pState: null, pScope: null, pEnv: null, pLive: null };
+const STATE_MS = 100, SCOPE_MS = 200;
+function startPolling() { poll.on = true; poll.tState = poll.tScope = 0; tick(); }
+function stopPolling() { poll.on = false; clearTimeout(poll.timer); }
+function tick() {
+  if (!poll.on || !link || link.closed) return;
+  const now = performance.now();
+  if (document.visibilityState !== 'hidden') {
+    if (!poll.pState && now - poll.tState >= STATE_MS) { poll.tState = now; poll.pState = link.request(CMD.state, undefined, { key: 'state' }).then(onState, e => warn('state', e)).finally(() => { poll.pState = null; }); }
+    if (!poll.pScope && scopeVisible && now - poll.tScope >= SCOPE_MS) { poll.tScope = now; poll.pScope = link.request(CMD.scope, undefined, { key: 'scope' }).then(b => { scope = parseScope(b); invalidate(D.scope); }, e => warn('scope', e)).finally(() => { poll.pScope = null; }); }
+    if (now - poll.tLink >= 250) { poll.tLink = now; drawLink(); }
+  }
+  poll.timer = setTimeout(tick, 25);
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState !== 'hidden' && poll.on) { poll.tState = poll.tScope = 0; } });
+let warned = 0;
+function warn(what, e) { if (e && e.message === 'link closed') return; if (warned++ < 20) console.warn(what, e && e.message); }
+const arrEq = (a, b) => { for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false; return true; };
+function onState(b) {
+  const s = parseState(b); if (!s) return; const p = st; st = s;
+  let m = 0;
+  if (!p) m = D.all;
+  else {
+    if (p.cur !== s.cur || p.callFlash !== s.callFlash || p.muted !== s.muted || p.nSlices !== s.nSlices || Math.round(p.bpm) !== Math.round(s.bpm) || p.mult !== s.mult || !arrEq(p.src, s.src) || !arrEq(p.stepClass, s.stepClass)) m |= D.bar | D.wave;
+    m |= D.text | D.controls;   /* cheap: both bail when their strings are unchanged */
+  }
+  if (s.matGen !== envGen && !poll.pEnv) { const gen = s.matGen; poll.pEnv = fetchEnv(link, s.nSlices).then(e => { env = e; envGen = gen; selSlice = -1; invalidate(D.wave); }, e => warn('env', e)).finally(() => { poll.pEnv = null; }); }
+  /* Options edited elsewhere (a preset load on the panel): the state carries three of them. */
+  if (live && opts && !poll.pLive && (optByte('grammar.mode') !== s.grammar || optByte('class.mode') !== s.cls || (s.barsOpt != null && optByte('bars') !== s.barsOpt))) refreshLive();
+  invalidate(m);
+}
+function drawLink() {
+  if (!link) return; const s = link.stats;
+  setPill('linkpill', s.reqs ? `link ${s.rtt.toFixed(0)} ms · max ${Math.max(s.rttMax, s.rtt).toFixed(0)} · ${s.rate.toFixed(0)} req/s · q${link.queued}${s.timeouts ? ' · ' + s.timeouts + ' timeouts' : ''}` : 'link: —',
+    s.timeouts ? 'warn' : (s.rttAvg > 60 ? 'warn' : 'ok'));
+}
+
+/* ───────────── Actions (urgent: ahead of every queued poll) ───────────── */
+async function action(op, ...args) {
+  if (!link) return;
+  try { await link.request(CMD.action, Uint8Array.of(op, ...args), { urgent: true }); poll.tState = 0; }
+  catch (e) { notice('Action failed: ' + e.message); }
+}
+$('b_dice').onclick = () => action(ACT.dice); $('b_reslice').onclick = () => action(ACT.reslice); $('b_mute').onclick = () => action(ACT.mute);
+$('b_flow').onclick = () => action(ACT.flow, st && st.flowing ? 0 : 1);
+$('b_page').onclick = () => action(ACT.page, st && st.brain ? 0 : 1);
+$('b_clear').onclick = () => action(ACT.clearLocks);
+$('b_load').onclick = () => { const v = +$('sample').value; if (Number.isInteger(v) && v >= 0) action(ACT.load, v); };
+$('hist').addEventListener('change', e => { if (!st) return; action(ACT.scrub, Math.max(0, st.histN - 1 - +e.target.value)); });
+$('sample').addEventListener('change', e => { const v = +e.target.value; if (Number.isInteger(v) && v >= 0) action(ACT.load, v); });
+$('wave').addEventListener('click', e => { if (!st) return; const r = e.currentTarget.getBoundingClientRect(); const s = Math.floor((e.clientX - r.left) / r.width * st.nSlices); selSlice = (selSlice === s) ? -1 : s; invalidate(D.wave); });
+$('strip').addEventListener('click', e => { if (!st) return; const r = e.currentTarget.getBoundingClientRect(); const step = Math.floor((e.clientX - r.left) / r.width * st.nSlices); if (selSlice >= 0) action(ACT.punch, step, selSlice); });
+
+/* ───────────── Options (live blob edits) ─────────────
+ * Values live in the running blob: read it fresh, change one byte, write it
+ * back as a live audition. The read happens right before the write so the
+ * pager's stored knob positions are current, not a stale snapshot. */
+const GROUPS = [
+  ['Sound', ['voice.mode', 'fades', 'tail', 'rests', 'swing']],
+  ['Brain & gates', ['grammar.mode', 'swaps', 'flow.dejavu', 'gate.mode', 'gate.len', 'gate.lvl', 'gate.lanes']],
+  ['Clock', ['clock.ppqn', 'bars']],
+  ['Analysis', ['class.mode', 'onsets']],
+];
+const optSelects = new Map();   /* field id → [select…] (the Bars option also sits next to the grid readout) */
+const optByte = id => { const f = opts && opts.fields.find(f => f.id === id); return f && live ? live.bytes[opts.comp.off + f.off] : null; };
+const optLabel = (id, v) => { const f = opts && opts.fields.find(f => f.id === id); return f && f.disp && f.disp.labels ? f.disp.labels[v] : null; };
+function buildOptions() {
+  const host = $('optgroups'); host.innerHTML = ''; optSelects.clear(); $('k_bars').textContent = '';
+  if (!opts) { host.innerHTML = '<p style="color:var(--mute)">This firmware\'s descriptor carries no Options block.</p>'; return; }
+  const placed = new Set();
+  const groups = GROUPS.map(([name, ids]) => [name, ids.map(id => opts.fields.find(f => f.id === id)).filter(Boolean)]);
+  groups.push(['Other', opts.fields.filter(f => !GROUPS.some(g => g[1].includes(f.id)))]);
+  for (const [name, fields] of groups) {
+    if (!fields.length) continue;
+    const g = document.createElement('div'); g.className = 'grp'; g.innerHTML = `<h3>${esc(name)}</h3>`;
+    for (const f of fields) { const row = document.createElement('div'); row.className = 'opt'; row.innerHTML = `<span title="${esc(f.id)}">${esc(f.name || f.id)}</span>`; row.appendChild(makeOptionSelect(f)); g.appendChild(row); placed.add(f.id); }
+    host.appendChild(g);
+  }
+  const bars = opts.fields.find(f => f.id === 'bars'); if (bars) { const s = makeOptionSelect(bars); s.className = 'inline'; $('k_bars').appendChild(s); }
+  syncOptions();
+}
+function makeOptionSelect(f) {
+  const sel = document.createElement('select'); const lab = (f.disp && f.disp.labels) || [];
+  const n = f.zones || lab.length; for (let i = 0; i < n; i++) { const o = document.createElement('option'); o.value = i; o.textContent = lab[i] ?? String(i); sel.appendChild(o); }
+  sel.onchange = () => writeOption(f, +sel.value);
+  if (!optSelects.has(f.id)) optSelects.set(f.id, []); optSelects.get(f.id).push(sel); return sel;
+}
+function syncOptions() { if (!live || !opts) return; for (const f of opts.fields) for (const s of optSelects.get(f.id) || []) { const v = String(live.bytes[opts.comp.off + f.off]); if (document.activeElement !== s && s.value !== v) s.value = v; } }
+let optBusy = false;
+async function writeOption(f, value) {
+  if (!link || !opts || optBusy) return; optBusy = true; setPill('opt_status', 'writing…', 'warn'); document.querySelectorAll('.opt').forEach(r => r.classList.add('busy'));
+  try {
+    const fresh = await getLive(link, info); const bytes = Uint8Array.from(fresh.bytes); bytes[opts.comp.off + f.off] = value;
+    await setLive(link, info, bytes); live = { bytes, schema: fresh.schema }; setPill('opt_status', 'written', 'ok'); poll.tState = 0;
+  } catch (e) { setPill('opt_status', 'failed: ' + e.message, 'warn'); await refreshLive(); }
+  finally { optBusy = false; document.querySelectorAll('.opt').forEach(r => r.classList.remove('busy')); syncOptions(); }
+}
+async function refreshLive() {
+  if (!link || poll.pLive) return poll.pLive;
+  poll.pLive = getLive(link, info).then(l => { live = l; syncOptions(); ctlSig = ''; invalidate(D.text | D.controls); }, e => warn('live', e)).finally(() => { poll.pLive = null; });
+  return poll.pLive;
+}
+
+/* ───────────── Manual (from the descriptor) ───────────── */
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+/* One layer of CommonMark, as the SDK promises: paragraphs, **bold**, *italic*, `code`. */
+function md(s) { return String(s).split(/\n\s*\n/).map(p => '<p>' + esc(p).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/\*(.+?)\*/g, '<i>$1</i>').replace(/`(.+?)`/g, '<code>$1</code>') + '</p>').join(''); }
+function buildManual() {
+  const host = $('manual');
+  if (!manual) { host.innerHTML = '<p style="color:var(--mute)">This firmware\'s descriptor carries no manual block (no <code>manual</code> / <code>jacks</code> / pager help). Hermetic\'s /program shows the manual when the firmware attaches one.</p>'; return; }
+  let h = '';
+  if (manual.tagline) h += `<p class="tag">${esc(manual.tagline)}</p>`;
+  if (manual.preamble) h += md(manual.preamble);
+  for (const s of manual.sections) h += `<h3 id="man-${esc(s.id)}">${esc(s.title)}</h3>${md(s.body)}`;
+  if (pager) {
+    h += '<h3>Knobs</h3>';
+    for (let pg = 0; pg < pager.pages; pg++) {
+      h += `<h4>${esc(pager.names[pg] || ('Page ' + (pg + 1)))} page (B1)</h4>`; if (pager.help[pg]) h += md(pager.help[pg]);
+      h += '<dl>'; for (let p = 0; p < pager.pots; p++) { const f = pager.knobs[pg + ':' + p]; if (f) h += `<dt>P${p + 1} · ${esc(f.name)}</dt><dd>${f.help ? md(f.help) : ''}</dd>`; } h += '</dl>';
+    }
+  }
+  h += '<h3>Buttons</h3><dl><dt>B1</dt><dd>tap: page Perform ↔ Brain · hold 300 ms + turn a pot: record a motion lock (hold + nudge again clears it) · LED: clock pulse / lock</dd>'
+     + '<dt>B2</dt><dd>tap: dice (new fill) · hold &gt; 300 ms: flow (a new fill every bar while held)</dd>'
+     + '<dt>B3</dt><dd>tap: reslice · hold &gt; 400 ms: load the file highlighted by P5</dd>'
+     + '<dt>B2 + B3</dt><dd>held 2 s: Settings (brightness, preset save/load); B2 or B3 leaves</dd></dl>'
+     + '<p style="font-size:12px;color:var(--mute)">Button gestures are read from the firmware source (OnPoll), not the descriptor — this module declares its pots through a Pager, which carries no button metadata.</p>';
+  if (manual.jacks.length) { h += '<h3>Jacks</h3><dl>'; manual.jacks.forEach((j, i) => { h += `<dt>J${i + 1} · ${esc(j.name || j.id)} <span style="color:var(--mute);font-weight:400">${esc(j.sig || '')}</span></dt><dd>${j.help ? md(j.help) : ''}</dd>`; }); h += '</dl>'; }
+  if (manual.presetsHelp) h += '<h3>Presets</h3>' + md(manual.presetsHelp);
+  host.innerHTML = h;
+}
+
+/* ───────────── Connect ───────────── */
+function setDisconnected() {
+  stopPolling(); link = null; info = null; desc = null; live = null; st = null; env = null; envGen = -1; scope = null; demoDevice = null; ctlSig = '';
+  $('connect').textContent = 'Connect'; $('demo').disabled = false; setPill('modpill', 'not connected', ''); setPill('linkpill', 'link: —', '');
+}
+async function connectPort(port, isDemo) {
+  try {
+    await port.open({ baudRate: 115200 });
+    link = new Link(port); link.onError = e => notice('Serial read error: ' + e.message); await link.start();
+    info = await hello(link);
+    setPill('modpill', `${info.name} ${info.fw}${isDemo ? ' (demo)' : ''}`, 'ok'); $('connect').textContent = 'Disconnect'; $('demo').disabled = true;
+    desc = await getDescriptor(link, info).catch(e => { notice('Descriptor unreadable: ' + e.message); return null; });
+    labels = { grammar: fieldLabels(desc, 'grammar.mode'), classifier: fieldLabels(desc, 'class.mode'), sample: fieldLabels(desc, 'sample.idx') };
+    pager = pagerInfo(desc); opts = optionsInfo(desc); manual = manualInfo(desc);
+    const sel = $('sample'); sel.innerHTML = labels.sample.length ? labels.sample.map((n, i) => `<option value="${i}">${esc(n)}</option>`).join('') : '<option value="-1">—</option>';
+    $('b_load').disabled = !labels.sample.length;
+    if (desc && desc.error) notice('The module reports a descriptor build error: ' + desc.error);
+    else if (!desc || !desc.audiothurgist) notice('Connected, but this firmware does not advertise the Audiothurgist state extension (0x60). Flash v0.7.0+ for the live view.');
+    buildManual();
+    if (opts) { try { live = await getLive(link, info); } catch (e) { notice('Options unreadable: ' + e.message); } }
+    buildOptions(); setPill('opt_status', live ? 'live' : '—', live ? 'ok' : '');
+    startPolling();
+  } catch (e) { notice('Connect failed: ' + e.message); if (link) await link.close(); setDisconnected(); }
+}
+async function connect() {
+  notice('');
+  if (link) { const l = link; setDisconnected(); await l.close(); return; }
+  try { const port = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x0483 }] }); await connectPort(port, false); }
+  catch (e) { if (e.name !== 'NotFoundError') notice('Connect failed: ' + e.message); }
+}
+/* ?demo[=brain,ext,grids,euclid,locks,old] — the fake module, optionally
+ * started on the Brain page, following a clock, in a grammar, with locks,
+ * or with a pre-v0.8.0 state body (no tails). */
+async function connectDemo(flags = '') {
+  if (link) return; notice('');
+  const f = new Set(flags.split(',').filter(Boolean));
+  demoDevice = new DEMO.FakeDevice({ tail: f.has('old') ? 148 : 167, latencyMs: 6 });
+  const d = demoDevice;
+  if (f.has('brain')) d.brain = true;
+  if (f.has('ext')) { d.ext = true; d.locked = true; d.mult = 2; d.multZone = 3; }
+  if (f.has('grids')) d.options[5] = 2; if (f.has('euclid')) d.options[5] = 3;
+  if (f.has('locks')) d.lockMask = 0x0049;
+  await connectPort(new DEMO.FakePort(d), true);
+  if (!f.size && demoDevice) setInterval(() => { if (!demoDevice) return; demoDevice.ext = !demoDevice.ext; demoDevice.locked = demoDevice.ext; demoDevice.lockMask = demoDevice.ext ? 0x0009 : 0; demoDevice.mult = demoDevice.ext ? 2 : 1; demoDevice.multZone = demoDevice.ext ? 3 : 2; }, 12000);
+}
+$('connect').onclick = connect; $('demo').onclick = () => connectDemo();
+if (!('serial' in navigator)) { notice('Web Serial is not available here. Use Chrome/Edge/Opera on https:// or http://localhost — file:// will not work. The Demo button works anywhere.'); $('connect').disabled = true; }
+{ const m = /[?&]demo(?:=([^&#]*))?/.exec(location.search); if (m) connectDemo(decodeURIComponent(m[1] || '')); }
 </script>
 </body>
 </html>
