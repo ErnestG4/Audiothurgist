@@ -21,6 +21,7 @@ grep -q "hash c2081c20c9d7fbbf" "$OUT/gc0.txt" || { echo "  FAIL: Classic gramma
 for m in 0 1 2 3 4; do grep -qE "badsrc 0 +coverErr 0" "$OUT/gc$m.txt" || { echo "  FAIL: mode $m range/coverage"; fail=1; }; done
 
 echo; echo "== engine_check (ASan/UBSan) =="
+rm -f "$OUT/ec"
 $CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/engine_check.cpp -o "$OUT/ec" || fail=1
 "$OUT/ec" || fail=1
 

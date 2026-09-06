@@ -114,6 +114,9 @@ static float          gReclassSal[bb::Engine::kMaxSlices]; /* staged with a recl
 static uint8_t        gPendBands[bb::Engine::kMaxSlices];  /* band mask staged with a load /
                                                               re-slice → engine.stepBands */
 /* GATES end */
+/* PLAY */
+static float          gPendDens[bb::Engine::kMaxSlices];   /* keyframe density per slice, staged with a load / re-slice */
+/* PLAY */
 
 /* ── Web frontend state (HostLink extension 0x60–0x6F, see StateExt) ────
  * Per-slice envelope (8 min/max pairs, u8 with 128 = 0) computed at load on
@@ -497,6 +500,16 @@ static void ClassifySteps(const float* x, int len, uint8_t* cls, int mode,
     bb::ClassifySteps(x, len, kSr, cls, mode, sal, nullptr, nsl, bands);
 }
 
+/* PLAY: keyframe density per slice (the Density lens, whatever classifier is
+ * selected) for Options → Fades → Adaptive. Control thread, at load and at
+ * a Bars re-slice; the audio thread copies it into engine.sliceDens. */
+static void ComputeDensity(const float* x, int len, float* dens, int nsl = 0)
+{
+    static uint8_t scratch[bb::Engine::kMaxSlices];
+    bb::ClassifySteps(x, len, kSr, scratch, 3, nullptr, dens, nsl);
+}
+/* PLAY */
+
 /* Slice count for material: the Bars override, else the backbeat estimate
  * (core/bb_bars.h), else 0 = the engine's duration prior. Always bars × 16,
  * halved while over kMaxSlices (an 8-bar loop becomes an 8th grid). */
@@ -560,6 +573,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
         /* GATES */
         memcpy(engine.stepBands, gPendBands, sizeof engine.stepBands);
         /* GATES end */
+        memcpy(engine.sliceDens, gPendDens, sizeof engine.sliceDens);   /* PLAY */
         memcpy(gEnv, gPendEnv, sizeof gEnv);
         gMatGen = (uint8_t)(gMatGen + 1u);
         gNeedNativeTempo = true;
@@ -569,6 +583,10 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
     engine.gateOnsetsOnly = gGateMode.sel == 1;
     /* GRAM */ engine.swapsMode = gSwaps.sel; engine.dejaVu = gDejaVu.sel; /* GRAM end */
     engine.multiLabel     = gGateLanes.sel == 1;   /* GATES */
+    /* PLAY */
+    engine.fadeMode = gFades.sel;   /* 0 Fixed, 1 Adaptive (keyframe density) */
+    engine.tailMode = gTail.sel;    /* 0 Gate, 1 Loop forward, 2 Ping-pong   */
+    /* PLAY */
 
     if(gPendReslice) { engine.Reslice();   gPendReslice = false; }
     if(gPendReroll)  { engine.RerollFill(); gPendReroll  = false; }
@@ -1050,6 +1068,7 @@ static void ServiceLoad()
 
     gPendHint = SliceCountFor(gLoad, len, gPendOnsets, gPendN);
     ClassifySteps(gLoad, len, gPendClass, gClass.mode, gPendSal, gPendHint, gPendBands /* GATES */);
+    ComputeDensity(gLoad, len, gPendDens, gPendHint);   /* PLAY */
     ComputeEnvelope(gLoad, len, gPendEnv, gPendHint);
     gPendLen   = len;
     gCurFile   = gLoadIdx;
@@ -1247,6 +1266,7 @@ int main()
             static uint8_t cls[bb::Engine::kMaxSlices];
             ClassifySteps(gPlay, len, cls, gClass.mode, gSal, 0, engine.stepBands /* GATES: audio not started */);
             engine.SetMaterial(gPlay, len, kSr, gPendOnsets, no, cls);
+            ComputeDensity(gPlay, len, engine.sliceDens, engine.nSlices);   /* PLAY: audio not started yet */
             ComputeEnvelope(gPlay, len, gEnv);
             gCurFile = 0;
             loaded   = true;
@@ -1260,6 +1280,7 @@ int main()
         int no = gDet.Detect(gPlay, len, kSr, onsets, kMaxOnsets, nullptr);
         ClassifySteps(gPlay, len, cls, gClass.mode, gSal, 0, engine.stepBands /* GATES */);
         engine.SetMaterial(gPlay, len, kSr, onsets, no, cls);
+        ComputeDensity(gPlay, len, engine.sliceDens, engine.nSlices);   /* PLAY: audio not started yet */
         ComputeEnvelope(gPlay, len, gEnv);
     }
 
@@ -1318,6 +1339,7 @@ int main()
             gBars.dirty = false;
             const int nsl = SliceCountFor(gPlay, engine.bufLen, gPendOnsets, gPendN);
             ClassifySteps(gPlay, engine.bufLen, gPendClass, gClass.mode, gPendSal, nsl, gPendBands /* GATES */);
+            ComputeDensity(gPlay, engine.bufLen, gPendDens, nsl);   /* PLAY */
             ComputeEnvelope(gPlay, engine.bufLen, gPendEnv, nsl);
             gPendLen  = engine.bufLen;
             gPendHint = nsl;
