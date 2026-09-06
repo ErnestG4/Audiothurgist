@@ -53,9 +53,9 @@ inline int GridSlices(int len, float sr)
 // Optional `dens` (kMaxSlices) receives the per-step keyframe density for
 // mode 3 (0 otherwise) — the host test prints it.
 inline void ClassifySteps(const float* x, int len, float sr, uint8_t* cls, int mode,
-                          float* sal = nullptr, float* densOut = nullptr)
+                          float* sal = nullptr, float* densOut = nullptr, int nslOverride = 0)
 {
-    const int nsl  = GridSlices(len, sr);
+    const int nsl  = nslOverride >= 1 ? nslOverride : GridSlices(len, sr);
     const int step = len / nsl;
     float lpK = 0.f, lpM = 0.f;
     const float fK = (mode == 1) ? 120.f : 325.f;

@@ -15,6 +15,7 @@
 #include <vector>
 #include "bb_engine.h"
 #include "bb_classify.h"
+#include "bb_bars.h"
 
 static int gFail = 0, gPass = 0;
 #define CHECK(cond, ...) do { if(cond) { gPass++; } else { gFail++; printf("  FAIL %s:%d  ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while(0)
@@ -310,6 +311,71 @@ int main()
         Rendered r = RenderLoops(e, 4);
         for(float v : r.y) if(!std::isfinite(v)) finite = false;
         CHECK(finite, "Collins rolls: finite output");
+    }
+
+    SECTION("Slice-count hint (Bars option) and onsets-only gates");
+    {
+        Fresh(e, 0, 1.f);
+        e.SetMaterial(gMat, kLen, kSr, nullptr, 0, gCls, 32);   // "2 bars" override on 2.0 s
+        CHECK(e.nSlices == 32, "hint 32 → 32 slices (got %d)", e.nSlices);
+        CHECK(fabsf(e.NativeBpm() - 240.f) < 0.01f, "…and native BPM doubles to 240 (got %.1f)", e.NativeBpm());
+        e.SetMaterial(gMat, kLen, kSr, nullptr, 0, gCls, 256);
+        CHECK(e.nSlices == 64, "an oversize hint halves to the cap (got %d)", e.nSlices);
+        // onsets at the starts of steps 0,4,8,12 only → those are the hits
+        static const int on[4] = {0, 4 * kStep + 30, 8 * kStep, 12 * kStep - 200};
+        Fresh(e, 0, 1.f);
+        e.SetMaterial(gMat, kLen, kSr, on, 4, gCls, 0);
+        e.RegenPattern();
+        int hits = 0; for(int s = 0; s < 16; s++) hits += e.stepHit[s];
+        CHECK(hits == 4 && e.stepHit[0] && e.stepHit[4] && e.stepHit[8] && e.stepHit[12], "onsets mark 4 hit slices (%d)", hits);
+        e.gateOnsetsOnly = false;
+        Rendered r = RenderLoops(e, 2);
+        CHECK(GateEvents(r) == 32, "every-step mode: 32 gate events (%d)", GateEvents(r));
+        Fresh(e, 0, 1.f);
+        e.SetMaterial(gMat, kLen, kSr, on, 4, gCls, 0);
+        e.RegenPattern();
+        e.gateOnsetsOnly = true;
+        r = RenderLoops(e, 2);
+        CHECK(GateEvents(r) == 8, "onsets-only: one gate per hit, 8 over 2 loops (%d)", GateEvents(r));
+        CHECK(GateEvents(r, 0) == 4, "…kick lane fires at steps 0 and 8 only (%d)", GateEvents(r, 0));
+        e.CallSlice(2, 1.f, false, false, false);
+        CHECK(e.gateFired != 0, "a Voice call always gates");
+    }
+
+    SECTION("Bar estimate from the backbeat (bb_bars.h)");
+    {
+        // 4 bars at 172 BPM, 48 kHz: kick (60 Hz) on 1 and 3, snare (1.8 kHz + noise) on 2 and 4,
+        // hats (8 kHz, quiet) on every 8th. The duration prior would call this 2 bars.
+        const float bpm = 172.f, beat = 60.f * kSr / bpm, bar = 4.f * beat;
+        const int   L = (int)(4.f * bar);
+        static float mat[48000 * 6];
+        static int   ons[64]; int no = 0;
+        for(int i = 0; i < L; i++) mat[i] = 0.f;
+        uint32_t rng = 1;
+        auto burst = [&](int at, float f, float amp, int len, bool noise) {
+            for(int i = 0; i < len && at + i < L; i++) {
+                rng = rng * 1664525u + 1013904223u;
+                float nz = noise ? ((float)(rng >> 8) / 8388608.f - 1.f) : 0.f;
+                float env = expf(-(float)i / (float)len * 5.f);
+                mat[at + i] += amp * env * (0.6f * sinf(6.2831853f * f * i / kSr) + 0.4f * nz);
+            } };
+        for(int b = 0; b < 4; b++)
+            for(int q = 0; q < 4; q++)
+            {
+                const int at = (int)(b * bar + q * beat);
+                if(q == 0 || q == 2) { burst(at, 60.f, 0.9f, 4000, false); ons[no++] = at; }
+                else                 { burst(at, 1800.f, 0.8f, 3000, true);  ons[no++] = at; }
+                burst(at + (int)(beat / 2), 8000.f, 0.15f, 800, true); ons[no++] = at + (int)(beat / 2);
+            }
+        // onsets sorted
+        for(int i = 1; i < no; i++) for(int j = i; j > 0 && ons[j - 1] > ons[j]; j--) { int t = ons[j]; ons[j] = ons[j - 1]; ons[j - 1] = t; }
+        const float est = bb::EstimateBarSamples(mat, L, kSr, ons, no);
+        CHECK(est > 0.f && fabsf(est - bar) < 0.03f * bar, "backbeat bar estimate %.0f vs true %.0f samples", est, bar);
+        bb::Engine e4; e4.Init(1); e4.SetMaterial(mat, L, kSr, ons, no, nullptr, 0);
+        CHECK(e4.nSlices == 32, "the duration prior alone calls it 2 bars (%d slices)", e4.nSlices);
+        e4.SetMaterial(mat, L, kSr, ons, no, nullptr, 64);
+        CHECK(e4.nSlices == 64 && fabsf(e4.NativeBpm() - bpm) < 2.f, "with the estimate: 64 slices, native %.1f BPM", e4.NativeBpm());
+        CHECK(bb::EstimateBarSamples(gMat, kLen, kSr, nullptr, 0) == 0.f, "no onsets → no estimate (prior applies)");
     }
 
     SECTION("Classifier lenses");

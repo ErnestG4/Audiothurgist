@@ -195,6 +195,13 @@ struct Engine
                                       // source slice after the previous step's,
                                       // verbatim through the continuity branch;
                                       // raises no gate and is not a "hit"
+    bool   stepHit[kMaxSlices] = {};  // the source slice begins with a detected
+                                      // onset (a drum's "open"); from the load's
+                                      // onset table. All true when none given.
+    bool   gateOnsetsOnly = false;    // gates fire once per HIT, not on every
+                                      // step that carries the class (a snare's
+                                      // decay steps are still "snare" — that was
+                                      // the rapid-fire the field report meant)
     bool   restSustain = false;       // languages (Grids/Euclid): a rest continues
                                       // the break instead of gating a 16th of
                                       // silence — the shell sets this per grammar.
@@ -337,21 +344,26 @@ struct Engine
     // of its estimated musical bar (8ths past 4 bars, capped at kMaxSlices).
     // Onsets are kept for future use (velocity/salience); the grid is what
     // plays — chop instruments live on the grid, not on free time.
+    // nSlicesHint (multiple of 16, 0 = none): the shell's bar estimate or the
+    // user's Bars override. Without it the duration prior below applies.
     void SetMaterial(const float* b, int len, float sampleRate, const int* onsets,
-                     int nOnsets, const uint8_t* classes = nullptr)
+                     int nOnsets, const uint8_t* classes = nullptr, int nSlicesHint = 0)
     {
-        (void)onsets;
-        (void)nOnsets;
         buf    = b;
         bufLen = len;
         sr     = sampleRate;
 
-        float dur  = (float)len / sampleRate;
-        int   bars = 1;
-        while(dur / (float)bars >= 3.2f && bars < 16) bars <<= 1;
-        nSlices = bars * 16;
+        int bars = 1;
+        if(nSlicesHint >= 16) nSlices = nSlicesHint;
+        else
+        {
+            float dur = (float)len / sampleRate;
+            while(dur / (float)bars >= 3.2f && bars < 16) bars <<= 1;
+            nSlices = bars * 16;
+        }
         while(nSlices > kMaxSlices) nSlices /= 2;
         if(nSlices < 1) nSlices = 1;
+        bars = nSlices / 16 > 0 ? nSlices / 16 : 1;
         int step = len / nSlices;
         for(int i = 0; i < nSlices; i++)
             slices[i] = {i * step, step};
@@ -360,6 +372,22 @@ struct Engine
 
         for(int i = 0; i < nSlices; i++)
             stepClass[i] = classes ? classes[i] : 3;
+
+        // Hits: a slice "opens" with a drum if an onset falls in its first
+        // quarter (or within 10 ms before its start). No onset table = every
+        // slice is a hit, which is the old behaviour.
+        for(int i = 0; i < nSlices; i++) stepHit[i] = (onsets == nullptr || nOnsets <= 0);
+        if(onsets && nOnsets > 0)
+            for(int o = 0; o < nOnsets; o++)
+            {
+                const int p = onsets[o];
+                if(p < 0 || p >= len) continue;
+                int s = p / (step > 0 ? step : 1);
+                if(s >= nSlices) s = nSlices - 1;
+                if(p - slices[s].start <= slices[s].len / 4) stepHit[s] = true;
+                else if(s + 1 < nSlices && slices[s + 1].start - p <= (int)(0.010f * sampleRate))
+                    stepHit[s + 1] = true;
+            }
         SetBpm(0.f); // every load opens at ITS OWN tempo — inheriting the
                      // previous break's BPM chipmunks the new one (field bug)
         RegenPattern();
@@ -559,7 +587,9 @@ struct Engine
     void TriggerStep(int k)
     {
         int s = stepSrc[k];
-        if(!stepCont[k])   /* a continuation is not a hit: no gate */
+        /* a continuation is not a hit: no gate; in onsets-only mode neither
+         * is a slice that does not open with a drum */
+        if(!stepCont[k] && (!gateOnsetsOnly || stepHit[s]))
         {
             gateFired |= (uint8_t)(1u << (stepClass[s] & 3));
             gateSlice[stepClass[s] & 3] = (int8_t)s;

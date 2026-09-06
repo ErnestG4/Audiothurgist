@@ -54,6 +54,7 @@
 #include "bb_onset.h"
 #include "bb_condition.h"
 #include "bb_classify.h" /* uses capicola's Analyzer (Matthew Nielsen, AGPL) — THIRD_PARTY.md */
+#include "bb_bars.h"
 #include "bb_testbreak.h"
 
 using namespace alchemy;
@@ -137,12 +138,28 @@ static ControlLoop loop(hw);
 static Pager       pager(hw.buttons[kButtonB1], 2, kNumPots); /* B1 tap: Perform ↔ Brain */
 /* Hold B1 + turn a pot: record that pot's motion as a loop (16 s @ 30 Hz,
  * 5.8 KB, saved with presets). Values compose into knob.Norm() automatically. */
-static ParamLock<2 * kNumPots> locks(hw.buttons[kButtonB1], pager);
+/* B1 is the page button AND the lock-record button. The SDK arms a
+ * recording the instant B1 is down and a pot moves > 3 %, so a page tap
+ * with a hand already on a pot recorded locks by accident (field,
+ * 2026-09-05). ParamLock sees B1 through this proxy: "pressed" only once
+ * held 300 ms, with pot baselines taken at that moment. */
+struct HoldButton : IButton
+{
+    IButton& b;
+    float    ms;
+    HoldButton(IButton& bb, float holdMs) : b(bb), ms(holdMs) {}
+    bool  Pressed() const override { return b.Pressed() && b.TimeHeldMs() >= ms; }
+    bool  RisingEdge() override { return false; }
+    bool  FallingEdge() override { return b.FallingEdge(); }
+    float TimeHeldMs() const override { return Pressed() ? b.TimeHeldMs() - ms : 0.f; }
+};
+static HoldButton gLockBtn(hw.buttons[kButtonB1], 300.f);
+static ParamLock<2 * kNumPots> locks(gLockBtn, pager);
 /* Settings screen: B2+B3 held 2 s enters; brightness + the preset gesture. */
 Settings           settings(hw, &pager);
 void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.7.5-grids", "web");
+                           "0.8.0-options", "web");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -161,6 +178,8 @@ static volatile int  gLoadIdx   = 0;       /* which file                   */
 static volatile bool gApply     = false;   /* loader done → audio may swap */
 static int           gPendOnsets[kMaxOnsets];
 static volatile int  gPendN = 0, gPendLen = 0;
+static volatile int  gPendHint = 0;      /* slice count for the pending material (0 = prior) */
+static volatile bool gReapply  = false;  /* re-slice the CURRENT material (Bars option) */
 static uint8_t       gPendClass[bb::Engine::kMaxSlices];
 static volatile int  gCurFile = -1;
 static volatile float gLoadFlash = 0.f;
@@ -212,9 +231,9 @@ static uint8_t       gReclassBuf[bb::Engine::kMaxSlices];
 static volatile bool gReclass = false;   /* control: labels ready → audio memcpy */
 
 /* Browser dropdown: external clock PPQN on J3 (all divide the 96-PPQN NCO). */
-static const uint32_t kPpqnTable[4] = {24u, 4u, 2u, 1u};
+static const uint32_t kPpqnTable[8] = {24u, 4u, 2u, 1u, 48u, 96u, 16u, 8u};
 static const char* kPpqnDisp =
-    "{\"kind\":\"enum\",\"labels\":[\"24 PPQN (MIDI/DIN)\",\"4 PPQN (16ths)\",\"2 PPQN (8ths)\",\"1 PPQN (quarters)\"]}";
+    "{\"kind\":\"enum\",\"labels\":[\"24 PPQN (MIDI/DIN)\",\"4 PPQN (16ths)\",\"2 PPQN (8ths)\",\"1 PPQN (quarters)\",\"48 PPQN\",\"96 PPQN\",\"16 PPQN\",\"8 PPQN\"]}";
 struct ClockSel
 {
     uint8_t       sel   = 0;
@@ -279,41 +298,89 @@ struct GrammarSel
 };
 static GrammarSel gGrammar;
 
-/* ── Options: ONE preset-managed component for the six one-byte selectors.
- * The SDK caps managed components at kPresetMaxManaged (8); six separate
+/* ── Options v2 (2026-09-06): one byte each. Plain structs like the above;
+ * the packages that implement a behaviour read `.sel` (or its dirty flag).
+ * Every recommendation that changes behaviour ships as an option (Ernest). */
+struct Sel { uint8_t sel = 0; volatile bool dirty = false; };
+static const char* kGateModeDisp  = "{\"kind\":\"enum\",\"labels\":[\"Every step\",\"Onsets only (once per hit)\"]}";
+static Sel gGateMode;    /* 6  audio reads .sel */
+static const char* kBarsDisp      = "{\"kind\":\"enum\",\"labels\":[\"Auto (backbeat)\",\"1 bar\",\"2 bars\",\"4 bars\",\"8 bars (8th grid)\"]}";
+static Sel gBars;        /* 7  dirty → re-slice the material */
+static const char* kRestsDisp     = "{\"kind\":\"enum\",\"labels\":[\"Continue the break\",\"Gate (silence)\"]}";
+static Sel gRests;       /* 8  dirty → engine.restSustain + regen */
+static const char* kGateLanesDisp = "{\"kind\":\"enum\",\"labels\":[\"Dominant class\",\"Multi-label (every band over threshold)\"]}";
+static Sel gGateLanes;   /* 9  GATES package */
+static const char* kFadesDisp     = "{\"kind\":\"enum\",\"labels\":[\"Fixed\",\"Adaptive (keyframe density)\"]}";
+static Sel gFades;       /* 10 PLAYBACK package */
+static const char* kTailDisp      = "{\"kind\":\"enum\",\"labels\":[\"Gate (honest)\",\"Loop forward\",\"Ping-pong\"]}";
+static Sel gTail;        /* 11 PLAYBACK package */
+static const char* kSwapsDisp     = "{\"kind\":\"enum\",\"labels\":[\"Class only\",\"Class + salience tier\"]}";
+static Sel gSwaps;       /* 12 GRAMMAR package */
+static const char* kDejaVuDisp    = "{\"kind\":\"enum\",\"labels\":[\"Off\",\"Some (¼ of flow bars from history)\",\"Lots (¾)\"]}";
+static Sel gDejaVu;      /* 13 GRAMMAR package */
+static const char* kSwingDisp     = "{\"kind\":\"enum\",\"labels\":[\"Straight 16ths\",\"Auto (the material's swing)\"]}";
+static Sel gSwing;       /* 14 SLICING package */
+static const char* kOnsetDetDisp  = "{\"kind\":\"enum\",\"labels\":[\"Spectral flux\",\"Log-filtered flux (Böck 2012)\"]}";
+static Sel gOnsetDet;    /* 15 SLICING package */
+
+/* ── Options: ONE preset-managed component for the one-byte selectors.
+ * The SDK caps managed components at kPresetMaxManaged (8); separate
  * Serializables plus pager/sample/locks/settings would blow it. Same
- * labels, same live semantics: the browser edits bytes 0..5, Deserialize
+ * labels, same live semantics: the browser edits bytes 0..15, Deserialize
  * fans them out to the plain structs above and raises their dirty flags. */
 struct Options : Serializable
 {
-    size_t SerializedSize() const override { return 6u; }
+    static constexpr size_t kBytes = 16u;
+    size_t SerializedSize() const override { return kBytes; }
     void   Serialize(uint8_t* o) const override
     {
         o[0] = gClass.mode; o[1] = gClockSel.sel; o[2] = gVoiceSel.sel;
         o[3] = gGateLen.sel; o[4] = gGateLvlSel.sel; o[5] = gGrammar.mode;
+        o[6] = gGateMode.sel; o[7] = gBars.sel; o[8] = gRests.sel; o[9] = gGateLanes.sel;
+        o[10] = gFades.sel; o[11] = gTail.sel; o[12] = gSwaps.sel; o[13] = gDejaVu.sel;
+        o[14] = gSwing.sel; o[15] = gOnsetDet.sel;
+    }
+    static void Put(Sel& s, uint8_t v, uint8_t max)
+    {
+        if(v > max) v = 0;
+        if(v != s.sel) { s.sel = v; s.dirty = true; }
     }
     bool Deserialize(const uint8_t* in) override
     {
         uint8_t v;
         v = in[0] > 3 ? 0 : in[0]; if(v != gClass.mode)    { gClass.mode = v;    gClass.dirty = true; }
-        v = in[1] > 3 ? 0 : in[1]; if(v != gClockSel.sel)  { gClockSel.sel = v;  gClockSel.dirty = true; }
+        v = in[1] > 7 ? 0 : in[1]; if(v != gClockSel.sel)  { gClockSel.sel = v;  gClockSel.dirty = true; }
         gVoiceSel.sel   = in[2] > 1 ? 0 : in[2];
         gGateLen.sel    = in[3] > 3 ? 0 : in[3];
         gGateLvlSel.sel = in[4] > 1 ? 0 : in[4];
         v = in[5] > 3 ? 0 : in[5]; if(v != gGrammar.mode)  { gGrammar.mode = v;  gGrammar.dirty = true; }
+        Put(gGateMode, in[6], 1);  Put(gBars, in[7], 4);     Put(gRests, in[8], 1);
+        Put(gGateLanes, in[9], 1); Put(gFades, in[10], 1);   Put(gTail, in[11], 2);
+        Put(gSwaps, in[12], 1);    Put(gDejaVu, in[13], 2);  Put(gSwing, in[14], 1);
+        Put(gOnsetDet, in[15], 1);
         return true;
     }
-    uint32_t SchemaHash() const override { return 0x4F505431u; /* 'OPT1' */ }
+    uint32_t SchemaHash() const override { return 0x4F505432u; /* 'OPT2' */ }
     bool     Describe(hostlink::ComponentWriter& w) const override
     {
         using hostlink::FieldType;
         w.Label("Options");
-        bool ok = w.Field("class.mode",   "Classifier",  0, FieldType::Enum, 0.f, kClassDisp,   4u);
-        ok &=     w.Field("clock.ppqn",   "Clock In",    1, FieldType::Enum, 0.f, kPpqnDisp,    4u);
-        ok &=     w.Field("voice.mode",   "Voice",       2, FieldType::Enum, 0.f, kVoiceDisp,   2u);
-        ok &=     w.Field("gate.len",     "Gate Length", 3, FieldType::Enum, 0.f, kGateLenDisp, 4u);
-        ok &=     w.Field("gate.lvl",     "Gate Level",  4, FieldType::Enum, 0.f, kGateLvlDisp, 2u);
-        ok &=     w.Field("grammar.mode", "Grammar",     5, FieldType::Enum, 0.f, kGrammarDisp, 4u);
+        bool ok = w.Field("class.mode",   "Classifier",   0, FieldType::Enum, 0.f, kClassDisp,     4u);
+        ok &=     w.Field("clock.ppqn",   "Clock In",     1, FieldType::Enum, 0.f, kPpqnDisp,      8u);
+        ok &=     w.Field("voice.mode",   "Voice",        2, FieldType::Enum, 0.f, kVoiceDisp,     2u);
+        ok &=     w.Field("gate.len",     "Gate Length",  3, FieldType::Enum, 0.f, kGateLenDisp,   4u);
+        ok &=     w.Field("gate.lvl",     "Gate Level",   4, FieldType::Enum, 0.f, kGateLvlDisp,   2u);
+        ok &=     w.Field("grammar.mode", "Grammar",      5, FieldType::Enum, 0.f, kGrammarDisp,   4u);
+        ok &=     w.Field("gate.mode",    "Gate Fires",   6, FieldType::Enum, 0.f, kGateModeDisp,  2u);
+        ok &=     w.Field("bars",         "Bars",         7, FieldType::Enum, 0.f, kBarsDisp,      5u);
+        ok &=     w.Field("rests",        "Rests",        8, FieldType::Enum, 0.f, kRestsDisp,     2u);
+        ok &=     w.Field("gate.lanes",   "Gate Lanes",   9, FieldType::Enum, 0.f, kGateLanesDisp, 2u);
+        ok &=     w.Field("fades",        "Fades",       10, FieldType::Enum, 0.f, kFadesDisp,     2u);
+        ok &=     w.Field("tail",         "Slice Tail",  11, FieldType::Enum, 0.f, kTailDisp,      3u);
+        ok &=     w.Field("swaps",        "Swaps",       12, FieldType::Enum, 0.f, kSwapsDisp,     2u);
+        ok &=     w.Field("flow.dejavu",  "Flow Déjà Vu",13, FieldType::Enum, 0.f, kDejaVuDisp,    3u);
+        ok &=     w.Field("swing",        "Swing",       14, FieldType::Enum, 0.f, kSwingDisp,     2u);
+        ok &=     w.Field("onsets",       "Onsets",      15, FieldType::Enum, 0.f, kOnsetDetDisp,  2u);
         return ok;
     }
 };
@@ -366,7 +433,7 @@ static constexpr LedPanel::Rgb kPitchC  { 60,  60,  70};
 
 VirtualKnob k_chop  = VirtualKnob(P_CHOP,  "Chop").Linear(0.f, 1.f)
                                  .Ident("chop").Ring(Level(kChopCol));
-VirtualKnob k_tempo = VirtualKnob(P_TEMPO, "Tempo").Linear(70.f, 180.f)
+VirtualKnob k_tempo = VirtualKnob(P_TEMPO, "Tempo").Linear(60.f, 200.f)
                                  .Unit("BPM").Ident("tempo").Ring(Level(kTempoCol));
 VirtualKnob k_hist  = VirtualKnob(P_HIST,  "History").Linear(0.f, 1.f)
                                  .Ident("history").Ring(Level(LedPanel::Rgb{120, 55, 190}));
@@ -420,20 +487,39 @@ Page brain = Page(1).Name("Brain").Color("#3a9fe0")
 
 /* ── class analysis: core/bb_classify.h (pure, host-tested) ─────────── */
 static void ClassifySteps(const float* x, int len, uint8_t* cls, int mode,
-                          float* sal = nullptr)
+                          float* sal = nullptr, int nsl = 0)
 {
-    bb::ClassifySteps(x, len, kSr, cls, mode, sal);
+    bb::ClassifySteps(x, len, kSr, cls, mode, sal, nullptr, nsl);
+}
+
+/* Slice count for material: the Bars override, else the backbeat estimate
+ * (core/bb_bars.h), else 0 = the engine's duration prior. Always bars × 16,
+ * halved while over kMaxSlices (an 8-bar loop becomes an 8th grid). */
+static int SliceCountFor(const float* x, int len, const int* onsets, int n)
+{
+    int bars = 0;
+    if(gBars.sel >= 1) bars = 1 << (gBars.sel - 1);
+    else
+    {
+        const float bar = bb::EstimateBarSamples(x, len, kSr, onsets, n);
+        if(bar > 0.f)
+        {
+            const float b = (float)len / bar;
+            int best = 1; float bestD = 1e9f;
+            for(int p = 1; p <= 16; p <<= 1) { float d = fabsf(b - (float)p) / (float)p; if(d < bestD) { bestD = d; best = p; } }
+            bars = best;
+        }
+    }
+    if(bars <= 0) return 0;
+    int nsl = bars * 16;
+    while(nsl > bb::Engine::kMaxSlices) nsl /= 2;
+    return nsl;
 }
 
 /* Per-slice min/max envelope over the engine's grid (same bar rule). */
-static void ComputeEnvelope(const float* x, int len, uint8_t env[][kEnvPts][2])
+static void ComputeEnvelope(const float* x, int len, uint8_t env[][kEnvPts][2], int nslHint = 0)
 {
-    float dur = (float)len / kSr;
-    int   bars = 1;
-    while(dur / (float)bars >= 3.2f && bars < 16) bars <<= 1;
-    int nsl = bars * 16;
-    while(nsl > bb::Engine::kMaxSlices) nsl /= 2;
-    if(nsl < 1) nsl = 1;
+    int nsl = nslHint >= 1 ? nslHint : bb::GridSlices(len, kSr);
     memset(env, 128, (size_t)bb::Engine::kMaxSlices * kEnvPts * 2);
     for(int s = 0; s < nsl; s++)
     {
@@ -460,17 +546,18 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
     const uint32_t cbStartUs = daisy::System::GetUs();   /* diag: callback duration */
     /* new material ready: swap buffers and re-point the engine (SetMaterial
      * is audio-thread work here exactly as it was on the Pod). */
-    if(gApply)
+    if(gApply || gReapply)
     {
-        float* t = gPlay; gPlay = gLoad; gLoad = t;
-        engine.SetMaterial(gPlay, gPendLen, kSr, gPendOnsets, gPendN, gPendClass);
+        if(gApply) { float* t = gPlay; gPlay = gLoad; gLoad = t; }   /* re-apply keeps the buffer */
+        engine.SetMaterial(gPlay, gPendLen, kSr, gPendOnsets, gPendN, gPendClass, gPendHint);
         memcpy(gSal, gPendSal, sizeof gSal);
         memcpy(gEnv, gPendEnv, sizeof gEnv);
         gMatGen = (uint8_t)(gMatGen + 1u);
         gNeedNativeTempo = true;
         gLastLp = -1.;   /* new nSlices → new phase geometry; do not hold */
-        gApply = false;
+        gApply = false; gReapply = false;
     }
+    engine.gateOnsetsOnly = gGateMode.sel == 1;
 
     if(gPendReslice) { engine.Reslice();   gPendReslice = false; }
     if(gPendReroll)  { engine.RerollFill(); gPendReroll  = false; }
@@ -638,14 +725,29 @@ static void OnPoll(uint32_t /*t_ms*/)
     const uint32_t now_us = daisy::System::GetUs();
     gClkEdge.Tick(loop.Cv(), loop.NumCv(), now_us);
     const bool rose = gClkEdge.JustRose(kClockChan);
-    if(rose) { gLastPulseUs = now_us; gClkFlash = 1.f; }
+    static uint32_t s_prevPulseUs = 0;
+    if(rose)
+    {
+        /* Arm on the SECOND edge within 2 s: a single spurious edge (a cable
+         * going in or out, noise on an unpatched jack) must not start the
+         * follower — armed, it stopped the NCO: two seconds of silence
+         * (field, 2026-09-06). Once armed every pulse refreshes. */
+        if(s_prevPulseUs && (now_us - s_prevPulseUs) < 2000000u) gLastPulseUs = now_us;
+        s_prevPulseUs = now_us;
+        gClkFlash = 1.f;
+    }
     const bool ext = gLastPulseUs && (now_us - gLastPulseUs) < 2000000u;
     static float gPreExtBpm = 120.f;
     if(ext && !gWasExt)
     {
         gPreExtBpm = gClock.Bpm();                     /* tempo to fall back on */
-        gFollower.Enable(kPpqnTable[gClockSel.sel]);   /* arm the PLL (stops the
-                                                          NCO until 3 pulses lock) */
+        const double tpuBefore = gClock.TicksPerUs();
+        gFollower.Enable(kPpqnTable[gClockSel.sel]);   /* arms the PLL — and stops
+                                                          the NCO at rate 0 */
+        /* Keep playing at the current tempo while the PLL acquires; lock sets
+         * the rate and phase. A stopped NCO made every patch-in a silence. */
+        gClock.SetTicksPerUs(tpuBefore);
+        gClock.Start();
         gP2ExtRef = -1.f; gP2ExtEng = false; gMultZone = 2; gClkMult = 1.f;
     }
     if(!ext && gWasExt)
@@ -928,8 +1030,9 @@ static void ServiceLoad()
         gPendN = gDet.Detect(gLoad, len, kSr, gPendOnsets, kMaxOnsets, nullptr);
     }
 
-    ClassifySteps(gLoad, len, gPendClass, gClass.mode, gPendSal);
-    ComputeEnvelope(gLoad, len, gPendEnv);
+    gPendHint = SliceCountFor(gLoad, len, gPendOnsets, gPendN);
+    ClassifySteps(gLoad, len, gPendClass, gClass.mode, gPendSal, gPendHint);
+    ComputeEnvelope(gLoad, len, gPendEnv, gPendHint);
     gPendLen   = len;
     gCurFile   = gLoadIdx;
     gLoadFlash = 1.f;
@@ -944,7 +1047,9 @@ static void ServiceLoad()
  *                     u8 matGen, u8 grammar, u8 classifier, u8 curFile,
  *                     u8 chop(0..255), u8 histN, u8 histDepth, u8 callFlash,
  *                     f32 bpm, f32 mult, i8 stepSrc[64], u8 stepClass[64],
- *                     u16 pollGapUs, u16 audioUs, u16 jumps, u16 regens (diag)
+ *                     u16 pollGapUs, u16 audioUs, u16 jumps, u16 regens (diag),
+ *                     u16 lockMask, f32 nativeBpm, u8 gridBars, u8 barsOpt (v0.8.0)
+ *   0x63 ACTION ops 7 clear locks · 8 page(u8 0/1)
  *   0x61 GET_ENV    ← u8 first, u8 count(≤30) → u8 status, u8 first, u8 n,
  *                     then n × (8 × {u8 min, u8 max})
  *   0x62 SCOPE      → u8 status, u16 n(256), i8 samples[256] (×4 decimated)
@@ -983,6 +1088,14 @@ struct StateExt : hostlink::IHostlinkExtension
                 w.Bytes(engine.stepClass, bb::Engine::kMaxSlices);
                 /* diagnostics tail (v0.7.3): u16 pollGapUs, u16 audioUs, u16 jumps, u16 regens */
                 w.U16(gDiagPollGapUs); w.U16(gDiagAudioUs); w.U16(gDiagJumps); w.U16(gDiagRegens);
+                /* v0.8.0 tail: u16 lockMask (bit page*6+pot), f32 nativeBpm, u8 bars(grid), u8 barsOpt */
+                uint16_t lm = 0;
+                for(uint8_t pg = 0; pg < 2; pg++)
+                    for(uint8_t p = 0; p < kNumPots; p++)
+                        if(locks.IsActiveAtPage(pg, p)) lm |= (uint16_t)(1u << (pg * kNumPots + p));
+                w.U16(lm);
+                float nb = engine.NativeBpm(); memcpy(&u, &nb, 4); w.U32(u);
+                w.U8((uint8_t)(engine.nSlices / 16)); w.U8(gBars.sel);
                 return;
             }
             case 0x61u:
@@ -1034,6 +1147,14 @@ struct StateExt : hostlink::IHostlinkExtension
                     case 6:
                         if(f.len >= 2 && f.body[1] < gNumFiles && !gLoadReq && !gApply) { gLoadIdx = f.body[1]; gLoadReq = true; }
                         break;
+                    case 7: locks.Clear(); break;              /* clear every motion lock */
+                    case 8:
+                    {
+                        float ph[kNumPots];
+                        for(int i = 0; i < kNumPots; i++) ph[i] = hw.pots[i].Value();
+                        pager.GoToPage(f.len >= 2 && f.body[1] ? 1u : 0u, ph);
+                        break;
+                    }
                     default: w.U8(2u); return;   /* BAD_ARGS */
                 }
                 w.U8(0u);
@@ -1166,11 +1287,29 @@ int main()
             gLoadIdx = gSample.idx < gNumFiles ? gSample.idx : 0;
             gLoadReq = true;
         }
-        if(gClass.dirty && !gReclass && !gApply && engine.bufLen > 0)
+        if(gClass.dirty && !gReclass && !gApply && !gReapply && engine.bufLen > 0)
         {
             gClass.dirty = false;
-            ClassifySteps(gPlay, engine.bufLen, gReclassBuf, gClass.mode, gReclassSal);
+            ClassifySteps(gPlay, engine.bufLen, gReclassBuf, gClass.mode, gReclassSal, engine.nSlices);
             gReclass = true;
+        }
+        /* Bars override / auto re-estimate: re-slice the CURRENT material in
+         * place (classes + envelope recomputed for the new grid first). */
+        if(gBars.dirty && !gApply && !gReapply && !gLoadReq && !gReclass && engine.bufLen > 0)
+        {
+            gBars.dirty = false;
+            const int nsl = SliceCountFor(gPlay, engine.bufLen, gPendOnsets, gPendN);
+            ClassifySteps(gPlay, engine.bufLen, gPendClass, gClass.mode, gPendSal, nsl);
+            ComputeEnvelope(gPlay, engine.bufLen, gPendEnv, nsl);
+            gPendLen  = engine.bufLen;
+            gPendHint = nsl;
+            gReapply  = true;
+        }
+        if(gRests.dirty && !gPendReroll)
+        {
+            gRests.dirty       = false;
+            engine.restSustain = gGrammar.mode >= 2 && gRests.sel == 0;
+            gPendRegen         = true;
         }
         if(gClockSel.dirty)
         {
@@ -1182,7 +1321,7 @@ int main()
         {
             gGrammar.dirty     = false;
             engine.patternMode = gGrammar.mode;
-            engine.restSustain = gGrammar.mode >= 2;   /* Grids/Euclid rests continue the break */
+            engine.restSustain = gGrammar.mode >= 2 && gRests.sel == 0;   /* Grids/Euclid rests continue the break */
             gPendReroll        = true;
         }
         ServiceLoad();
