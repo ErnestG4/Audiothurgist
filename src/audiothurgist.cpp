@@ -54,6 +54,7 @@
 #include "bb_onset.h"
 #include "bb_condition.h"
 #include "bb_classify.h" /* uses capicola's Analyzer (Matthew Nielsen, AGPL) — THIRD_PARTY.md */
+#include "bb_gates.h"    /* GATES: pure lane law (arm / poll / volts) */
 #include "bb_bars.h"
 #include "bb_testbreak.h"
 
@@ -100,15 +101,19 @@ static volatile bool gNeedNativeTempo = false;  /* set on load (audio) → clock
 
 /* Per-class gate outs: J6/J7/J8 = kick/snare/hat (cv jacks).
  * ── musical branch: Gate Length + Gate Level (velocity from salience) ── */
-static constexpr int kGateHold = 1 << 28;            /* "hold to next hit" sentinel */
+static constexpr int kGateHold = bb::kGateHold;      /* "hold to next hit" sentinel */
 static const int kGateLenSamps[4] = { (int)(0.006f * kSr), (int)(0.020f * kSr),
                                       (int)(0.050f * kSr), kGateHold };
 static volatile int   gGateCd[3]     = {0, 0, 0};    /* audio arms/decrements; poll reads */
 static volatile float gGateLvl[3]    = {5.f, 5.f, 5.f}; /* volts for the current gate */
-static volatile bool  gGateRetrig[3] = {false, false, false}; /* Hold mode: fired while high */
+static volatile bool  gGateRetrig[3] = {false, false, false}; /* re-hit while high: one poll low */
 static float          gSal[bb::Engine::kMaxSlices];        /* live per-slice salience 0..1 */
 static float          gPendSal[bb::Engine::kMaxSlices];    /* staged with a load */
 static float          gReclassSal[bb::Engine::kMaxSlices]; /* staged with a reclassify */
+/* GATES */
+static uint8_t        gPendBands[bb::Engine::kMaxSlices];  /* band mask staged with a load /
+                                                              re-slice → engine.stepBands */
+/* GATES end */
 
 /* ── Web frontend state (HostLink extension 0x60–0x6F, see StateExt) ────
  * Per-slice envelope (8 min/max pairs, u8 with 128 = 0) computed at load on
@@ -487,9 +492,9 @@ Page brain = Page(1).Name("Brain").Color("#3a9fe0")
 
 /* ── class analysis: core/bb_classify.h (pure, host-tested) ─────────── */
 static void ClassifySteps(const float* x, int len, uint8_t* cls, int mode,
-                          float* sal = nullptr, int nsl = 0)
+                          float* sal = nullptr, int nsl = 0, uint8_t* bands = nullptr /* GATES */)
 {
-    bb::ClassifySteps(x, len, kSr, cls, mode, sal, nullptr, nsl);
+    bb::ClassifySteps(x, len, kSr, cls, mode, sal, nullptr, nsl, bands);
 }
 
 /* Slice count for material: the Bars override, else the backbeat estimate
@@ -551,6 +556,9 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
         if(gApply) { float* t = gPlay; gPlay = gLoad; gLoad = t; }   /* re-apply keeps the buffer */
         engine.SetMaterial(gPlay, gPendLen, kSr, gPendOnsets, gPendN, gPendClass, gPendHint);
         memcpy(gSal, gPendSal, sizeof gSal);
+        /* GATES */
+        memcpy(engine.stepBands, gPendBands, sizeof engine.stepBands);
+        /* GATES end */
         memcpy(gEnv, gPendEnv, sizeof gEnv);
         gMatGen = (uint8_t)(gMatGen + 1u);
         gNeedNativeTempo = true;
@@ -558,6 +566,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
         gApply = false; gReapply = false;
     }
     engine.gateOnsetsOnly = gGateMode.sel == 1;
+    engine.multiLabel     = gGateLanes.sel == 1;   /* GATES */
 
     if(gPendReslice) { engine.Reslice();   gPendReslice = false; }
     if(gPendReroll)  { engine.RerollFill(); gPendReroll  = false; }
@@ -627,21 +636,26 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
      * (WriteAll + PulseLdac through the PCA9557). Blocking I²C inside the
      * audio ISR deadlocks the module on the first callback — the v0.3.0
      * boot hang. J7/J8 are STM DACs but stay on the same path for uniformity. */
+    /* GATES: the lane law lives in core/bb_gates.h (host-tested): a re-hit
+     * while a lane is high retriggers it (one poll low) in EVERY length
+     * mode; leaving Hold closes a held lane within the new length; a grammar
+     * accent lifts a velocity hit to the 5 V ceiling. */
     uint8_t gf = engine.gateFired; engine.gateFired = 0;
     const int  glen = kGateLenSamps[gGateLen.sel & 3];
     const bool vel  = gGateLvlSel.sel == 1;
     for(int c = 0; c < 3; c++)
     {
-        if(gf & (1u << c))
+        const bool fired = (gf & (1u << c)) != 0;
+        float volts = 0.f;
+        if(fired)
         {
-            if(gGateCd[c] > 0 && glen == kGateHold) gGateRetrig[c] = true; /* re-hit while held */
-            gGateCd[c] = glen;
             int sl = engine.gateSlice[c];
             float sa = (sl >= 0 && sl < bb::Engine::kMaxSlices) ? gSal[sl] : 1.f;
-            gGateLvl[c] = vel ? 1.5f + 3.5f * sa : 5.f;
+            volts = bb::GateVolts(vel, sa, engine.gateAccent[c]);
         }
-        else if(gGateCd[c] > 0 && glen != kGateHold) gGateCd[c] -= n;
+        bb::GateArm(gGateCd[c], gGateLvl[c], gGateRetrig[c], fired, glen, volts, n);
     }
+    /* GATES end */
 
     const float v = gVol, send = gVerbSend;
     for(int i = 0; i < n; i++)
@@ -859,8 +873,8 @@ static void OnPoll(uint32_t /*t_ms*/)
     static float s_lastV[3] = {-1.f, -1.f, -1.f};
     for(int c = 0; c < 3; c++)
     {
-        float v = gGateCd[c] > 0 ? gGateLvl[c] : 0.f;
-        if(gGateRetrig[c]) { v = 0.f; gGateRetrig[c] = false; } /* 1 ms low, then back up */
+        /* GATES: consumes a pending retrigger — this poll low, next poll up */
+        float v = bb::GatePollVolts(gGateCd[c], gGateLvl[c], gGateRetrig[c]);
         if(v != s_lastV[c])
         {
             s_lastV[c] = v;
@@ -1031,7 +1045,7 @@ static void ServiceLoad()
     }
 
     gPendHint = SliceCountFor(gLoad, len, gPendOnsets, gPendN);
-    ClassifySteps(gLoad, len, gPendClass, gClass.mode, gPendSal, gPendHint);
+    ClassifySteps(gLoad, len, gPendClass, gClass.mode, gPendSal, gPendHint, gPendBands /* GATES */);
     ComputeEnvelope(gLoad, len, gPendEnv, gPendHint);
     gPendLen   = len;
     gCurFile   = gLoadIdx;
@@ -1227,7 +1241,7 @@ int main()
                     gPendOnsets[no++] = cues[i];
             }
             static uint8_t cls[bb::Engine::kMaxSlices];
-            ClassifySteps(gPlay, len, cls, gClass.mode, gSal);
+            ClassifySteps(gPlay, len, cls, gClass.mode, gSal, 0, engine.stepBands /* GATES: audio not started */);
             engine.SetMaterial(gPlay, len, kSr, gPendOnsets, no, cls);
             ComputeEnvelope(gPlay, len, gEnv);
             gCurFile = 0;
@@ -1240,7 +1254,7 @@ int main()
         static uint8_t cls[bb::Engine::kMaxSlices];
         int onsets[kMaxOnsets];
         int no = gDet.Detect(gPlay, len, kSr, onsets, kMaxOnsets, nullptr);
-        ClassifySteps(gPlay, len, cls, gClass.mode, gSal);
+        ClassifySteps(gPlay, len, cls, gClass.mode, gSal, 0, engine.stepBands /* GATES */);
         engine.SetMaterial(gPlay, len, kSr, onsets, no, cls);
         ComputeEnvelope(gPlay, len, gEnv);
     }
@@ -1299,7 +1313,7 @@ int main()
         {
             gBars.dirty = false;
             const int nsl = SliceCountFor(gPlay, engine.bufLen, gPendOnsets, gPendN);
-            ClassifySteps(gPlay, engine.bufLen, gPendClass, gClass.mode, gPendSal, nsl);
+            ClassifySteps(gPlay, engine.bufLen, gPendClass, gClass.mode, gPendSal, nsl, gPendBands /* GATES */);
             ComputeEnvelope(gPlay, engine.bufLen, gPendEnv, nsl);
             gPendLen  = engine.bufLen;
             gPendHint = nsl;

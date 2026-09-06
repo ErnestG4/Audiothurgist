@@ -16,6 +16,7 @@
 #include "bb_engine.h"
 #include "bb_classify.h"
 #include "bb_bars.h"
+#include "bb_gates.h"
 
 static int gFail = 0, gPass = 0;
 #define CHECK(cond, ...) do { if(cond) { gPass++; } else { gFail++; printf("  FAIL %s:%d  ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while(0)
@@ -73,6 +74,7 @@ struct Rendered
 {
     std::vector<float> y;          // whole render
     std::vector<uint8_t> gates;    // gateFired per block
+    std::vector<uint8_t> accents;  // GATES: lanes fired WITH a grammar accent, per block
     int blocks = 0;
 };
 // Drive the engine like the shell does: extPhase, barPhase written per block.
@@ -88,6 +90,9 @@ static Rendered RenderLoops(bb::Engine& e, int loops, int block = 24)
         e.barPhase = fmod(t / (double)e.barSeconds, 1.0);
         e.Process(out, block);
         r.y.insert(r.y.end(), out, out + block);
+        uint8_t acc = 0;
+        for(int c = 0; c < 4; c++) if((e.gateFired >> c) & 1 && e.gateAccent[c]) acc |= (uint8_t)(1u << c);
+        r.accents.push_back(acc);
         r.gates.push_back(e.gateFired); e.gateFired = 0;
         r.blocks++;
         t += (double)block / kSr;
@@ -394,6 +399,155 @@ int main()
         // rising frequency per step → density rises with the step index
         int mono = 0; for(int s = 1; s < 15; s++) mono += dens[s] >= dens[s - 1];
         CHECK(mono >= 12, "keyframe density tracks bandwidth (%d/14 rising)", mono);
+    }
+
+    /* ── GATES package ───────────────────────────────────────────────── */
+
+    SECTION("GATES: band mask — kick+hat marks both lanes, pure hits mark one");
+    {
+        // A drum loop on the 16-step grid: 60 Hz kick, 1.8 kHz+noise snare,
+        // 8 kHz + band-limited noise hat (a real hat has nothing under 325 Hz;
+        // white noise there would be a fake kick). Kicks at 0/8 (pure) and 6/14
+        // (with a hat), snares at 4 (with a hat) and 12 (pure), pure hats at
+        // 2/10, a quiet hat carpet on the odd steps, step 15 silent.
+        static float drum[kLen];
+        for(int i = 0; i < kLen; i++) drum[i] = 0.f;
+        uint32_t rng = 7;
+        auto burst = [&](int at, float f, float amp, int n, bool noise, bool bright) {
+            float lp1 = 0.f, lp2 = 0.f;
+            const float a = 1.f - expf(-6.2831853f * 2000.f / kSr);
+            for(int i = 0; i < n && at + i < kLen; i++) {
+                rng = rng * 1664525u + 1013904223u;
+                float nz = noise ? ((float)(rng >> 8) / 8388608.f - 1.f) : 0.f;
+                if(bright) { lp1 += a * (nz - lp1); float h = nz - lp1; lp2 += a * (h - lp2); nz = h - lp2; }
+                float env = expf(-(float)i / (float)n * 5.f);
+                drum[at + i] += amp * env * (0.6f * sinf(6.2831853f * f * i / kSr) + 0.4f * nz);
+            } };
+        auto kick  = [&](int s) { burst(s * kStep, 60.f, 0.9f, 4000, false, false); };
+        auto snare = [&](int s) { burst(s * kStep, 1800.f, 0.8f, 3000, true, false); };
+        auto hat   = [&](int s, float a) { burst(s * kStep, 8000.f, a, 2400, true, true); };
+        kick(0); kick(8); kick(6); kick(14); snare(4); snare(12); hat(2, 0.35f); hat(10, 0.35f);
+        hat(6, 0.35f); hat(14, 0.35f); hat(4, 0.35f);
+        for(int s = 1; s < 15; s += 2) hat(s, 0.15f);
+        uint8_t cls[64], bands[64], ref[64];
+        bb::ClassifySteps(drum, kLen, kSr, cls, 0, nullptr, nullptr, 0, bands);
+        const uint8_t K = 1, S = 2, H = 4;
+        CHECK(bands[0] == K && bands[8] == K, "pure kick steps mark the kick lane only (0:%x 8:%x)", bands[0], bands[8]);
+        CHECK(bands[6] == (K | H) && bands[14] == (K | H), "kick+hat steps mark kick AND hat (6:%x 14:%x)", bands[6], bands[14]);
+        CHECK(bands[2] == H && bands[10] == H, "pure hat steps mark the hat lane only (2:%x 10:%x)", bands[2], bands[10]);
+        CHECK((bands[4] & (S | H)) == (S | H) && !(bands[4] & K), "snare+hat marks snare and hat, not kick (%x)", bands[4]);
+        CHECK((bands[12] & S) && !(bands[12] & K), "pure snare marks the snare lane, not kick (%x)", bands[12]);
+        int carpet = 0; for(int s = 1; s < 15; s += 2) carpet += bands[s] == H;
+        CHECK(carpet == 7, "the quiet hat carpet marks the hat lane only (%d/7)", carpet);
+        CHECK(bands[15] == 0 && cls[15] == 3, "the silent step marks nothing (%x)", bands[15]);
+        int sup = 0; for(int s = 0; s < 15; s++) sup += (bands[s] >> cls[s]) & 1;
+        CHECK(sup == 15, "Multi-label is a superset of the Hockman lens's lane (%d/15)", sup);
+        memcpy(ref, bands, 64);
+        int lensDep = 0;
+        for(int m = 1; m < 4; m++) { bb::ClassifySteps(drum, kLen, kSr, cls, m, nullptr, nullptr, 0, bands); lensDep += memcmp(ref, bands, 64) != 0; }
+        CHECK(lensDep == 0, "the mask is lens-independent (%d lenses differ)", lensDep);
+        // the classification itself is untouched by asking for the mask
+        uint8_t c1[64], c2[64]; float s1[64], s2[64];
+        for(int m = 0; m < 4; m++)
+        {
+            bb::ClassifySteps(gMat, kLen, kSr, c1, m, s1, nullptr, 0, nullptr);
+            bb::ClassifySteps(gMat, kLen, kSr, c2, m, s2, nullptr, 0, bands);
+            CHECK(memcmp(c1, c2, 16) == 0 && memcmp(s1, s2, 16 * sizeof(float)) == 0, "mode %d: classes and salience identical with bandsOut", m);
+        }
+    }
+
+    SECTION("GATES: engine lanes — dominant identical, multi-label raises every marked lane");
+    {
+        // Dominant class with a mask present must be byte-identical to no mask.
+        Fresh(e, 0, 1.f);
+        Rendered r0 = RenderLoops(e, 2);
+        Fresh(e, 0, 1.f);
+        for(int s = 0; s < 16; s++) e.stepBands[s] = (uint8_t)(7u);   // every lane marked everywhere
+        e.multiLabel = false;
+        Rendered r1 = RenderLoops(e, 2);
+        CHECK(r0.gates == r1.gates, "Dominant class ignores stepBands");
+        CHECK(r0.y == r1.y, "…and the audio is unchanged");
+        // Multi-label on constructed masks: kick+hat at step 8, kick only at 0
+        Fresh(e, 0, 1.f);
+        for(int s = 0; s < 16; s++) e.stepBands[s] = (uint8_t)(1u << gCls[s]);
+        e.stepBands[8] = 1 | 4;                                        // a hat rides the kick
+        e.multiLabel = true;
+        Rendered r2 = RenderLoops(e, 2);
+        CHECK(r2.y == r0.y, "multi-label changes lanes, never audio");
+        CHECK(GateEvents(r2, 0) == 4, "kick lane: steps 0 and 8, 2 loops (%d)", GateEvents(r2, 0));
+        CHECK(GateEvents(r2, 2) == GateEvents(r0, 2) + 2, "hat lane gains the kick+hat step (%d vs %d)", GateEvents(r2, 2), GateEvents(r0, 2));
+        int both = 0, kickOnly = 0;
+        for(size_t b = 0; b < r2.gates.size(); b++) { if((r2.gates[b] & 5) == 5) both++; if(r2.gates[b] == 1) kickOnly++; }
+        CHECK(both == 2 && kickOnly == 2, "kick+hat block raises both lanes (%d), pure kick block the kick lane only (%d)", both, kickOnly);
+        // no mask known → the dominant class (no lane is ever lost)
+        Fresh(e, 0, 1.f);
+        e.multiLabel = true;
+        Rendered r3 = RenderLoops(e, 2);
+        CHECK(r3.gates == r0.gates, "stepBands all zero → dominant lanes");
+        // onsets-only and continuations gate multi-label exactly as dominant
+        static const int on[4] = {0, 4 * kStep + 30, 8 * kStep, 12 * kStep - 200};
+        Fresh(e, 0, 1.f);
+        e.SetMaterial(gMat, kLen, kSr, on, 4, gCls, 0);
+        e.RegenPattern();
+        for(int s = 0; s < 16; s++) e.stepBands[s] = 7;
+        e.multiLabel = true; e.gateOnsetsOnly = true;
+        Rendered r4 = RenderLoops(e, 2);
+        CHECK(GateEvents(r4) == 8, "onsets-only: 4 hits × 2 loops = 8 gate blocks (%d)", GateEvents(r4));
+        CHECK(GateEvents(r4, 0) == 8 && GateEvents(r4, 2) == 8, "…each raising every marked lane (K%d H%d)", GateEvents(r4, 0), GateEvents(r4, 2));
+        Fresh(e, 3, 1.f);
+        e.restSustain = true;
+        e.langDens[0] = 4.f / 16.f; e.langDens[1] = 0.f; e.langDens[2] = 0.f; e.langRot = 0.f;
+        e.RegenPattern();
+        for(int s = 0; s < 16; s++) e.stepBands[s] = 7;
+        e.multiLabel = true;
+        Rendered r5 = RenderLoops(e, 2);
+        CHECK(GateEvents(r5) == 8, "continuations raise no lane under multi-label either (%d)", GateEvents(r5));
+    }
+
+    SECTION("GATES: accent → velocity ceiling; the lane law");
+    {
+        CHECK(bb::GateVolts(false, 0.2f, false) == 5.f && bb::GateVolts(false, 0.2f, true) == 5.f, "fixed level is 5 V, accent or not");
+        CHECK(fabsf(bb::GateVolts(true, 0.5f, false) - 3.25f) < 1e-6f && bb::GateVolts(true, 0.f, false) == 1.5f && bb::GateVolts(true, 1.f, false) == 5.f, "velocity maps salience 0..1 → 1.5..5 V");
+        CHECK(bb::GateVolts(true, 0.2f, true) == 5.f, "an accented velocity hit is lifted to the ceiling");
+        // engine side: the grammar's accent rides the gate to the shell
+        Fresh(e, 0, 1.f);
+        e.stepAccent[8] = true;                                        // kick on 3 accented, kick on 1 not
+        Rendered r = RenderLoops(e, 1);
+        int accK = 0, plainK = 0;
+        for(size_t b = 0; b < r.gates.size(); b++) if(r.gates[b] & 1) { if(r.accents[b] & 1) accK++; else plainK++; }
+        CHECK(accK == 1 && plainK == 1, "kick lane: one accented hit, one plain (%d/%d)", accK, plainK);
+        int accOther = 0; for(uint8_t a : r.accents) accOther += (a & ~1u) != 0;
+        CHECK(accOther == 0, "the accent stays on its own lane");
+        e.CallSlice(8, 1.f, false, false, false);
+        CHECK((e.gateFired & 1) && !e.gateAccent[0], "a Voice call gates without an accent");
+
+        // the lane law (bb_gates.h) as the shell drives it: audio arms per
+        // 24-sample block, the poll consumes
+        int cd = 0; float lvl = 0.f; bool rt = false;
+        const int t6 = 288, hold = bb::kGateHold;
+        bb::GateArm(cd, lvl, rt, true, t6, 5.f, 24);
+        CHECK(cd == t6 && lvl == 5.f && !rt, "first hit arms a 6 ms gate, no retrigger");
+        CHECK(bb::GatePollVolts(cd, lvl, rt) == 5.f, "poll writes the level");
+        for(int i = 0; i < 20; i++) bb::GateArm(cd, lvl, rt, false, t6, 0.f, 24);
+        CHECK(cd <= 0 && bb::GatePollVolts(cd, lvl, rt) == 0.f, "…and it closes after 6 ms");
+        bb::GateArm(cd, lvl, rt, true, t6, 5.f, 24);
+        bb::GateArm(cd, lvl, rt, false, t6, 0.f, 24);
+        bb::GateArm(cd, lvl, rt, true, t6, 3.f, 24);                   // a ratchet 1 ms later, quieter
+        CHECK(rt && cd == t6 && lvl == 3.f, "re-hit while high: retrigger flagged, gate re-armed at the new level");
+        CHECK(bb::GatePollVolts(cd, lvl, rt) == 0.f && !rt, "the next poll is the low…");
+        CHECK(bb::GatePollVolts(cd, lvl, rt) == 3.f, "…and the one after is up again at the new level");
+        // Hold: never counts down; only a re-hit on the same lane retriggers
+        cd = 0; lvl = 0.f; rt = false;
+        bb::GateArm(cd, lvl, rt, true, hold, 5.f, 24);
+        for(int i = 0; i < 48000; i++) bb::GateArm(cd, lvl, rt, false, hold, 0.f, 24);
+        CHECK(cd == hold && bb::GatePollVolts(cd, lvl, rt) == 5.f, "Hold stays up through 24 s of silence");
+        bb::GateArm(cd, lvl, rt, true, hold, 5.f, 24);
+        CHECK(rt && bb::GatePollVolts(cd, lvl, rt) == 0.f && bb::GatePollVolts(cd, lvl, rt) == 5.f, "a re-hit on a held lane: one poll low, then up");
+        // Leaving Hold for a timed length closes a held lane within that length
+        bb::GateArm(cd, lvl, rt, false, t6, 0.f, 24);
+        CHECK(cd == t6 - 24, "Hold → 6 ms: the held lane now counts down from 6 ms, not 2^28 samples (cd %d)", cd);
+        for(int i = 0; i < 12; i++) bb::GateArm(cd, lvl, rt, false, t6, 0.f, 24);
+        CHECK(bb::GatePollVolts(cd, lvl, rt) == 0.f, "…and is closed 6 ms later");
     }
 
     printf("\n%d passed, %d failed\n", gPass, gFail);

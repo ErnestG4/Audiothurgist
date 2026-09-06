@@ -135,6 +135,13 @@ struct Engine
                                // shell reads+clears it to raise CV gates
     int8_t  gateSlice[4] = {-1, -1, -1, -1}; // source slice of the last trigger
                                // per class (pure data; shell maps to velocity)
+    bool    gateAccent[4] = {}; /* GATES */ // the last trigger per class carried a
+                               // grammar accent (stepAccent) — shell → velocity ceiling
+    uint8_t stepBands[kMaxSlices] = {}; /* GATES */ // per-slice band-presence mask
+                               // (bit c = class c present, bb_classify.h rule);
+                               // 0 = unknown → the dominant class is used
+    bool    multiLabel = false; /* GATES */ // Options → Gate Lanes: raise every
+                               // lane in stepBands instead of 1 << stepClass
     float   barSeconds = 2.f; // GRID duration: our tempo, not the file's
     float   nativeStep = 0.f; // source samples per source 16th
     float   bpm        = 0.f; // 0 = native tempo
@@ -432,12 +439,26 @@ struct Engine
     float callRate      = 1.f;
     bool  callRev       = false;
 
+    /* GATES: raise the lanes for source slice `idx`. Dominant class: the
+     * lens's label (1 << stepClass). Multi-label: every band the classifier
+     * marked present (stepBands), the dominant class when no mask is known.
+     * Per-class bookkeeping (slice → salience, accent → ceiling) for the
+     * shell's velocity mapping. Callers decide WHETHER a gate is due
+     * (continuations, onsets-only) — this only says WHICH lanes. */
+    void RaiseGates(int idx, bool accent)
+    {
+        uint8_t m = (uint8_t)(1u << (stepClass[idx] & 3));
+        if(multiLabel && stepBands[idx]) m = stepBands[idx];
+        gateFired |= m;
+        for(int c = 0; c < 4; c++)
+            if(m & (1u << c)) { gateSlice[c] = (int8_t)idx; gateAccent[c] = accent; }
+    }
+
     void FireSlice(int idx, float rate, bool rev)
     {
         Slice cell = slices[idx];
         if(cell.len < 64) return;
-        gateFired |= (uint8_t)(1u << (stepClass[idx] & 3));
-        gateSlice[stepClass[idx] & 3] = (int8_t)idx;
+        RaiseGates(idx, false); /* GATES: a call is never accented */
         Voice*   v    = &voices[0];
         uint32_t best = 0;
         for(int i = 0; i < kVoices; i++)
@@ -596,10 +617,7 @@ struct Engine
         /* a continuation is not a hit: no gate; in onsets-only mode neither
          * is a slice that does not open with a drum */
         if(!stepCont[k] && (!gateOnsetsOnly || stepHit[s]))
-        {
-            gateFired |= (uint8_t)(1u << (stepClass[s] & 3));
-            gateSlice[stepClass[s] & 3] = (int8_t)s;
-        }
+            RaiseGates(s, stepAccent[k]); /* GATES */
         // VARISPEED: rate follows tempo like a record — each slot consumes
         // exactly one slice of source (slotSamples × rate == nativeStep), so
         // the continuity branch holds at EVERY tempo: verbatim runs stay
