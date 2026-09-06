@@ -50,7 +50,7 @@ struct OnsetDetector
     // mode 1 scratch
     int   bandEdge[kMaxBands + 1];
     int   nBands;
-    float bandL[kMaxBands], prevBandL[kMaxBands];
+    float prevBandL[kMaxBands];
 
     // Returns onset count. out[0] is always 0 (the buffer start is a slice).
     // salience (optional, same length as out) receives each onset's flux peak

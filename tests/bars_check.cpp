@@ -7,6 +7,7 @@
 //   /tmp/bc [--onsets 0|1] [--speed S] [--bpm N] break.wav [...]
 //   /tmp/bc --truth tests/bars_truth.txt --root analysis/breaks [--speed S]
 //   /tmp/bc --root analysis/breaks --list files.txt      (no truth: grid vs prior)
+//   /tmp/bc --csv ...                                    (tab-separated, one line per file)
 // Flags before a file apply to it: --bpm states its truth, --speed resamples
 // it (varispeed: tempo × S). --truth reads "<bpm>\t<file>" lines (# comments)
 // and runs every file under --root. --quiet prints the summary only.
@@ -31,6 +32,7 @@ struct Tally
     int tried = 0, priorOk = 0, newOk = 0, newSpoke = 0, newWrong = 0, newOctave = 0;
 };
 
+static bool gCsv = false;   /* --csv: one machine-readable line per file (tests/bars_corpus.sh, cross-checks) */
 static void RunOne(const char* path, float truth, float speed, int onsetMode, bool quiet, Tally& t)
 {
     std::vector<float> x; float sr;
@@ -70,6 +72,13 @@ static void RunOne(const char* path, float truth, float speed, int onsetMode, bo
 
     const char* base = strrchr(path, '/'); base = base ? base + 1 : path;
     const bool  spoke = bars > 0;
+    if(gCsv)
+    {
+        printf("%s\t%.3f\t%.2f\t%.2f\t%.2f\t%d\t%d\t%.4f\t%.3f\t%.3f\t%.3f\t%.2f\n", base, len / sr, priorBpm, estBpm, gridBpm,
+               spoke ? 1 : 0, nsl / 16, (float)ci.trimmedStart / sr, est.conf, est.fit, sw.p, truth);
+        if(truth > 0.f) { t.tried++; t.priorOk += fabsf(priorBpm - truth) < 0.04f * truth; t.newOk += fabsf(gridBpm - truth) < 0.04f * truth; t.newSpoke += spoke; }
+        return;
+    }
     if(truth > 0.f)
     {
         t.tried++;
@@ -107,6 +116,7 @@ int main(int argc, char** argv)
         if(!strcmp(argv[a], "--root") && a + 1 < argc)   { root = argv[++a]; continue; }
         if(!strcmp(argv[a], "--truth") && a + 1 < argc)  { truthFile = argv[++a]; continue; }
         if(!strcmp(argv[a], "--quiet"))                  { quiet = true; continue; }
+        if(!strcmp(argv[a], "--csv"))                    { gCsv = true; quiet = true; printf("file\tdur\tprior_bpm\test_bpm\tgrid_bpm\tspoke\tbars\thead_trim_s\tconf\tfit\tswing_p\ttruth\n"); continue; }
         if(!strcmp(argv[a], "--list") && a + 1 < argc)   /* one path per line, no truth */
         {
             FILE* f = fopen(argv[++a], "r");
