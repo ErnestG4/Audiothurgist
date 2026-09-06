@@ -18,7 +18,7 @@ inside `/* SLICE */` comments, straight path byte-identical), `src/audiothurgist
 (hooks inside `/* SLICE */` fences), `tests/engine_check.cpp` (four new
 sections appended), `tests/bars_check.cpp` (rewritten: the firmware pipeline),
 `tests/bars_truth.txt`, `tests/bars_corpus.sh`, `tests/run.sh` (builds
-bars_check).
+bars_check), `tests/neural/` (Beat This! cross-check, needs the GPU venv).
 
 ## 1. Onsets: log-filtered flux + Dixon peak rule
 
@@ -177,6 +177,54 @@ a 200-file sample it speaks on 93 (46 %): 50 same as the prior, 42 double it
 per file. Total analysis cost on the M7 is dominated by onset detection: two
 detections per load as before (three for files over 9.5 s), the estimator
 itself is a few ms.
+
+### Neural cross-check (Beat This!, RTX 4090) — all 1,230 files
+
+Frane's 45 files settle accuracy; they cannot say how the estimator behaves
+on the other 1,185 breaks. So the whole corpus was also run through
+**Beat This!** (Foscarin, Schlüter & Widmer 2024; `final0` checkpoint, no
+DBN), a neural beat/downbeat tracker, on the 4090 — 61 s for the corpus.
+Scripts: `tests/neural/beatthis_corpus.py` (setup line in its header, ~3 GB
+venv), `bars_check --csv`, `tests/neural/compare_bt.py`. The tracker is an
+*opinion*, not truth: on the 45 Frane files it is right on 39 and plays
+double-time on 6 (Funky Drummer, It's A New Day ×3, Meter Man, I'm Glad
+You're Mine — all of which the estimator gets right); at 1.5× it is right on
+43. Tempo agreement classes are ±4 %; "spoke" = the estimator's grid,
+"prior" = the duration prior stood.
+
+| | files | same tempo | tracker ×2 of grid | grid ×2 of tracker | other ratio |
+|---|---|---|---|---|---|
+| 1.0× estimator spoke | 674 | **571 (85 %)** | 46 (7 %) | 16 (2 %) | 41 (6 %) |
+| 1.0× prior stood | 493 | 254 (52 %) | 57 (12 %) | 1 | 181 (37 %) |
+| 1.5× estimator spoke | 568 | **518 (91 %)** | 13 (2 %) | 3 (1 %) | 34 (6 %) |
+| 1.5× prior stood | 581 | 124 (21 %) | 194 (33 %) | 1 | 262 (45 %) |
+
+Reading it: where the estimator speaks it agrees with an independent
+neural tracker on 85–91 %; where it stays silent the prior is right about
+half the time at native speed and a fifth of the time sped up (the prior
+halves a third of the sped-up files — the field bug, now measured). Most of
+the 46 "tracker ×2" files at 1.0× are the tracker's double-time habit (it
+does the same to 6 of the 45 known files). The estimator's own recurring
+error is the mirror image: ~8 files at 130–160 BPM with a **half-time snare
+on 3** (Steve Grey "Pulp", Procol Harum, Fancy, Bill Withers "Use Me") come
+out at 65–75 BPM — the snare-on-2-and-4 convention halving a half-time
+groove. A musician would count those either way; a Bars override fixes them
+in one click.
+
+**Downbeat.** For spoken files that agree on tempo, the conditioning's cut
+position lies within a 16th of a neural downbeat on **451/570 (79 %)** at
+1.0× and **419/517 (81 %)** at 1.5×. The residual is dominated by the
+half-bar rotation (±0.5 bar: 32 and 33 files) on bars whose two halves are
+alike (K-S-K-S), where "beat 1" is a convention the audio does not carry;
+the remaining offsets are spread thinly.
+
+### v0.9.2 review fixes (merged)
+
+`SwingFor` measured swing against the slice grid whatever its resolution;
+past 4 bars (8th-note slices) straight 16th hats at 0.5 and 0.75 of the cell
+read as one swung cluster. It now only speaks when bars × 16 is the grid. The
+boot test break keeps its onset table for later re-applies. (The adversarial
+review's H1/H2/M1/M4/M5/L1 fixes landed in v0.9.1.)
 
 ## 3. Swing: the material's own 16ths
 
