@@ -56,8 +56,8 @@ Defaults as of **v0.9.3-defaults** (stage 17), per Ernest: the recommendations s
 - [ ] Swing Auto on a swung break vs Straight.
 
 ## Known / deferred
-- DTCM is at 84 % (the bar estimator's scratch is static); next big thing must move analysis scratch to SDRAM.
+- DTCM is at 64 % after the review moved the bar estimator's scratch and the lock arena to SDRAM.
 - Under Swing Auto, class/envelope of odd steps can be up to 0.3 step off (equal-step analysis).
 - History scrub replays with the current grammar params; presets saved with a card don't load cardless.
 - Least-squares clock period estimator is evaluated (4–5× better than the SDK's EMA on an E-RM-shaped train) but needs an SDK hook — a question for Luke.
-- Onsets = Log-filtered is probably the better default; left as an option per your rule.
+- Onsets = Log-filtered is now the default (v0.9.3); Spectral flux stays selectable.
