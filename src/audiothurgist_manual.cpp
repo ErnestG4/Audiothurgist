@@ -56,14 +56,29 @@ static Manual manual =
             "(Options) a call also writes itself into the bar at the current "
             "step — playing is editing. Mute + punch composes a loop from "
             "silence.")
+        .Section("buttons", "The three buttons",
+            "**B1** tap: Perform ↔ Brain page. **B1 held 300 ms + turn a pot**: "
+            "record that pot's motion as a loop that replays until you hold "
+            "and nudge it again (a green pip at 6 o'clock marks a locked pot; "
+            "*Clear locks* in the web app removes them all). **B2** tap: dice "
+            "(a new arrangement of the same slices); hold: *flow*, a new bar "
+            "every loop until released. **B3** tap: reslice (new cell tree); "
+            "hold: load the highlighted file. **B2 + B3 held 2 s**: Settings "
+            "(brightness, preset save/load); B2 or B3 leaves. B1 also shows "
+            "the clock: white per pulse, green when locked.")
         .Section("brain", "Clock in, gates out",
             "Patch a clock into J3 and set its PPQN in Options; B1 flashes "
-            "white per pulse and sits green when locked. While following, P2 "
-            "becomes a clock divider/multiplier (÷4 · ÷2 · ×1 · ×2 · ×4, wide "
-            "×1 centre) and engages once you move it. Unpatch and the tempo "
-            "holds until P2 moves. Gates on J6/J7/J8 follow the classifier's "
-            "labels; Gate Length and Gate Level (velocity from each slice's "
-            "loudness) live in Options.")
+            "white per pulse and sits green when locked (the loop aligns to "
+            "the pulse grid at lock). While following, P2 becomes a clock "
+            "divider/multiplier (÷4 · ÷2 · ×1 · ×2 · ×4, wide ×1 centre) that "
+            "engages once you move it and switches on the next beat, in "
+            "phase. Unpatch and the tempo holds until P2 moves. Gates on "
+            "J6/J7/J8 follow the classifier's labels: *Gate Fires* chooses "
+            "every step or once per hit (as drums do), *Gate Lanes* can mark "
+            "every class present in a hit, Gate Length and Gate Level "
+            "(velocity from loudness, accents to the ceiling) shape them. "
+            "If a break plays at half or double speed against your clock, "
+            "set **Bars** in Options — the bar guess is the culprit.")
         .Section("languages", "Pattern languages (Grammar, in Options)",
             "**Classic** is BreakFix's Brocot cell grammar. **Collins** adds "
             "the breakbeat-science upgrades: faithful early in the phrase, "
@@ -74,7 +89,24 @@ static Manual manual =
             "and three densities on the **Brain** page (B1). **Euclid** "
             "spaces each class's hits evenly with Rotation. In both, the Chop "
             "knob sets how faithfully slices are chosen: full right plays "
-            "each class's own nearest hit, lower swaps within the class.")
+            "each class's own nearest hit, lower swaps within the class; a "
+            "rest lets the break run on underneath (or gates it: *Rests*). "
+            "**Camp** rings the bar's cells through change-ringing "
+            "permutations — deterministic, B2 rings the next change.")
+        .Section("options", "Options, one line each",
+            "**Classifier** — which lens labels kick/snare/hat (Hockman "
+            "3-band, the legacy hi/lo split, two-band, or keyframe density). "
+            "**Clock In** — J3 PPQN. **Voice** — Choke or Punch. **Gate "
+            "Length / Level / Fires / Lanes** — see the Brain section. "
+            "**Grammar** — the pattern language. **Bars** — override the bar "
+            "guess (Auto reads the backbeat). **Rests** — continue or gate. "
+            "**Fades** — fixed, or adaptive to each slice's brightness. "
+            "**Slice Tail** — when a slot outlasts its slice (pitched up): "
+            "gate, loop forward, or ping-pong. **Swaps** — class only, or "
+            "class + loudness tier (a ghost never replaces a backbeat). "
+            "**Flow Déjà Vu** — some flow bars replay from history. **Swing** "
+            "— slice and step at the material's own swing. **Onsets** — the "
+            "onset detector behind the bar guess and hit gates.")
         .Section("cards", "Cards and loading",
             "FAT32 microSD, WAVs in the root, 1–4 bar breaks are ideal "
             "(longer files trim to their first four bars; levels normalise on "
@@ -98,7 +130,7 @@ void DescribeManual(hostlink::Host& host)
     k_chop.Help("**Chop character** — the journey from verbatim (full right) "
                 "to rolls, bursts and reverb (full left).")
           .SeeAlso(k_hist);
-    k_tempo.Help("**Tempo**, 70–180 BPM, varispeed like vinyl. Snaps to the "
+    k_tempo.Help("**Tempo**, 60–200 BPM, varispeed like vinyl. Snaps to the "
                  "break's own tempo within ±2 BPM. While following an "
                  "external clock it becomes a ÷4…×4 multiplier.")
            .SeeAlso(jk3);
@@ -121,9 +153,10 @@ void DescribeManual(hostlink::Host& host)
        .SeeAlso(jk5);
     jk5.Help("**Gate** — each rising edge samples J4 and dispatches.")
        .SeeAlso(jk4);
-    jk6.Help("**Kick gate out** — fires with every kick-class step.");
-    jk7.Help("**Snare gate out** — fires with every snare-class step.");
-    jk8.Help("**Hat gate out** — fires with every hat-class step.");
+    jk6.Help("**Kick gate out** — every kick-class step, or once per hit "
+             "(Gate Fires); Gate Lanes can add it to mixed hits.");
+    jk7.Help("**Snare gate out** — every snare-class step, or once per hit.");
+    jk8.Help("**Hat gate out** — every hat-class step, or once per hit.");
     jk9.Help("Audio out, left.");
     jk10.Help("Audio out, right.");
 
