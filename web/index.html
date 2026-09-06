@@ -49,7 +49,7 @@
   .knob.inert{opacity:.5} .knob .n{display:flex;align-items:center;gap:6px;font-weight:600} .knob .n .p{color:var(--mute);font-weight:500;font-size:12px}
   .knob .m{font-size:12px;color:var(--mute);margin-top:2px} .knob .v{font-size:12px;color:var(--ink)}
   .knob .lk{margin-left:auto;font-size:11px;color:#111;background:var(--lock);border-radius:6px;padding:1px 6px;font-weight:600}
-  .zones{display:inline-flex;gap:2px} .zones span{padding:0 5px;border-radius:5px;background:#1f1f24;color:var(--mute)} .zones span.on{background:var(--accent);color:#111;font-weight:600}
+  .zones{display:inline-flex;gap:2px} .zones span{padding:0 5px;border-radius:5px;background:#1f1f24;color:var(--mute)} .zones span.on{background:var(--accent);color:#111;font-weight:600} .zones span.pend{outline:1px dashed var(--accent);color:var(--accent)}
   .page-perform .knob{border-color:#3a2a1a} .page-brain .knob{border-color:#1a2e3f}
   /* Options */
   .grp{margin-bottom:8px} .grp h3{font-size:12px;color:var(--mute);margin:8px 0 4px;text-transform:uppercase;letter-spacing:.1em}
@@ -111,8 +111,8 @@
         <div class="gest"><span class="how">LED</span><span>white flash per clock pulse · green while locked to the clock</span></div>
       </div>
       <div class="b">B2</div><div class="g">
-        <div class="gest"><span class="how">tap</span><em>Dice — a new fill</em><button id="b_dice" class="mini">🎲 Dice</button></div>
-        <div class="gest" id="g_flow"><span class="how">hold &gt; 300 ms</span><em>Flow — a new fill every bar while held</em><button id="b_flow" class="mini">Flow</button></div>
+        <div class="gest"><span class="how">tap</span><em id="g_b2tap">Dice — a new fill</em><button id="b_dice" class="mini">🎲 Dice</button></div>
+        <div class="gest" id="g_flow"><span class="how">hold &gt; 300 ms</span><em id="g_b2hold">Flow — a new fill every bar while held</em><button id="b_flow" class="mini">Flow</button></div>
       </div>
       <div class="b">B3</div><div class="g">
         <div class="gest"><span class="how">tap</span><em>Reslice — re-splice the burst centres</em><button id="b_reslice" class="mini">✂ Reslice</button></div>
@@ -157,7 +157,7 @@
 <script src="demo.js"></script>
 <script>
 'use strict';
-const { CMD, ACT, Link, hello, getDescriptor, getLive, setLive, parseState, fetchEnv, parseScope, fieldLabels, pagerInfo, optionsInfo, manualInfo } = HL;
+const { CMD, ACT, ZONE_MULT, Link, hello, getDescriptor, getLive, setLive, parseState, fetchEnv, parseScope, fieldLabels, pagerInfo, optionsInfo, manualInfo } = HL;
 const $ = id => document.getElementById(id);
 const COL = ['#eb4614', '#28c878', '#e6c828', '#3c78e6'];
 
@@ -243,9 +243,18 @@ function drawText() {
   setText('k_grid', st.gridBars != null ? `${st.gridBars} bar${st.gridBars === 1 ? '' : 's'} · ${st.nSlices} steps` : st.nSlices + ' steps');
   const barsSel = $('k_bars').firstElementChild;
   if (!barsSel) setText('k_bars', st.barsOpt != null ? (optLabel('bars', st.barsOpt) ?? String(st.barsOpt)) : '—');
+  /* Clock line: state · applied multiplier (→ requested one while a beat-aligned
+   * switch is pending) · aligned · jitter peak / rms · external-clock transitions. */
   let clk = st.ext ? (st.locked ? 'locked' : 'following') : 'internal';
-  if (st.ext) clk += ' · ' + multLabel(st.mult) + (st.multZone != null ? ` (zone ${st.multZone})` : '');
-  if (st.jitterUs != null && st.ext) clk += ` · jitter ${st.jitterUs} µs`;
+  if (st.ext) {
+    clk += ' · ' + multLabel(st.mult);
+    if (st.multPending && st.multZone != null && ZONE_MULT[st.multZone] !== st.mult) clk += ` → ${multLabel(ZONE_MULT[st.multZone])} pending`;
+    else if (st.multZone != null && st.clkFlags == null) clk += ` (zone ${st.multZone})`;
+    if (st.p2Engaged === false) clk += ' · P2 not engaged';
+    if (st.aligned) clk += ' · aligned';
+    if (st.jitterUs != null) clk += ` · jitter ${st.jitterUs}` + (st.jitterRmsUs != null ? ` / ${st.jitterRmsUs} rms` : '') + ' µs';
+  }
+  if (st.extTrans != null) clk += ` · ext ${st.extTrans}`;
   setText('k_clock', clk);
   $('b_mute').classList.toggle('on', st.muted); $('b_flow').classList.toggle('on', st.flowing); $('g_flow').classList.toggle('live', st.flowing);
   setPill('bpmpill', st.bpm.toFixed(1) + ' BPM' + (st.mult !== 1 ? ' ' + multLabel(st.mult) : ''), '');
@@ -270,20 +279,29 @@ const knobCells = [];
     host.appendChild(el); knobCells.push({ el, name: el.querySelector('.name'), lk: el.querySelector('.lk'), v: el.querySelector('.v'), m: el.querySelector('.m') });
   }
 })();
+/* Camp (grammar 4): the Chop knob is the number of bells — GenerateCamp maps
+ * the norm ≥1 → rounds (the bar verbatim), ≥0.5 → 4, ≥0.25 → 8, else 16. */
+const campBells = chop => chop >= 255 ? 'rounds' : chop >= 128 ? '4 bells' : chop >= 64 ? '8 bells' : '16 bells';
 function knobMeaning(page, pot) {
-  const gram = st.grammar, gname = labels.grammar[gram] ?? ('grammar ' + gram), gridsLike = gram >= 2;
+  const gram = st.grammar, gname = labels.grammar[gram] ?? ('grammar ' + gram), gridsLike = gram === 2 || gram === 3, camp = gram === 4;
   if (page === 0) switch (pot) {
-    case 0: return gridsLike ? ['slice-choice faithfulness: full right = each class plays its own nearest hit, lower = swaps within the class', `${Math.round(st.chop / 2.55)}%`]
+    case 0: return camp ? ['number of bells rung: full right = rounds (the bar verbatim), then 4 · 8 · 16 bells; B2 rings the next change', campBells(st.chop)]
+                 : gridsLike ? ['slice-choice faithfulness: full right = each class plays its own nearest hit, lower = swaps within the class', `${Math.round(st.chop / 2.55)}%`]
                              : ['the journey: verbatim (right) → beat swaps → chops → rolls → cluster + reverb (left)', `${Math.round(st.chop / 2.55)}%`];
-    case 1: if (st.ext) { const z = st.multZone != null ? st.multZone : [0.25, 0.5, 1, 2, 4].indexOf(st.mult);
-              return ['clock multiplier while following (engages once moved)', ['÷4', '÷2', '×1', '×2', '×4'].map((l, i) => `<span class="${i === z ? 'on' : ''}">${l}</span>`).join(''), true]; }
+    case 1: if (st.ext) {
+              /* The applied multiplier lights its zone; while a beat-aligned switch is pending the requested zone is outlined. */
+              const playing = ZONE_MULT.indexOf(st.mult), req = st.multZone != null ? st.multZone : playing;
+              const pend = st.multPending && req !== playing ? req : -1, on = playing >= 0 ? playing : req;
+              const note = st.p2Engaged === false ? ' — not engaged yet' : pend >= 0 ? ` — ${multLabel(ZONE_MULT[pend])} at the next beat` : '';
+              return ['clock multiplier while following (engages once moved; a change lands on a beat)' + note,
+                      ['÷4', '÷2', '×1', '×2', '×4'].map((l, i) => `<span class="${i === on ? 'on' : i === pend ? 'pend' : ''}">${l}</span>`).join(''), true]; }
             return ['internal tempo 60–200 BPM; snaps to the break\'s own tempo within ±2; engages once moved', st.bpm.toFixed(1) + ' BPM' + (st.nativeBpm != null ? ` · native ${st.nativeBpm.toFixed(1)}` : '')];
     case 2: return ['the last sixteen patterns: counter-clockwise older, full clockwise now', st.histN ? `${st.histN - st.histDepth}/${st.histN}` : 'empty'];
     case 3: return ['±12 semitones; onsets stay on the grid, the kit retunes', ''];
     case 4: return ['highlights a file on the card; hold B3 to load it', st.file === 255 ? 'synth break' : (labels.sample[st.file] ?? '')];
     case 5: return ['output level; the reverb tail rides the cluster zone', ''];
   }
-  const inert = !gridsLike ? `inert in ${gname} (Brain knobs are live in Grids and Euclid)` : null;
+  const inert = camp ? 'unused in Camp (the bells are set by P1 on the Perform page)' : !gridsLike ? `inert in ${gname} (Brain knobs are live in Grids and Euclid)` : null;
   switch (pot) {
     case 0: case 1: return inert ? [inert, '', false, true] : gram === 2 ? ['Grids drum-map coordinate', ''] : ['unused in Euclid', '', false, true];
     case 2: case 3: case 4: return inert ? [inert, '', false, true] : gram === 2 ? ['Grids density threshold for this class', ''] : ['Euclid hits per bar for this class', ''];
@@ -293,8 +311,11 @@ function knobMeaning(page, pot) {
 let ctlSig = '';
 function drawControls() {
   const page = st.brain ? 1 : 0;
-  const sig = [page, st.grammar, st.ext, st.locked, st.mult, st.multZone, st.lockMask, st.flowing, st.muted, st.file, st.histN, st.histDepth, st.chop, Math.round(st.bpm), st.nSlices, labels.sample.length].join('|');
+  const sig = [page, st.grammar, st.ext, st.locked, st.mult, st.multZone, st.clkFlags, st.lockMask, st.flowing, st.muted, st.file, st.histN, st.histDepth, st.chop, Math.round(st.bpm), st.nSlices, labels.sample.length].join('|');
   if (sig === ctlSig) return; ctlSig = sig;
+  const camp = st.grammar === 4;   /* Camp: B2 steps the ringing method instead of drawing a fill */
+  setText('g_b2tap', camp ? 'Ring the next change (deterministic — nothing is drawn)' : 'Dice — a new fill');
+  setText('g_b2hold', camp ? 'Flow — ring a change every bar while held (walks the method)' : 'Flow — a new fill every bar while held');
   $('knobs').className = 'knobs page-' + (page ? 'brain' : 'perform');
   const pname = (pager && pager.names[page]) || (page ? 'Brain' : 'Perform');
   setPill('ctl_page', pname + ' page', page ? 'brain' : '');
@@ -442,7 +463,7 @@ function buildManual() {
     }
   }
   h += '<h3>Buttons</h3><dl><dt>B1</dt><dd>tap: page Perform ↔ Brain · hold 300 ms + turn a pot: record a motion lock (hold + nudge again clears it) · LED: clock pulse / lock</dd>'
-     + '<dt>B2</dt><dd>tap: dice (new fill) · hold &gt; 300 ms: flow (a new fill every bar while held)</dd>'
+     + '<dt>B2</dt><dd>tap: dice (new fill; in Camp, ring the next change) · hold &gt; 300 ms: flow (a new fill every bar while held)</dd>'
      + '<dt>B3</dt><dd>tap: reslice · hold &gt; 400 ms: load the file highlighted by P5</dd>'
      + '<dt>B2 + B3</dt><dd>held 2 s: Settings (brightness, preset save/load); B2 or B3 leaves</dd></dl>'
      + '<p style="font-size:12px;color:var(--mute)">Button gestures are read from the firmware source (OnPoll), not the descriptor — this module declares its pots through a Pager, which carries no button metadata.</p>';
@@ -481,20 +502,22 @@ async function connect() {
   try { const port = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x0483 }] }); await connectPort(port, false); }
   catch (e) { if (e.name !== 'NotFoundError') notice('Connect failed: ' + e.message); }
 }
-/* ?demo[=brain,ext,grids,euclid,locks,old] — the fake module, optionally
- * started on the Brain page, following a clock, in a grammar, with locks,
- * or with a pre-v0.8.0 state body (no tails). */
+/* ?demo[=brain,ext,pending,grids,euclid,camp,locks,old,short] — the fake
+ * module, optionally started on the Brain page, following a clock (with a
+ * multiplier switch left pending), in a grammar, with locks, with a
+ * pre-v0.8.0 state body (no tails) or the 167-byte CLOCK body (no flags). */
 async function connectDemo(flags = '') {
   if (link) return; notice('');
   const f = new Set(flags.split(',').filter(Boolean));
-  demoDevice = new DEMO.FakeDevice({ tail: f.has('old') ? 148 : 167, latencyMs: 6 });
+  demoDevice = new DEMO.FakeDevice({ tail: f.has('old') ? 148 : f.has('short') ? 167 : 170, latencyMs: 6 });
   const d = demoDevice;
   if (f.has('brain')) d.brain = true;
-  if (f.has('ext')) { d.ext = true; d.locked = true; d.mult = 2; d.multZone = 3; }
-  if (f.has('grids')) d.options[5] = 2; if (f.has('euclid')) d.options[5] = 3;
+  if (f.has('ext')) { d.ext = true; d.locked = true; d.mult = 2; d.multZone = 3; d.p2Engaged = true; }
+  if (f.has('pending')) { d.multZone = 4; d.pending = true; }
+  if (f.has('grids')) d.options[5] = 2; if (f.has('euclid')) d.options[5] = 3; if (f.has('camp')) d.options[5] = 4;
   if (f.has('locks')) d.lockMask = 0x0049;
   await connectPort(new DEMO.FakePort(d), true);
-  if (!f.size && demoDevice) setInterval(() => { if (!demoDevice) return; demoDevice.ext = !demoDevice.ext; demoDevice.locked = demoDevice.ext; demoDevice.lockMask = demoDevice.ext ? 0x0009 : 0; demoDevice.mult = demoDevice.ext ? 2 : 1; demoDevice.multZone = demoDevice.ext ? 3 : 2; }, 12000);
+  if (!f.size && demoDevice) setInterval(() => { if (!demoDevice) return; const d = demoDevice; d.ext = !d.ext; d.locked = d.ext; d.lockMask = d.ext ? 0x0009 : 0; d.mult = d.ext ? 2 : 1; d.multZone = d.ext ? 3 : 2; d.p2Engaged = d.ext; d.aligned = d.ext; }, 12000);
 }
 $('connect').onclick = connect; $('demo').onclick = () => connectDemo();
 if (!('serial' in navigator)) { notice('Web Serial is not available here. Use Chrome/Edge/Opera on https:// or http://localhost — file:// will not work. The Demo button works anywhere.'); $('connect').disabled = true; }

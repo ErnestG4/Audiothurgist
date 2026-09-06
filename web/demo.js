@@ -1,7 +1,8 @@
 /* demo.js — a fake Audiothurgist on a fake serial port.
  *
  * Answers HostLink frames exactly as the firmware would (same framing, same
- * StateExt layouts including the v0.8.0 and CLOCK tails, a descriptor in
+ * StateExt layouts including the v0.8.0 and CLOCK tails — 170 bytes with
+ * the clock flags and RMS jitter, or shorter on request — a descriptor in
  * the SDK's shape with the Options block, pager help and the manual), so
  * the page can be exercised without hardware — open index.html?demo — and
  * so selftest.mjs can drive the real Link end to end. The port exposes
@@ -20,7 +21,7 @@ const OPTION_FIELDS = [
   ['voice.mode', 'Voice', ['Choke (momentary)', 'Punch (writes the bar)']],
   ['gate.len', 'Gate Length', ['6 ms trig', '20 ms', '50 ms', 'Hold to next hit']],
   ['gate.lvl', 'Gate Level', ['Fixed 5 V', 'Velocity (1.5–5 V)']],
-  ['grammar.mode', 'Grammar', ['Classic', 'Collins', 'Grids', 'Euclid']],
+  ['grammar.mode', 'Grammar', ['Classic', 'Collins', 'Grids', 'Euclid', 'Camp']],
   ['gate.mode', 'Gate Fires', ['Every step', 'Onsets only (once per hit)']],
   ['bars', 'Bars', ['Auto (backbeat)', '1 bar', '2 bars', '4 bars', '8 bars (8th grid)']],
   ['rests', 'Rests', ['Continue the break', 'Gate (silence)']],
@@ -34,7 +35,7 @@ const OPTION_FIELDS = [
 ];
 const FILES = ['amen_170.wav', 'apache_120.wav', 'funky_drummer_100.wav', 'think_110.wav'];
 const KNOBS = [
-  [['chop', 'Chop', '**Chop character** — the journey from verbatim (full right) to rolls, bursts and reverb (full left).'],
+  [['chop', 'Chop', '**Chop character** — the journey from verbatim (full right) to rolls, bursts and reverb (full left). In Camp: the number of bells (rounds → 4 → 8 → 16).'],
    ['tempo', 'Tempo', '**Tempo**, 70–180 BPM, varispeed like vinyl. Snaps to the break\'s own tempo within ±2 BPM. While following an external clock it becomes a ÷4…×4 multiplier.'],
    ['history', 'History', '**History** — the last sixteen patterns. Counter-clockwise is older; full clockwise is now.'],
    ['pitch', 'Pitch', '**Pitch**, ±12 semitones. Onsets stay on the grid; the kit retunes.'],
@@ -91,7 +92,8 @@ function buildDescriptor() {
       preamble: '**Audiothurgist chops breaks to a grid and rearranges them** with one knob that travels from *the record, verbatim* to rolls, bursts, and reverb rubble. Patterns hold until you ask for new ones. (Demo descriptor — the module\'s own text replaces this.)',
       sections: [
         { id: 'roles', title: 'Three roles, one engine', body: '**Chopper** — the knobs and buttons. **Voice** — the rack plays *it*: a v/oct + gate pair on J4/J5. **Brain** — it plays the rack: kick, snare and hat gates on J6/J7/J8, clock on J3.' },
-        { id: 'brain', title: 'Clock in, gates out', body: 'Patch a clock into J3 and set its PPQN in Options; B1 flashes white per pulse and sits green when locked. While following, P2 becomes a clock divider/multiplier (÷4 · ÷2 · ×1 · ×2 · ×4).' },
+        { id: 'brain', title: 'Clock in, gates out', body: 'Patch a clock into J3 and set its PPQN in Options; B1 flashes white per pulse and sits green when locked. While following, P2 becomes a clock divider/multiplier (÷4 · ÷2 · ×1 · ×2 · ×4); a change lands on the next beat.' },
+        { id: 'camp', title: 'Camp', body: '**Camp** rings the bar\'s cells through change-ringing permutations — deterministic, nothing drawn. Chop is the number of bells (rounds, 4, 8, 16); B2 rings the next change; the Brain knobs are unused.' },
       ],
       presets: { help: 'Preset slots store the complete state of the module. Slot 0 is the boot slot.' },
     },
@@ -100,12 +102,15 @@ function buildDescriptor() {
 
 class FakeDevice {
   constructor(opts = {}) {
-    this.opts = Object.assign({ tail: 167, bpm: 120, nSlices: 32, latencyMs: 8 }, opts);
+    this.opts = Object.assign({ tail: 170, bpm: 120, nSlices: 32, latencyMs: 8 }, opts);
     this.live = new Uint8Array(LIVE_SIZE); this.live.fill(0x80, OFF.pager, OFF.pager + 48);
     this.desc = new TextEncoder().encode(JSON.stringify(buildDescriptor()));
     this.muted = false; this.flowing = false; this.brain = false; this.ext = false; this.locked = false;
     this.lockMask = 0; this.matGen = 1; this.file = 0; this.histN = 3; this.histDepth = 0; this.callFlash = 255; this.callT = 0;
     this.mult = 1; this.multZone = 2; this.t0 = Date.now(); this.log = [];
+    /* CLOCK flags (170-byte body): P2 engaged, a multiplier switch waiting for its beat, a lock
+     * alignment in the last ~2 s; the ext-transition counter is kept here from `ext` flips. */
+    this.p2Engaged = false; this.pending = false; this.aligned = false; this.extTrans = 0; this._lastExt = false;
     this.src = new Int8Array(64); this.stepClass = new Uint8Array(64);
     this.env = new Uint8Array(64 * 16); this.scopePhase = 0;
     this.newMaterial();
@@ -113,6 +118,10 @@ class FakeDevice {
   }
   get nSlices() { return this.opts.nSlices; }
   get options() { return this.live.subarray(OFF.options, OFF.options + 16); }
+  get clkFlags() {
+    if (this.ext !== this._lastExt) { this._lastExt = this.ext; this.extTrans = (this.extTrans + 1) & 0xff; }
+    return (this.p2Engaged ? 1 : 0) | (this.pending ? 2 : 0) | (this.aligned ? 4 : 0) | ((this.extTrans & 15) << 4);
+  }
   newMaterial() {
     const n = this.nSlices;
     for (let s = 0; s < n; s++) { this.stepClass[s] = s % 4 === 0 ? 0 : s % 4 === 2 ? 1 : (s % 8 === 7 ? 3 : 2); this.src[s] = s; }
@@ -163,6 +172,7 @@ class FakeDevice {
         if (tail >= 156) { U16(900 + Math.floor(Math.random() * 300)); U16(180 + Math.floor(Math.random() * 40)); U16(0); U16(this.histN); }
         if (tail >= 164) { U16(this.lockMask); F32(this.opts.bpm); U8(this.nSlices / 16); U8(this.options[7]); }
         if (tail >= 167) { U16(this.ext ? 120 + Math.floor(Math.random() * 60) : 0); U8(this.multZone); }
+        if (tail >= 170) { U8(this.clkFlags); U16(this.ext ? 40 + Math.floor(Math.random() * 20) : 0); }
         break; }
       case CMD.env: {
         const first = body[0] || 0, n = Math.min(body[1] || 30, 30, 64 - first);
