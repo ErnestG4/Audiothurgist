@@ -926,8 +926,11 @@ struct Engine
          * multiplier) — with more than the continuity window to spare, the
          * voice would gate before the next hit. The tail policy then loops
          * it; such a voice is not extendable, so no lookahead grace. */
+        /* consumption of the slot in SOURCE samples: pitch × the slot's own
+         * slice length (under swing the odd slots are shorter — review M2) */
+        const float slotSrc = swung ? (float)slices[k].len : nativeStep;
         const bool outlast = tailMode != 0 && !stepRev[k] && !reverse
-                             && gridStepSamp * rate - (float)cell.len > 160.f;
+                             && pitch * slotSrc - (float)cell.len > 160.f;
         const int grace = (willCont && !outlast) ? 400 : 0;
 
         // CONTINUITY: if a voice is already playing exactly into this slice

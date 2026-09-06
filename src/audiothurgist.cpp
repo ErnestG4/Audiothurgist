@@ -164,12 +164,18 @@ struct HoldButton : IButton
     float TimeHeldMs() const override { return Pressed() ? b.TimeHeldMs() - ms : 0.f; }
 };
 static HoldButton gLockBtn(hw.buttons[kButtonB1], 300.f);
-static ParamLock<2 * kNumPots> locks(gLockBtn, pager);
+/* The motion arena (11.5 KB) lives in SDRAM, not DTCM (review M7); the
+ * ParamLock object itself must stay in .bss (its ctor runs before hw.Init). */
+using Locks = ParamLock<2 * kNumPots>;
+static uint16_t ALCHEMY_SDRAM_BSS gLockArena[Locks::kArenaSamples];
+static Locks locks(gLockBtn, pager, alchemy::LockArena{gLockArena, sizeof gLockArena});
+/* bb_bars scratch (≈15 KB) — SDRAM, zeroed once at boot (NOLOAD). */
+static bb::bardetail::BarScratch ALCHEMY_SDRAM_BSS gBarScratchMem;
 /* Settings screen: B2+B3 held 2 s enters; brightness + the preset gesture. */
 Settings           settings(hw, &pager);
 void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.9.0-round2", "web");
+                           "0.9.1-reviewed", "web");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -1052,6 +1058,25 @@ static void OnPoll(uint32_t /*t_ms*/)
     }
 }
 
+/* Clock keep-alive for long control-thread analyses (loads, re-slices): the
+ * pure core calls bb::Yield() at ~ms granularity; we tick the NCO and
+ * republish the audio thread's snapshot so its extrapolation never reaches
+ * the 50 ms cap — the loop keeps time through a load (review M6). Same
+ * thread as OnPoll, never re-entered from it. */
+static void KeepClock()
+{
+    const uint32_t now_us = daisy::System::GetUs();
+    gClock.Tick(now_us);
+    const uint8_t wi = (uint8_t)(gSnapIdx ^ 1u);
+    gSnap[wi].tick    = gClock.MasterTick();
+    gSnap[wi].frac    = gClock.FracTick();
+    gSnap[wi].tpu     = gClock.TicksPerUs();
+    gSnap[wi].us      = now_us;
+    gSnap[wi].running = gClock.Running();
+    gSnap[wi].map     = gMap;
+    gSnapIdx = wi;
+}
+
 /* ── render ─────────────────────────────────────────────────────────── */
 static void OnRender(uint32_t /*t_ms*/)
 {
@@ -1132,7 +1157,7 @@ static void ScanSD()
  * into gLoad, then hands off to the audio thread via gApply. */
 static void ServiceLoad()
 {
-    if(!gLoadReq || gApply) return;
+    if(!gLoadReq || gApply || gReapply) return;   /* review L1 */
     gLoadReq = false;
 
     char path[140];
@@ -1149,17 +1174,22 @@ static void ServiceLoad()
      * whole-bar count it cut the buffer to (0 when the prior applied) */
     gDet.mode = gOnsetDet.sel;
     bb::ConditionInfo ci;
-    len = bb::ConditionBuffer(gLoad, len, kSr, gDet, &ci);
+    len = bb::ConditionBuffer(gLoad, len, kSr, gDet, &ci, gBars.sel == 0 /* review M5 */);
     gCondBars = ci.bars;
     gPendCues = nCues >= 2;
 
     if(nCues >= 2)
     {
+        /* cue chunk positions are file positions: re-base by the head cut
+         * (silence + downbeat) and drop what fell outside (review M1) */
+        int nc = 0;
+        for(int i = 0; i < nCues; i++) { const int q = cues[i] - ci.trimmedStart; if(q >= 0 && q < len) cues[nc++] = q; }
+        nCues = nc;
         for(int i = 1; i < nCues; i++)
             for(int j = i; j > 0 && cues[j - 1] > cues[j]; j--)
             { int t = cues[j - 1]; cues[j - 1] = cues[j]; cues[j] = t; }
         gPendN = 0;
-        if(cues[0] > (int)(0.02f * kSr)) gPendOnsets[gPendN++] = 0;
+        if(nCues == 0 || cues[0] > (int)(0.02f * kSr)) gPendOnsets[gPendN++] = 0;
         for(int i = 0; i < nCues && gPendN < bb::Engine::kMaxSlices; i++)
             gPendOnsets[gPendN++] = cues[i];
     }
@@ -1315,6 +1345,9 @@ static StateExt gStateExt;
 int main()
 {
     hw.Init();
+    locks.Init();                                   /* SDRAM arena is NOLOAD */
+    memset(&gBarScratchMem, 0, sizeof gBarScratchMem);
+    bb::bardetail::gBarScratch = &gBarScratchMem;
     hw.j6.EnableCvOutput();   /* kick gate  */
     hw.j7.EnableCvOutput();   /* snare gate */
     hw.j8.EnableCvOutput();   /* hat gate   */
@@ -1366,13 +1399,18 @@ int main()
         if(len > 0)
         {
             bb::ConditionInfo ci;                                  /* SLICE */
-            len = bb::ConditionBuffer(gPlay, len, kSr, gDet, &ci);
+            gDet.mode = gOnsetDet.sel;                             /* review M4: SDRAM object, no NSDMI */
+            len = bb::ConditionBuffer(gPlay, len, kSr, gDet, &ci, gBars.sel == 0);
             gCondBars = ci.bars;
             int no = (nCues >= 2) ? 0 : gDet.Detect(gPlay, len, kSr, gPendOnsets, kMaxOnsets, nullptr);
             if(nCues >= 2)
             {
                 for(int i = 0; i < nCues && no < bb::Engine::kMaxSlices; i++)
-                    gPendOnsets[no++] = cues[i];
+                {
+                    const int q = cues[i] - ci.trimmedStart;   /* review M1 */
+                    if(q >= 0 && q < len) gPendOnsets[no++] = q;
+                }
+                if(no == 0) gPendOnsets[no++] = 0;
             }
             gPendCues = nCues >= 2;
             gPendN    = no;
@@ -1381,6 +1419,7 @@ int main()
             const int nsl = SliceCountFor(gPlay, len, gPendOnsets, no, gCondBars);
             static uint8_t cls[bb::Engine::kMaxSlices];
             ClassifySteps(gPlay, len, cls, gClass.mode, gSal, nsl, engine.stepBands /* GATES: audio not started */);
+            memcpy(engine.sliceSal, gSal, sizeof engine.sliceSal);   /* GRAM tiers at boot (review M3) */
             engine.SetMaterial(gPlay, len, kSr, gPendOnsets, no, cls, nsl);
             ComputeDensity(gPlay, len, engine.sliceDens, engine.nSlices);   /* PLAY: audio not started yet */
             ComputeEnvelope(gPlay, len, gEnv, nsl);
@@ -1395,6 +1434,7 @@ int main()
         int onsets[kMaxOnsets];
         int no = gDet.Detect(gPlay, len, kSr, onsets, kMaxOnsets, nullptr);
         ClassifySteps(gPlay, len, cls, gClass.mode, gSal, 0, engine.stepBands /* GATES */);
+        memcpy(engine.sliceSal, gSal, sizeof engine.sliceSal);   /* review M3 */
         engine.SetMaterial(gPlay, len, kSr, onsets, no, cls);
         ComputeDensity(gPlay, len, engine.sliceDens, engine.nSlices);   /* PLAY: audio not started yet */
         ComputeEnvelope(gPlay, len, gEnv);
@@ -1402,6 +1442,7 @@ int main()
 
     gClock.SetBpm(engine.NativeBpm());
     gClock.Start();
+    bb::gYield = KeepClock;   /* loads no longer freeze the playhead */
     gFollower.SetLossPolicy(ClockLossPolicy::Freewheel);
     /* CLOCK: no auto-start. The NCO is kept running through acquisition (see
      * OnPoll), and DeclareLock's Start() on an already-running NCO is not a
@@ -1491,7 +1532,7 @@ int main()
         if(gRests.dirty && !gPendReroll)
         {
             gRests.dirty       = false;
-            engine.restSustain = gGrammar.mode >= 2 && gRests.sel == 0;
+            engine.restSustain = (gGrammar.mode == 2 || gGrammar.mode == 3) && gRests.sel == 0;
             gPendRegen         = true;
         }
         /* GRAM: Swaps re-ranks the tiers and regenerates (same seeds) so the
@@ -1509,7 +1550,7 @@ int main()
         {
             gGrammar.dirty     = false;
             engine.patternMode = gGrammar.mode;
-            engine.restSustain = gGrammar.mode >= 2 && gRests.sel == 0;   /* Grids/Euclid rests continue the break */
+            engine.restSustain = (gGrammar.mode == 2 || gGrammar.mode == 3) && gRests.sel == 0;   /* Grids/Euclid rests continue the break */
             gPendReroll        = true;
         }
         ServiceLoad();

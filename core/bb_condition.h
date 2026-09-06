@@ -3,6 +3,7 @@
 #include <cstring>
 #include "bb_onset.h"
 #include "bb_bars.h"
+#include "bb_yield.h"
 
 namespace bb {
 
@@ -31,7 +32,10 @@ struct ConditionInfo
     int   trimmedStart = 0; // samples removed at the head (silence + downbeat)
 };
 
-inline int ConditionBuffer(float* x, int len, float sr, OnsetDetector& det, ConditionInfo* info = nullptr)
+// allowBarCut = false (Options → Bars set by hand): skip 3a so the user's bar
+// count applies to the file as it is, not to an estimator-cut buffer (review M5).
+inline int ConditionBuffer(float* x, int len, float sr, OnsetDetector& det, ConditionInfo* info = nullptr,
+                           bool allowBarCut = true)
 {
     if(info) *info = ConditionInfo();
     if(len < (int)(0.25f * sr)) return len;
@@ -54,7 +58,9 @@ inline int ConditionBuffer(float* x, int len, float sr, OnsetDetector& det, Cond
     b = (b + 240 < len) ? b + 240 : len - 1;
     int n2 = b - a + 1;
     if(n2 < (int)(0.25f * sr)) return len;
-    if(a > 0) memmove(x, x + a, sizeof(float) * (size_t)n2);
+    /* shift EVERYTHING past the head trim, not just the body: 3a may take the
+     * trimmed tail back (lenValid), and it must be shifted data (review H1) */
+    if(a > 0) memmove(x, x + a, sizeof(float) * (size_t)(len - a));
     const int lenValid = len - a;   // samples still in memory past the tail trim
     len = n2;
     const int headTrim = a;
@@ -66,9 +72,10 @@ inline int ConditionBuffer(float* x, int len, float sr, OnsetDetector& det, Cond
     /* SLICE: 3a) whole bars of the material's own bar, when confident. Two
      * attempts: the whole file, then (a long song excerpt can carry a tempo
      * change or a fill that muddles the clusters) the first 4 prior-bars. */
-    for(int attempt = 0; attempt < 2; attempt++)
+    for(int attempt = 0; allowBarCut && attempt < 2; attempt++)
     {
-        static int onsets[256];
+        Yield();
+        int (&onsets)[256] = bardetail::ScratchRef().condOnsets;
         int lenA = len;
         if(attempt == 1)
         {
@@ -81,14 +88,15 @@ inline int ConditionBuffer(float* x, int len, float sr, OnsetDetector& det, Cond
         BarEstimate est = EstimateBar(x, lenA, sr, onsets, no);
         if(est.bar > 0.f)
         {
-            len = lenA;
+            /* `len` is NOT truncated to lenA here: a vetoed attempt must leave
+             * the full file for the prior path (review H2) */
             const float B = est.bar;
             float db = est.downbeat;
             if(db > 0.5f * B) db -= B;                   // just before the start
             int start = db > 0.1f * B / 16.f ? (int)(db + 0.5f) : 0;  // within a
                                                           // tenth of a 16th = the start
-            int avail = len - start;
-            if(avail < (int)(0.97f * B) && start > 0) { start = 0; avail = len; }
+            int avail = lenA - start;
+            if(avail < (int)(0.97f * B) && start > 0) { start = 0; avail = lenA; }
             /* a 16th of slack: a loop whose last 16th is quiet lost it to the
              * tail trim above; the samples are still in memory, so the cut
              * can keep the whole bar */
@@ -105,9 +113,9 @@ inline int ConditionBuffer(float* x, int len, float sr, OnsetDetector& det, Cond
                  * the head is gone). Onsets are reused, shifted: no second
                  * detection. A silent second opinion is allowed; a
                  * dissenting one vetoes. */
-                if(newLen != len || start > 0)
+                if(newLen != lenA || start > 0)
                 {
-                    static int sub[256];
+                    int (&sub)[256] = bardetail::ScratchRef().condSub;
                     int ns = 0;
                     for(int i = 0; i < no; i++)
                     {

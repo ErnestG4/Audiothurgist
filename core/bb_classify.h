@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdint>
 #include "bb_engine.h"
+#include "bb_yield.h"
 #include "Analyzer.h"   // capicola (AGPL) — vendor/capicola/lib
 
 namespace bb {
@@ -84,8 +85,14 @@ inline void ClassifySteps(const float* x, int len, float sr, uint8_t* cls, int m
                           float* sal = nullptr, float* densOut = nullptr, int nslOverride = 0,
                           uint8_t* bandsOut = nullptr)
 {
-    const int nsl  = nslOverride >= 1 ? nslOverride : GridSlices(len, sr);
-    const int step = len / nsl;
+    int nsl = nslOverride >= 1 ? nslOverride : GridSlices(len, sr);
+    if(nsl > Engine::kMaxSlices) nsl = Engine::kMaxSlices;
+    const int step = nsl > 0 ? len / nsl : 0;
+    if(step < 1)   /* sub-slice material: all silent, no NaN (review L3) */
+    {
+        for(int s = 0; s < Engine::kMaxSlices; s++) { cls[s] = 3; if(sal) sal[s] = 0.f; if(densOut) densOut[s] = 0.f; if(bandsOut) bandsOut[s] = 0; }
+        return;
+    }
     float lpK = 0.f, lpM = 0.f;
     const float fK = (mode == 1) ? 120.f : 325.f;
     const float fM = (mode == 1) ? 900.f : 4000.f;
@@ -108,6 +115,7 @@ inline void ClassifySteps(const float* x, int len, float sr, uint8_t* cls, int m
         }
         eL[s] = (float)(sl / n); eM[s] = (float)(sm / n); eH[s] = (float)(sh / n);
         eRaw[s] = (float)(sx / n);
+        if((s & 3) == 3) Yield();
     }
     float mL = 1e-12f, mM = 1e-12f, mH = 1e-12f;
     for(int s = 0; s < nsl; s++) { mL += eL[s]; mM += eM[s]; mH += eH[s]; }
@@ -203,6 +211,7 @@ inline void ClassifySteps(const float* x, int len, float sr, uint8_t* cls, int m
         an.SetThreshold(gDensityEps * ps);
         int c = 0;
         for(int i = 0; i < n; i++) if(an.Analyze(p[i])) c++;
+        if((s & 3) == 3) Yield();
         dens[s] = (float)c / (float)n;
         if(densOut) densOut[s] = dens[s];
     }

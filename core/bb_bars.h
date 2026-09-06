@@ -34,6 +34,7 @@
 //
 // Pure, no allocation: fixed static scratch (~8 KB). Offline, control thread.
 #include <cmath>
+#include "bb_yield.h"
 #ifdef BB_BARS_DEBUG
 #include <cstdio>
 #endif
@@ -69,6 +70,26 @@ constexpr float kGridTol   = 0.15f;  // of a 16th, either side
 constexpr int   kSubdiv[]  = {1, 2, 3, 4, 6, 8, 12, 16, 32};
 
 inline float RelWeight(int k) { return k <= 4 ? (float)(6 - k) : (k <= 8 ? 1.f : 0.f); }
+
+// All of EstimateBar's scratch (≈15 KB) in one object the shell places in
+// SDRAM (review M7: it sat in DTCM as function statics). Written before read
+// on every path; the shell zeroes it once at boot anyway (NOLOAD section).
+struct BarScratch
+{
+    float low[kMaxO], mid[kMaxO], high[kMaxO], all[kMaxO], sal[kMaxO], kick[kMaxO], snare[kMaxO];
+    float hist[kHistBins], sm[kHistBins];
+    float cMean[kMaxClus], cW[kMaxClus], cScore[kMaxClus];
+    int   top[kTopClus];
+    float cand[kMaxCand], candPhase[kMaxCand], candFit[kMaxCand];
+    float score[kMaxCand], rot[kMaxCand];
+    int   condOnsets[256], condSub[256];   // bb_condition.h
+};
+inline BarScratch* gBarScratch = nullptr;
+#ifndef BB_SCRATCH_EXTERNAL
+inline BarScratch& ScratchRef() { static BarScratch s; return gBarScratch ? *gBarScratch : s; }
+#else
+inline BarScratch& ScratchRef() { return *gBarScratch; }   // firmware: the shell must set it
+#endif
 } // namespace bardetail
 
 // Per-onset band features: rise of energy across the onset (40 ms after minus
@@ -119,7 +140,9 @@ inline BarEstimate EstimateBar(const float* x, int len, float sr, const int* ons
     if(!x || len < (int)sr || !onsets || n < 6) return none;
     const int m = n > kMaxO ? kMaxO : n;
 
-    static float low[kMaxO], mid[kMaxO], high[kMaxO], all[kMaxO], sal[kMaxO], kick[kMaxO], snare[kMaxO];
+    BarScratch& S = ScratchRef();
+    float (&low)[kMaxO] = S.low; float (&mid)[kMaxO] = S.mid; float (&high)[kMaxO] = S.high; float (&all)[kMaxO] = S.all;
+    float (&sal)[kMaxO] = S.sal; float (&kick)[kMaxO] = S.kick; float (&snare)[kMaxO] = S.snare;
     OnsetBandRises(x, len, sr, onsets, m, low, mid, high, all);
     float maxAll = 1e-12f;
     for(int i = 0; i < m; i++) if(all[i] > maxAll) maxAll = all[i];
@@ -139,7 +162,8 @@ inline BarEstimate EstimateBar(const float* x, int len, float sr, const int* ons
 
     /* 1. IOI clustering: salience-weighted histogram of ALL pairs, 5 ms bins,
      * smoothed over ±2 bins (a 25 ms cluster); peaks are the clusters. */
-    static float hist[kHistBins], sm[kHistBins];
+    float (&hist)[kHistBins] = S.hist; float (&sm)[kHistBins] = S.sm;
+    Yield();
     for(int i = 0; i < kHistBins; i++) hist[i] = 0.f;
     const float binS = kHistBinS * sr;
     const float minI = kMinIoiS * sr, maxI = kMaxIoiS * sr;
@@ -162,7 +186,8 @@ inline BarEstimate EstimateBar(const float* x, int len, float sr, const int* ons
         }
         sm[i] = s;
     }
-    static float cMean[kMaxClus], cW[kMaxClus], cScore[kMaxClus];
+    float (&cMean)[kMaxClus] = S.cMean; float (&cW)[kMaxClus] = S.cW; float (&cScore)[kMaxClus] = S.cScore;
+    Yield();
     int nc = 0;
     for(int i = 2; i + 2 < kHistBins && nc < kMaxClus; i++)
     {
@@ -200,7 +225,7 @@ inline BarEstimate EstimateBar(const float* x, int len, float sr, const int* ons
         }
         cScore[c] = s;
     }
-    static int top[kTopClus];
+    int (&top)[kTopClus] = S.top;
     int nt = 0;
     for(int t = 0; t < kTopClus && t < nc; t++)
     {
@@ -218,7 +243,8 @@ inline BarEstimate EstimateBar(const float* x, int len, float sr, const int* ons
 
     /* 2. bar candidates: each top cluster read as k 16ths, inside the tempo
      * range, deduplicated at 3 %, refined by a least-squares 16th-grid fit */
-    static float cand[kMaxCand], candPhase[kMaxCand], candFit[kMaxCand];
+    float (&cand)[kMaxCand] = S.cand; float (&candPhase)[kMaxCand] = S.candPhase; float (&candFit)[kMaxCand] = S.candFit;
+    Yield();
     int ncand = 0;
     const float barMin = 240.f * sr / kBpmHi, barMax = 240.f * sr / kBpmLo;
     for(int t = 0; t < nt; t++)
@@ -312,7 +338,8 @@ inline BarEstimate EstimateBar(const float* x, int len, float sr, const int* ons
 
     /* 3. backbeat template per candidate: 16-step profiles of kick-share,
      * snare-share and total salience; best rotation = downbeat */
-    static float score[kMaxCand], rot[kMaxCand];
+    float (&score)[kMaxCand] = S.score; float (&rot)[kMaxCand] = S.rot;
+    Yield();
     for(int c = 0; c < ncand; c++)
     {
         score[c] = -1e9f; rot[c] = 0.f;

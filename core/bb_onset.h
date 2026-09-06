@@ -1,6 +1,7 @@
 #pragma once
 #include <cmath>
 #include <cstring>
+#include "bb_yield.h"
 
 namespace bb {
 
@@ -39,7 +40,7 @@ struct OnsetDetector
     static constexpr int   kPeakM     = 3;      // mean window −m·w … +w
     static constexpr float kPeakDelta = 0.35f;  // × global mean of the function
 
-    int mode = 0;
+    int mode;   // no in-class initialiser: instances live in NOLOAD SDRAM (review M4)
 
     float win[kN];
     float re[kN], im[kN];
@@ -48,7 +49,7 @@ struct OnsetDetector
     float thr[kMaxFrames];
     // mode 1 scratch
     int   bandEdge[kMaxBands + 1];
-    int   nBands = 0;
+    int   nBands;
     float bandL[kMaxBands], prevBandL[kMaxBands];
 
     // Returns onset count. out[0] is always 0 (the buffer start is a slice).
@@ -79,6 +80,7 @@ struct OnsetDetector
         float meanFlux = 0.f;
         for(int f = 0; f < nf; f++)
         {
+            if((f & 31) == 0) Yield();
             const float* seg = x + f * kHop;
             for(int i = 0; i < kN; i++)
             {
@@ -103,6 +105,7 @@ struct OnsetDetector
         // adaptive threshold: local median × 1.5 + floor
         for(int f = 0; f < nf; f++)
         {
+            if((f & 31) == 0) Yield();
             float w[2 * kMed + 1];
             int   m = 0;
             for(int k = f - kMed; k <= f + kMed; k++)
@@ -185,6 +188,7 @@ struct OnsetDetector
         double meanFlux = 0.;
         for(int f = 0; f < nf; f++)
         {
+            if((f & 31) == 0) Yield();
             const float* seg = x + f * kHop;
             for(int i = 0; i < kN; i++)
             {
