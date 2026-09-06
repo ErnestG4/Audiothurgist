@@ -396,6 +396,255 @@ int main()
         CHECK(mono >= 12, "keyframe density tracks bandwidth (%d/14 rising)", mono);
     }
 
+    // ── GRAM package (docs/packages/gram.md) ──────────────────────────────
+    SECTION("GRAM Swaps: tiers ignored when off; on, no swap crosses a salience tier");
+    {
+        bb::Pattern p;
+        uint8_t cls[64];
+        for(int i = 0; i < 64; i++) cls[i] = (uint8_t)(i % 3);
+        // a tier spread that cuts across the classes, so every same-class pool
+        // holds all three tiers and a class-only swap WOULD cross tiers
+        uint8_t tier[64], zero[64] = {};
+        for(int i = 0; i < 64; i++) tier[i] = (uint8_t)((i * 7 + (i >> 2)) % 3);
+        auto gen = [&](int mode, int ns, float k, uint64_t seed, bool on, const uint8_t* t) {
+            p.langX = 0.3f; p.langY = 0.7f; p.langDens[0] = 0.6f; p.langDens[1] = 0.5f; p.langDens[2] = 0.9f; p.langRot = 0.25f;
+            memcpy(p.salTier, t, 64); p.salSwaps = on;
+            p.Generate(ns, 4, cls, k, seed, seed * 7 + 1, mode);
+        };
+        int diff = 0, viol = 0, swaps = 0, changed = 0;
+        for(int mode = 0; mode < 4; mode++)
+            for(int ns : {16, 32, 64})
+                for(int ki = 0; ki <= 4; ki++)
+                    for(uint64_t seed = 1; seed < 30; seed++)
+                    {
+                        // Classic/Collins above the cluster zone: hat ticks are not swaps
+                        const float k = mode >= 2 ? ki / 4.f : 0.4f + 0.15f * (float)ki;
+                        gen(mode, ns, k, seed, false, tier);
+                        int8_t a[64], fa[64]; memcpy(a, p.src, 64); memcpy(fa, p.fsrc, 64);
+                        gen(mode, ns, k, seed, false, zero);
+                        if(memcmp(a, p.src, 64) || (mode == 1 && memcmp(fa, p.fsrc, 64))) diff++;
+                        gen(mode, ns, k, seed, true, tier);
+                        if(memcmp(a, p.src, 64)) changed++;
+                        if(mode <= 1)
+                        {
+                            // a swap = a cell playing neither in place nor the previous
+                            // cell's source (the generator's prevSrc, tracked the same way)
+                            auto scan = [&](const int8_t* S, const int8_t* L, int from, int prev) {
+                                int c = from;
+                                while(c < ns)
+                                {
+                                    const int Lc = L[c] > 0 ? L[c] : 1, s = S[c];
+                                    if(s >= 0) { if(s != c && s != prev) { swaps++; if(tier[s] != tier[c]) viol++; } prev = s; }
+                                    c += Lc;
+                                }
+                            };
+                            scan(p.src, p.len, 0, 0);
+                            if(mode == 1 && p.fillStart >= 0)
+                            {
+                                int pv = 0; for(int c = 0; c < p.fillStart; c++) if(p.src[c] >= 0) pv = p.src[c];
+                                scan(p.fsrc, p.flen, p.fillStart, pv);
+                            }
+                        }
+                        else
+                            for(int s = 0; s < ns; s++)
+                            {   // same class as the step itself ⇒ the faithful pick was in place ⇒ this is a swap
+                                const int q = p.src[s];
+                                if(q >= 0 && q != s && cls[q] == cls[s]) { swaps++; if(tier[q] != tier[s]) viol++; }
+                            }
+                    }
+        CHECK(diff == 0, "Swaps off: salTier is ignored (%d patterns differed)", diff);
+        CHECK(swaps > 200, "the scan sees swaps (%d)", swaps);
+        CHECK(viol == 0, "Swaps on: %d of %d swaps crossed a tier", viol, swaps);
+        CHECK(changed > 0, "Swaps on changes some patterns (%d)", changed);
+
+        // Engine: tiers are the loop's terciles of sliceSal; uniform salience is one tier
+        Fresh(e, 0, 0.4f);
+        int8_t off[64]; memcpy(off, e.stepSrc, 64);
+        for(int s = 0; s < 16; s++) e.sliceSal[s] = gCls[s] < 2 ? 1.f : ((s & 1) ? 0.1f : 0.5f);
+        e.sliceSal[15] = 0.f;
+        e.swapsMode = 0; e.RegenPattern();
+        CHECK(memcmp(off, e.stepSrc, 64) == 0 && !e.pat.salSwaps, "Swaps=0: salience never changes the pattern");
+        e.swapsMode = 1; e.RegenPattern();
+        int mono = 0;
+        for(int i = 0; i < 16; i++) for(int j = 0; j < 16; j++)
+            if(e.sliceSal[i] < e.sliceSal[j] && e.pat.salTier[i] > e.pat.salTier[j]) mono++;
+        CHECK(e.pat.salSwaps && mono == 0, "tiers are monotone in salience (%d inversions)", mono);
+        CHECK(e.pat.salTier[15] == 0 && e.pat.salTier[1] == 1 && e.pat.salTier[2] == 2 && e.pat.salTier[0] == 2,
+              "terciles: silence 0, ghost hats 1, loud hats and drums 2 (got %d %d %d %d)",
+              e.pat.salTier[15], e.pat.salTier[1], e.pat.salTier[2], e.pat.salTier[0]);
+        for(int s = 0; s < 16; s++) e.sliceSal[s] = 0.7f;
+        e.RegenPattern();
+        int one = 0; for(int s = 0; s < 16; s++) one += e.pat.salTier[s] == 2;
+        CHECK(one == 16, "uniform salience = a single tier (%d/16)", one);
+    }
+
+    SECTION("GRAM Flow Déjà Vu: replay rate, no push, exact replays, determinism, taps fresh");
+    {
+        struct Run { int recalls = 0, pushed = 0, mismatch = 0; uint64_t sig = 0; };
+        auto run = [&](bb::Engine& en, int dv, int bars) {
+            Run r;
+            Fresh(en, 0, 0.5f);
+            en.dejaVu = dv; en.flowRegen = true;
+            static int8_t snap[bb::Engine::kHist][64];
+            memcpy(snap[en.histHead], en.stepSrc, 64);
+            for(int b = 0; b < bars; b++)
+            {
+                const uint32_t r0 = en.dejaRecalls; const int n0 = en.histN, h0 = en.histHead;
+                en.RerollFill();
+                if(en.dejaRecalls != r0)
+                {
+                    r.recalls++;
+                    if(en.histN != n0 || en.histHead != h0) r.pushed++;
+                    if(memcmp(snap[en.histPos], en.stepSrc, 64)) r.mismatch++;
+                }
+                else memcpy(snap[en.histHead], en.stepSrc, 64);
+                for(int s = 0; s < 16; s++) r.sig = (r.sig * 1099511628211ULL) ^ (uint8_t)en.stepSrc[s];
+            }
+            return r;
+        };
+        Run r0 = run(e, 0, 200);
+        CHECK(r0.recalls == 0 && e.dejaBars == 200 && e.histN == bb::Engine::kHist, "Off: every flow bar is fresh (%d recalls, %u bars)", r0.recalls, e.dejaBars);
+        Run r1 = run(e, 1, 400);
+        const float rate1 = (float)r1.recalls / 400.f;
+        CHECK(rate1 > 0.18f && rate1 < 0.32f, "Some: ~¼ of flow bars replay (%.3f)", rate1);
+        CHECK(r1.pushed == 0, "a replay does not push to history (%d did)", r1.pushed);
+        CHECK(r1.mismatch == 0, "a replay reproduces the ring entry exactly (%d differed)", r1.mismatch);
+        Run r2 = run(e, 2, 400);
+        const float rate2 = (float)r2.recalls / 400.f;
+        CHECK(rate2 > 0.68f && rate2 < 0.82f, "Lots: ~¾ of flow bars replay (%.3f)", rate2);
+        CHECK(r2.pushed == 0 && r2.mismatch == 0, "Lots: no pushes (%d), exact replays (%d wrong)", r2.pushed, r2.mismatch);
+        bb::Engine e5;
+        Run r2b = run(e5, 2, 400);
+        CHECK(r2b.sig == r2.sig && r2b.recalls == r2.recalls, "the bar sequence is reproducible from Init's seed");
+        Fresh(e, 0, 0.5f);
+        e.dejaVu = 2; e.flowRegen = false;
+        for(int i = 0; i < 50; i++) e.RerollFill();
+        CHECK(e.dejaRecalls == 0 && e.dejaBars == 0 && e.histN == bb::Engine::kHist, "B2 taps never replay (%u recalls)", e.dejaRecalls);
+        // rendered flow: the wrap in Process drives RerollFill; output stays finite
+        Fresh(e, 1, 0.3f);
+        e.dejaVu = 2; e.flowRegen = true;
+        Rendered r = RenderLoops(e, 8, 96);
+        bool finite = true; for(float v : r.y) if(!std::isfinite(v)) finite = false;
+        CHECK(finite && e.dejaBars >= 7, "flow under Lots renders finite audio over %u bars", e.dejaBars);
+    }
+
+    SECTION("GRAM accents: Grids level > 192 on the firing class; Euclid downbeat; none elsewhere");
+    {
+        bb::Pattern p;
+        uint8_t cls[64];
+        for(int i = 0; i < 64; i++) cls[i] = (uint8_t)(i % 3);
+        int wrong = 0, accents = 0, fired = 0;
+        for(float x : {0.1f, 0.5f, 0.9f})
+            for(float y : {0.2f, 0.5f, 0.8f})
+                for(float d : {0.3f, 0.6f, 1.f})
+                {
+                    p.langX = x; p.langY = y; p.langDens[0] = p.langDens[1] = p.langDens[2] = d; p.langRot = 0.f;
+                    p.Generate(32, 4, cls, 1.f, 1, 2, 2);
+                    const uint8_t X = (uint8_t)(x * 255.f + 0.5f), Y = (uint8_t)(y * 255.f + 0.5f);
+                    const uint8_t thr = (uint8_t)(255 - (uint8_t)(d * 255.f + 0.5f));
+                    for(int s = 0; s < 32; s++)
+                    {
+                        const uint8_t gs = (uint8_t)((s % 16) * 2);
+                        int c = -1;
+                        for(int k = 0; k < 3 && c < 0; k++) if(bb::GridsReadDrumMap(gs, (uint8_t)k, X, Y) > thr) c = k;
+                        const bool expect = c >= 0 && bb::GridsReadDrumMap(gs, (uint8_t)c, X, Y) > 192;
+                        if(p.accent[s] != expect) wrong++;
+                        if((c < 0) != (p.src[s] == -2)) wrong++;
+                        accents += p.accent[s]; fired += c >= 0;
+                    }
+                }
+        CHECK(wrong == 0, "Grids accent = firing class's level > 192 (%d wrong)", wrong);
+        CHECK(accents > 0 && accents < fired, "some, not all, hits are accented (%d of %d)", accents, fired);
+        p.langDens[0] = 0.25f; p.langDens[1] = 0.5f; p.langDens[2] = 1.f; p.langRot = 0.f;
+        p.Generate(32, 4, cls, 1.f, 1, 2, 3);
+        int bad = 0; for(int s = 0; s < 32; s++) if(p.accent[s] != ((s % 16) == 0 && p.src[s] != -2)) bad++;
+        CHECK(bad == 0 && p.accent[0] && p.accent[16], "Euclid: the firing downbeat of each bar is accented (%d wrong)", bad);
+        int stray = 0;
+        for(int mode = 0; mode < 2; mode++)
+            for(uint64_t seed = 1; seed < 20; seed++)
+            {
+                p.Generate(32, 4, cls, 0.3f, seed, seed + 1, mode);
+                for(int s = 0; s < 32; s++) stray += p.accent[s];
+            }
+        CHECK(stray == 0, "Classic/Collins set no accents (%d)", stray);
+        Fresh(e, 2, 1.f);
+        e.langDens[0] = e.langDens[1] = e.langDens[2] = 1.f;
+        e.RegenPattern();
+        int n = 0, m = 0;
+        for(int s = 0; s < 16; s++) { n += e.stepAccent[s]; m += e.stepAccent[s] != e.pat.accent[s]; }
+        CHECK(n > 0 && m == 0, "stepAccent follows Pattern::accent (%d accents, %d mismatches)", n, m);
+    }
+
+    SECTION("GRAM Camp: change ringing — rows permute the bar's cells, come round, step by one");
+    {
+        bb::Pattern p;
+        uint8_t cls[64];
+        for(int i = 0; i < 64; i++) cls[i] = (uint8_t)(i % 3);
+        // every bar is a permutation of its own cells; the row index is the fill seed
+        auto isPerm = [&](int ns, int barSteps) {
+            for(int b0 = 0; b0 < ns; b0 += barSteps)
+            {
+                bool seen[64] = {};
+                int  c = b0, cnt = 0;
+                while(c < b0 + barSteps)
+                {
+                    const int L = p.len[c] > 0 ? p.len[c] : 1, s = p.src[c];
+                    if(s < b0 || s >= b0 + barSteps || (s - b0) % L || seen[s]) return false;
+                    seen[s] = true; cnt++; c += L;
+                }
+                if(c != b0 + barSteps) return false;
+            }
+            return true;
+        };
+        int notPerm = 0, notRounds = 0, nondet = 0, noStep = 0;
+        for(uint64_t cs = 0; cs < 16; cs++)
+            for(int ns : {16, 32, 64})
+                for(int ki = 0; ki <= 4; ki++)
+                    for(uint64_t fs = 0; fs < 60; fs += 7)
+                    {
+                        p.Generate(ns, 4, cls, ki / 4.f, cs, fs, 4);
+                        if(!isPerm(ns, 16)) notPerm++;
+                        int8_t a[64]; memcpy(a, p.src, 64);
+                        p.Generate(ns, 4, cls, ki / 4.f, cs, fs, 4);
+                        if(memcmp(a, p.src, 64)) nondet++;
+                        if(ns >= 32 && !(cs & 4)) // forward: bar 1 of row r == bar 0 of row r+1
+                        {
+                            p.Generate(ns, 4, cls, ki / 4.f, cs, fs + 1, 4);
+                            for(int s = 0; s < 16; s++) if(a[16 + s] != (p.src[s] < 0 ? p.src[s] : p.src[s] + 16)) { noStep++; break; }
+                        }
+                    }
+        CHECK(notPerm == 0, "every bar is a permutation of its own cells (%d weren't)", notPerm);
+        CHECK(nondet == 0, "deterministic (%d)", nondet);
+        CHECK(noStep == 0, "fill seed +1 rings the next change (%d bars disagreed)", noStep);
+        // plain hunt on 4 bells (knob 0.5–0.96) comes round after 8 rows, plain bob after 24
+        for(uint64_t cs : {0ull, 2ull})
+        {
+            const int cycle = cs & 2 ? 24 : 8;
+            for(uint64_t fs = 0; fs < 48; fs++)
+            {
+                p.Generate(16, 4, cls, 0.7f, cs, fs, 4);
+                bool rounds = true; for(int c = 0; c < 16; c += 4) rounds &= p.src[c] == c && p.len[c] == 4;
+                if(rounds != ((fs % (uint64_t)cycle) == 0)) notRounds++;
+            }
+        }
+        CHECK(notRounds == 0, "rounds recur exactly at the method's cycle (%d rows wrong)", notRounds);
+        p.Generate(16, 4, cls, 1.f, 5, 3, 4);
+        CHECK(p.src[0] == 0 && p.len[0] == 16, "knob full right = rounds, one bar cell");
+        p.Generate(16, 4, cls, 0.1f, 0, 1, 4);
+        int ones = 0; for(int s = 0; s < 16; s++) ones += p.len[s] == 1;
+        CHECK(ones == 16 && p.src[0] == 1 && p.src[1] == 0, "16 bells at the bottom: the first change swaps every pair");
+        // engine: Camp rerolls step the row by one; a scrub back restores the previous row
+        Fresh(e, 4, 0.7f);
+        const uint64_t f0 = e.fillSeed;
+        int8_t before[64]; memcpy(before, e.stepSrc, 64);
+        e.RerollFill();
+        CHECK(e.fillSeed == f0 + 1 && memcmp(before, e.stepSrc, 64) != 0, "Camp: B2 rings the next change (seed %llu → %llu)", (unsigned long long)f0, (unsigned long long)e.fillSeed);
+        e.Scrub(-1);
+        CHECK(memcmp(before, e.stepSrc, 64) == 0, "…and history scrubs back to the previous row");
+        Rendered r = RenderLoops(e, 2);
+        CHECK(MapMismatches(e, r) == 0, "the rung bar plays as mapped");
+    }
+
     printf("\n%d passed, %d failed\n", gPass, gFail);
     return gFail ? 1 : 0;
 }

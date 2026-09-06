@@ -40,6 +40,22 @@ struct Pattern
     bool   accent[kMaxSteps];   // grammar accent (Grids: map level > 192) — the gates
                                 // may raise velocity for it (GATES package reads it)
 
+    // GRAM — Options → Swaps. Per-step salience TIER (0 quiet … 2 loud, the
+    // terciles of the loop's per-slice salience), set by the engine before
+    // Generate; not cleared by it. With salSwaps every swap candidate must
+    // share the tier of the step it replaces — Hockman & Davies 2015 weight
+    // resequencing candidates by segment length precisely so "an off-beat
+    // ghost note" is never pasted "in place of a salient snare". Repeats,
+    // in-place cells, rests and hat ticks are not swaps and are untouched.
+    // salSwaps false = the RNG stream and every output are byte-identical to
+    // the shipped grammars (the extra rejection is a pure post-filter).
+    uint8_t salTier[kMaxSteps] = {};
+    bool    salSwaps = false;
+    bool    TierOk(int cand, int pos) const
+    {
+        return !salSwaps || salTier[cand] == salTier[pos];
+    }
+
     // Fill layer (Collins only): alternative cells for [fillStart, nSteps),
     // played on every 4th loop by the engine, then it snaps back to the base.
     int    fillStart = -1;
@@ -87,6 +103,13 @@ struct Pattern
             float vc = v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
             if(vc > 0.96f) vc = 1.f;
             GenerateLang(nSteps, cls, vc, mode, fr);
+            return;
+        }
+        if(mode == 4) // GRAM: Camp — change ringing, no draws at all
+        {
+            float vc = v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
+            if(vc > 0.96f) vc = 1.f;
+            GenerateCamp(nSteps, stepsPerBeat, vc, cellSeed, fillSeed);
             return;
         }
 
@@ -226,7 +249,7 @@ struct Pattern
                 {
                     int cand = ((int)(fr.Uniform() * (float)nSteps) / cl) * cl;
                     if(cand + cl > nSteps || cand == pos) continue; // no no-op swaps
-                    if(!strict || !cls || cls[cand] == cls[pos])
+                    if((!strict || !cls || cls[cand] == cls[pos]) && TierOk(cand, pos))
                     {
                         s = cand;
                         break;
@@ -280,9 +303,14 @@ struct Pattern
         const int bar = 16;
         uint8_t   fire[kMaxSteps];
         uint8_t   dbl[kMaxSteps];   // Grids: the map's odd (32nd) step also fires
+        uint8_t   acc[kMaxSteps];   // GRAM: accent bits — Grids: firing class's map
+                                    // level > 192 (pattern_generator.cc, EvaluateDrums:
+                                    // `if (level > 192) accent_bits |= instrument_mask`,
+                                    // tested after the density gate); Euclid: the bar
+                                    // downbeat (grid step 0 of each bar) when it fires
         for(int s = 0; s < nSteps; s++)
         {
-            uint8_t f = 0, d = 0;
+            uint8_t f = 0, d = 0, a = 0;
             if(mode == 2)
             {
                 // The Grids map is ONE BAR at 32nd resolution (pichenettes:
@@ -298,7 +326,12 @@ struct Pattern
                 {
                     const uint8_t dens = (uint8_t)(langDens[c] * 255.f + 0.5f);
                     const uint8_t thr  = (uint8_t)(255 - dens);
-                    if(GridsReadDrumMap(gs, (uint8_t)c, x, y) > thr) f |= (uint8_t)(1u << c);
+                    const uint8_t lv   = GridsReadDrumMap(gs, (uint8_t)c, x, y);
+                    if(lv > thr)
+                    {
+                        f |= (uint8_t)(1u << c);
+                        if(lv > 192) a |= (uint8_t)(1u << c);
+                    }
                     if(GridsReadDrumMap((uint8_t)(gs + 1), (uint8_t)c, x, y) > thr)
                         d |= (uint8_t)(1u << c);
                 }
@@ -313,9 +346,11 @@ struct Pattern
                     // Bjorklund-equivalent maximally-even spacing (Toussaint E(k,16))
                     if(k > 0 && ((i + 1) * k / bar) != (i * k / bar)) f |= (uint8_t)(1u << c);
                 }
+                if((s % bar) == 0) a = f; // the "one" of every bar carries the accent
             }
             fire[s] = f;
             dbl[s]  = d;
+            acc[s]  = a;
         }
         int8_t byClass[3][kMaxSteps];
         int    nBy[3] = {0, 0, 0};
@@ -332,6 +367,7 @@ struct Pattern
             if(!f) { src[s] = -2; continue; }              // rest
             const int c = (f & 1) ? 0 : (f & 2) ? 1 : 2;  // kick > snare > hat
             if(dbl[s] & (uint8_t)(1u << c)) ratN[s] = 1;   // map's 32nd → a double
+            accent[s] = (acc[s] >> c) & 1;                 // GRAM: the firing class's accent
             int pick = -1;
             if(cls && (cls[s] & 3) == c) pick = s;         // in place
             else if(cls)                                   // nearest of that class
@@ -342,8 +378,79 @@ struct Pattern
                 }
             if(pick < 0) pick = s;
             if(nBy[c] > 1 && fr.Uniform() < swapP)
-                pick = byClass[c][(int)(fr.Uniform() * (float)nBy[c]) % nBy[c]];
+            {
+                // GRAM: with salSwaps the same-class pool is re-drawn until the
+                // candidate shares the replaced step's tier (8 tries, then the
+                // faithful pick stands). One draw, unconditional, when off.
+                const int base = pick;
+                for(int tries = 0; tries < (salSwaps ? 8 : 1); tries++)
+                {
+                    const int cand = byClass[c][(int)(fr.Uniform() * (float)nBy[c]) % nBy[c]];
+                    if(TierOk(cand, base)) { pick = cand; break; }
+                }
+            }
             src[s] = (int8_t)pick;
+        }
+    }
+
+    // ── Camp grammar (mode 4) — after Collins' CampCutProc (GRAM) ─────
+    //
+    // Change ringing. The bar is N "bells" (equal cells) and each bar plays
+    // one ROW of a ringing method — a permutation of its own cells — with
+    // successive bars ringing successive changes, until the bells come round.
+    // Nothing is drawn: the CELL seed picks the method (plain hunt, or plain
+    // bob with its "12" lead end), the direction and a mirror; the FILL seed
+    // is the row index — and for Camp the engine steps fillSeed by ONE on a
+    // reroll, so B2 rings the next change and flow walks the method bar after
+    // bar. The knob is the number of bells: rounds (verbatim) → 4 → 8 → 16.
+    // Place notation, N bells, 0-indexed places: X swaps every pair (0,1)
+    // (2,3)…; "1N" holds places 0 and N-1 and swaps (1,2)(3,4)…; "12" holds
+    // places 0 and 1 and swaps (2,3)(4,5)…. Plain hunt = X.1N repeated (2N
+    // rows to rounds); plain bob = X.1N… with "12" as the 2N-th change,
+    // (N-1)·2N rows to rounds (the plain course).
+    void GenerateCamp(int nSteps, int spb, float vc, uint64_t cs, uint64_t fs)
+    {
+        const int barSteps = 4 * spb;
+        int       N        = vc >= 1.f ? 1 : vc >= 0.5f ? 4 : vc >= 0.25f ? 8 : 16;
+        if(N > barSteps) N = barSteps;
+        const int  cl     = barSteps / N;
+        const bool bob    = (cs >> 1) & 1;
+        const bool back   = (cs >> 2) & 1;
+        const bool mirror = (cs >> 3) & 1;
+        const int  lead   = 2 * N;
+        const int  cycle  = N < 2 ? 1 : (bob ? (N - 1) * lead : lead);
+        const int  r0     = (int)(fs % (uint64_t)cycle);
+        int        bar    = 0;
+        for(int b0 = 0; b0 < nSteps; b0 += barSteps, bar++)
+        {
+            int8_t row[kMaxSteps];
+            for(int i = 0; i < N; i++) row[i] = (int8_t)i;
+            int k = (back ? (r0 - bar) : (r0 + bar)) % cycle;
+            if(k < 0) k += cycle;
+            for(int t = 1; t <= k; t++)
+            {
+                const int first = (t & 1) ? 0 : (bob && (t % lead) == 0) ? 2 : 1;
+                for(int i = first; i + 1 < N; i += 2)
+                {
+                    const int8_t tmp = row[i];
+                    row[i]           = row[i + 1];
+                    row[i + 1]       = tmp;
+                }
+            }
+            int to = b0 + barSteps;
+            if(to > nSteps) to = nSteps;
+            for(int i = 0; i < N; i++)
+            {
+                const int pos = b0 + i * cl;
+                if(pos >= to) break;
+                const int bell = mirror ? N - 1 - row[i] : row[i];
+                int       s    = b0 + bell * cl;
+                int       L    = cl;
+                if(pos + L > to) L = to - pos;
+                if(s + L > nSteps) s = pos; // a partial last bar rings in place
+                src[pos] = (int8_t)s;
+                len[pos] = (int8_t)L;
+            }
         }
     }
 
@@ -506,7 +613,8 @@ struct Pattern
                         {
                             int cand = (int)(fr.Uniform() * (float)span);
                             if(cand == pos) continue;
-                            if(!strict || !cls || cls[cand] == cls[pos]) { s = cand; break; }
+                            if((!strict || !cls || cls[cand] == cls[pos]) && TierOk(cand, pos))
+                            { s = cand; break; }
                         }
                     }
                     S[pos]  = (int8_t)s;

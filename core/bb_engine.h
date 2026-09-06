@@ -128,6 +128,17 @@ struct Engine
     int      stepsPerBeat = 4;
     bool     flowRegen    = false; // hold-to-flow: new fill each bar wrap
 
+    /* GRAM */ // Options → Swaps / Flow Déjà Vu (docs/packages/gram.md)
+    float    sliceSal[kMaxSlices] = {}; // per-slice salience 0..1, copied from the
+                                        // shell's classifier output (gSal) — the
+                                        // engine ranks it into Pattern::salTier
+    int      swapsMode = 0;   // 0 class only (shipped), 1 class + salience tier
+    int      dejaVu    = 0;   // 0 off, 1 some (¼ of flow bars replay), 2 lots (¾)
+    Rng      dejaRng;         // its own stream: the bar sequence replays from Init's seed
+    static constexpr int kDejaWindow = 8; // phrase memory: the newest N ring entries
+    uint32_t dejaBars = 0, dejaRecalls = 0; // flow bars seen / replayed (diag, tests)
+    /* GRAM end */
+
     double  barPhase   = 0.; // playhead sweep of the ring, [0,1)
     bool    extPhase   = false; // true: barPhase is set by the shell (clock
                                // sync); false: engine self-advances (internal)
@@ -163,6 +174,31 @@ struct Engine
     {
         gas.Init(16, seed);
         seedRng.Seed(seed ^ 0xBEA7);
+        dejaRng.Seed(seed ^ 0xDE7A); /* GRAM */
+    }
+
+    /* GRAM: rank the loop's salience into three tiers by tercile so the
+     * grammars can refuse tier-crossing swaps. Thresholds are VALUES at the
+     * tercile ranks, so ties collapse upward — a loop with uniform salience
+     * (no classifier data, or a wall of hats) is ONE tier and swaps freely.
+     * n ≤ 64: an insertion sort on a stack copy, no allocation. */
+    void ComputeSalTiers()
+    {
+        pat.salSwaps = swapsMode == 1;
+        if(!pat.salSwaps) return;
+        const int n = nSlices > 0 ? nSlices : 1;
+        float     v[kMaxSlices];
+        for(int i = 0; i < n; i++) v[i] = sliceSal[i];
+        for(int i = 1; i < n; i++)
+        {
+            const float x = v[i];
+            int         j = i;
+            while(j > 0 && v[j - 1] > x) { v[j] = v[j - 1]; j--; }
+            v[j] = x;
+        }
+        const float t1 = v[n / 3], t2 = v[(2 * n) / 3];
+        for(int i = 0; i < kMaxSlices; i++)
+            pat.salTier[i] = (uint8_t)(i >= n ? 0 : sliceSal[i] >= t2 ? 2 : sliceSal[i] >= t1 ? 1 : 0);
     }
 
     // native tempo of the loaded material, from the bar-count estimate
@@ -210,7 +246,7 @@ struct Engine
     int    ratchetK    = -1;         // step whose retrigger series is pending
     int    ratchetLeft = 0, ratchetIval = 0;
     bool   ratchetAccel = false;
-    int    patternMode = 0;   // 0 Classic, 1 Collins, 2 Grids, 3 Euclid — see bb_pattern.h
+    int    patternMode = 0;   // 0 Classic, 1 Collins, 2 Grids, 3 Euclid, 4 Camp (GRAM) — see bb_pattern.h
     float  langX = 0.5f, langY = 0.5f, langDens[3] = {0.5f, 0.5f, 0.5f}, langRot = 0.f;
     int    loopCount   = 0;   // wraps since (re)generation: fill hyperperiod
     bool   fillActive  = false;
@@ -324,6 +360,7 @@ struct Engine
     {
         pat.langX = langX; pat.langY = langY; pat.langRot = langRot;
         for(int c = 0; c < 3; c++) pat.langDens[c] = langDens[c];
+        ComputeSalTiers(); /* GRAM */
         pat.Generate(nSlices, stepsPerBeat, stepClass, knob, cs, fs, patternMode);
         jitRng.Seed(cs ^ (fs * 0x9E3779B97F4A7C15ULL));
         loopCount        = 0;
@@ -334,6 +371,39 @@ struct Engine
     }
     void RerollFill() // button 1: same chop, new arrangement
     {
+        /* GRAM: Flow Déjà Vu. A FLOW-bar reroll (flowRegen set — Process
+         * calls us at the wrap) may REPLAY a bar from the history ring instead
+         * of drawing fresh seeds: Marbles' DEJA VU "probability of re-using the
+         * loop", drawn uniformly over the newest kDejaWindow entries (its
+         * "jump within the loop"); Margulis 2013 — repetition, immediate or
+         * delayed, is rewarded. A replay is not a roll: it does NOT push, so
+         * the ring stays the timeline of new ideas and a scrub never lands on
+         * a duplicate; histPos moves to the replayed slot so the P3 depth pip
+         * shows which bar is sounding. Taps (flowRegen clear) are always
+         * fresh. dejaRng is a separate stream: the same Init seed and the
+         * same option give the same bar sequence, and with the option off
+         * seedRng's stream is untouched (byte-identical flow). */
+        if(flowRegen)
+        {
+            dejaBars++;
+            if(dejaVu > 0 && histN > 0)
+            {
+                const float p = dejaVu >= 2 ? 0.75f : 0.25f;
+                if(dejaRng.Uniform() < p)
+                {
+                    const int win   = histN < kDejaWindow ? histN : kDejaWindow;
+                    const int depth = (int)(dejaRng.Uniform() * (float)win) % win;
+                    histPos         = (histHead - depth + kHist) % kHist;
+                    const PatState& s = hist[histPos];
+                    ApplyPattern(s.knob, s.cell, s.fill);
+                    dejaRecalls++;
+                    return;
+                }
+            }
+        }
+        /* GRAM: Camp rings the NEXT change — its fill seed is a row index */
+        if(patternMode == 4) fillSeed += 1;
+        else
         fillSeed = ((uint64_t)seedRng.Next() << 32) | seedRng.Next();
         PushHistory();
         ApplyPattern(patternKnob, cellSeed, fillSeed);
