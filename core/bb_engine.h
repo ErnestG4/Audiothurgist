@@ -407,6 +407,16 @@ struct Engine
     bool   stepHit[kMaxSlices] = {};  // the source slice begins with a detected
                                       // onset (a drum's "open"); from the load's
                                       // onset table. All true when none given.
+    /* SLICE: the material's own 16th swing (Options → Swing: Auto). `swing`
+     * is the odd 16th's position inside its 8th, 0.5 = straight; the shell
+     * sets it BEFORE SetMaterial from bb::EstimateSwing. When swung, odd
+     * slice BOUNDARIES sit at that offset (a straight cut opens the hat
+     * slice with the kick's tail and shears the hat off the kick slice) and
+     * odd STEPS fire at the same offset, so rearrangement keeps the groove
+     * (straight timing of swung slices would straighten it). 0.5 leaves
+     * every path below byte-identical to v0.8.0. */
+    float  swing = 0.5f;
+    bool   swung = false;             // swing applied to the current slices
     bool   gateOnsetsOnly = false;    // gates fire once per HIT, not on every
                                       // step that carries the class (a snare's
                                       // decay steps are still "snare" — that was
@@ -616,6 +626,23 @@ struct Engine
             slices[i] = {i * step, step};
         slices[nSlices - 1].len = len - slices[nSlices - 1].start;
         nativeStep = (float)step;
+        /* SLICE: swung boundaries — each odd slice starts at `swing` of its
+         * 8th; the even slice before it grows by the same amount. The average
+         * step (nativeStep) is unchanged, so varispeed still consumes exactly
+         * one slice per slot. */
+        swung = swing > 0.5f && swing < 0.75f && nSlices >= 2 && (nSlices & 1) == 0;
+        if(swung)
+        {
+            const int cell = 2 * step;
+            for(int i = 0; i + 1 < nSlices; i += 2)
+            {
+                const int odd       = i * step + (int)((float)cell * swing + 0.5f);
+                const int next      = (i + 2 < nSlices) ? (i + 2) * step : len;
+                slices[i].len       = odd - slices[i].start;
+                slices[i + 1].start = odd;
+                slices[i + 1].len   = next - odd;
+            }
+        }
 
         for(int i = 0; i < nSlices; i++)
             stepClass[i] = classes ? classes[i] : 3;
@@ -632,6 +659,11 @@ struct Engine
                 if(p < 0 || p >= len) continue;
                 int s = p / (step > 0 ? step : 1);
                 if(s >= nSlices) s = nSlices - 1;
+                if(swung)   /* SLICE: boundaries are no longer i·step */
+                {
+                    while(s + 1 < nSlices && p >= slices[s + 1].start) s++;
+                    while(s > 0 && p < slices[s].start) s--;
+                }
                 if(p - slices[s].start <= slices[s].len / 4) stepHit[s] = true;
                 else if(s + 1 < nSlices && slices[s + 1].start - p <= (int)(0.010f * sampleRate))
                     stepHit[s + 1] = true;
@@ -760,7 +792,14 @@ struct Engine
             barPhase -= floor(barPhase);
         }
         // (extPhase: the shell has written barPhase from the musical clock)
-        int step = (int)(barPhase * (double)nSlices);
+        int step;
+        if(swung)   /* SLICE: the odd step of each 8th fires at the swung offset */
+        {
+            const double cells = barPhase * (double)(nSlices / 2);
+            const int    cell  = (int)cells;
+            step = 2 * cell + ((cells - (double)cell) >= (double)swing ? 1 : 0);
+        }
+        else step = (int)(barPhase * (double)nSlices);
         if(step >= nSlices) step = nSlices - 1;
         if(step != curStep)
         {

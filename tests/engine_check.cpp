@@ -17,6 +17,10 @@
 #include "bb_classify.h"
 #include "bb_bars.h"
 #include "bb_gates.h"
+#include "bb_onset.h"
+#include "bb_condition.h"
+#include "bb_swing.h"
+#include "bb_testbreak.h"
 
 static int gFail = 0, gPass = 0;
 #define CHECK(cond, ...) do { if(cond) { gPass++; } else { gFail++; printf("  FAIL %s:%d  ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while(0)
@@ -952,6 +956,197 @@ int main()
         Rendered r = RenderLoops(e, 3);
         bool finite = true; for(float v : r.y) if(!std::isfinite(v)) finite = false;
         CHECK(finite && MaxStep(r.y) < 0.5f, "Adaptive + Ping-pong + rolls: finite, max |Δ| %.3f", MaxStep(r.y));
+
+    }
+    /* ───────────────────────── SLICE package ───────────────────────── */
+    SECTION("SLICE onsets: mode 0 byte-identical, mode 1 (log-filtered flux) finds the quiet hats");
+    {
+        static bb::OnsetDetector det;
+        auto hash = [](const int* o, int n, const float* s) {
+            uint64_t h = 1469598103934665603ull;
+            for(int i = 0; i < n; i++) { h ^= (uint64_t)(uint32_t)o[i]; h *= 1099511628211ull; uint32_t u; memcpy(&u, &s[i], 4); h ^= u; h *= 1099511628211ull; }
+            return h; };
+        static float tb[48000 * 8]; static int on[128]; static float sal[128];
+        const int tlen = bb::MakeTestBreak(tb, 48000 * 8, kSr);
+        det.mode = 0;
+        int n = det.Detect(tb, tlen, kSr, on, 128, sal);
+        CHECK(n == 16 && hash(on, n, sal) == 0x3aafccb7403e6f5bull, "mode 0 on the test break: v0.8.0 table (n %d, hash %016llx)", n, (unsigned long long)hash(on, n, sal));
+        n = det.Detect(gMat, kLen, kSr, on, 128, sal);
+        CHECK(n == 16 && hash(on, n, sal) == 0xddfe11dd6de0abd8ull, "mode 0 on the tone grid: v0.8.0 table (hash %016llx)", (unsigned long long)hash(on, n, sal));
+        // 2 bars at 100 BPM: loud kicks (1, 3) and snares (2, 4), hats on every
+        // 16th at −30 dB. Truth = the 32 hat times (kicks/snares coincide).
+        const float bpm = 100.f, beat = 60.f * kSr / bpm, step = beat / 4.f;
+        const int   L = (int)(8.f * beat);
+        static float m[48000 * 5]; for(int i = 0; i < L; i++) m[i] = 0.f;
+        uint32_t rng = 7;
+        auto burst = [&](int at, float f, float amp, int len, bool noise) {
+            for(int i = 0; i < len && at + i < L; i++) { rng = rng * 1664525u + 1013904223u; float nz = noise ? ((float)(rng >> 8) / 8388608.f - 1.f) : 0.f;
+                float env = expf(-(float)i / (float)len * 5.f); m[at + i] += amp * env * (noise ? nz : sinf(6.2831853f * f * i / kSr)); } };
+        static int truth[32]; int nt = 0;
+        for(int s16 = 0; s16 < 32; s16++)
+        {
+            const int at = (int)(s16 * step);
+            truth[nt++] = at;
+            if(s16 % 8 == 0) burst(at, 60.f, 0.9f, 4000, false);
+            else if(s16 % 8 == 4) burst(at, 0.f, 0.8f, 3000, true);
+            burst(at, 0.f, 0.03f, 500, true);                          // hat: −30 dB
+        }
+        auto score = [&](int mode, float& medErr, int& fp) {
+            det.mode = mode;
+            int nn = det.Detect(m, L, kSr, on, 128, nullptr);
+            int hit = 0; float errs[128]; int ne = 0; fp = 0;
+            for(int t = 0; t < nt; t++) { int best = 1 << 30; for(int i = 0; i < nn; i++) { int d = abs(on[i] - truth[t]); if(d < best) best = d; } if(best <= (int)(0.010f * kSr)) { hit++; errs[ne++] = (float)best / kSr * 1000.f; } }
+            for(int i = 0; i < nn; i++) { int best = 1 << 30; for(int t = 0; t < nt; t++) { int d = abs(on[i] - truth[t]); if(d < best) best = d; } if(best > (int)(0.015f * kSr)) fp++; }
+            for(int i = 1; i < ne; i++) for(int j = i; j > 0 && errs[j - 1] > errs[j]; j--) { float t = errs[j]; errs[j] = errs[j - 1]; errs[j - 1] = t; }
+            medErr = ne ? errs[ne / 2] : 99.f;
+            printf("  mode %d: %d onsets, recall %d/%d, false %d, median |err| %.1f ms\n", mode, nn, hit, nt, fp, medErr);
+            return hit; };
+        float e0, e1; int fp0, fp1;
+        const int h0 = score(0, e0, fp0), h1 = score(1, e1, fp1);
+        CHECK(h1 >= 29, "mode 1 recall ≥ 29/32 of the −30 dB hats (%d)", h1);
+        CHECK(fp1 <= 1, "mode 1: at most one false onset (%d)", fp1);
+        CHECK(h1 >= h0, "mode 1 recall ≥ mode 0 (%d vs %d)", h1, h0);
+        CHECK(e1 <= 6.f, "mode 1 timing: median error ≤ 6 ms (%.1f)", e1);
+    }
+
+    // A parametric break: kick on 1 and the "and" of 3, snare on 2 and 4,
+    // hats on every 16th (odd 16ths at `swing` of their 8th), `lead` samples
+    // of hats-only count-in before the first downbeat.
+    struct Synth { static int Make(float* m, int maxLen, float bpm, int bars, float swing, int lead, int* ons, int& no, bool snareEveryBeat = false) {
+        const float beat = 60.f * kSr / bpm, bar = 4.f * beat, step = beat / 4.f, cell = beat / 2.f;
+        const int L = lead + (int)(bars * bar); if(L > maxLen) return 0;
+        for(int i = 0; i < L; i++) m[i] = 0.f;
+        uint32_t rng = 99; no = 0;
+        auto burst = [&](int at, float f, float amp, int len, bool noise) {
+            for(int i = 0; i < len && at + i < L; i++) { if(at + i < 0) continue; rng = rng * 1664525u + 1013904223u; float nz = ((float)(rng >> 8) / 8388608.f - 1.f);
+                float env = expf(-(float)i / (float)len * 5.f); m[at + i] += amp * env * (noise ? nz : sinf(6.2831853f * f * i / kSr)); } };
+        auto pos = [&](int b, int s16) { const int c = s16 / 2; const float off = (s16 & 1) ? swing * cell : 0.f; return lead + (int)(b * bar + c * cell + off); };
+        for(int b = -1; b < bars; b++)
+            for(int s16 = 0; s16 < 16; s16++)
+            {
+                const int at = pos(b, s16);
+                if(at < 0 || at >= L) continue;
+                bool hit = false;
+                if(b >= 0 && (s16 == 0 || s16 == 10)) { burst(at, 60.f, 0.9f, 4000, false); hit = true; }
+                if(b >= 0 && (s16 == 4 || s16 == 12 || (snareEveryBeat && s16 % 4 == 0))) { burst(at, 0.f, 0.8f, 3000, true); hit = true; }
+                burst(at, 0.f, 0.12f, 600, true);
+                if(no < 256) ons[no++] = at;
+                (void)hit;
+            }
+        (void)step; return L; } };
+
+    SECTION("SLICE bars: IOI-cluster estimate — tempo, octave, downbeat, varispeed, swing, fallback");
+    {
+        static float m[48000 * 12]; static int ons[256]; int no;
+        auto est = [&](float bpm, int bars, float swing, int lead, bool sev, bb::BarEstimate& e) {
+            const int L = Synth::Make(m, 48000 * 12, bpm, bars, swing, lead, ons, no, sev);
+            e = bb::EstimateBar(m, L, kSr, ons, no); return L; };
+        bb::BarEstimate e;
+        const float b96 = 240.f * kSr / 96.f;
+        est(96.f, 2, 0.5f, 0, false, e);
+        CHECK(e.bar > 0.f && fabsf(e.bar - b96) < 0.02f * b96, "96 BPM, 2 bars: bar %.0f vs %.0f (conf %.2f fit %.2f)", e.bar, b96, e.conf, e.fit);
+        CHECK(e.bar > 0.f && (e.downbeat < 0.05f * b96 || e.downbeat > 0.95f * b96), "…downbeat at the start (%.0f)", e.downbeat);
+        const float b172 = 240.f * kSr / 172.f;
+        est(172.f, 4, 0.5f, 0, false, e);
+        CHECK(e.bar > 0.f && fabsf(e.bar - b172) < 0.02f * b172, "172 BPM, 4 bars (jungle): bar %.0f vs %.0f, not the prior's octave", e.bar, b172);
+        const int lead = (int)(0.37f * b96);
+        est(96.f, 2, 0.5f, lead, false, e);
+        CHECK(e.bar > 0.f && fabsf(e.bar - b96) < 0.02f * b96 && fabsf(e.downbeat - (float)lead) < 0.03f * b96, "0.37-bar count-in: bar %.0f, downbeat %.0f vs %d", e.bar, e.downbeat, lead);
+        const float b110 = 240.f * kSr / 110.f;
+        est(110.f, 2, 0.62f, 0, false, e);
+        CHECK(e.bar > 0.f && fabsf(e.bar - b110) < 0.02f * b110, "swung 16ths (ratio 1.6) do not shear the bar: %.0f vs %.0f", e.bar, b110);
+        const float b154 = 240.f * kSr / 153.6f;
+        est(153.6f, 2, 0.55f, 0, false, e);
+        CHECK(e.bar > 0.f && fabsf(e.bar - b154) < 0.02f * b154, "96 BPM material at 1.6× (153.6 BPM): %.0f vs %.0f", e.bar, b154);
+        est(96.f, 2, 0.5f, 0, true, e);
+        CHECK(e.bar == 0.f || fabsf(e.bar - b96) < 0.02f * b96, "snare on every beat: silent or right, never a wrong confident answer (%.0f)", e.bar);
+        CHECK(bb::EstimateBar(gMat, kLen, kSr, nullptr, 0).bar == 0.f, "no onsets → no estimate");
+    }
+
+    SECTION("SLICE conditioning: whole bars of the material's own bar, prior as fallback");
+    {
+        static bb::OnsetDetector det; det.mode = 0;
+        static float m[48000 * 12]; static int ons[256]; int no;
+        const float b96 = 240.f * kSr / 96.f;
+        const int lead = (int)(0.3f * b96);
+        int L = Synth::Make(m, 48000 * 12, 96.f, 2, 0.5f, lead, ons, no);
+        for(int i = 0; i < (int)(0.2f * b96) && L < 48000 * 12; i++) m[L++] = 0.01f * sinf(0.3f * i);   // a tail of noise
+        bb::ConditionInfo ci;
+        const int L2 = bb::ConditionBuffer(m, L, kSr, det, &ci);
+        CHECK(ci.bars == 2 && fabsf((float)L2 - 2.f * b96) < 0.02f * b96, "count-in + tail → exactly 2 bars (%d bars, %d vs %.0f samples)", ci.bars, L2, 2.f * b96);
+        CHECK(abs(ci.trimmedStart - lead) < (int)(0.03f * b96), "…starting at the downbeat (trimmed %d vs lead %d)", ci.trimmedStart, lead);
+        // a 4-bar jungle break stays 4 bars (the prior would call it 2 bars of 8ths)
+        L = Synth::Make(m, 48000 * 12, 172.f, 4, 0.5f, 0, ons, no);
+        const int L3 = bb::ConditionBuffer(m, L, kSr, det, &ci);
+        CHECK(ci.bars == 4 && L3 >= (int)(0.99f * L), "172 BPM × 4 bars: kept whole, 4 bars (%d bars, %d of %d)", ci.bars, L3, L);
+        CHECK(bb::GridSlices(L3, kSr) == 32, "…where the duration prior alone says 2 bars (%d slices)", bb::GridSlices(L3, kSr));
+        // silence → untouched
+        static float z[48000]; for(int i = 0; i < 48000; i++) z[i] = 0.f;
+        CHECK(bb::ConditionBuffer(z, 48000, kSr, det, &ci) == 48000 && ci.bars == 0, "silence: length kept, no bar");
+    }
+
+    SECTION("SLICE swing: estimate; Auto keeps the hats' heads and their timing, straight loses them");
+    {
+        static float m[48000 * 12]; static int ons[256]; int no;
+        const float p = 0.66f;                                           // ratio 1.94
+        Synth::Make(m, 48000 * 12, 110.f, 2, p, 0, ons, no);
+        const float step = (240.f * kSr / 110.f) / 16.f;
+        bb::SwingEstimate sw = bb::EstimateSwing(ons, no, step);
+        CHECK(fabsf(sw.p - p) < 0.02f, "swung synthetic: p %.3f vs %.2f (R %.2f, %d off-beat onsets)", sw.p, p, sw.r, sw.nOff);
+        Synth::Make(m, 48000 * 12, 110.f, 2, 0.5f, 0, ons, no);
+        sw = bb::EstimateSwing(ons, no, step);
+        CHECK(sw.p == 0.5f, "straight synthetic: p stays 0.5 (%.3f)", sw.p);
+
+        // Engine material: the tone grid with SWUNG content — step k's tone
+        // begins at its swung position (odd steps at p of their 8th).
+        static float sm[kLen]; static int son[16];
+        for(int k = 0; k < kSteps; k++)
+        {
+            const int cell = 2 * kStep, c = k / 2;
+            const int a = c * cell + ((k & 1) ? (int)(p * cell) : 0);
+            const int b = (k + 1 < kSteps) ? ((k + 1) & 1 ? c * cell + (int)(p * cell) : (c + 1) * cell) : kLen;
+            son[k] = a;
+            for(int i = a; i < b; i++) { float t = (float)(i - a) / kSr; float env = (i - a) < 48 ? (float)(i - a) / 48.f : 1.f; sm[i] = 0.5f * env * sinf(6.2831853f * StepFreq(k) * t); }
+        }
+        auto run = [&](float swing, int& wrongHeads, int& oddGates, double& oddPhase) {
+            bb::Engine es; es = bb::Engine(); es.Init(0x51); es.patternMode = 0; es.patternKnob = 1.f;
+            es.swing = swing;
+            es.SetMaterial(sm, kLen, kSr, son, 16, gCls, 0);
+            es.SetBpm(0.f); es.RegenPattern();
+            // parity-keeping rearrangement with no verbatim runs (every step is a
+            // fresh trigger): even steps take source k+6, odd steps k+10
+            for(int k = 0; k < 16; k++) { es.stepSrc[k] = (int8_t)((k + ((k & 1) ? 10 : 6)) & 15); es.stepCont[k] = false; es.stepRatN[k] = 0; es.stepRev[k] = false; }
+            es.gateOnsetsOnly = true;
+            static double tlog[256]; es.trigLog = tlog; es.trigLogMax = 256; es.trigLogN = 0;
+            Rendered r = RenderLoops(es, 2);
+            wrongHeads = 0; oddGates = 0; oddPhase = 0.;
+            const double cellSec = 2.0 * kStep / kSr;
+            for(int k = 1; k < 16; k += 2)
+            {
+                // the odd slot's first 12 % of an 8th (before any swung attack could be due)
+                const double slotStart = (16 + (k / 2) * 2) * (double)kStep / kSr + (swing > 0.5f ? swing : 0.5) * cellSec;
+                const int a = (int)(slotStart * kSr) + 200, n = (int)(0.10 * cellSec * kSr);
+                const int src = es.stepSrc[k];
+                if(SliceOfFreq(MeasureFreq(&r.y[a], n), Rms(&r.y[a], n)) != src) wrongHeads++;
+            }
+            oddGates = GateEvents(r, 2);   // hat lane: the odd steps' gates
+            int cnt = 0;
+            for(int i = 0; i < es.trigLogN; i++) { double ph = fmod(tlog[i] / cellSec, 1.0); if(ph > 0.25 && ph < 0.9) { oddPhase += ph; cnt++; } }
+            if(cnt) oddPhase /= cnt;
+            return r; };
+        int wS, gS, wA, gA; double phS, phA;
+        run(0.5f, wS, gS, phS);
+        run(p, wA, gA, phA);
+        printf("  straight: %d/8 odd slots open with the wrong slice, hat gates %d, odd triggers at %.2f of the 8th\n", wS, gS, phS);
+        printf("  auto:     %d/8 odd slots open with the wrong slice, hat gates %d, odd triggers at %.2f of the 8th\n", wA, gA, phA);
+        CHECK(wS >= 6, "straight boundaries: the odd slice opens with the even slice's tail (%d/8 heads wrong)", wS);
+        CHECK(wA == 0, "Auto: every odd slot opens with its own hat (%d/8 wrong)", wA);
+        CHECK(gA >= 2 * gS && gA >= 20, "onsets-only gates: Auto keeps the hat hits (%d vs %d over 2 loops)", gA, gS);
+        CHECK(fabs(phA - p) < 0.03 && fabs(phS - 0.5) < 0.03, "odd steps fire at %.2f of the 8th under Auto, 0.50 straight (%.2f)", phA, phS);
+        // straight = byte-identical slicing
+        bb::Engine e0; e0 = bb::Engine(); e0.Init(1); e0.SetMaterial(gMat, kLen, kSr, nullptr, 0, gCls, 0);
+        bool same = !e0.swung; for(int k = 0; k < 16; k++) same = same && e0.slices[k].start == k * kStep;
+        CHECK(same, "swing 0.5: slices are i·step, swung flag off");
     }
 
     printf("\n%d passed, %d failed\n", gPass, gFail);

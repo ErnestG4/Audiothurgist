@@ -53,6 +53,7 @@
 #include "bb_engine.h"
 #include "bb_onset.h"
 #include "bb_condition.h"
+#include "bb_swing.h"      /* SLICE */
 #include "bb_classify.h" /* uses capicola's Analyzer (Matthew Nielsen, AGPL) — THIRD_PARTY.md */
 #include "bb_gates.h"    /* GATES: pure lane law (arm / poll / volts) */
 #include "bb_bars.h"
@@ -188,6 +189,13 @@ static volatile bool gApply     = false;   /* loader done → audio may swap */
 static int           gPendOnsets[kMaxOnsets];
 static volatile int  gPendN = 0, gPendLen = 0;
 static volatile int  gPendHint = 0;      /* slice count for the pending material (0 = prior) */
+/* SLICE: staged with a load — the conditioning's verified whole-bar count
+ * (core/bb_condition.h; 0 = none), the material's 16th swing for the grid it
+ * will play on (0.5 = straight; Options → Swing), and whether the onset table
+ * came from the file's cue chunk (then Options → Onsets does not replace it) */
+static volatile int   gCondBars   = 0;
+static volatile float gPendSwing  = 0.5f;
+static bool           gPendCues   = false;
 static volatile bool gReapply  = false;  /* re-slice the CURRENT material (Bars option) */
 static uint8_t       gPendClass[bb::Engine::kMaxSlices];
 static volatile int  gCurFile = -1;
@@ -522,25 +530,40 @@ static void ComputeDensity(const float* x, int len, float* dens, int nsl = 0)
 /* Slice count for material: the Bars override, else the backbeat estimate
  * (core/bb_bars.h), else 0 = the engine's duration prior. Always bars × 16,
  * halved while over kMaxSlices (an 8-bar loop becomes an 8th grid). */
-static int SliceCountFor(const float* x, int len, const int* onsets, int n)
+static int SliceCountFor(const float* x, int len, const int* onsets, int n, int condBars /* SLICE */)
 {
     int bars = 0;
     if(gBars.sel >= 1) bars = 1 << (gBars.sel - 1);
     else
     {
-        const float bar = bb::EstimateBarSamples(x, len, kSr, onsets, n);
-        if(bar > 0.f)
+        /* SLICE: the conditioning's verified whole-bar count first (the buffer
+         * was cut to it); else a confident IOI-cluster estimate whose bar
+         * count for this buffer is a power of two within 6 %; else 0 = the
+         * duration prior (docs/packages/slice.md) */
+        bars = condBars > 0 ? condBars : 0;
+        if(bars <= 0)
         {
-            const float b = (float)len / bar;
-            int best = 1; float bestD = 1e9f;
-            for(int p = 1; p <= 16; p <<= 1) { float d = fabsf(b - (float)p) / (float)p; if(d < bestD) { bestD = d; best = p; } }
-            bars = best;
+            const float bar = bb::EstimateBarSamples(x, len, kSr, onsets, n);
+            if(bar > 0.f)
+            {
+                const float b = (float)len / bar;
+                for(int p = 1; p <= 16; p <<= 1) if(fabsf(b - (float)p) < 0.06f * (float)p) bars = p;
+            }
         }
     }
     if(bars <= 0) return 0;
     int nsl = bars * 16;
     while(nsl > bb::Engine::kMaxSlices) nsl /= 2;
     return nsl;
+}
+
+/* SLICE: the material's 16th swing against the grid it will play on (Options
+ * → Swing: Auto), from core/bb_swing.h; 0.5 = straight. */
+static float SwingFor(int len, const int* onsets, int n, int nslHint)
+{
+    if(gSwing.sel != 1) return 0.5f;
+    const int nsl = nslHint >= 1 ? nslHint : bb::GridSlices(len, kSr);
+    return bb::EstimateSwing(onsets, n, (float)len / (float)nsl).p;
 }
 
 /* Per-slice min/max envelope over the engine's grid (same bar rule). */
@@ -577,6 +600,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
     {
         if(gApply) { float* t = gPlay; gPlay = gLoad; gLoad = t; }   /* re-apply keeps the buffer */
         /* GRAM */ memcpy(engine.sliceSal, gPendSal, sizeof engine.sliceSal); /* before SetMaterial: its boot pattern ranks the tiers */
+        engine.swing = gPendSwing;   /* SLICE: read by SetMaterial (boundaries + step timing) */
         engine.SetMaterial(gPlay, gPendLen, kSr, gPendOnsets, gPendN, gPendClass, gPendHint);
         memcpy(gSal, gPendSal, sizeof gSal);
         /* GATES */
@@ -1121,7 +1145,13 @@ static void ServiceLoad()
                           kMaxSec, cues, &nCues, kMaxOnsets, &err);
     if(len <= 0) return;   /* leave current material playing on failure */
 
-    len = bb::ConditionBuffer(gLoad, len, kSr, gDet);
+    /* SLICE: detector mode from Options → Onsets; the conditioning reports the
+     * whole-bar count it cut the buffer to (0 when the prior applied) */
+    gDet.mode = gOnsetDet.sel;
+    bb::ConditionInfo ci;
+    len = bb::ConditionBuffer(gLoad, len, kSr, gDet, &ci);
+    gCondBars = ci.bars;
+    gPendCues = nCues >= 2;
 
     if(nCues >= 2)
     {
@@ -1138,7 +1168,8 @@ static void ServiceLoad()
         gPendN = gDet.Detect(gLoad, len, kSr, gPendOnsets, kMaxOnsets, nullptr);
     }
 
-    gPendHint = SliceCountFor(gLoad, len, gPendOnsets, gPendN);
+    gPendHint  = SliceCountFor(gLoad, len, gPendOnsets, gPendN, gCondBars);
+    gPendSwing = SwingFor(len, gPendOnsets, gPendN, gPendHint);   /* SLICE */
     ClassifySteps(gLoad, len, gPendClass, gClass.mode, gPendSal, gPendHint, gPendBands /* GATES */);
     ComputeDensity(gLoad, len, gPendDens, gPendHint);   /* PLAY */
     ComputeEnvelope(gLoad, len, gPendEnv, gPendHint);
@@ -1334,18 +1365,25 @@ int main()
                           kMaxSec, cues, &nCues, kMaxOnsets, &err);
         if(len > 0)
         {
-            len = bb::ConditionBuffer(gPlay, len, kSr, gDet);
+            bb::ConditionInfo ci;                                  /* SLICE */
+            len = bb::ConditionBuffer(gPlay, len, kSr, gDet, &ci);
+            gCondBars = ci.bars;
             int no = (nCues >= 2) ? 0 : gDet.Detect(gPlay, len, kSr, gPendOnsets, kMaxOnsets, nullptr);
             if(nCues >= 2)
             {
                 for(int i = 0; i < nCues && no < bb::Engine::kMaxSlices; i++)
                     gPendOnsets[no++] = cues[i];
             }
+            gPendCues = nCues >= 2;
+            gPendN    = no;
+            /* SLICE: the boot load takes the same bar rule as a later load
+             * (v0.8.0 sliced it by the prior alone) */
+            const int nsl = SliceCountFor(gPlay, len, gPendOnsets, no, gCondBars);
             static uint8_t cls[bb::Engine::kMaxSlices];
-            ClassifySteps(gPlay, len, cls, gClass.mode, gSal, 0, engine.stepBands /* GATES: audio not started */);
-            engine.SetMaterial(gPlay, len, kSr, gPendOnsets, no, cls);
+            ClassifySteps(gPlay, len, cls, gClass.mode, gSal, nsl, engine.stepBands /* GATES: audio not started */);
+            engine.SetMaterial(gPlay, len, kSr, gPendOnsets, no, cls, nsl);
             ComputeDensity(gPlay, len, engine.sliceDens, engine.nSlices);   /* PLAY: audio not started yet */
-            ComputeEnvelope(gPlay, len, gEnv);
+            ComputeEnvelope(gPlay, len, gEnv, nsl);
             gCurFile = 0;
             loaded   = true;
         }
@@ -1420,7 +1458,29 @@ int main()
         if(gBars.dirty && !gApply && !gReapply && !gLoadReq && !gReclass && engine.bufLen > 0)
         {
             gBars.dirty = false;
-            const int nsl = SliceCountFor(gPlay, engine.bufLen, gPendOnsets, gPendN);
+            const int nsl = SliceCountFor(gPlay, engine.bufLen, gPendOnsets, gPendN, gCondBars);
+            gPendSwing = SwingFor(engine.bufLen, gPendOnsets, gPendN, nsl);   /* SLICE */
+            ClassifySteps(gPlay, engine.bufLen, gPendClass, gClass.mode, gPendSal, nsl, gPendBands /* GATES */);
+            ComputeDensity(gPlay, engine.bufLen, gPendDens, nsl);   /* PLAY */
+            ComputeEnvelope(gPlay, engine.bufLen, gPendEnv, nsl);
+            gPendLen  = engine.bufLen;
+            gPendHint = nsl;
+            gReapply  = true;
+        }
+        /* SLICE: Options → Onsets re-detects the table (unless it came from
+         * the file's cues), Options → Swing re-measures; both re-apply the
+         * current material with the new boundaries and step timing. */
+        if((gSwing.dirty || gOnsetDet.dirty) && !gApply && !gReapply && !gLoadReq && !gReclass && engine.bufLen > 0)
+        {
+            if(gOnsetDet.dirty)
+            {
+                gOnsetDet.dirty = false;
+                gDet.mode       = gOnsetDet.sel;
+                if(!gPendCues) gPendN = gDet.Detect(gPlay, engine.bufLen, kSr, gPendOnsets, kMaxOnsets, nullptr);
+            }
+            gSwing.dirty  = false;
+            const int nsl = SliceCountFor(gPlay, engine.bufLen, gPendOnsets, gPendN, gCondBars);
+            gPendSwing    = SwingFor(engine.bufLen, gPendOnsets, gPendN, nsl);
             ClassifySteps(gPlay, engine.bufLen, gPendClass, gClass.mode, gPendSal, nsl, gPendBands /* GATES */);
             ComputeDensity(gPlay, engine.bufLen, gPendDens, nsl);   /* PLAY */
             ComputeEnvelope(gPlay, engine.bufLen, gPendEnv, nsl);
