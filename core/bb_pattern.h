@@ -19,9 +19,11 @@ namespace bb {
 //   1 Collins — the Chop Codex upgrades (Collins 2001, "Algorithmic
 //     Composition Methods for Breakbeat Science" + "Further Automatic
 //     Breakbeat Cutting Methods"): position-in-phrase weighted moves, odd
-//     cut figures (3+3+2 …), a fill bar with snap-back, 1-cell stutter as a
-//     rare phrase terminator, WarpCut-style geometric rolls, and repitch
-//     jitter on repeats (applied by the engine).
+//     cut figures (3+3+2 …), a fill bar with snap-back (every-4th-bar fills
+//     after BBCut's SQPusher1), 1-cell stutter as a rare phrase terminator,
+//     WarpCut-style geometric rolls, and — ours, not from his text — repitch
+//     jitter on repeats (±1.4 %, after the detune range of his beat
+//     generator; applied by the engine).
 struct Pattern
 {
     static constexpr int kMaxSteps = 64;
@@ -274,19 +276,28 @@ struct Pattern
     {
         const int bar = 16;
         uint8_t   fire[kMaxSteps];
+        uint8_t   dbl[kMaxSteps];   // Grids: the map's odd (32nd) step also fires
         for(int s = 0; s < nSteps; s++)
         {
-            uint8_t f = 0;
+            uint8_t f = 0, d = 0;
             if(mode == 2)
             {
+                // The Grids map is ONE BAR at 32nd resolution (pichenettes:
+                // kStepsPerPattern = 32, 8 steps per quarter). Our grid is
+                // 16ths, so read the map's even steps for the 16th grid and
+                // fold its odd steps into 32nd doubles (our ratchet). Indexing
+                // it with 16th steps stretched the map over two bars and put
+                // the backbeat on beat 3 (lit review, 2026-09-05).
                 const uint8_t x  = (uint8_t)(langX * 255.f + 0.5f);
                 const uint8_t y  = (uint8_t)(langY * 255.f + 0.5f);
-                const uint8_t gs = (uint8_t)(s % kGridsSteps);
+                const uint8_t gs = (uint8_t)((s % bar) * 2);
                 for(int c = 0; c < 3; c++)
                 {
                     const uint8_t dens = (uint8_t)(langDens[c] * 255.f + 0.5f);
-                    if(GridsReadDrumMap(gs, (uint8_t)c, x, y) > (uint8_t)(255 - dens))
-                        f |= (uint8_t)(1u << c);
+                    const uint8_t thr  = (uint8_t)(255 - dens);
+                    if(GridsReadDrumMap(gs, (uint8_t)c, x, y) > thr) f |= (uint8_t)(1u << c);
+                    if(GridsReadDrumMap((uint8_t)(gs + 1), (uint8_t)c, x, y) > thr)
+                        d |= (uint8_t)(1u << c);
                 }
             }
             else
@@ -301,6 +312,7 @@ struct Pattern
                 }
             }
             fire[s] = f;
+            dbl[s]  = d;
         }
         int8_t byClass[3][kMaxSteps];
         int    nBy[3] = {0, 0, 0};
@@ -316,6 +328,7 @@ struct Pattern
             const uint8_t f = fire[s];
             if(!f) { src[s] = -2; continue; }              // rest
             const int c = (f & 1) ? 0 : (f & 2) ? 1 : 2;  // kick > snare > hat
+            if(dbl[s] & (uint8_t)(1u << c)) ratN[s] = 1;   // map's 32nd → a double
             int pick = -1;
             if(cls && (cls[s] & 3) == c) pick = s;         // in place
             else if(cls)                                   // nearest of that class
