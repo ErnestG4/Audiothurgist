@@ -26,6 +26,23 @@ struct Voice
     float  clickComp  = 0.f; // decaying offset that bridges a mid-note steal
     float  relScale   = 1.f; // keeps the envelope continuous through a choke
 
+    /* PLAY: per-voice fade geometry (Options → Fades). Trigger resets these
+     * to the fixed 1 ms attack / 5 ms release; Adaptive mode then rewrites
+     * them from the slice's keyframe density (Engine::ApplyFades). Ramps are
+     * multiplies by a reciprocal — no per-sample division. epShape bends
+     * both ramps parabolically (x·(2−x)): ≈ equal-power for the uncorrelated
+     * cross-slice joins; linear stays for correlated (near-verbatim) ones. */
+    float  atkInv   = 1.f / 48.f;  // attack gain per source sample
+    float  guardInv = 1.f / 240.f; // edge-guard gain per source sample
+    int    chokeLen = 240;         // release length when choked, source samples
+    bool   epShape  = false;
+    /* PLAY: tail policy (Options → Slice Tail). tail 1 loops [loopA, loopB)
+     * forward, 2 ping-pongs between them; 0 plays to the natural end. Set by
+     * Engine::SetTail only when the grid slot outlasts the slice. */
+    int8_t tail    = 0;
+    bool   looping = false;        // has wrapped at least once
+    double loopA = 0., loopB = 0.; // sub-sample zero-crossing positions
+
     // ext > 1 plays past the slice's natural boundary, fading out across the
     // extension, so adjacent slices crossfade instead of butting — a frozen
     // repeating pattern otherwise exposes every seam on every pass.
@@ -45,25 +62,54 @@ struct Voice
         age      = 0;
         relScale = 1.f;
         active   = true;
+        /* PLAY: back to the fixed geometry; the engine overrides per slice */
+        atkInv   = 1.f / 48.f;
+        guardInv = 1.f / 240.f;
+        chokeLen = 240;
+        epShape  = false;
+        tail     = 0;
+        looping  = false;
+    }
+
+    // Would a new attack choke this voice? Voices ringing in their extension
+    // or within 10 ms of their boundary (a jitter-early trigger must not
+    // leave the old voice free to replay the new attack), and every looping
+    // tail (PLAY): the tail fills silence and always yields to a hit.
+    bool WouldChoke() const
+    {
+        return active && (tail != 0 || (rate >= 0.f && pos > (double)(natEnd - 480)));
     }
 
     // A new attack chokes any voice still ringing in its extension: the tail
     // fills silence, but must never replay the next slice's transient under
     // the incoming one (that reads as every hit doubled a few ms apart).
-    void Choke(int bufLen)
+    void Choke(int bufLen, bool ep = false)
     {
-        // also catch voices within 10 ms of their boundary: a jitter-early
-        // trigger must not leave the old voice free to replay the new attack
-        if(!active || rate < 0.f || pos <= (double)(natEnd - 480)) return;
+        if(!WouldChoke()) return;
+        if(tail) /* PLAY: a tail is mid-slice at unity gain; fade out forward
+                  * from here, never past the slice's own end */
+        {
+            if(rate < 0.f) rate = -rate; // ping-pong heading back: value-continuous flip
+            int e = (int)pos + chokeLen;
+            if(e > natEnd) e = natEnd;
+            natEnd  = (int)pos;
+            end     = e > bufLen ? bufLen : e;
+            epShape = ep;
+            tail    = 0;
+            looping = false;
+            return;
+        }
         float h = (end > natEnd + 8)
                       ? 1.f - (float)(pos - (double)natEnd) / (float)(end - natEnd)
                       : 1.f;
         if(h < 0.f) h = 0.f;
         if(h > 1.f) h = 1.f;
+        if(epShape) h = h * (2.f - h); // PLAY: restart at the SHAPED gain
         relScale *= h; // new 5 ms ramp starts exactly where the old gain was
         natEnd = (int)pos;
-        int e  = (int)pos + 240;
+        int e  = (int)pos + chokeLen;
         end    = e > bufLen ? bufLen : e;
+        epShape = ep;
     }
 
     float Render(const float* buf)
@@ -81,13 +127,34 @@ struct Voice
             lastOut = 0.f;
             return clickComp;
         }
+        /* PLAY: tail wrap. Loop forward jumps loopB → loopA (both are
+         * positive-going zero crossings when the slice has any, so the join
+         * is ~0 → ~0); ping-pong reflects at either end (value-continuous).
+         * The output then continues from the previous sample through
+         * clickComp, exactly as a steal does — the seam becomes a ~1 ms
+         * decaying offset instead of a step. */
+        bool wrapped = false;
+        if(tail)
+        {
+            if(rate > 0.f && pos >= loopB)
+            {
+                if(tail == 1) pos -= loopB - loopA;
+                else { rate = -rate; pos = 2. * loopB - pos; }
+                wrapped = looping = true;
+            }
+            else if(rate < 0.f && pos <= loopA)
+            {
+                rate = -rate; pos = 2. * loopA - pos;
+                wrapped = true;
+            }
+        }
         int   i0 = (int)pos;
         float fr = (float)(pos - (double)i0);
         float s  = buf[i0] + fr * (buf[i0 + 1] - buf[i0]);
         // envelope: ~1 ms attack; unity through the natural slice; release
         // across the extension (or a 5 ms edge guard when there is none)
         float dA = (float)(pos - (double)start);
-        float g  = dA * (1.f / 48.f);
+        float g  = dA * atkInv;
         if(g > 1.f) g = 1.f;
         float h;
         if(pos <= (double)natEnd)
@@ -95,12 +162,15 @@ struct Voice
         else if(end > natEnd + 8)
             h = 1.f - (float)(pos - (double)natEnd) / (float)(end - natEnd);
         else
-            h = (float)((double)(end - 1) - pos) * (1.f / 240.f);
+            h = (float)((double)(end - 1) - pos) * guardInv;
         if(h > 1.f) h = 1.f;
         if(h < 0.f) h = 0.f;
+        if(epShape) { g = g * (2.f - g); h = h * (2.f - h); } // PLAY: ≈ equal power
         pos += (double)rate;
         age++;
-        lastOut = s * g * h * relScale;
+        const float o = s * g * h * relScale;
+        if(wrapped) clickComp += lastOut - o; // PLAY: bridge the seam
+        lastOut = o;
         return lastOut + clickComp;
     }
 };
@@ -146,9 +216,104 @@ struct Engine
                                // slot outlasts its content — off-native tempo
                                // or pitched up). Gate honestly instead; the
                                // continuity path keeps verbatim runs seamless.
+                               // (PLAY: Options → Slice Tail can instead loop
+                               // the slice's OWN tail — a region that ends
+                               // before the boundary, so still no pre-echo.)
 
     Voice    voices[kVoices];
     uint32_t trigFlash = 0; // incremented per trigger; shell reads + clears for LEDs
+
+    /* PLAY: Options → Fades / Slice Tail. The shell writes the modes per
+     * block and sliceDens[] (keyframes per sample per slice, the Density
+     * lens of bb_classify.h) with each load or re-slice; 0 = unknown, which
+     * falls back to the fixed lengths. Nothing here costs per sample: fade
+     * lengths are resolved per trigger, loop points once per slice. */
+    int   fadeMode = 0;              // 0 Fixed (1 ms attack, 5 ms release), 1 Adaptive
+    int   tailMode = 0;              // 0 Gate (honest), 1 Loop forward, 2 Ping-pong
+    float sliceDens[kMaxSlices] = {};
+    double loopA[kMaxSlices] = {}, loopB[kMaxSlices] = {}; // sub-sample loop region per slice
+    int8_t loopState[kMaxSlices] = {};                     // 0 unsearched, 1 found, -1 none
+    static constexpr float kFadeKeyframes = 10.f; // a splice spans ~10 keyframes
+    static constexpr int   kFadeMin = 48, kFadeMax = 480; // 1–10 ms (Nielsen floor,
+                                                          // Driedger & Müller ceiling)
+
+    // Release / edge-guard length for a slice: keyframe-dense (bright,
+    // transient) → short, sparse (sustained) → long. Fixed mode: 5 ms.
+    int FadeSamples(int s) const
+    {
+        if(fadeMode == 0 || s < 0 || s >= kMaxSlices) return 240;
+        const float d = sliceDens[s];
+        if(d <= 0.f) return 240;
+        const float f = kFadeKeyframes / d;
+        return f < (float)kFadeMin ? kFadeMin : (f > (float)kFadeMax ? kFadeMax : (int)f);
+    }
+    // Attack ramp: a third of the release, floored at 1 ms (a kick can take
+    // 2–3 ms without losing its click; a hat cannot).
+    int AttackSamples(int s) const
+    {
+        if(fadeMode == 0) return kFadeMin;
+        const int a = FadeSamples(s) / 3;
+        return a < kFadeMin ? kFadeMin : a;
+    }
+    void ApplyFades(Voice& v, int s, bool ep) const
+    {
+        if(fadeMode == 0) return; // Trigger's defaults ARE the fixed geometry
+        const int f = FadeSamples(s), a = AttackSamples(s);
+        v.chokeLen = f;
+        v.guardInv = 1.f / (float)f;
+        v.atkInv   = 1.f / (float)a;
+        v.epShape  = ep;
+    }
+    // Is the join into a slice starting at `cellStart` a cross-slice one?
+    // True when some voice about to be choked is NOT within the continuity
+    // window of that start (i.e. it was not heading into this very slice).
+    bool JoinIsCross(int cellStart) const
+    {
+        if(fadeMode == 0) return false;
+        for(int i = 0; i < kVoices; i++)
+            if(voices[i].WouldChoke() && fabs(voices[i].pos - (double)cellStart) >= 160.)
+                return true;
+        return false;
+    }
+    // Loop region of a slice for the tail policies: from a positive-going
+    // zero crossing at or after the slice's midpoint to one just before its
+    // natural end, so the region never reaches the next slice's attack
+    // (no pre-echo — the reason sliceExt is 1.0). Both crossings are refined
+    // to sub-sample positions (linear, matching the reader's interpolation)
+    // so the join carries no phase error. Without usable crossings (DC,
+    // silence) the plain midpoint..end region serves and the wrap bridge in
+    // Voice::Render declicks. Cached per slice; ≤ len/2 compares, once.
+    void FindLoop(int s)
+    {
+        const Slice& c   = slices[s];
+        const int natEnd = c.start + c.len;
+        const int a0 = c.start + c.len / 2, b0 = natEnd - 2;
+        double a = (double)a0, b = (double)b0;
+        const int span = c.len / 4;
+        int zb = -1, za = -1;
+        for(int i = b0, k = 0; i > c.start && k < span; i--, k++)
+            if(buf[i - 1] <= 0.f && buf[i] > 0.f) { zb = i; break; }
+        for(int i = a0, k = 0; i + 1 < natEnd && k < span; i++, k++)
+            if(buf[i] <= 0.f && buf[i + 1] > 0.f) { za = i + 1; break; }
+        if(zb >= 0 && za >= 0 && zb - za >= 256)
+        {
+            a = (double)(za - 1) + (double)(-buf[za - 1] / (buf[za] - buf[za - 1]));
+            b = (double)(zb - 1) + (double)(-buf[zb - 1] / (buf[zb] - buf[zb - 1]));
+        }
+        if(b - a < 64.) { loopState[s] = -1; return; }
+        loopA[s]     = a;
+        loopB[s]     = b;
+        loopState[s] = 1;
+    }
+    void SetTail(Voice& v, int s)
+    {
+        if(tailMode == 0) return;
+        if(loopState[s] == 0) FindLoop(s);
+        if(loopState[s] < 0) return;
+        v.tail  = (int8_t)tailMode;
+        v.loopA = loopA[s];
+        v.loopB = loopB[s];
+    }
 
     // debug hook (desktop shell): log trigger times in seconds
     double* trigLog    = nullptr;
@@ -377,6 +542,7 @@ struct Engine
 
         for(int i = 0; i < nSlices; i++)
             stepClass[i] = classes ? classes[i] : 3;
+        for(int i = 0; i < kMaxSlices; i++) loopState[i] = 0; /* PLAY: new grid, re-search */
 
         // Hits: a slice "opens" with a drum if an onset falls in its first
         // quarter (or within 10 ms before its start). No onset table = every
@@ -438,6 +604,7 @@ struct Engine
         if(cell.len < 64) return;
         gateFired |= (uint8_t)(1u << (stepClass[idx] & 3));
         gateSlice[stepClass[idx] & 3] = (int8_t)idx;
+        const bool ep = JoinIsCross(cell.start); /* PLAY */
         Voice*   v    = &voices[0];
         uint32_t best = 0;
         for(int i = 0; i < kVoices; i++)
@@ -446,8 +613,9 @@ struct Engine
             if(voices[i].age >= best) { best = voices[i].age; v = &voices[i]; }
         }
         for(int i = 0; i < kVoices; i++)
-            if(&voices[i] != v) voices[i].Choke(bufLen);
+            if(&voices[i] != v) voices[i].Choke(bufLen, ep);
         v->Trigger(cell, rate, rev, bufLen, sliceExt);
+        ApplyFades(*v, idx, ep); /* PLAY: calls play honestly — no tail loop */
         trigFlash++;
     }
 
@@ -624,7 +792,16 @@ struct Engine
         int       sn = s + 1; if(sn >= nSlices) sn -= nSlices;
         const bool willCont = !stepRev[k] && !reverse && stepRatN[k] == 0
                               && stepSrc[kn] == sn && !stepRev[kn];
-        const int grace = willCont ? 400 : 0;
+
+        /* PLAY: does the grid slot OUTLAST the slice? The slot consumes
+         * gridStepSamp × rate source samples (varispeed makes that exactly
+         * one slice at any tempo, so this is pitch-up, or a Voice pitch
+         * multiplier) — with more than the continuity window to spare, the
+         * voice would gate before the next hit. The tail policy then loops
+         * it; such a voice is not extendable, so no lookahead grace. */
+        const bool outlast = tailMode != 0 && !stepRev[k] && !reverse
+                             && gridStepSamp * rate - (float)cell.len > 160.f;
+        const int grace = (willCont && !outlast) ? 400 : 0;
 
         // CONTINUITY: if a voice is already playing exactly into this slice
         // (a verbatim run at matching rate), extend it instead of re-splicing
@@ -637,7 +814,7 @@ struct Engine
                 // rate tolerance, not equality: tiny tempo adjustments must
                 // not break continuity (adopting the new rate is a sub-cent
                 // pitch step; position re-anchors at the next boundary)
-                if(vv.active && vv.relScale > 0.99f
+                if(vv.active && vv.relScale > 0.99f && vv.tail == 0 /* PLAY */
                    && fabsf(vv.rate - rate) < 0.02f * rate
                    && fabs(vv.pos - (double)cell.start) < 160.)
                 {
@@ -650,6 +827,7 @@ struct Engine
                 }
             }
 
+        const bool ep = JoinIsCross(cell.start); /* PLAY: uncorrelated join? */
         Voice*   v    = &voices[0];
         uint32_t best = 0;
         for(int i = 0; i < kVoices; i++)
@@ -666,8 +844,10 @@ struct Engine
             }
         }
         for(int i = 0; i < kVoices; i++)
-            if(&voices[i] != v) voices[i].Choke(bufLen);
+            if(&voices[i] != v) voices[i].Choke(bufLen, ep);
         v->Trigger(cell, rate, stepRev[k] || reverse, bufLen, sliceExt);
+        ApplyFades(*v, s, ep);           /* PLAY */
+        if(outlast) SetTail(*v, s);      /* PLAY */
         if(grace)
         {
             v->natEnd += grace;

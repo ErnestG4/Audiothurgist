@@ -396,6 +396,161 @@ int main()
         CHECK(mono >= 12, "keyframe density tracks bandwidth (%d/14 rising)", mono);
     }
 
+    /* ── PLAY package: Options → Fades / Slice Tail ─────────────────────── */
+    auto Fnv = [](const std::vector<float>& y) {
+        uint64_t h = 1469598103934665603ULL;
+        for(float v : y) { uint32_t b; memcpy(&b, &v, 4); for(int i = 0; i < 4; i++) { h ^= (b >> (8 * i)) & 255u; h *= 1099511628211ULL; } }
+        return h;
+    };
+    auto MaxStep = [](const std::vector<float>& y) {
+        float m = 0.f; for(size_t i = 1; i < y.size(); i++) { float d = fabsf(y[i] - y[i - 1]); if(d > m) m = d; } return m;
+    };
+
+    SECTION("PLAY: Fixed fades + Gate tail are byte-identical to the pre-PLAY engine");
+    {
+        // Golden FNV-1a checksums of the rendered float bits, computed from the
+        // untouched engine (commit a4cf8ac) with this exact driver before the
+        // PLAY changes landed; identical at -O1 sanitized and -O2 on x86-64
+        // (SSE, no FMA contraction — an FMA host would need its own goldens).
+        struct Case { int mode; float knob, pitch; uint64_t gold; };
+        const Case cases[4] = { {0, 0.3f, 1.0f, 0xdca3e67a979f38d8ULL},   // chops + Classic doubles
+                                {0, 0.3f, 1.5f, 0x4bf165f0ff272e75ULL},   // pitched up: honest gates
+                                {0, 1.0f, 0.7f, 0x756ef6f001894408ULL},   // verbatim, pitched down: overlaps
+                                {1, 0.2f, 1.2f, 0x0b44c34fb1580ea5ULL} }; // Collins rolls + chokes
+        for(const Case& c : cases)
+        {
+            Fresh(e, c.mode, c.knob);
+            e.fadeMode = 0; e.tailMode = 0;
+            e.pitch = c.pitch;
+            Rendered r = RenderLoops(e, 2);
+            const uint64_t h = Fnv(r.y);
+            CHECK(h == c.gold, "mode %d knob %.1f pitch %.1f: checksum %016llx != golden %016llx", c.mode, c.knob, c.pitch,
+                  (unsigned long long)h, (unsigned long long)c.gold);
+        }
+    }
+
+    SECTION("PLAY: Adaptive fades — shorter on keyframe-dense slices than sparse ones");
+    {
+        uint8_t cls[64]; float dens[64];
+        bb::ClassifySteps(gMat, kLen, kSr, cls, 3, nullptr, dens);   // the Density lens
+        Fresh(e, 0, 1.f);
+        memcpy(e.sliceDens, dens, sizeof e.sliceDens);
+        e.fadeMode = 0;
+        CHECK(e.FadeSamples(0) == 240 && e.FadeSamples(14) == 240 && e.AttackSamples(0) == 48, "Fixed: 5 ms release, 1 ms attack everywhere");
+        e.fadeMode = 1;
+        const int f0 = e.FadeSamples(0), f14 = e.FadeSamples(14), fS = e.FadeSamples(15);
+        CHECK(f0 > f14, "sparse slice 0 (200 Hz) fades longer than dense slice 14 (900 Hz): %d vs %d samples", f0, f14);
+        CHECK(f0 <= 480 && f14 >= 48, "fades stay within 1–10 ms (%d, %d)", f0, f14);
+        CHECK(fS == 480, "the silent slice (only guard keyframes) takes the longest fade (%d)", fS);
+        e.sliceDens[15] = 0.f;
+        CHECK(e.FadeSamples(15) == 240, "unknown density (0) keeps the fixed length (%d)", e.FadeSamples(15));
+        CHECK(e.AttackSamples(0) > e.AttackSamples(14) && e.AttackSamples(14) >= 48, "attack ramps follow (%d vs %d)", e.AttackSamples(0), e.AttackSamples(14));
+        // Behavioural: the attack ramp measured on the output of a call from
+        // silence — output / (0.8 × source) reaches unity after AttackSamples.
+        auto AttackLen = [&](int sl) {
+            Fresh(e, 0, 1.f); memcpy(e.sliceDens, dens, sizeof e.sliceDens); e.fadeMode = 1; e.muted = true;
+            float o[24]; e.barPhase = 0.9; e.Process(o, 24);            // settle curStep
+            e.CallSlice(sl, 1.f, false, false, false);
+            std::vector<float> y; for(int b = 0; b < 40; b++) { e.Process(o, 24); y.insert(y.end(), o, o + 24); }
+            for(int i = 0; i < (int)y.size(); i++)
+            {
+                const float src = 0.8f * gMat[sl * kStep + i];
+                if(fabsf(src) > 0.1f && y[i] / src > 0.98f) return i;
+            }
+            return -1;
+        };
+        const int a0 = AttackLen(0), a14 = AttackLen(14);
+        CHECK(a0 > a14 && a14 > 0, "rendered attack: sparse slice 0 ramps over %d samples, dense slice 14 over %d", a0, a14);
+        CHECK(a0 >= e.AttackSamples(0) - 30 && a0 <= e.AttackSamples(0) + 30, "…and slice 0's ramp matches AttackSamples %d (%d)", e.AttackSamples(0), a0);
+        // Adaptive on a chopped loop with rolls: finite, still the map
+        Fresh(e, 1, 0.2f); memcpy(e.sliceDens, dens, sizeof e.sliceDens); e.fadeMode = 1; e.pitch = 1.2f;
+        Rendered r = RenderLoops(e, 2);
+        bool finite = true; for(float v : r.y) if(!std::isfinite(v)) finite = false;
+        CHECK(finite, "Adaptive + Collins rolls: finite output");
+        Fresh(e, 0, 1.f); memcpy(e.sliceDens, dens, sizeof e.sliceDens); e.fadeMode = 1;
+        r = RenderLoops(e, 2);
+        CHECK(MapMismatches(e, r) == 0 && e.trigFlash <= 4, "Adaptive: verbatim still plays the map as one voice (%u triggers)", e.trigFlash);
+    }
+
+    SECTION("PLAY: Slice Tail — a slot 1.5× the slice: Gate is silent after the natural end, loops keep sounding without seams");
+    {
+        // pitch 1.5: each 6000-sample slot consumes 9000 source samples; the
+        // slice runs out after 4000 output samples. Judge the last third of
+        // every slot in the second loop (steps whose source is not silent).
+        // (The synthetic material restarts each slice's sine from 0, so it has a
+        // hard step at every boundary; Gate mode's lookahead grace plays ~8 ms
+        // across it at pitch-up — pre-existing, byte-identical, and why the
+        // seam check below looks only at the tail region, where the loop
+        // policies alone are sounding.)
+        auto TailRms = [&](const Rendered& r, int step) { return Rms(&r.y[step * kStep + 4400], 1400); };
+        auto Slope   = [](int k) { return 0.8f * 0.5f * 6.2831853f * StepFreq(k) * 1.5f / kSr; }; // slice k's own max |Δ| at rate 1.5
+        for(int tail = 0; tail < 3; tail++)
+        {
+            Fresh(e, 0, 1.f);
+            e.fadeMode = 0; e.tailMode = tail; e.pitch = 1.5f;
+            Rendered r = RenderLoops(e, 2);
+            int silent = 0, sounding = 0, tooMany = 0, wrongF = 0, seams = 0;
+            float worst = 0.f;
+            for(int k = 0; k < 15; k++)
+            {
+                const float t = TailRms(r, 16 + k); silent += t < 1e-3f; sounding += t > 0.1f;
+                // the slot plays ITS slice, repitched ×1.5 (whole slot for loops, first two thirds for Gate)
+                const int a = (16 + k) * kStep + 300, n = (tail ? kStep - 400 : 3600);
+                const float f = MeasureFreq(&r.y[a], n);
+                if(fabsf(f - 1.5f * StepFreq(k)) > 0.05f * 1.5f * StepFreq(k)) wrongF++;
+                // seams: inside the tail region no sample-to-sample step may exceed the slice's own slope (+10 %)
+                float m = 0.f;
+                for(int i = (16 + k) * kStep + 4200; i < (16 + k) * kStep + 5900; i++) { float d = fabsf(r.y[i] - r.y[i - 1]); if(d > m) m = d; }
+                if(tail && m > 1.1f * Slope(k)) seams++;
+                if(m / Slope(k) > worst) worst = m / Slope(k);
+            }
+            CHECK(wrongF == 0, "tail %d: every slot plays its own slice at ×1.5 (%d wrong)", tail, wrongF);
+            if(tail == 0)
+                CHECK(silent == 15, "Gate: every slot's tail is silent after the natural end (%d/15)", silent);
+            else
+            {
+                CHECK(sounding == 15, "tail %d: every slot's tail keeps sounding (%d/15)", tail, sounding);
+                CHECK(seams == 0, "tail %d: no seam clicks in the looped tails (%d slots over; worst |Δ| = %.2f× the slice's slope)", tail, seams, worst);
+                CHECK(e.trigFlash == 32, "tail %d: one trigger per step (%u)", tail, e.trigFlash);
+            }
+            // a tail always yields to the next attack: never more than 2 voices alive
+            Fresh(e, 0, 0.3f); e.tailMode = tail; e.pitch = 1.5f;
+            e.extPhase = true; float o[24];
+            for(int b = 0; b < 4000; b++)
+            {
+                e.barPhase = fmod((double)b * 24. / kSr / e.barSeconds, 1.0);
+                e.Process(o, 24);
+                int alive = 0; for(int v = 0; v < bb::Engine::kVoices; v++) alive += e.voices[v].active;
+                if(alive > 2) tooMany++;
+            }
+            CHECK(tooMany == 0, "tail %d: at most 2 voices alive (the fading tail + the new hit) — %d blocks over", tail, tooMany);
+        }
+        // Native pitch: the tail never engages, continuity still holds verbatim runs as one voice
+        for(int tail = 1; tail < 3; tail++)
+        {
+            Fresh(e, 0, 1.f); e.tailMode = tail; e.pitch = 1.f;
+            Rendered r = RenderLoops(e, 2);
+            CHECK(e.trigFlash <= 4 && MapMismatches(e, r) == 0, "tail %d at native pitch: verbatim run is one voice (%u triggers)", tail, e.trigFlash);
+            int looped = 0; for(int v = 0; v < bb::Engine::kVoices; v++) looped += e.voices[v].looping;
+            CHECK(looped == 0, "tail %d at native pitch: no voice ever looped", tail);
+        }
+        // Loop points sit on positive-going zero crossings inside the slice's second half
+        Fresh(e, 0, 1.f); e.tailMode = 1; e.FindLoop(3);
+        const double a = e.loopA[3], b = e.loopB[3];
+        const int ia = (int)a, ib = (int)b;
+        CHECK(e.loopState[3] == 1 && a >= 3 * kStep + kStep / 2 - 1 && b <= 4 * kStep - 2 && b - a >= 256, "slice 3 loop region [%.2f, %.2f) in its second half", a - 3 * kStep, b - 3 * kStep);
+        CHECK(gMat[ia] <= 0.f && gMat[ia + 1] > 0.f && gMat[ib] <= 0.f && gMat[ib + 1] > 0.f, "…bounded by positive-going zero crossings");
+        const float za = gMat[ia] + (float)(a - ia) * (gMat[ia + 1] - gMat[ia]), zbv = gMat[ib] + (float)(b - ib) * (gMat[ib + 1] - gMat[ib]);
+        CHECK(fabsf(za) < 1e-4f && fabsf(zbv) < 1e-4f, "…refined to sub-sample zeros (%.5f, %.5f)", za, zbv);
+        // Adaptive + Ping-pong together, Collins rolls: finite
+        uint8_t cls[64]; float dens[64];
+        bb::ClassifySteps(gMat, kLen, kSr, cls, 3, nullptr, dens);
+        Fresh(e, 1, 0.2f); memcpy(e.sliceDens, dens, sizeof e.sliceDens); e.fadeMode = 1; e.tailMode = 2; e.pitch = 1.5f;
+        Rendered r = RenderLoops(e, 3);
+        bool finite = true; for(float v : r.y) if(!std::isfinite(v)) finite = false;
+        CHECK(finite && MaxStep(r.y) < 0.5f, "Adaptive + Ping-pong + rolls: finite, max |Δ| %.3f", MaxStep(r.y));
+    }
+
     printf("\n%d passed, %d failed\n", gPass, gFail);
     return gFail ? 1 : 0;
 }
