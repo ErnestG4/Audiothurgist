@@ -142,7 +142,7 @@ static ParamLock<2 * kNumPots> locks(hw.buttons[kButtonB1], pager);
 Settings           settings(hw, &pager);
 void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.7.2-density", "web");
+                           "0.7.3-clockx", "web");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -326,7 +326,23 @@ static bool           gWasExt   = false; /* ext/internal transition tracking */
  * SetTicksPerUs, so no torn double read) and consumed by the audio thread as
  * an atomic float: the engine's varispeed rate is derived from it every block
  * so slice playback advances EXACTLY as fast as the phase does. */
-static volatile float gTpu      = 0.f;
+/* Clock snapshot for the audio thread — published by OnPoll after every NCO
+ * tick, double-buffered with a single-byte index so the ISR always reads a
+ * complete record (it can preempt the writer mid-record; a seqlock would
+ * deadlock the ISR). The audio thread EXTRAPOLATES from it: tick + tpu × µs
+ * since the tick, so a control-thread stall (HostLink, LED render, a load)
+ * no longer freezes the playhead and then jumps it — the "thinking moment"
+ * that broke verbatim runs through the 160-sample continuity window. */
+struct ClockSnap { uint64_t tick; double frac; double tpu; uint32_t us; bool running; };
+static ClockSnap          gSnap[2];
+static volatile uint8_t   gSnapIdx = 0;
+static constexpr uint32_t kSnapMaxExtrapUs = 50000u;   /* = MusicalClock's catch-up clamp */
+/* Diagnostics (GET_STATE tail; the web app shows them). */
+static volatile uint16_t gDiagPollGapUs = 0;   /* worst gap between OnPoll calls, last second */
+static volatile uint16_t gDiagAudioUs   = 0;   /* worst audio-callback duration, last second */
+static volatile uint16_t gDiagJumps     = 0;   /* playhead forward jumps > 1.5 steps (lifetime) */
+static volatile uint16_t gDiagRegens    = 0;   /* pattern regenerations (lifetime) */
+static volatile uint32_t gDiagAudioCur  = 0;   /* audio: running max, rolled by OnPoll */
 static double         gLastLp   = -1.;   /* phase guard memory; -1 = re-arm */
 static float          gP2ExtRef = -1.f;  /* P2 while following: engage on move */
 static bool           gP2ExtEng = false;
@@ -441,6 +457,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
                     daisy::AudioHandle::OutputBuffer out,
                     size_t                           size)
 {
+    const uint32_t cbStartUs = daisy::System::GetUs();   /* diag: callback duration */
     /* new material ready: swap buffers and re-point the engine (SetMaterial
      * is audio-thread work here exactly as it was on the Pod). */
     if(gApply)
@@ -457,7 +474,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
 
     if(gPendReslice) { engine.Reslice();   gPendReslice = false; }
     if(gPendReroll)  { engine.RerollFill(); gPendReroll  = false; }
-    if(gPendRegen)   { engine.RegenPattern(); gPendRegen = false; }
+    if(gPendRegen)   { engine.RegenPattern(); gPendRegen = false; gDiagRegens = (uint16_t)(gDiagRegens + 1u); }
     if(gScrubReq)    { engine.Scrub(gScrubDir); gScrubReq = false; }
     if(gReclass)     { memcpy(engine.stepClass, gReclassBuf, sizeof gReclassBuf); memcpy(gSal, gReclassSal, sizeof gSal); gReclass = false; }
     if(gCallReq)     { engine.CallSlice(gCallIdx, gCallMul, gCallRev, gCallPunch, gCallRat); gCallReq = false; }
@@ -474,8 +491,15 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
     engine.extPhase = true;
     {
         const float  mult  = gClkMult;
-        const double tick  = ((double)gClock.MasterTick() + gClock.FracTick())
-                             * (double)mult;
+        /* Extrapolate the NCO from its last published tick (see ClockSnap):
+         * the control thread ticks it every ~1 ms but can stall for tens of
+         * ms; without this the playhead froze and then jumped. Capped at the
+         * clock's own catch-up clamp so both lose the same time past it. */
+        const ClockSnap s = gSnap[gSnapIdx];
+        uint32_t dtUs = daisy::System::GetUs() - s.us;
+        if(dtUs > kSnapMaxExtrapUs) dtUs = kSnapMaxExtrapUs;
+        const double extrap = s.running ? s.tpu * (double)dtUs : 0.;
+        const double tick  = ((double)s.tick + s.frac + extrap) * (double)mult;
         const double loopT = (double)engine.nSlices * ((double)gClock.Ppqn() / 4.0);
         double lp = loopT > 0. ? fmod(tick, loopT) / loopT : 0.;
 
@@ -488,7 +512,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
          * 160-sample continuity window every ~8 steps: the ext-clock stutter.)
          * tpu == 0 while the follower acquires lock: phase is frozen and no
          * step can fire, so the previous barSeconds is simply left alone. */
-        const float tpu = gTpu;
+        const float tpu = (float)s.tpu;
         if(tpu > 0.f && loopT > 0.)
             engine.barSeconds = (float)(loopT / ((double)tpu * 1e6 * (double)mult));
 
@@ -502,6 +526,8 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
         if(mult != s_lastMult) { s_lastMult = mult; gLastLp = -1.; }
         const double thr = 0.5 / (double)(engine.nSlices > 0 ? engine.nSlices : 1);
         if(gLastLp >= 0. && lp < gLastLp && (gLastLp - lp) < thr) lp = gLastLp;
+        if(gLastLp >= 0. && lp - gLastLp > 3. * thr)   /* diag: > 1.5 steps forward in one block */
+            gDiagJumps = (uint16_t)(gDiagJumps + 1u);
         gLastLp = lp;
         engine.barPhase = lp;
     }
@@ -544,6 +570,8 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
         out[1][i] = r;
         if((i & 3) == 0) { gScope[gScopeW & 1023u] = (int8_t)(l * 127.f); gScopeW = (uint16_t)(gScopeW + 1u); }
     }
+    const uint32_t cbUs = daisy::System::GetUs() - cbStartUs;
+    if(cbUs > gDiagAudioCur) gDiagAudioCur = cbUs;
 }
 
 /* ── control frame ──────────────────────────────────────────────────── */
@@ -553,11 +581,9 @@ static void OnFrame()
     engine.patternKnob = pk;
     gVerbSend = pk < 0.22f ? (0.22f - pk) / 0.22f * 0.75f : 0.f;
 
-    /* Varispeed follows the musical clock: snapshot the NCO rate here (same
-     * thread as the PLL writes it — no torn double) for the audio thread to
-     * derive barSeconds from every block. engine.bpm is telemetry only now;
-     * SetBpm's integer-quantised barSeconds must NOT be written from here. */
-    gTpu       = (float)gClock.TicksPerUs();
+    /* Varispeed follows the musical clock via the OnPoll snapshot (ClockSnap);
+     * engine.bpm is telemetry only now — SetBpm's integer-quantised
+     * barSeconds must NOT be written from here. */
     engine.bpm = gClock.Bpm() * gClkMult;
 
     engine.pitch = exp2f(k_pitch.Value() / 12.f);   /* ±12 semitones */
@@ -682,6 +708,27 @@ static void OnPoll(uint32_t /*t_ms*/)
         }
     }
     gClock.Tick(now_us);
+    {   /* Publish the clock snapshot for the audio thread (see ClockSnap). */
+        const uint8_t wi = (uint8_t)(gSnapIdx ^ 1u);
+        gSnap[wi].tick    = gClock.MasterTick();
+        gSnap[wi].frac    = gClock.FracTick();
+        gSnap[wi].tpu     = gClock.TicksPerUs();
+        gSnap[wi].us      = now_us;
+        gSnap[wi].running = gClock.Running();
+        gSnapIdx = wi;
+        /* Diagnostics: worst poll gap and worst audio callback, rolled per second. */
+        static uint32_t s_lastUs = 0, s_rollUs = 0, s_gapMax = 0;
+        if(s_lastUs) { const uint32_t g = now_us - s_lastUs; if(g > s_gapMax) s_gapMax = g; }
+        s_lastUs = now_us;
+        if(now_us - s_rollUs >= 1000000u)
+        {
+            s_rollUs       = now_us;
+            gDiagPollGapUs = (uint16_t)(s_gapMax > 65535u ? 65535u : s_gapMax);
+            const uint32_t a = gDiagAudioCur;
+            gDiagAudioUs   = (uint16_t)(a > 65535u ? 65535u : a);
+            s_gapMax = 0; gDiagAudioCur = 0;
+        }
+    }
 
     /* Voice keymap: sample v/oct at each gate edge (MONO, latched mods). */
     if(gClkEdge.JustRose(kVoiceGateChan))
@@ -896,7 +943,8 @@ static void ServiceLoad()
  *                     (b0 muted b1 ext b2 locked b3 flowing b4 brainPage),
  *                     u8 matGen, u8 grammar, u8 classifier, u8 curFile,
  *                     u8 chop(0..255), u8 histN, u8 histDepth, u8 callFlash,
- *                     f32 bpm, f32 mult, i8 stepSrc[64], u8 stepClass[64]
+ *                     f32 bpm, f32 mult, i8 stepSrc[64], u8 stepClass[64],
+ *                     u16 pollGapUs, u16 audioUs, u16 jumps, u16 regens (diag)
  *   0x61 GET_ENV    ← u8 first, u8 count(≤30) → u8 status, u8 first, u8 n,
  *                     then n × (8 × {u8 min, u8 max})
  *   0x62 SCOPE      → u8 status, u16 n(256), i8 samples[256] (×4 decimated)
@@ -933,6 +981,8 @@ struct StateExt : hostlink::IHostlinkExtension
                 memcpy(&u, &bpm, 4); w.U32(u); memcpy(&u, &mult, 4); w.U32(u);
                 w.Bytes((const uint8_t*)engine.stepSrc, bb::Engine::kMaxSlices);
                 w.Bytes(engine.stepClass, bb::Engine::kMaxSlices);
+                /* diagnostics tail (v0.7.3): u16 pollGapUs, u16 audioUs, u16 jumps, u16 regens */
+                w.U16(gDiagPollGapUs); w.U16(gDiagAudioUs); w.U16(gDiagJumps); w.U16(gDiagRegens);
                 return;
             }
             case 0x61u:
