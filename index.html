@@ -45,6 +45,7 @@
   <span id="modpill" class="pill">not connected</span>
   <span id="syncpill" class="pill">clock: —</span>
   <span id="bpmpill" class="pill">— BPM</span>
+  <span id="diagpill" class="pill" title="worst control-loop gap and audio callback in the last second; playhead jumps > 1.5 steps and pattern regenerations since boot">diag: —</span>
 </header>
 <div id="notice"></div>
 <main>
@@ -214,7 +215,8 @@ function findFieldLabels(node, id, out) {
 function parseState(b) {
   return { nSlices: b[1], cur: b[2], flags: b[3], matGen: b[4], grammar: b[5], cls: b[6], file: b[7], chop: b[8],
            histN: b[9], histDepth: b[10], callFlash: b[11], bpm: f32(b, 12), mult: f32(b, 16),
-           src: Int8Array.from(b.subarray(20, 84)), stepClass: b.slice(84, 148) };
+           src: Int8Array.from(b.subarray(20, 84)), stepClass: b.slice(84, 148),
+           diag: b.length >= 156 ? { gap: u16(b, 148), audio: u16(b, 150), jumps: u16(b, 152), regens: u16(b, 154) } : null };
 }
 async function fetchEnv(n) {
   const out = new Uint8Array(64 * 16);
@@ -274,6 +276,9 @@ function render() {
   $('k_file').textContent = st.file === 255 ? 'synth break' : (labels.sample[st.file] ?? st.file); $('k_page').textContent = brain ? 'Brain' : 'Perform';
   $('b_mute').classList.toggle('on', !!muted); $('b_flow').classList.toggle('on', !!flowing);
   $('bpmpill').textContent = st.bpm.toFixed(1) + ' BPM' + (st.mult !== 1 ? ' ×' + st.mult : '');
+  if (st.diag) { const d = st.diag, dp = $('diagpill');
+    dp.textContent = `poll gap ${(d.gap / 1000).toFixed(1)} ms · audio ${d.audio} µs · jumps ${d.jumps} · regens ${d.regens}`;
+    dp.className = 'pill ' + (d.gap > 4000 || d.audio > 400 ? 'warn' : 'ok'); }
   const sp = $('syncpill'); sp.textContent = ext ? (locked ? 'clock: locked' : 'clock: following') : 'clock: internal'; sp.className = 'pill ' + (ext ? (locked ? 'ok' : 'warn') : '');
   const hs = $('hist'); if (document.activeElement !== hs) { hs.max = Math.max(0, st.histN - 1); hs.value = Math.max(0, st.histN - 1 - st.histDepth); }
   const sel = $('sample'); if (document.activeElement !== sel && st.file !== 255 && sel.value !== String(st.file)) sel.value = String(st.file);
