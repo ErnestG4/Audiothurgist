@@ -50,10 +50,39 @@ inline int GridSlices(int len, float sr)
     return nsl < 1 ? 1 : nsl;
 }
 
+/* GATES: band-presence rule for Options → Gate Lanes = Multi-label.
+ * Per step, three SECOND-order bands at the Hockman edges (low = LP²(325),
+ * high = HP²(4000), mid = LP²(4000) of HP²(325)) — the classifier's own
+ * first-order split is byte-identical to before but leaks a 100 Hz kick
+ * into the mid band at only −10 dB (6 dB/oct); two poles make that −21 dB
+ * and put a hat's noise under 325 Hz at −20 dB. A band is PRESENT when
+ *   e_c ≥ gBandTheta × mean_c   (the class is loud for THIS break: the loop
+ *                                mean is duty × average hit, so a rare
+ *                                class — snares on 2 and 4 — is judged more
+ *                                leniently than a hat carpet, which is what
+ *                                lets a ghost snare mark the snare lane)
+ *   e_c ≥ kBandFloor × e_max    (the class is a real part of THIS hit, not
+ *                                crossover leakage: −20 dB under the step's
+ *                                loudest band; measured on the host suite's
+ *                                drums a 60 Hz kick reaches the mid band at
+ *                                −27 dB and the high band at −66 dB, while
+ *                                a hat riding that kick sits at −16 dB)
+ * The loudest band always counts, so a sounding step marks at least one
+ * lane; silent steps mark nothing. Lens-independent: the same mask under
+ * every Classifier — the lens still labels the ring and drives swaps.
+ * Known cross-talk (Wu et al. 2018): a snare's noise is bright, so most
+ * snare steps also mark the hat lane, and a kick with a strong beater click
+ * can mark the snare lane — the rule reads the drum, not the label. Both
+ * numbers are first guesses for ears; gBandTheta is sweepable from the host. */
+inline float     gBandTheta = 0.5f;    // × band's loop mean
+constexpr float  kBandFloor = 0.01f;   // × step's loudest band (−20 dB)
+
 // Optional `dens` (kMaxSlices) receives the per-step keyframe density for
-// mode 3 (0 otherwise) — the host test prints it.
+// mode 3 (0 otherwise) — the host test prints it. Optional `bandsOut`
+// (kMaxSlices) receives the GATES band mask (bit c = class c present).
 inline void ClassifySteps(const float* x, int len, float sr, uint8_t* cls, int mode,
-                          float* sal = nullptr, float* densOut = nullptr, int nslOverride = 0)
+                          float* sal = nullptr, float* densOut = nullptr, int nslOverride = 0,
+                          uint8_t* bandsOut = nullptr)
 {
     const int nsl  = nslOverride >= 1 ? nslOverride : GridSlices(len, sr);
     const int step = len / nsl;
@@ -103,6 +132,47 @@ inline void ClassifySteps(const float* x, int len, float sr, uint8_t* cls, int m
         if(eRaw[s] < eSil || eRaw[s] < 1e-9f) { cls[s] = 3; if(sal) sal[s] = 0.f; }
         else if(mode == 2)              cls[s] = (l >= (m > h ? m : h)) ? 0 : 2;
         else                            cls[s] = (l >= m && l >= h) ? 0 : (m >= h ? 1 : 2);
+    }
+    if(bandsOut) /* GATES band mask (rule above): its own second-order pass */
+    {
+        static float b2[3][Engine::kMaxSlices];
+        const float a1 = 1.f - expf(-2.f * 3.14159f * 325.f / sr);
+        const float a2 = 1.f - expf(-2.f * 3.14159f * 4000.f / sr);
+        /* seven one-pole states: two cascades make each edge second order.
+         * (v − LP² is NOT a second-order highpass — it is (2s+s²)/(1+s)²,
+         * first order with twice the leakage; HP² must cascade v − LP(v).) */
+        float l1 = 0.f, l2 = 0.f, lB = 0.f, g1 = 0.f, gB = 0.f, m1 = 0.f, m2 = 0.f;
+        for(int s = 0; s < nsl; s++)
+        {
+            const float* p = x + s * step;
+            int n = (s == nsl - 1) ? len - s * step : step;
+            double sl = 0, sm = 0, sh = 0;
+            for(int i = 0; i < n; i++)
+            {
+                const float v = p[i];
+                l1 += a1 * (v - l1);   l2 += a1 * (l1 - l2);           /* low  = LP²(325)      */
+                const float hA = v - l1;                                /* HP(325)              */
+                lB += a1 * (hA - lB);  const float hp = hA - lB;        /* HP²(325)             */
+                g1 += a2 * (v - g1);   const float gA = v - g1;         /* HP(4000)             */
+                gB += a2 * (gA - gB);  const float hi = gA - gB;        /* high = HP²(4000)     */
+                m1 += a2 * (hp - m1);  m2 += a2 * (m1 - m2);           /* mid  = LP²(4000)(hp) */
+                sl += l2 * l2; sm += m2 * m2; sh += hi * hi;
+            }
+            b2[0][s] = (float)(sl / n); b2[1][s] = (float)(sm / n); b2[2][s] = (float)(sh / n);
+        }
+        float mB[3] = {1e-12f, 1e-12f, 1e-12f};
+        for(int c = 0; c < 3; c++) { for(int s = 0; s < nsl; s++) mB[c] += b2[c][s]; mB[c] /= (float)nsl; }
+        for(int s = 0; s < Engine::kMaxSlices; s++) bandsOut[s] = 0;
+        for(int s = 0; s < nsl; s++)
+        {
+            if(eRaw[s] < eSil || eRaw[s] < 1e-9f) continue;   /* silent: no lane */
+            const float e[3] = {b2[0][s], b2[1][s], b2[2][s]};
+            const int   arg  = (e[0] >= e[1] && e[0] >= e[2]) ? 0 : (e[1] >= e[2] ? 1 : 2);
+            uint8_t m = (uint8_t)(1u << arg);
+            for(int c = 0; c < 3; c++)
+                if(e[c] >= gBandTheta * mB[c] && e[c] >= kBandFloor * e[arg]) m |= (uint8_t)(1u << c);
+            bandsOut[s] = m;
+        }
     }
     if(densOut) for(int s = 0; s < Engine::kMaxSlices; s++) densOut[s] = 0.f;
     if(mode != 3) return;
