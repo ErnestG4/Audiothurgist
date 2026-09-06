@@ -4,7 +4,10 @@
 # 1. grammar_check  — Classic grammar hash must equal the frozen value; all
 #                     modes: tiling coverage + source ranges.
 # 2. engine_check   — behavioural suite under ASan/UBSan (see the file).
-# 3. classify_check — smoke run of the four classifier lenses on any WAVs
+# 3. bars_check     — builds; with WAVs on the command line, prints the bar/
+#                     tempo estimate per file (tests/bars_corpus.sh validates
+#                     against the corpus truth set).
+# 4. classify_check — smoke run of the four classifier lenses on any WAVs
 #                     given on the command line (prints, no assertions).
 set -u
 cd "$(dirname "$0")/.."
@@ -24,10 +27,15 @@ echo; echo "== engine_check (ASan/UBSan) =="
 $CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/engine_check.cpp -o "$OUT/ec" || fail=1
 "$OUT/ec" || fail=1
 
+echo; echo "== bars_check (build; corpus run: tests/bars_corpus.sh) =="
+$CXX -O2 -std=gnu++17 $INC tests/bars_check.cpp -o "$OUT/bc" || fail=1
+
 if [ $# -gt 0 ]; then
   echo; echo "== classify_check =="
   $CXX -O2 -std=gnu++17 $INC tests/classify_check.cpp -o "$OUT/cc" || fail=1
   "$OUT/cc" "$@"
+  echo; echo "== bars_check =="
+  "$OUT/bc" "$@"
 fi
 
 echo
