@@ -56,6 +56,7 @@
 #include "bb_classify.h" /* uses capicola's Analyzer (Matthew Nielsen, AGPL) — THIRD_PARTY.md */
 #include "bb_bars.h"
 #include "bb_testbreak.h"
+#include "bb_clockmath.h" /* CLOCK: ClockMap, PhaseGuard, MultZone, JitterMeter (pure, host-tested) */
 
 using namespace alchemy;
 
@@ -386,8 +387,9 @@ struct Options : Serializable
 };
 static Options gOptions;
 /* ── end GRAMMAR ───────────────────────────────────────────────────────── */
+/* ── CLOCK ── control-thread clock state; the math is core/bb_clockmath.h ── */
 static volatile float gClkFlash = 0.f;   /* B1 white flash per detected pulse */
-static volatile float gClkMult  = 1.f;   /* P2 while following: ÷4 ÷2 ×1 ×2 ×4 */
+static volatile float gClkMult  = 1.f;   /* APPLIED multiplier (telemetry mirror of gMap.mult) */
 static bool           gWasExt   = false; /* ext/internal transition tracking */
 /* NCO rate snapshot taken on the CONTROL thread (same thread as the PLL's
  * SetTicksPerUs, so no torn double read) and consumed by the audio thread as
@@ -400,7 +402,7 @@ static bool           gWasExt   = false; /* ext/internal transition tracking */
  * since the tick, so a control-thread stall (HostLink, LED render, a load)
  * no longer freezes the playhead and then jumps it — the "thinking moment"
  * that broke verbatim runs through the 160-sample continuity window. */
-struct ClockSnap { uint64_t tick; double frac; double tpu; uint32_t us; bool running; };
+struct ClockSnap { uint64_t tick; double frac; double tpu; uint32_t us; bool running; bb::ClockMap map; };
 static ClockSnap          gSnap[2];
 static volatile uint8_t   gSnapIdx = 0;
 static constexpr uint32_t kSnapMaxExtrapUs = 50000u;   /* = MusicalClock's catch-up clamp */
@@ -410,10 +412,17 @@ static volatile uint16_t gDiagAudioUs   = 0;   /* worst audio-callback duration,
 static volatile uint16_t gDiagJumps     = 0;   /* playhead forward jumps > 1.5 steps (lifetime) */
 static volatile uint16_t gDiagRegens    = 0;   /* pattern regenerations (lifetime) */
 static volatile uint32_t gDiagAudioCur  = 0;   /* audio: running max, rolled by OnPoll */
-static double         gLastLp   = -1.;   /* phase guard memory; -1 = re-arm */
+static double         gLastLp   = -1.;   /* audio thread: < 0 = re-arm the phase guard (new material) */
 static float          gP2ExtRef = -1.f;  /* P2 while following: engage on move */
 static bool           gP2ExtEng = false;
-static int            gMultZone = 2;     /* 0..4 → ÷4 ÷2 ×1 ×2 ×4 (hysteresis) */
+static bb::ClockMap    gMap;             /* NCO ticks → loop ticks; OnPoll writes it, audio reads the snapshot copy */
+static bb::MultZone    gZone;            /* P2 → ÷4 ÷2 ×1 ×2 ×4 with hysteresis + dwell (the REQUESTED zone) */
+static bb::JitterMeter gJitter;          /* per-pulse period deviation, rolled per second */
+static double          gPulseTick = -1.; /* NCO position of the last external pulse; -1 = none since arming */
+static volatile uint16_t gDiagJitterUs = 0, gDiagJitterRmsUs = 0;   /* last second: peak / RMS, µs */
+static volatile uint8_t  gDiagClkFlags = 0;   /* b0 P2 engaged · b1 switch pending · b2 lock aligned (~2 s) · b4-7 ext transitions mod 16 */
+static uint8_t           gDiagExtTrans = 0, gDiagAlignHold = 0;
+/* ── end CLOCK ─────────────────────────────────────────────────────────── */
 
 static constexpr uint8_t P_CHOP  = kPotTopLeft;
 static constexpr uint8_t P_TEMPO = kPotTopRight;
@@ -569,15 +578,18 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
     int n = (int)size;
     if(n > kScratch) n = kScratch;
 
-    /* Drive the engine playhead from the musical clock (internal or followed).
+    /* CLOCK ── loop phase from the clock snapshot ─────────────────────────
+     * Drive the engine playhead from the musical clock (internal or followed).
      * Position comes from the single monotonic MasterTick counter (+ FracTick),
      * NOT Bar()/BarPhase() read separately: those tore at bar boundaries under
-     * the 1 ms tick and fired a spurious last-step ("skips"). One 16th = Ppqn/4
-     * ticks; the loop = nSlices 16ths. gClkMult scales the rate when P2 acts
-     * as a clock multiplier/divider while following. */
+     * the 1 ms tick and fired a spurious last-step ("skips"). The snapshot's
+     * bb::ClockMap turns NCO ticks into loop ticks (one 16th = Ppqn/4; the
+     * loop = nSlices 16ths) and carries the P2 multiplier: a zone change is a
+     * slope change at a scheduled NCO tick, continuous by construction, and
+     * the map decides from THIS block's T whether the switch has happened —
+     * block-exact, no cross-thread flag, no phase jump. */
     engine.extPhase = true;
     {
-        const float  mult  = gClkMult;
         /* Extrapolate the NCO from its last published tick (see ClockSnap):
          * the control thread ticks it every ~1 ms but can stall for tens of
          * ms; without this the playhead froze and then jumped. Capped at the
@@ -586,9 +598,12 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
         uint32_t dtUs = daisy::System::GetUs() - s.us;
         if(dtUs > kSnapMaxExtrapUs) dtUs = kSnapMaxExtrapUs;
         const double extrap = s.running ? s.tpu * (double)dtUs : 0.;
-        const double tick  = ((double)s.tick + s.frac + extrap) * (double)mult;
+        const double T     = (double)s.tick + s.frac + extrap;
+        const double mult  = s.map.MultAt(T);
+        const double tick  = s.map.Loop(T);
         const double loopT = (double)engine.nSlices * ((double)gClock.Ppqn() / 4.0);
         double lp = loopT > 0. ? fmod(tick, loopT) / loopT : 0.;
+        if(lp < 0.) lp += 1.;   /* a backward lock alignment can put the first loop ticks below zero */
 
         /* RATE == PHASE ADVANCE, exactly. barSeconds feeds the varispeed rate
          * (and the ratchet countdown) in the engine; deriving it here, per
@@ -601,23 +616,22 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
          * step can fire, so the previous barSeconds is simply left alone. */
         const float tpu = (float)s.tpu;
         if(tpu > 0.f && loopT > 0.)
-            engine.barSeconds = (float)(loopT / ((double)tpu * 1e6 * (double)mult));
+            engine.barSeconds = (float)(loopT / ((double)tpu * 1e6 * mult));
 
-        /* Monotonic guard, half-a-step wide: a torn MasterTick/FracTick read
-         * is at most ±1 tick (1/24 step) and must not fire a backward step
-         * (double trigger + a bogus flow-reroll). Anything larger backward is
-         * a legitimate jump (new material, multiplier zone, transport reset)
-         * and must pass immediately — a 0.5-loop guard held the playhead
-         * silent for up to half a loop after those. */
-        static float s_lastMult = 1.f;
-        if(mult != s_lastMult) { s_lastMult = mult; gLastLp = -1.; }
-        const double thr = 0.5 / (double)(engine.nSlices > 0 ? engine.nSlices : 1);
-        if(gLastLp >= 0. && lp < gLastLp && (gLastLp - lp) < thr) lp = gLastLp;
-        if(gLastLp >= 0. && lp - gLastLp > 3. * thr)   /* diag: > 1.5 steps forward in one block */
-            gDiagJumps = (uint16_t)(gDiagJumps + 1u);
-        gLastLp = lp;
+        /* Monotonic guard, half-a-step wide (bb::PhaseGuard): a torn
+         * MasterTick/FracTick read is at most ±1 tick (1/24 step) and must not
+         * fire a backward step (double trigger + a bogus flow-reroll).
+         * Anything larger backward is a legitimate jump (new material,
+         * transport reset, a lock alignment) and passes immediately. A
+         * multiplier switch is continuous now, so it needs no re-arm; new
+         * material still asks for one through gLastLp < 0. */
+        static bb::PhaseGuard s_guard;
+        if(gLastLp < 0.) { s_guard.Rearm(); gLastLp = 0.; }
+        lp = s_guard.Apply(lp, engine.nSlices);
+        gDiagJumps = s_guard.jumps;   /* > 1.5 steps forward in one block */
         engine.barPhase = lp;
     }
+    /* ── end CLOCK ─────────────────────────────────────────────────────── */
 
     engine.Process(gMono, n);
 
@@ -721,7 +735,10 @@ static void OnPoll(uint32_t /*t_ms*/)
         gP2Ref = -1e9f;   /* re-latch: P2 re-engages on movement */
     }
 
-    /* Clock pipeline (spec §7): edge intake → follower → NCO tick. */
+    /* CLOCK ── clock pipeline (spec §7): edge intake → arming → follower →
+     * P2 zones → NCO tick → lock alignment → multiplier map → snapshot →
+     * diagnostics. OnPoll is the only place the NCO ticks; the audio thread
+     * only ever reads the published snapshot. docs/packages/clock.md. ──── */
     const uint32_t now_us = daisy::System::GetUs();
     gClkEdge.Tick(loop.Cv(), loop.NumCv(), now_us);
     const bool rose = gClkEdge.JustRose(kClockChan);
@@ -738,17 +755,29 @@ static void OnPoll(uint32_t /*t_ms*/)
     }
     const bool ext = gLastPulseUs && (now_us - gLastPulseUs) < 2000000u;
     static float gPreExtBpm = 120.f;
+    /* The NCO position before this poll's tick: the map's "now" for the
+     * transitions below (a reached switch is committed first so MultAt is
+     * the truth). */
+    const double Tpre = (double)gClock.MasterTick() + gClock.FracTick();
+    gMap.Commit(Tpre);
     if(ext && !gWasExt)
     {
         gPreExtBpm = gClock.Bpm();                     /* tempo to fall back on */
         const double tpuBefore = gClock.TicksPerUs();
-        gFollower.Enable(kPpqnTable[gClockSel.sel]);   /* arms the PLL — and stops
+        gFollower.Enable(kPpqnTable[gClockSel.sel]);   /* arms the PLL — and Stop()s
                                                           the NCO at rate 0 */
-        /* Keep playing at the current tempo while the PLL acquires; lock sets
-         * the rate and phase. A stopped NCO made every patch-in a silence. */
+        /* Keep playing at the current tempo while the PLL acquires; lock
+         * aligns the phase (after the tick, below). Start() cancels Enable()'s
+         * Stop() inside the same Tick; the price is the one poll of dt that
+         * ApplyDeferredTransport drops on a Start (≈1 ms, once per patch-in).
+         * A stopped NCO made every patch-in a silence. */
         gClock.SetTicksPerUs(tpuBefore);
         gClock.Start();
-        gP2ExtRef = -1.f; gP2ExtEng = false; gMultZone = 2; gClkMult = 1.f;
+        /* P2 reverts to ×1 and re-engages on move. Continuous: the map keeps
+         * the loop where it is, only its slope is (re)set. */
+        gZone.Reset(2); gP2ExtRef = -1.f; gP2ExtEng = false;
+        gMap.SetMultNow(1., Tpre);
+        gPulseTick = -1.; gJitter.Reset(); gDiagExtTrans = (uint8_t)(gDiagExtTrans + 1u);
     }
     if(!ext && gWasExt)
     {
@@ -757,17 +786,26 @@ static void OnPoll(uint32_t /*t_ms*/)
          * the freewheeled tempo until P2 moves (re-latch), like a fresh load. */
         gFollower.Disable();
         gClock.SetSteered(false);
-        /* Lost BEFORE lock (cable bounce, master stopped within the first
-         * three pulses): Enable() had stopped the NCO at rate 0 and only a
-         * lock restarts it — Disable() does not. Restart at the pre-clock
-         * tempo or the module stays silent until reboot (review finding). */
         if(!gClock.Running() || gClock.TicksPerUs() <= 0.)
         {
+            /* Lost BEFORE lock with a stopped NCO (the v0.7.1 review finding).
+             * Cannot happen now that the NCO runs through acquisition, kept
+             * as the safety net: restart at the pre-clock tempo. */
             gClock.SetBpm(gPreExtBpm);
             gClock.Start();
         }
-        gP2Ref   = -1e9f;
-        gClkMult = 1.f;
+        else
+        {
+            /* Tempo HOLDS (checklist §1): whatever the loop was doing at ×m it
+             * keeps doing. Fold the multiplier into the NCO rate and drop the
+             * map to ×1 in the same poll — the loop position and its speed are
+             * both continuous through the unpatch. */
+            const double m = gMap.MultAt(Tpre);
+            if(m != 1.) gClock.SetTicksPerUs(gClock.TicksPerUs() * m);
+        }
+        gMap.SetMultNow(1., Tpre);
+        gP2Ref = -1e9f;
+        gJitter.Reset(); gDiagExtTrans = (uint8_t)(gDiagExtTrans + 1u);
     }
     gWasExt = ext;
 
@@ -778,26 +816,19 @@ static void OnPoll(uint32_t /*t_ms*/)
         /* Spec §6.4: while following, P2 is a clock multiplier/divider around
          * the followed tempo — wide ×1 detent in the middle. It ENGAGES only
          * once the knob moves (an uncaught/stored P2 at boot otherwise lands
-         * on ÷4 and the loop crawls), and zones carry ±0.02 hysteresis so pot
-         * noise on an edge can't flip the multiplier back and forth. */
+         * on ÷4 and the loop crawls). The zone map, its ±0.04 hysteresis and
+         * the 100 ms dwell live in bb::MultZone (core/bb_clockmath.h). The
+         * zone is a REQUEST: the map applies it at the next beat, below.
+         * Note k_tempo.Norm() = stored + param-lock delta: a lock recorded on
+         * P2 (B1 held ≥ 300 ms while turning) replays here — see the doc. */
         const float p = k_tempo.Norm();
         if(gP2ExtRef < 0.f) gP2ExtRef = p;
         if(!gP2ExtEng && (p > gP2ExtRef + 0.03f || p < gP2ExtRef - 0.03f))
             gP2ExtEng = true;
-        if(gP2ExtEng)
-        {
-            static const float kB[4]  = {0.15f, 0.35f, 0.65f, 0.85f};
-            static const float kM[5]  = {0.25f, 0.5f, 1.f, 2.f, 4.f};
-            int z = gMultZone;
-            while(z < 4 && p > kB[z] + 0.02f)     z++;
-            while(z > 0 && p < kB[z - 1] - 0.02f) z--;
-            gMultZone = z;
-            gClkMult  = kM[z];
-        }
+        if(gP2ExtEng) gZone.Update(p, daisy::System::GetNow());   /* ms, wraps at 2^32: dwell math stays wrap-safe */
     }
     else
     {
-        gClkMult = 1.f;
         /* Internal tempo from P2, engaging only once the knob moves (so a
          * fresh load keeps playing at its native tempo). Native detent. */
         float pv = k_tempo.Value();
@@ -810,6 +841,42 @@ static void OnPoll(uint32_t /*t_ms*/)
         }
     }
     gClock.Tick(now_us);
+    {   /* Lock alignment + multiplier map (core/bb_clockmath.h). T is the NCO
+         * position at now_us — which is also this poll's pulse stamp (CvGate
+         * stamps a rise with the poll's now_us), so on the poll that saw a
+         * pulse, T IS the pulse's NCO position. */
+        const double T   = (double)gClock.MasterTick() + gClock.FracTick();
+        const double tpu = gClock.TicksPerUs();
+        const double ppq = (double)gClock.Ppqn();
+        const double tpp = ppq / (double)gFollower.ExtPpqn();   /* NCO ticks per external pulse */
+        if(ext && rose) { gPulseTick = T; gJitter.Pulse(gClkEdge.LastRiseUs(kClockChan)); }
+        /* The SDK follower's DeclareLock anchors its phase reference wherever
+         * the NCO happens to be at the third pulse; from then on the PI keeps
+         * pulses tpp ticks apart but never puts them ON the tick grid — with
+         * a running NCO the loop sat up to a whole pulse off the clock (a
+         * full step at 4 PPQN, a beat at 1 PPQN). Once per lock (first lock
+         * and every re-lock after a loss) shift the loop so the lock pulse
+         * sits on the pulse grid, never aligning beyond a beat. */
+        static bool s_wasLocked = false;
+        const bool locked = ext && gFollower.Locked();
+        if(locked && !s_wasLocked && gPulseTick >= 0.)
+        {
+            if(!gClock.Running()) gClock.Start();   /* SetAutoStart is off (main); belt and braces */
+            const double m = gMap.MultAt(T);
+            double A = tpp * (m > 1. ? m : 1.); if(A > ppq) A = ppq;
+            gMap.Shift(bb::ClockMap::AlignDelta(gMap.Loop(gPulseTick), A, 0.4 * ppq / 4.));
+            gDiagAlignHold = 2;
+        }
+        s_wasLocked = locked;
+        /* Commit a switch the audio thread has already passed, then keep the
+         * zone's multiplier requested (idempotent): it is scheduled at the
+         * next pulse instant that is also a loop beat, ≥ 3 ms out. */
+        gMap.Commit(T);
+        if(ext) gMap.Request((double)gZone.Mult(), T, tpu * 3000., gPulseTick, gPulseTick >= 0. ? tpp : 0., ppq);
+        gClkMult = (float)gMap.mult;
+        gDiagClkFlags = (uint8_t)((gP2ExtEng ? 1u : 0u) | (gMap.Pending() ? 2u : 0u)
+                                | (gDiagAlignHold ? 4u : 0u) | (uint8_t)((gDiagExtTrans & 15u) << 4));
+    }
     {   /* Publish the clock snapshot for the audio thread (see ClockSnap). */
         const uint8_t wi = (uint8_t)(gSnapIdx ^ 1u);
         gSnap[wi].tick    = gClock.MasterTick();
@@ -817,8 +884,9 @@ static void OnPoll(uint32_t /*t_ms*/)
         gSnap[wi].tpu     = gClock.TicksPerUs();
         gSnap[wi].us      = now_us;
         gSnap[wi].running = gClock.Running();
+        gSnap[wi].map     = gMap;
         gSnapIdx = wi;
-        /* Diagnostics: worst poll gap and worst audio callback, rolled per second. */
+        /* Diagnostics: worst poll gap, worst audio callback, pulse jitter — rolled per second. */
         static uint32_t s_lastUs = 0, s_rollUs = 0, s_gapMax = 0;
         if(s_lastUs) { const uint32_t g = now_us - s_lastUs; if(g > s_gapMax) s_gapMax = g; }
         s_lastUs = now_us;
@@ -829,8 +897,12 @@ static void OnPoll(uint32_t /*t_ms*/)
             const uint32_t a = gDiagAudioCur;
             gDiagAudioUs   = (uint16_t)(a > 65535u ? 65535u : a);
             s_gapMax = 0; gDiagAudioCur = 0;
+            uint16_t pk, rms; gJitter.Roll(pk, rms);
+            gDiagJitterUs = pk; gDiagJitterRmsUs = rms;
+            if(gDiagAlignHold) gDiagAlignHold--;
         }
     }
+    /* ── end CLOCK ─────────────────────────────────────────────────────── */
 
     /* Voice keymap: sample v/oct at each gate edge (MONO, latched mods). */
     if(gClkEdge.JustRose(kVoiceGateChan))
@@ -1049,6 +1121,7 @@ static void ServiceLoad()
  *                     f32 bpm, f32 mult, i8 stepSrc[64], u8 stepClass[64],
  *                     u16 pollGapUs, u16 audioUs, u16 jumps, u16 regens (diag),
  *                     u16 lockMask, f32 nativeBpm, u8 gridBars, u8 barsOpt (v0.8.0)
+ *                     u16 jitterUs, u8 multZone, u8 clkFlags, u16 jitterRmsUs (CLOCK, 164..169)
  *   0x63 ACTION ops 7 clear locks · 8 page(u8 0/1)
  *   0x61 GET_ENV    ← u8 first, u8 count(≤30) → u8 status, u8 first, u8 n,
  *                     then n × (8 × {u8 min, u8 max})
@@ -1096,6 +1169,11 @@ struct StateExt : hostlink::IHostlinkExtension
                 w.U16(lm);
                 float nb = engine.NativeBpm(); memcpy(&u, &nb, 4); w.U32(u);
                 w.U8((uint8_t)(engine.nSlices / 16)); w.U8(gBars.sel);
+                /* CLOCK tail (164..169): u16 jitterUs = peak per-pulse period deviation over the
+                 * last second; u8 multZone = the REQUESTED P2 zone 0..4 (÷4 ÷2 ×1 ×2 ×4 — f32 mult
+                 * above is the applied one); u8 clkFlags b0 P2 engaged · b1 switch pending ·
+                 * b2 lock aligned (~2 s) · b4-7 ext transitions mod 16; u16 jitterRmsUs. */
+                w.U16(gDiagJitterUs); w.U8((uint8_t)gZone.zone); w.U8(gDiagClkFlags); w.U16(gDiagJitterRmsUs);
                 return;
             }
             case 0x61u:
@@ -1248,7 +1326,12 @@ int main()
     gClock.SetBpm(engine.NativeBpm());
     gClock.Start();
     gFollower.SetLossPolicy(ClockLossPolicy::Freewheel);
-    gFollower.SetAutoStart(true);
+    /* CLOCK: no auto-start. The NCO is kept running through acquisition (see
+     * OnPoll), and DeclareLock's Start() on an already-running NCO is not a
+     * no-op: ApplyDeferredTransport clears have_last_us_, so the next Tick
+     * drops one poll of dt — a ~1 ms phase slip at every lock and re-lock.
+     * OnPoll starts the NCO itself in the (theoretical) stopped case. */
+    gFollower.SetAutoStart(false);
     /* NOT gFollower.Enable() here: Enable() does SetSteered(true) + Stop() +
      * SetTicksPerUs(0) while it waits for lock, and SetBpm is a no-op while
      * steered — arming at boot froze unpatched playback after one step
