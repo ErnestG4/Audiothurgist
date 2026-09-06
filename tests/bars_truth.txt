@@ -1,0 +1,57 @@
+# Tempo truth set for tests/bars_corpus.sh — SLICE package, 2026-09-06.
+# Source: Frane, A. V. (2017), "Swing Rhythm in Classic Drum Breaks From
+# Hip-Hop's Breakbeat Canon", Music Perception 34(3), Table 1 (30 breaks,
+# BPM measured on the original recordings). Corpus files are rips of the same
+# recordings; covers are excluded (The Bamboos' Amen, Papetti's Love's Theme).
+# Columns: <Frane BPM> <TAB> <file under analysis/breaks/> <TAB> <rip BPM>
+# The rip BPM is Frane's tempo snapped to the file's own periodicity family
+# (an independent numpy comb-autocorrelation, octave-agnostic; within ±5.5 %)
+# — vinyl/CD rips run a few percent off. Dropped as NOT the same passage
+# (their periodicity family contradicts the listed tempo at every octave):
+#   Theme From The Planets (Part 1) and (Part 2) — family at 104 BPM, not 79
+#   Little Feat - Fool Yourself — family at 95.5 BPM, not 78 (a shuffle)
+79	Dexter Wansel - Theme From The Planets.wav	79.8
+81	Al Green - I'm Glad Your Mine.wav	81.3
+85	Isaac Hayes - Breakthrough.wav	84.9
+117	Incredible Bongo Band - Apache.wav	117.1
+117	Incredible Bongo Band - Apache (Part 1).wav	115.4
+117	Incredible Bongo Band - Apache (Part 2).wav	116.8
+101	James Brown - Funky Drummer.wav	97.6
+101	James Brown - Funky Drummer (Ver. 1).wav	100.9
+101	James Brown - Funky Drummer (Ver. 2).wav	97.6
+84	Barry White - I'm Gonna Love You Just A Little Bit More Baby.wav	84.7
+138	The Winstons - Amen Brother.wav	142.3
+138	Winstons - Amen Brother (Ver. 1).wav	137.7
+94	Headhunters - God Made Me Funky (Part 1).wav	94.0
+94	Headhunters - God Made Me Funky (Part 2).wav	94.3
+94	Headhunters - God Made Me Funky (Part 3).wav	95.2
+92	Bill Withers - Kissing My Love.wav	92.0
+92	Bill Withers - Kissing My Love (Part 1).wav	92.0
+92	Bill Withers - Kissing My Love (Part 2).wav	92.0
+98	The Soul Searchers - Ashley's Roachclip (Part 1).wav	98.1
+98	The Soul Searchers - Ashley's Roachclip (Part 2).wav	98.8
+98	The Soul Searchers - Ashley's Roadclip.wav	98.3
+106	Rufus Thomas - Do The Funky Penguin (Part 2).wav	105.9
+106	Rufus Thomas - Do The Funky Penguin (Pt. 2).wav	105.9
+96	Melvin Bliss - Synthetic Substitution.wav	93.7
+95	Honeydrippers - Impeach The President (Ver. 1).wav	94.8
+95	Honeydrippers - Impeach The President (Ver. 2).wav	94.7
+95	Honeydrippers - Impeach The President (Ver. 3).wav	94.4
+95	The Honey Drippers - Impeach The President.wav	94.4
+91	Lee Dorsey - Get Out of My Life Woman.wav	90.8
+92	Five Stairsteps & Cubie - Don't Change Your Love.wav	91.9
+92	5 Stair Steps - Don't Change Your Love.wav	91.9
+95	Skull Snaps - It's A New Day.wav	95.3
+95	Skull Snaps - Its A New Day (Ver. 1).wav	95.4
+95	Skull Snaps - Its A New Day (Ver. 2).wav	95.0
+101	Sly & The Family Stone - Sing A Simple Song.wav	100.9
+104	Funk Inc - Kool Is Back.wav	103.5
+100	Lafayette Afro Rock Band - Hihache.wav	105.2
+93	Mountain - Long Red.wav	93.2
+104	Funkadelic - You'll Like It Too.wav	103.2
+94	Meters - Here Comes The Meter Man.wav	91.7
+109	Graham Central Station - The Jam.wav	106.4
+82	Ohio Players - Funky Worm.wav	82.2
+94	Detroit Emeralds - You're Getting A Little Too Smart.wav	95.9
+94	Detroit Emeralds - You're Getting Too Smart.wav	94.8
+121	The Grass Roots - The You And Love Are The Same.wav	121.0
