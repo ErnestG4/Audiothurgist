@@ -142,7 +142,7 @@ static ParamLock<2 * kNumPots> locks(hw.buttons[kButtonB1], pager);
 Settings           settings(hw, &pager);
 void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.7.3-clockx", "web");
+                           "0.7.4-rests", "web");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -1182,6 +1182,7 @@ int main()
         {
             gGrammar.dirty     = false;
             engine.patternMode = gGrammar.mode;
+            engine.restSustain = gGrammar.mode >= 2;   /* Grids/Euclid rests continue the break */
             gPendReroll        = true;
         }
         ServiceLoad();

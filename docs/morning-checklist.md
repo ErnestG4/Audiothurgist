@@ -54,7 +54,8 @@ iteration list for the day.
 
 ## 6. Languages — M4 (stage 6)
 - [ ] **B1 tap** → Brain page (rings switch to Map X/Y, Kick/Snare/Hat densities, Rotation); tap again → Perform. Bar/history overdraw only on Perform.
-- [ ] **Before judging Grids/Euclid:** on the Brain page turn P3/P4/P5 (the three densities) down through zero and back up to ~2 o'clock. Brain knobs start at their *stored* value (0 on a fresh unit = no hits at all) and need pickup — silence here is the pots, not the grammar.
+- [ ] **Rests continue the break (v0.7.4):** in Grids/Euclid a rest no longer gates a 16th of silence — the break flows verbatim between hits and only the map's hits re-anchor (and only hits raise gates). Densities at zero = the plain break. Listen for the old hole before the downbeat: gone? Does the flow feel right, or do you want the gated version back as an option?
+- [ ] Brain knobs still start at their *stored* value and need pickup (sweep P3/P4/P5 through their position once); with rests sustaining, un-caught pots now mean "plain break", not silence.
 - [ ] Grammar → **Grids**: Map X/Y + densities speak Mutable's map through the break's own kicks/snares/hats; a change regenerates live.
 - [ ] Grammar → **Euclid**: densities = hits per bar, Rotation rotates all classes.
 - [ ] In both: Chop full right = each class's own nearest hit; lower = same-class swaps (B2 rerolls the swaps).

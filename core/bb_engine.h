@@ -191,6 +191,14 @@ struct Engine
     bool   stepRatAccel[kMaxSlices]; // series gaps halve (accel) or double
     int8_t stepJit[kMaxSlices];      // per-cell repitch jitter ×0.001 on Collins
                                      // repeats (anti machine-gun); 0 in Classic
+    bool   stepCont[kMaxSlices] = {}; // rest resolved as a CONTINUATION: plays the
+                                      // source slice after the previous step's,
+                                      // verbatim through the continuity branch;
+                                      // raises no gate and is not a "hit"
+    bool   restSustain = false;       // languages (Grids/Euclid): a rest continues
+                                      // the break instead of gating a 16th of
+                                      // silence — the shell sets this per grammar.
+                                      // Collins keeps its rests: they are figures.
     int    ratchetK    = -1;         // step whose retrigger series is pending
     int    ratchetLeft = 0, ratchetIval = 0;
     bool   ratchetAccel = false;
@@ -264,14 +272,30 @@ struct Engine
                     stepRatN[c + j]     = RN[c];
                     stepRatAccel[c + j] = RA[c];
                     stepJit[c + j]      = jit;
+                    stepCont[c + j]     = false;
                 }
                 else
                 {
-                    stepSrc[c + j]      = -1; // rest or unfilled: silence
+                    // rest or unfilled. With restSustain the rest CONTINUES the
+                    // break: the slice after whatever the previous step plays
+                    // (wrapping), so the continuity branch extends the running
+                    // voice verbatim — no gate, no re-splice, no 16th of silence
+                    // (the Grids map's last 16th is a rest at most densities:
+                    // that hole before the downbeat read as a dropout).
+                    // Leading rests (nothing played yet) and rests after a
+                    // reversed step continue IN PLACE — so densities at zero
+                    // give the plain break, not silence.
+                    const int  p      = c + j - 1;
+                    const bool prevOk = p >= 0 && stepSrc[p] >= 0 && !stepRev[p];
+                    const bool cont   = restSustain;
+                    int8_t s = -1;
+                    if(cont) { int q = prevOk ? stepSrc[p] + 1 : c + j; if(q >= nSlices) q -= nSlices; s = (int8_t)q; }
+                    stepSrc[c + j]      = s;
                     stepRev[c + j]      = false;
                     stepRatN[c + j]     = 0;
                     stepRatAccel[c + j] = false;
                     stepJit[c + j]      = 0;
+                    stepCont[c + j]     = cont;
                 }
             }
             c += Lc;
@@ -409,6 +433,7 @@ struct Engine
             stepRatN[curStep]     = 0;      /* a punched hit is plain: no roll, no jitter */
             stepRatAccel[curStep] = false;
             stepJit[curStep]      = 0;
+            stepCont[curStep]     = false;
         }
         if(ratchet)
         {
@@ -534,8 +559,11 @@ struct Engine
     void TriggerStep(int k)
     {
         int s = stepSrc[k];
-        gateFired |= (uint8_t)(1u << (stepClass[s] & 3));
-        gateSlice[stepClass[s] & 3] = (int8_t)s;
+        if(!stepCont[k])   /* a continuation is not a hit: no gate */
+        {
+            gateFired |= (uint8_t)(1u << (stepClass[s] & 3));
+            gateSlice[stepClass[s] & 3] = (int8_t)s;
+        }
         // VARISPEED: rate follows tempo like a record — each slot consumes
         // exactly one slice of source (slotSamples × rate == nativeStep), so
         // the continuity branch holds at EVERY tempo: verbatim runs stay
@@ -547,6 +575,20 @@ struct Engine
         if(stepJit[k]) rate *= 1.f + 0.001f * (float)stepJit[k]; // Collins ±1.5%
         Slice cell         = slices[s];
         if(cell.len < 64) return;
+
+        // LOOKAHEAD: the pattern is known, so we know whether the NEXT step
+        // continues this run (its source is the next slice, same direction,
+        // no roll). If so, hold this voice past its natural end by a grace
+        // window: the step that fires on time (or a block late) then finds it
+        // still sounding and extends it, and the run stays one unbroken voice.
+        // Without this the voice ended one sample before the boundary and every
+        // 16th of a verbatim run re-spliced with a 5 ms notch (host suite). The
+        // grace must clear the 5 ms edge fade plus the continuity window.
+        const int kn = (k + 1 < nSlices) ? k + 1 : 0;
+        int       sn = s + 1; if(sn >= nSlices) sn -= nSlices;
+        const bool willCont = !stepRev[k] && !reverse && stepRatN[k] == 0
+                              && stepSrc[kn] == sn && !stepRev[kn];
+        const int grace = willCont ? 400 : 0;
 
         // CONTINUITY: if a voice is already playing exactly into this slice
         // (a verbatim run at matching rate), extend it instead of re-splicing
@@ -564,9 +606,10 @@ struct Engine
                    && fabs(vv.pos - (double)cell.start) < 160.)
                 {
                     vv.rate   = rate;
-                    vv.natEnd = cell.start + cell.len;
-                    int e     = cell.start + (int)((float)cell.len * sliceExt);
+                    vv.natEnd = cell.start + cell.len + grace;
+                    int e     = cell.start + (int)((float)cell.len * sliceExt) + grace;
                     vv.end    = e > bufLen ? bufLen : e;
+                    if(vv.natEnd > vv.end) vv.natEnd = vv.end;
                     return;
                 }
             }
@@ -589,6 +632,13 @@ struct Engine
         for(int i = 0; i < kVoices; i++)
             if(&voices[i] != v) voices[i].Choke(bufLen);
         v->Trigger(cell, rate, stepRev[k] || reverse, bufLen, sliceExt);
+        if(grace)
+        {
+            v->natEnd += grace;
+            int e  = v->end + grace;
+            v->end = e > bufLen ? bufLen : e;
+            if(v->natEnd > v->end) v->natEnd = v->end;
+        }
         trigFlash++;
         if(trigLog && trigLogN < trigLogMax) trigLog[trigLogN++] = timeSec;
     }

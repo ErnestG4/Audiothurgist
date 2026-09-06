@@ -62,21 +62,23 @@ inline void ClassifySteps(const float* x, int len, float sr, uint8_t* cls, int m
     const float fM = (mode == 1) ? 900.f : 4000.f;
     float aK = 1.f - expf(-2.f * 3.14159f * fK / sr);
     float aM = 1.f - expf(-2.f * 3.14159f * fM / sr);
-    static float eL[Engine::kMaxSlices], eM[Engine::kMaxSlices], eH[Engine::kMaxSlices];
+    static float eL[Engine::kMaxSlices], eM[Engine::kMaxSlices], eH[Engine::kMaxSlices],
+        eRaw[Engine::kMaxSlices];
     for(int s = 0; s < nsl; s++)
     {
         const float* p = x + s * step;
         int n = (s == nsl - 1) ? len - s * step : step;
-        double sl = 0, sm = 0, sh = 0;
+        double sl = 0, sm = 0, sh = 0, sx = 0;
         for(int i = 0; i < n; i++)
         {
             float v = p[i];
             lpK += aK * (v - lpK);
             lpM += aM * (v - lpM);
             float mid = lpM - lpK, hi = v - lpM;
-            sl += lpK * lpK; sm += mid * mid; sh += hi * hi;
+            sl += lpK * lpK; sm += mid * mid; sh += hi * hi; sx += v * v;
         }
         eL[s] = (float)(sl / n); eM[s] = (float)(sm / n); eH[s] = (float)(sh / n);
+        eRaw[s] = (float)(sx / n);
     }
     float mL = 1e-12f, mM = 1e-12f, mH = 1e-12f;
     for(int s = 0; s < nsl; s++) { mL += eL[s]; mM += eM[s]; mH += eH[s]; }
@@ -88,12 +90,19 @@ inline void ClassifySteps(const float* x, int len, float sr, uint8_t* cls, int m
             sal[s] = s < nsl ? sqrtf(eL[s] + eM[s] + eH[s]) / mx : 0.f;
     }
     mL /= nsl; mM /= nsl; mH /= nsl;
+    /* Silence is RELATIVE and judged on the RAW signal: a step 50 dB under
+     * the loop's loudest is class 3 with zero salience. (Judging the band
+     * energies let the filters' ringing — about −33 dB for a step after a
+     * loud one — classify a digitally silent step as a kick; host suite.) */
+    float eMax = 1e-12f;
+    for(int s = 0; s < nsl; s++) if(eRaw[s] > eMax) eMax = eRaw[s];
+    const float eSil = eMax * 1e-5f;
     for(int s = 0; s < nsl; s++)
     {
         float l = eL[s] / mL, m = eM[s] / mM, h = eH[s] / mH;
-        if(eL[s] + eM[s] + eH[s] < 1e-7f) cls[s] = 3;
-        else if(mode == 2)                  cls[s] = (l >= (m > h ? m : h)) ? 0 : 2;
-        else                                cls[s] = (l >= m && l >= h) ? 0 : (m >= h ? 1 : 2);
+        if(eRaw[s] < eSil || eRaw[s] < 1e-9f) { cls[s] = 3; if(sal) sal[s] = 0.f; }
+        else if(mode == 2)              cls[s] = (l >= (m > h ? m : h)) ? 0 : 2;
+        else                            cls[s] = (l >= m && l >= h) ? 0 : (m >= h ? 1 : 2);
     }
     if(densOut) for(int s = 0; s < Engine::kMaxSlices; s++) densOut[s] = 0.f;
     if(mode != 3) return;
