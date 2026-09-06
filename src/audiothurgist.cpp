@@ -175,7 +175,7 @@ static bb::bardetail::BarScratch ALCHEMY_SDRAM_BSS gBarScratchMem;
 Settings           settings(hw, &pager);
 void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.9.2-swingfix", "web");
+                           "0.9.3-defaults", "web");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -326,7 +326,7 @@ static GrammarSel gGrammar;
  * Every recommendation that changes behaviour ships as an option (Ernest). */
 struct Sel { uint8_t sel = 0; volatile bool dirty = false; };
 static const char* kGateModeDisp  = "{\"kind\":\"enum\",\"labels\":[\"Every step\",\"Onsets only (once per hit)\"]}";
-static Sel gGateMode;    /* 6  audio reads .sel */
+static Sel gGateMode = {1};    /* 6  audio reads .sel */
 static const char* kBarsDisp      = "{\"kind\":\"enum\",\"labels\":[\"Auto (backbeat)\",\"1 bar\",\"2 bars\",\"4 bars\",\"8 bars (8th grid)\"]}";
 static Sel gBars;        /* 7  dirty → re-slice the material */
 static const char* kRestsDisp     = "{\"kind\":\"enum\",\"labels\":[\"Continue the break\",\"Gate (silence)\"]}";
@@ -334,17 +334,17 @@ static Sel gRests;       /* 8  dirty → engine.restSustain + regen */
 static const char* kGateLanesDisp = "{\"kind\":\"enum\",\"labels\":[\"Dominant class\",\"Multi-label (every band over threshold)\"]}";
 static Sel gGateLanes;   /* 9  GATES package */
 static const char* kFadesDisp     = "{\"kind\":\"enum\",\"labels\":[\"Fixed\",\"Adaptive (keyframe density)\"]}";
-static Sel gFades;       /* 10 PLAYBACK package */
+static Sel gFades = {1};       /* 10 PLAYBACK package */
 static const char* kTailDisp      = "{\"kind\":\"enum\",\"labels\":[\"Gate (honest)\",\"Loop forward\",\"Ping-pong\"]}";
 static Sel gTail;        /* 11 PLAYBACK package */
 static const char* kSwapsDisp     = "{\"kind\":\"enum\",\"labels\":[\"Class only\",\"Class + salience tier\"]}";
-static Sel gSwaps;       /* 12 GRAMMAR package */
+static Sel gSwaps = {1};       /* 12 GRAMMAR package */
 static const char* kDejaVuDisp    = "{\"kind\":\"enum\",\"labels\":[\"Off\",\"Some (¼ of flow bars from history)\",\"Lots (¾)\"]}";
-static Sel gDejaVu;      /* 13 GRAMMAR package */
+static Sel gDejaVu = {1};      /* 13 GRAMMAR package */
 static const char* kSwingDisp     = "{\"kind\":\"enum\",\"labels\":[\"Straight 16ths\",\"Auto (the material's swing)\"]}";
-static Sel gSwing;       /* 14 SLICING package */
+static Sel gSwing = {1};       /* 14 SLICING package */
 static const char* kOnsetDetDisp  = "{\"kind\":\"enum\",\"labels\":[\"Spectral flux\",\"Log-filtered flux (Böck 2012)\"]}";
-static Sel gOnsetDet;    /* 15 SLICING package */
+static Sel gOnsetDet = {1};    /* 15 SLICING package */
 
 /* ── Options: ONE preset-managed component for the one-byte selectors.
  * The SDK caps managed components at kPresetMaxManaged (8); separate
@@ -1428,10 +1428,12 @@ int main()
             gPendN    = no;
             /* SLICE: the boot load takes the same bar rule as a later load
              * (v0.8.0 sliced it by the prior alone) */
-            const int nsl = SliceCountFor(gPlay, len, gPendOnsets, no, gCondBars);
+            int barsN = 0;
+            const int nsl = SliceCountFor(gPlay, len, gPendOnsets, no, gCondBars, &barsN);
             static uint8_t cls[bb::Engine::kMaxSlices];
             ClassifySteps(gPlay, len, cls, gClass.mode, gSal, nsl, engine.stepBands /* GATES: audio not started */);
             memcpy(engine.sliceSal, gSal, sizeof engine.sliceSal);   /* GRAM tiers at boot (review M3) */
+            engine.swing = SwingFor(len, gPendOnsets, no, nsl, barsN);   /* SLICE: boot honours Swing */
             engine.SetMaterial(gPlay, len, kSr, gPendOnsets, no, cls, nsl);
             ComputeDensity(gPlay, len, engine.sliceDens, engine.nSlices);   /* PLAY: audio not started yet */
             ComputeEnvelope(gPlay, len, gEnv, nsl);

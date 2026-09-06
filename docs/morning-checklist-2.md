@@ -1,6 +1,6 @@
 # Morning checklist 2 — the night of 2026-09-06 ("until noon")
 
-Flash `Desktop\Audiothurgist-flash\audiothurgist.bin` (= stage 16, **v0.9.2-swingfix**
+Flash `Desktop\Audiothurgist-flash\audiothurgist.bin` (= stage 17, **v0.9.3-defaults** = v0.9.2 with the recommended options on by default; stage 16 = **v0.9.2-swingfix**
 = v0.9.1 plus one more fix: no swing estimate on loops sliced at 8ths, where
 straight hats read as a 1.67 swing). v0.9.1-reviewed was stage 15 (**reviewed**:
 round 2 plus an adversarial review's fixes — two real bugs in the new
@@ -21,19 +21,21 @@ without the module. Every package has a longer test script in
 - [ ] **Button functions in the web app.** Controls panel: B1/B2/B3 tap · hold · chord, six knob meanings for the current page and grammar, P2's zones highlighted while following, lock badges, on-page buttons for every action, a Manual tab from the firmware's own descriptor.
 - [ ] **Web responsiveness.** Clicks now go ahead of polls; state 10 Hz, scope 5 Hz only when visible. The link pill shows round-trip ms and req/s. Say whether it feels right on the phone too.
 
-## 1. Options that change behaviour (all default to the old behaviour)
+## 1. Options that change behaviour
+
+Defaults as of **v0.9.3-defaults** (stage 17), per Ernest: the recommendations ship on — Gate Fires: Onsets only · Rests: Continue · Fades: Adaptive · Swaps: Class + salience · Flow Déjà Vu: Some · Swing: Auto · Onsets: Log-filtered. Gate Lanes, Slice Tail and Bars keep the old behaviour. Set an option back to its first entry to hear the old behaviour.
 | Option | Default | Try | Listen for |
 |---|---|---|---|
 | Bars | Auto | 1/2/4/8 on a break Auto gets wrong | tempo and grid snap right |
-| Rests | Continue | Gate | Grids/Euclid: flowing break vs gated 16ths |
-| Gate Fires | Every step | Onsets only | one gate per drum hit |
+| Rests | **Continue** | Gate | Grids/Euclid: flowing break vs gated 16ths |
+| Gate Fires | **Onsets only** | Onsets only | one gate per drum hit |
 | Gate Lanes | Dominant class | Multi-label | kick+hat step gates both J6 and J8; snares often also mark the hat lane (by design) |
-| Fades | Fixed | Adaptive | pitched-up/chopped material: fewer clicks on bright slices, softer on sustained |
+| Fades | **Adaptive** | Adaptive | pitched-up/chopped material: fewer clicks on bright slices, softer on sustained |
 | Slice Tail | Gate | Loop forward / Ping-pong | pitch +7: the slot keeps sounding instead of gating at the slice end |
-| Swaps | Class only | Class + salience tier | Chop ~10–11 o'clock on the Amen: ghost notes never replace backbeats |
-| Flow Déjà Vu | Off | Some / Lots | B2 hold: bars come back around (¼ / ¾ of the time) |
-| Swing | Straight | Auto | a swung break keeps its hats (straight slicing decapitated them) |
-| Onsets | Spectral flux | Log-filtered | quiet hats found; better Bars Auto (the doc recommends it as the future default) |
+| Swaps | **Class + salience** | Class + salience tier | Chop ~10–11 o'clock on the Amen: ghost notes never replace backbeats |
+| Flow Déjà Vu | **Some** | Some / Lots | B2 hold: bars come back around (¼ / ¾ of the time) |
+| Swing | **Auto** | Auto | a swung break keeps its hats (straight slicing decapitated them) |
+| Onsets | **Log-filtered** | Log-filtered | quiet hats found; better Bars Auto (the doc recommends it as the future default) |
 | Grammar | — | **Camp** (new, 5th) | change-ringing permutations; B2 rings the next change |
 | Gate Level | — | Velocity | Grids accents (map level > 192) hit the 5 V ceiling |
 
