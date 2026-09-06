@@ -22,6 +22,7 @@
 #include "alchemy/hw/alchemy_lab_layout.h"
 #include "alchemy/led/panel.h"
 #include "alchemy/led/anims/level_arc.h"
+#include "alchemy/led/anims/catch_pip.h"
 #include "alchemy/surface/control_loop.h"
 #include "alchemy/surface/presets.h"
 #include "alchemy/surface/virtual_knob.h"
@@ -175,7 +176,7 @@ static bb::bardetail::BarScratch ALCHEMY_SDRAM_BSS gBarScratchMem;
 Settings           settings(hw, &pager);
 void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.9.3-defaults", "web");
+                           "0.9.4-frozen", "web");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -1137,6 +1138,25 @@ static void OnRender(uint32_t /*t_ms*/)
     }
     hw.leds.SetButtonPair(kButtonB2, gFlowing ? Rgb{20, 160, 60} : Rgb{6, 10, 6});
     hw.leds.SetButtonPair(kButtonB3, Rgb{12, 6, 2});
+
+    /* FROZEN dials (Ernest, 2026-09-06): a pot that has not yet swept through
+     * its stored value — after a page switch or a preset load — is inert
+     * until it does. The SDK draws a white catch pip at the value to reach,
+     * but our own overdraws hid it on P1/P3 and a single dot is easy to miss.
+     * Redraw such a ring as a DIM blue-grey arc of the frozen value, with the
+     * pip on top; the ring returns to its live colours the moment it catches. */
+    {
+        static const LedPanel::Rgb kFrozenCol = {14, 18, 40};
+        for(uint8_t p = 0; p < kNumPots; p++)
+        {
+            if(pager.Caught(p)) continue;
+            const PotState st = pager.State(pager.Page(), p);
+            hw.leds.ClearRing(p);
+            DrawLevelArc(hw.leds, p, kAlchemyLabArcGeometry, st.stored, {0.5f, 0.99f},
+                         kFrozenCol, kFrozenCol, kFrozenCol);
+            DrawCatchPip(hw.leds, p, st, kAlchemyLabArcGeometry, {0xFF, 0xFF, 0xFF});
+        }
+    }
 }
 
 /* ── SD: scan + load (main-loop only, off the audio thread) ─────────── */
