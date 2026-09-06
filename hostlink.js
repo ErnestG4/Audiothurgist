@@ -200,8 +200,12 @@ function concat(parts) { const all = new Uint8Array(parts.reduce((s, p) => s + p
 /* ───────────── StateExt (0x60–0x63) ─────────────
  * GET_STATE body (after status): fixed 148 bytes, then append-only tails
  * parsed by length — diag (v0.7.3, → 156), locks/native/bars (v0.8.0, → 164),
- * clock jitter + multiplier zone (CLOCK package, → 167). */
+ * clock jitter + REQUESTED multiplier zone (CLOCK package, → 167; `mult`
+ * above is the applied multiplier), clock flags + RMS jitter (→ 170):
+ * clkFlags b0 P2 engaged · b1 multiplier switch pending · b2 lock alignment
+ * just happened (~2 s) · b4–7 external-clock transitions mod 16. */
 const STATE_MIN = 148;
+const ZONE_MULT = [0.25, 0.5, 1, 2, 4];   /* P2 zones 0..4 while following: ÷4 ÷2 ×1 ×2 ×4 */
 function parseState(b) {
   if (!b || b.length < STATE_MIN) return null;
   const st = {
@@ -209,11 +213,16 @@ function parseState(b) {
     histN: b[9], histDepth: b[10], callFlash: b[11], bpm: f32(b, 12), mult: f32(b, 16),
     src: Int8Array.from(b.subarray(20, 84)), stepClass: Uint8Array.from(b.subarray(84, 148)),
     diag: null, lockMask: null, nativeBpm: null, gridBars: null, barsOpt: null, jitterUs: null, multZone: null,
+    clkFlags: null, jitterRmsUs: null, p2Engaged: null, multPending: null, aligned: null, extTrans: null,
   };
   st.muted = !!(st.flags & 1); st.ext = !!(st.flags & 2); st.locked = !!(st.flags & 4); st.flowing = !!(st.flags & 8); st.brain = !!(st.flags & 16);
   if (b.length >= 156) st.diag = { gap: u16(b, 148), audio: u16(b, 150), jumps: u16(b, 152), regens: u16(b, 154) };
   if (b.length >= 164) { st.lockMask = u16(b, 156); st.nativeBpm = f32(b, 158); st.gridBars = b[162]; st.barsOpt = b[163]; }
   if (b.length >= 167) { st.jitterUs = u16(b, 164); st.multZone = b[166]; }
+  if (b.length >= 170) {
+    st.clkFlags = b[167]; st.jitterRmsUs = u16(b, 168);
+    st.p2Engaged = !!(st.clkFlags & 1); st.multPending = !!(st.clkFlags & 2); st.aligned = !!(st.clkFlags & 4); st.extTrans = st.clkFlags >> 4;
+  }
   return st;
 }
 /* GET_ENV: fetch nSlices × 16 envelope bytes in ≤30-slice chunks. */
@@ -261,6 +270,6 @@ function manualInfo(desc) {
 
 const api = { PROTO, CMD, ACT, STATUS, statusName, crc32, cobsEncode, cobsDecode, buildFrame, FrameParser, Link,
   u16, u32, f32, readStr, hello, getDescriptor, getLive, setLive, concat,
-  STATE_MIN, parseState, fetchEnv, parseScope, allFields, findField, fieldLabels, pagerInfo, optionsInfo, manualInfo };
+  STATE_MIN, ZONE_MULT, parseState, fetchEnv, parseScope, allFields, findField, fieldLabels, pagerInfo, optionsInfo, manualInfo };
 if (typeof module === 'object' && module.exports) module.exports = api; else root.HL = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

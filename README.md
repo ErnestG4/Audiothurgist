@@ -6,9 +6,9 @@ panel that always says what B1/B2/B3 and the six knobs do right now**, the
 module's Options, and its manual. It speaks **HostLink over Web Serial** to
 the module's front USB-C — the same protocol Hermetic's `/program` uses —
 plus the firmware's `StateExt` (commands 0x60–0x63, v0.7.0+; the v0.8.0
-state tail for locks, native BPM and bars; the CLOCK package's jitter tail
-when the firmware sends it). No dependencies, three static files,
-phone-friendly.
+state tail for locks, native BPM and bars; the CLOCK package's jitter,
+multiplier-zone and clock-flags tail when the firmware sends it). No
+dependencies, three static files, phone-friendly.
 
 | file | what |
 |---|---|
@@ -32,9 +32,11 @@ Press **Connect**, pick the Alchemy Lab (0483:5740), and the bar starts moving.
 **No module to hand?** Press **Demo** (or open `index.html?demo`) — the page
 drives itself from `demo.js`, a fake module that answers real HostLink
 frames. `?demo=brain,ext,grids,locks` starts it on the Brain page, locked to
-a clock at ×2, in Grids, with two motion locks; `?demo=old` sends a
-pre-v0.8.0 state body so you can see the fallbacks. `#opts` / `#man` open a
-tab directly.
+a clock at ×2, in Grids, with two motion locks; `?demo=ext,pending` leaves a
+×4 switch waiting for its beat; `?demo=camp` starts in Camp; `?demo=old`
+sends a pre-v0.8.0 state body and `?demo=short` the 167-byte CLOCK body
+(no flags) so you can see the fallbacks. `#opts` / `#man` open a tab
+directly.
 
 ## What is on the page
 
@@ -45,8 +47,13 @@ tab directly.
   callback, playhead jumps, regenerations).
 - **The bar:** ring + strip with the playhead, plus grammar, classifier,
   chop, history, sample, page, **native BPM**, **grid** (bars · steps), the
-  **Bars** option (editable here as well as in Options), and the clock line
-  (multiplier zone and pulse jitter when the firmware reports them).
+  **Bars** option (editable here as well as in Options), and the clock line:
+  internal / following / locked, the multiplier that is *playing* and — while
+  a beat-aligned switch is waiting — the one P2 has *requested* (`×2 → ×4
+  pending`), `P2 not engaged` until the knob has moved, `aligned` for ~2 s
+  after a lock snaps the loop onto the pulse grid, pulse jitter as peak /
+  RMS µs, and `ext n`, the external-clock transition counter (mod 16), when
+  the firmware reports them.
 - **Controls:** every button gesture as the firmware implements it (B1 tap
   = page, B1 held 300 ms + pot = motion lock, hold + nudge again clears; B2
   tap dice / hold flow; B3 tap reslice / hold load; B2+B3 2 s = Settings),
@@ -54,13 +61,17 @@ tab directly.
   (ACTION 8), Clear locks (7), Dice (0), Flow (4), Reslice (1), Load
   selected (6), Mute (2). Below it the six knobs laid out as on the panel
   for the **current page** (flags bit 4), with what each one means under
-  the current grammar and clock: P1 is the chop macro in Classic/Collins
-  and slice-choice faithfulness in Grids/Euclid; P2 is tempo internally and
-  the ÷4 ÷2 ×1 ×2 ×4 multiplier while following (the active zone is
-  highlighted); Brain knobs are marked inert in Classic/Collins and
-  unused where a grammar ignores them. Pots carrying an active motion lock
-  (`lockMask`) are badged. Knob names come from the descriptor's pager,
-  the meanings from the firmware source.
+  the current grammar and clock: P1 is the chop macro in Classic/Collins,
+  slice-choice faithfulness in Grids/Euclid and the **number of bells** in
+  Camp (full right = rounds, then 4 · 8 · 16); P2 is tempo internally and
+  the ÷4 ÷2 ×1 ×2 ×4 multiplier while following (the playing zone is
+  highlighted; a requested zone still waiting for its beat is outlined);
+  Brain knobs are marked inert in Classic/Collins and unused where a
+  grammar ignores them (Euclid's Map X/Y, Grids' Rotation, all six in
+  Camp). Under Camp the B2 row reads *ring the next change* rather than
+  Dice. Pots carrying an active motion lock (`lockMask`) are badged. Knob
+  names come from the descriptor's pager, the meanings from the firmware
+  source.
 - **Options tab:** every enum field of the module's Options block, labels
   and names straight from the descriptor, grouped Sound / Brain & gates /
   Clock / Analysis (anything new lands in "Other"). A change reads the live
@@ -101,10 +112,37 @@ pins `hostlink.js` to the SDK's golden vectors
 (`../alchemy-sdk/tests/host/golden/hostlink_golden.json`: 11/11 — CRC32,
 COBS, the HELLO frame both ways — plus every recorded exchange frame and
 the golden descriptor), parses synthetic `GET_STATE` bodies of every length
-the firmware has shipped (148 / 156 / 164 / 167 bytes), and runs the real
-`Link` over the fake module: priority ordering, coalescing, status errors,
-envelope fetch, and a `GET_LIVE → BLOB` option round-trip. Pass
-`--golden <path>` if the SDK lives elsewhere.
+the firmware has shipped (148 / 156 / 164 / 167 / 170 bytes), and runs the
+real `Link` over the fake module: priority ordering, coalescing, status
+errors, envelope fetch, the clock flags on a fake clock, a `GET_LIVE →
+BLOB` option round-trip, and the five-label Grammar with Camp at index 4.
+Pass `--golden <path>` if the SDK lives elsewhere.
+
+## The GET_STATE body
+
+Fixed 148 bytes, then append-only tails that the page parses by length —
+an older firmware simply sends a shorter body and the page falls back.
+
+```
+u8 status u8 nSlices u8 curStep u8 flags u8 matGen u8 grammar u8 cls u8 file
+u8 chop u8 histN u8 histDepth u8 callFlash f32 bpm f32 mult
+i8 stepSrc[64] u8 stepClass[64]                                  (ends at 148)
+u16 pollGapUs u16 audioUs u16 jumps u16 regens                    (148..155, v0.7.3)
+u16 lockMask f32 nativeBpm u8 gridBars u8 barsOpt                 (156..163, v0.8.0)
+u16 jitterUs u8 multZone                                          (164..166, CLOCK)
+u8 clkFlags u16 jitterRmsUs                                       (167..169, CLOCK)
+```
+
+`flags`: b0 muted · b1 following an external clock · b2 locked · b3 flow
+held · b4 Brain page. `mult` is the multiplier being *applied*; `multZone`
+is the zone P2 is *requesting* (0..4 = ÷4 ÷2 ×1 ×2 ×4), which differs only
+while a switch waits for its beat. `jitterUs` / `jitterRmsUs` are the peak
+and RMS per-pulse period deviation over the last second. `clkFlags`: b0 P2
+has engaged (moved since the clock arrived) · b1 multiplier switch pending
+· b2 a lock alignment happened in the last ~2 s · b4–7 external-clock
+transitions mod 16. `grammar` indexes the descriptor's Grammar labels —
+Classic, Collins, Grids, Euclid, **Camp** (4: change ringing; Chop = the
+number of bells, B2 rings the next change, Brain knobs unused).
 
 ## What talks to what
 
