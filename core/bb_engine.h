@@ -543,6 +543,8 @@ struct Engine
         pat.langX = langX; pat.langY = langY; pat.langRot = langRot;
         for(int c = 0; c < 3; c++) pat.langDens[c] = langDens[c];
         ComputeSalTiers(); /* GRAM */
+        for(int i = 0; i < kMaxSlices; i++) pat.hit[i] = stepHit[i];   /* language modes prefer onset slices */
+        pat.useHits = true;
         pat.Generate(nSlices, stepsPerBeat, stepClass, knob, cs, fs, patternMode);
         jitRng.Seed(cs ^ (fs * 0x9E3779B97F4A7C15ULL));
         loopCount        = 0;
@@ -893,7 +895,10 @@ struct Engine
         int s = stepSrc[k];
         /* a continuation is not a hit: no gate; in onsets-only mode neither
          * is a slice that does not open with a drum */
-        if(!stepCont[k] && (!gateOnsetsOnly || stepHit[s]))
+        /* a map hit (Grids/Euclid) IS a hit by definition — it gates in
+         * Onsets-only mode whatever the chosen slice looks like */
+        const bool langHit = patternMode == 2 || patternMode == 3;
+        if(!stepCont[k] && (!gateOnsetsOnly || langHit || stepHit[s]))
             RaiseGates(s, stepAccent[k]); /* GATES */
         // VARISPEED: rate follows tempo like a record — each slot consumes
         // exactly one slice of source (slotSamples × rate == nativeStep), so

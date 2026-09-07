@@ -51,6 +51,15 @@ struct Pattern
     // the shipped grammars (the extra rejection is a pure post-filter).
     uint8_t salTier[kMaxSteps] = {};
     bool    salSwaps = false;
+    // Onset HITS per source slice (Engine::stepHit), set by the engine before
+    // Generate. Language modes (Grids/Euclid) prefer a slice that opens with
+    // a drum for a map hit: a "hat" under the Density lens is a brightness
+    // rank, not an attack, and a hit played from ride wash gave no gate in
+    // Onsets-only mode and no attack to hear (field, 2026-09-07). Classic,
+    // Collins and Camp ignore it (byte-identical).
+    bool    hit[kMaxSteps] = {};
+    bool    useHits = false;
+    bool    HitOk(int i) const { return !useHits || hit[i]; }
     bool    TierOk(int cand, int pos) const
     {
         return !salSwaps || salTier[cand] == salTier[pos];
@@ -352,12 +361,12 @@ struct Pattern
             dbl[s]  = d;
             acc[s]  = a;
         }
-        int8_t byClass[3][kMaxSteps];
-        int    nBy[3] = {0, 0, 0};
+        int8_t byClass[3][kMaxSteps], byHit[3][kMaxSteps];
+        int    nBy[3] = {0, 0, 0}, nHit[3] = {0, 0, 0};
         for(int s = 0; s < nSteps; s++)
         {
             int c = cls ? (cls[s] & 3) : 3;
-            if(c < 3) byClass[c][nBy[c]++] = (int8_t)s;
+            if(c < 3) { byClass[c][nBy[c]++] = (int8_t)s; if(HitOk(s)) byHit[c][nHit[c]++] = (int8_t)s; }
         }
         const float swapP = (1.f - vc) * 0.8f;
         for(int s = 0; s < nSteps; s++)
@@ -369,15 +378,26 @@ struct Pattern
             if(dbl[s] & (uint8_t)(1u << c)) ratN[s] = 1;   // map's 32nd → a double
             accent[s] = (acc[s] >> c) & 1;                 // GRAM: the firing class's accent
             int pick = -1;
-            if(cls && (cls[s] & 3) == c) pick = s;         // in place
-            else if(cls)                                   // nearest of that class
+            if(cls && (cls[s] & 3) == c && HitOk(s)) pick = s;   // in place, and it opens with a drum
+            else if(cls)                                         // nearest of that class WITH a hit …
+                for(int d = 1; d < nSteps && pick < 0; d++)
+                {
+                    if(s - d >= 0     && (cls[s - d] & 3) == c && HitOk(s - d)) { pick = s - d; break; }
+                    if(s + d < nSteps && (cls[s + d] & 3) == c && HitOk(s + d)) { pick = s + d; break; }
+                }
+            if(pick < 0 && cls && (cls[s] & 3) == c) pick = s;   // … else the old rule: in place
+            else if(pick < 0 && cls)                             // … else nearest of that class
                 for(int d = 1; d < nSteps && pick < 0; d++)
                 {
                     if(s - d >= 0     && (cls[s - d] & 3) == c) { pick = s - d; break; }
                     if(s + d < nSteps && (cls[s + d] & 3) == c) { pick = s + d; break; }
                 }
             if(pick < 0) pick = s;
-            if(nBy[c] > 1 && fr.Uniform() < swapP)
+            /* swap pool: slices of the class that open with a drum when there are
+             * enough of them, else the whole class */
+            const int8_t* pool  = nHit[c] > 1 ? byHit[c] : byClass[c];
+            const int     nPool = nHit[c] > 1 ? nHit[c] : nBy[c];
+            if(nPool > 1 && fr.Uniform() < swapP)
             {
                 // GRAM: with salSwaps the same-class pool is re-drawn until the
                 // candidate shares the replaced step's tier (8 tries, then the
@@ -385,7 +405,7 @@ struct Pattern
                 const int base = pick;
                 for(int tries = 0; tries < (salSwaps ? 8 : 1); tries++)
                 {
-                    const int cand = byClass[c][(int)(fr.Uniform() * (float)nBy[c]) % nBy[c]];
+                    const int cand = pool[(int)(fr.Uniform() * (float)nPool) % nPool];
                     if(TierOk(cand, base)) { pick = cand; break; }
                 }
             }

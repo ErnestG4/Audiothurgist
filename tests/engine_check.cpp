@@ -1149,6 +1149,33 @@ int main()
         CHECK(same, "swing 0.5: slices are i·step, swung flag off");
     }
 
+    SECTION("Language hits: map hits gate in Onsets-only; picks prefer slices that open with a drum");
+    {
+        static const int on4[4] = {0, 4 * kStep, 8 * kStep, 12 * kStep};
+        static uint8_t allKick[64]; for(int i = 0; i < 64; i++) allKick[i] = 0;
+        // Euclid kick 4/16 = hits at 3,7,11,15; every slice is "kick" but only 0,4,8,12 open with a drum
+        Fresh(e, 3, 1.f);
+        e.SetMaterial(gMat, kLen, kSr, on4, 4, allKick, 0);
+        e.langDens[0] = 4.f / 16.f; e.langDens[1] = e.langDens[2] = 0.f; e.langRot = 0.f;
+        e.RegenPattern();
+        int hitPicks = 0, hits = 0;
+        for(int s = 0; s < 16; s++) if(!e.stepCont[s] && e.stepSrc[s] >= 0) { hits++; hitPicks += e.stepHit[e.stepSrc[s]]; }
+        CHECK(hits == 4 && hitPicks == 4, "every map hit plays a slice that opens with a drum (%d/%d)", hitPicks, hits);
+        e.gateOnsetsOnly = true;
+        Rendered r = RenderLoops(e, 2);
+        CHECK(GateEvents(r) == 8, "onsets-only + Euclid: one gate per map hit (%d over 2 loops)", GateEvents(r));
+        // even a hit forced onto a non-onset slice still gates in a language mode
+        for(int s = 0; s < 16; s++) if(!e.stepCont[s] && e.stepSrc[s] >= 0) e.stepSrc[s] = 1;
+        r = RenderLoops(e, 2);
+        CHECK(GateEvents(r) == 8, "…and still gates when the slice has no onset (%d)", GateEvents(r));
+        // Classic keeps the strict rule: a step whose slice has no onset does not gate
+        Fresh(e, 0, 1.f);
+        e.SetMaterial(gMat, kLen, kSr, on4, 4, allKick, 0);
+        e.RegenPattern(); e.gateOnsetsOnly = true;
+        r = RenderLoops(e, 2);
+        CHECK(GateEvents(r) == 8, "Classic verbatim, onsets-only: 4 of 16 slices open with a drum → 8 gates (%d)", GateEvents(r));
+    }
+
     printf("\n%d passed, %d failed\n", gPass, gFail);
     return gFail ? 1 : 0;
 }
