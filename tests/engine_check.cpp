@@ -1184,6 +1184,12 @@ int main()
         int filled = 0;
         for(int k = 0; k < 14; k++) { const int a = (16 + k) * kStep + kStep * 3 / 4; if(Rms(&r.y[a], kStep / 5) > 0.05f) filled++; }
         CHECK(filled >= 13, "pitch +12, Zoom: the last quarter of each slot still sounds (%d/14)", filled);
+        {   // every synthetic slice opens with an attack → zoom must NOT read the next slice: the tail loops its own tone
+            int own = 0;
+            for(int k = 0; k < 14; k++) { const int a = (16 + k) * kStep + kStep * 3 / 4; const float f = MeasureFreq(&r.y[a], kStep / 5);
+                if(fabsf(f - 2.f * StepFreq(e.stepSrc[k])) < 0.15f * 2.f * StepFreq(e.stepSrc[k])) own++; }
+            CHECK(own >= 12, "pitch +12, Zoom: the slot's tail is its own slice, not the next one's attack (%d/14)", own);
+        }
         Fresh(e, 0, 1.f);
         e.tailMode = 0; e.pitch = 2.f; e.RegenPattern();
         r = RenderLoops(e, 2);

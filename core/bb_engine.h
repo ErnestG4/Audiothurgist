@@ -976,11 +976,27 @@ struct Engine
          * record's behaviour back — 2026-09-07.) Reverse keeps the slice. */
         const bool zoom = tailMode == 3 && !stepRev[k] && !reverse;
         Slice zc = cell;
+        bool  zoomLoop = false;
         if(zoom)
         {
             int zl = (int)(pitch * slotSrc + 0.5f);
             if(zl < 64) zl = 64;
             if(cell.start + zl > bufLen) zl = bufLen - cell.start;
+            if(zl > cell.len + 160)
+            {
+                /* Never read THROUGH an attack: it would play here, pitched, and
+                 * again at its own step (the "duplicating" at high pitch). If the
+                 * next slice opens with a drum, loop this slice's tail for the
+                 * rest of the slot; otherwise read on through the following
+                 * attack-less material and stop at the first drum. */
+                if(s + 1 < nSlices ? stepHit[s + 1] : true) { zl = cell.len; zoomLoop = true; }
+                else
+                {
+                    int limit = cell.len, n = s + 1;
+                    while(n < nSlices && !stepHit[n] && limit < zl) { limit += slices[n].len; n++; }
+                    if(limit < zl) zl = limit;
+                }
+            }
             zc.len = zl;
         }
         const int grace = (willCont && !outlast) ? 400 : 0;
@@ -1030,6 +1046,11 @@ struct Engine
         v->Trigger(zc, rate, stepRev[k] || reverse, bufLen, sliceExt);
         ApplyFades(*v, s, ep);           /* PLAY */
         if(outlast) SetTail(*v, s);      /* PLAY */
+        if(zoomLoop)                     /* zoom, but the next slice is a drum: loop this tail */
+        {
+            if(loopState[s] == 0) FindLoop(s);
+            if(loopState[s] > 0) { v->tail = 1; v->loopA = loopA[s]; v->loopB = loopB[s]; }
+        }
         if(grace)
         {
             v->natEnd += grace;
