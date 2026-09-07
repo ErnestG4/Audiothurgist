@@ -6,8 +6,21 @@
 
 namespace bb {
 
-// Pure engine: no libDaisy, no allocation, no printf. Mono in, mono out,
-// fixed buffers. The shell owns the sample memory and the control mapping.
+// Pure engine: no libDaisy, no allocation, no printf. Fixed buffers; the
+// shell owns the sample memory and the control mapping.
+//
+// SAMPLE (docs/packages/sample-engine.md, 2026-09-07): one material buffer,
+// one slice table, two playback rules. The buffer is one or two planes
+// (L, optional R) of bufCap samples; the material (the loaded break) fills
+// [0, bufLen) and recordings are appended after it, so the table has a grid
+// part [0, nSlices) — what the grammars, the clock and the bar rule see,
+// unchanged — and a recorded part [nSlices, nTable). Every table entry is a
+// {start, len} into the same planes; per-slice metadata (stepClass,
+// sliceSal, sliceDens, stepHit, stepBands, loop points) is indexed by table
+// index and sized kMaxTable. A 24-key table (keySlice) maps the Voice map's
+// notes onto table entries. Thread ownership per call is stated at each
+// declaration: "control" = the shell's main loop / poll, "audio" = the
+// audio callback; the audio thread only ever touches plain arrays.
 
 struct Slice
 {
@@ -21,10 +34,24 @@ struct Voice
     double pos    = 0.; // source sample position
     float  rate   = 1.f;
     int    start = 0, natEnd = 0, end = 0;
+    int    bound = 0;        // SAMPLE: this voice's read limit (the material's
+                             // end for a grid slice, its own end for a
+                             // recorded one) — a fade never reads past it
     uint32_t age      = 0;
     float  lastOut    = 0.f;
     float  clickComp  = 0.f; // decaying offset that bridges a mid-note steal
     float  relScale   = 1.f; // keeps the envelope continuous through a choke
+    /* SAMPLE: the R plane's bridge state (one envelope and position serve
+     * both planes; the seam offsets are per plane because the material is).
+     * Mono material never touches these. */
+    float  lastOutR   = 0.f;
+    float  clickCompR = 0.f;
+    /* SAMPLE: a HELD call (the sampler rule) reads on to the end of the
+     * material regardless of its slice, tagged with the key that struck it;
+     * Engine::ReleaseKey fades every voice carrying that key. A held voice
+     * belongs to its key: the sequencer's continuity branch leaves it alone. */
+    bool   held = false;
+    int8_t key  = -1;
 
     /* PLAY: per-voice fade geometry (Options → Fades). Trigger resets these
      * to the fixed 1 ms attack / 5 ms release; Adaptive mode then rewrites
@@ -48,7 +75,10 @@ struct Voice
     // repeating pattern otherwise exposes every seam on every pass.
     void Trigger(const Slice& s, float r, bool rev, int bufLen, float ext)
     {
-        if(active) clickComp = lastOut; // steal: no waveform step, ~1ms decay
+        if(active) { clickComp = lastOut; clickCompR = lastOutR; } // steal: no waveform step, ~1ms decay
+        bound  = bufLen;
+        held   = false;
+        key    = -1;
         start  = s.start;
         natEnd = s.start + s.len;
         int e  = s.start + (int)((float)s.len * ext);
@@ -83,9 +113,29 @@ struct Voice
     // A new attack chokes any voice still ringing in its extension: the tail
     // fills silence, but must never replay the next slice's transient under
     // the incoming one (that reads as every hit doubled a few ms apart).
-    void Choke(int bufLen, bool ep = false)
+    void Choke(bool ep = false)
     {
         if(!WouldChoke()) return;
+        Fade(ep);
+    }
+
+    /* SAMPLE: the key came up — a held voice fades out from here with the
+     * normal choke geometry whatever its position (Choke only acts near a
+     * boundary). A reversed held voice flips forward first, value-continuous,
+     * exactly as a ping-pong tail does when choked. */
+    void Release()
+    {
+        if(!active || !held) return;
+        held = false;
+        key  = -1;
+        if(!tail && rate < 0.f) rate = -rate;
+        Fade(epShape);
+    }
+
+    // The fade itself: a choke or a release, never past `bound`.
+    void Fade(bool ep)
+    {
+        const int bufLen = bound;
         if(tail) /* PLAY: a tail is mid-slice at unity gain; fade out forward
                   * from here, never past the slice's own end */
         {
@@ -112,9 +162,16 @@ struct Voice
         epShape = ep;
     }
 
-    float Render(const float* buf)
+    /* SAMPLE: one reader for both planes. One position, one envelope, one
+     * set of loop points; the sample fetch and the seam bridge are per plane.
+     * ST = false is the mono reader, op for op the pre-SAMPLE Render (the
+     * host suite holds goldens on it); ST = true adds the R plane's fetch
+     * and bridge and leaves the L arithmetic untouched. */
+    template <bool ST>
+    void RenderT(const float* L, const float* R, float& oL, float& oR)
     {
         clickComp *= 0.93f;
+        if constexpr(ST) clickCompR *= 0.93f;
         // direction-aware end test: a reversed voice STARTS at the top of its
         // slice — pos >= end-1 is only "finished" when travelling forward
         // (the symmetric check killed every reverse at birth once ext hit 1.0)
@@ -123,9 +180,16 @@ struct Voice
         if(ended)
         {
             if(active && lastOut != 0.f) clickComp += lastOut; // natural end
+            if constexpr(ST)
+            {
+                if(active && lastOutR != 0.f) clickCompR += lastOutR;
+                lastOutR = 0.f;
+                oR       = clickCompR;
+            }
             active  = false;
             lastOut = 0.f;
-            return clickComp;
+            oL      = clickComp;
+            return;
         }
         /* PLAY: tail wrap. Loop forward jumps loopB → loopA (both are
          * positive-going zero crossings when the slice has any, so the join
@@ -150,7 +214,9 @@ struct Voice
         }
         int   i0 = (int)pos;
         float fr = (float)(pos - (double)i0);
-        float s  = buf[i0] + fr * (buf[i0 + 1] - buf[i0]);
+        float s  = L[i0] + fr * (L[i0 + 1] - L[i0]);
+        float sR = 0.f;
+        if constexpr(ST) sR = R[i0] + fr * (R[i0 + 1] - R[i0]);
         // envelope: ~1 ms attack; unity through the natural slice; release
         // across the extension (or a 5 ms edge guard when there is none)
         float dA = (float)(pos - (double)start);
@@ -171,21 +237,49 @@ struct Voice
         const float o = s * g * h * relScale;
         if(wrapped) clickComp += lastOut - o; // PLAY: bridge the seam
         lastOut = o;
-        return lastOut + clickComp;
+        oL      = lastOut + clickComp;
+        if constexpr(ST)
+        {
+            const float o2 = sR * g * h * relScale;
+            if(wrapped) clickCompR += lastOutR - o2;
+            lastOutR = o2;
+            oR       = lastOutR + clickCompR;
+        }
+    }
+    // mono reader (the pre-SAMPLE signature)
+    float Render(const float* buf)
+    {
+        float l = 0.f, r = 0.f;
+        RenderT<false>(buf, buf, l, r);
+        return l;
+    }
+    // SAMPLE: two planes; R == L (or nullptr) is mono and costs nothing extra
+    void Render(const float* L, const float* R, float& outL, float& outR)
+    {
+        if(R && R != L) RenderT<true>(L, R, outL, outR);
+        else { RenderT<false>(L, L, outL, outR); outR = outL; }
     }
 };
 
 struct Engine
 {
-    static constexpr int kMaxSlices = 64;
+    static constexpr int kMaxSlices = 64;   // grid steps per loop: the grammars' world
     static constexpr int kVoices    = 8;
+    /* SAMPLE */
+    static constexpr int kMaxTable  = kMaxSlices + 32; // grid + recorded entries
+    static constexpr int kKeys      = 24;              // Voice map notes 0..23
+    static constexpr int kRecMin    = 480;             // 10 ms: the shortest usable recording
 
-    const float* buf    = nullptr;
-    int          bufLen = 0;
-    float        sr     = 48000.f;
+    float* buf     = nullptr; // L plane: the material, then the recordings
+    float* bufR    = nullptr; // R plane, nullptr = mono                    /* SAMPLE */
+    int    bufLen  = 0;       // the MATERIAL's length: the grid's domain
+    int    bufCap  = 0;       // plane capacity; recordings may fill up to it /* SAMPLE */
+    int    freePos = 0;       // end of USED material = the next recording's start /* SAMPLE */
+    float  sr      = 48000.f;
 
-    Slice slices[kMaxSlices];
-    int   nSlices = 0;
+    Slice slices[kMaxTable];
+    int   nSlices = 0;            // grid entries [0, nSlices)
+    int   nTable  = 0;            // grid + recorded entries [0, nTable)  /* SAMPLE */
     float slicePhase[kMaxSlices]; // onset positions as ring angles (gas wells)
 
     BetaGas gas; // dormant in the trigger path since v3.1 — remains the
@@ -194,12 +288,12 @@ struct Engine
     float    patternKnob = 0.85f; // pot 1: 1 verbatim … 0 micro-chop
     uint64_t cellSeed = 0x5EED1, fillSeed = 0x5EED2;
     Rng      seedRng;
-    uint8_t  stepClass[kMaxSlices]; // per-step kick/snare/hat/other
+    uint8_t  stepClass[kMaxTable]; // per-slice kick/snare/hat/other (grid: per step)
     int      stepsPerBeat = 4;
     bool     flowRegen    = false; // hold-to-flow: new fill each bar wrap
 
     /* GRAM */ // Options → Swaps / Flow Déjà Vu (docs/packages/gram.md)
-    float    sliceSal[kMaxSlices] = {}; // per-slice salience 0..1, copied from the
+    float    sliceSal[kMaxTable] = {};  // per-slice salience 0..1, copied from the
                                         // shell's classifier output (gSal) — the
                                         // engine ranks it into Pattern::salTier
     int      swapsMode = 0;   // 0 class only (shipped), 1 class + salience tier
@@ -218,7 +312,7 @@ struct Engine
                                // per class (pure data; shell maps to velocity)
     bool    gateAccent[4] = {}; /* GATES */ // the last trigger per class carried a
                                // grammar accent (stepAccent) — shell → velocity ceiling
-    uint8_t stepBands[kMaxSlices] = {}; /* GATES */ // per-slice band-presence mask
+    uint8_t stepBands[kMaxTable] = {}; /* GATES */ // per-slice band-presence mask
                                // (bit c = class c present, bb_classify.h rule);
                                // 0 = unknown → the dominant class is used
     bool    multiLabel = false; /* GATES */ // Options → Gate Lanes: raise every
@@ -248,9 +342,9 @@ struct Engine
      * lengths are resolved per trigger, loop points once per slice. */
     int   fadeMode = 0;              // 0 Fixed (1 ms attack, 5 ms release), 1 Adaptive
     int   tailMode = 0;              // 0 Gate (honest), 1 Loop forward, 2 Ping-pong
-    float sliceDens[kMaxSlices] = {};
-    double loopA[kMaxSlices] = {}, loopB[kMaxSlices] = {}; // sub-sample loop region per slice
-    int8_t loopState[kMaxSlices] = {};                     // 0 unsearched, 1 found, -1 none
+    float sliceDens[kMaxTable] = {};
+    double loopA[kMaxTable] = {}, loopB[kMaxTable] = {}; // sub-sample loop region per slice
+    int8_t loopState[kMaxTable] = {};                    // 0 unsearched, 1 found, -1 none
     static constexpr float kFadeKeyframes = 10.f; // a splice spans ~10 keyframes
     static constexpr int   kFadeMin = 48, kFadeMax = 480; // 1–10 ms (Nielsen floor,
                                                           // Driedger & Müller ceiling)
@@ -259,7 +353,7 @@ struct Engine
     // transient) → short, sparse (sustained) → long. Fixed mode: 5 ms.
     int FadeSamples(int s) const
     {
-        if(fadeMode == 0 || s < 0 || s >= kMaxSlices) return 240;
+        if(fadeMode == 0 || s < 0 || s >= kMaxTable) return 240;
         const float d = sliceDens[s];
         if(d <= 0.f) return 240;
         const float f = kFadeKeyframes / d;
@@ -404,7 +498,7 @@ struct Engine
                                       // verbatim through the continuity branch;
                                       // raises no gate and is not a "hit"
     bool   stepAccent[kMaxSlices] = {}; // grammar accent on this step (Pattern::accent)
-    bool   stepHit[kMaxSlices] = {};  // the source slice begins with a detected
+    bool   stepHit[kMaxTable] = {};   // the source slice begins with a detected
                                       // onset (a drum's "open"); from the load's
                                       // onset table. All true when none given.
     /* SLICE: the material's own 16th swing (Options → Swing: Auto). `swing`
@@ -431,7 +525,7 @@ struct Engine
     void   PunchStep(int step, int src, bool rev)
     {
         if(patternMode == 6) return;   /* Pads: nothing is ever written — you keep the beat */
-        if(step < 0 || step >= nSlices || src < 0 || src >= nSlices) return;
+        if(step < 0 || step >= nSlices || src < 0 || src >= nTable) return;   /* SAMPLE: a recording may be punched in */
         stepSrc[step]      = (int8_t)src;
         stepRev[step]      = rev;
         stepRatN[step]     = 0;      /* a punched hit is plain: no roll, no jitter */
@@ -634,10 +728,35 @@ struct Engine
     // plays — chop instruments live on the grid, not on free time.
     // nSlicesHint (multiple of 16, 0 = none): the shell's bar estimate or the
     // user's Bars override. Without it the duration prior below applies.
-    void SetMaterial(const float* b, int len, float sampleRate, const int* onsets,
-                     int nOnsets, const uint8_t* classes = nullptr, int nSlicesHint = 0)
+    //
+    // SAMPLE (audio thread in the shell, or before audio starts): `b`/`bR`
+    // are the L/R planes (bR nullptr = mono), `cap` their capacity in
+    // samples (0 = len: no room to record, the pre-SAMPLE behaviour). The
+    // material occupies [0, len); recordings are appended past it. A
+    // re-slice of the SAME planes (same pointers) keeps every recorded entry
+    // that lies past the new material (their keys, metadata and memory);
+    // anything else — new planes, a material that grew over them — is new
+    // material and the table starts over. A take in flight is cancelled.
+    void SetMaterial(float* b, int len, float sampleRate, const int* onsets,
+                     int nOnsets, const uint8_t* classes = nullptr, int nSlicesHint = 0,
+                     float* bR = nullptr, int cap = 0)
     {
+        /* SAMPLE: which recorded entries survive? */
+        const int keepFrom = nSlices;
+        int       keepN    = 0;
+        if(b == buf && bR == bufR && nTable > nSlices)
+        {
+            keepN = nTable - nSlices;
+            for(int t = nSlices; t < nTable; t++)
+                if(slices[t].start < len) { keepN = 0; break; }
+        }
+        recArmed   = false;
+        recPending = false;
+        recKey     = -1;
+        const int oldFree = freePos;
+
         buf    = b;
+        bufR   = bR;
         bufLen = len;
         sr     = sampleRate;
 
@@ -652,6 +771,23 @@ struct Engine
         while(nSlices > kMaxSlices) nSlices /= 2;
         if(nSlices < 1) nSlices = 1;
         bars = nSlices / 16 > 0 ? nSlices / 16 : 1;
+
+        /* SAMPLE: relocate the kept recordings to [nSlices, nSlices + keepN)
+         * BEFORE the grid is written over [0, nSlices). In place, in the safe
+         * direction; a bigger grid may leave no room for the last ones. */
+        if(keepN > 0)
+        {
+            if(nSlices + keepN > kMaxTable) keepN = kMaxTable - nSlices;
+            if(nSlices < keepFrom)
+                for(int i = 0; i < keepN; i++) MoveEntry(keepFrom + i, nSlices + i);
+            else if(nSlices > keepFrom)
+                for(int i = keepN - 1; i >= 0; i--) MoveEntry(keepFrom + i, nSlices + i);
+        }
+        nTable  = nSlices + keepN;
+        bufCap  = cap > 0 ? cap : (keepN > 0 ? bufCap : len);
+        if(bufCap < len) bufCap = len;
+        freePos = keepN > 0 ? oldFree : len;
+
         int step = len / nSlices;
         for(int i = 0; i < nSlices; i++)
             slices[i] = {i * step, step};
@@ -677,7 +813,7 @@ struct Engine
 
         for(int i = 0; i < nSlices; i++)
             stepClass[i] = classes ? classes[i] : 3;
-        for(int i = 0; i < kMaxSlices; i++) loopState[i] = 0; /* PLAY: new grid, re-search */
+        for(int i = 0; i < kMaxTable; i++) loopState[i] = 0; /* PLAY: new grid, re-search */
 
         // Hits: a slice "opens" with a drum if an onset falls in its first
         // quarter (or within 10 ms before its start). No onset table = every
@@ -699,11 +835,13 @@ struct Engine
                 else if(s + 1 < nSlices && slices[s + 1].start - p <= (int)(0.010f * sampleRate))
                     stepHit[s + 1] = true;
             }
+        SyncRecordedMeta();   /* SAMPLE: the kept recordings' class/salience/density/hit */
+        DefaultKeyTable();    /* SAMPLE: keys span the grid; recorded keys point at their entries */
         SetBpm(0.f); // every load opens at ITS OWN tempo — inheriting the
                      // previous break's BPM chipmunks the new one (field bug)
         RegenPattern();
         barPhase   = 0.;
-        for(int i = 0; i < kVoices; i++) voices[i].active = false; // old slice
+        for(int i = 0; i < kVoices; i++) { voices[i].active = false; voices[i].held = false; voices[i].key = -1; } // old slice
         // bounds are meaningless against new material
         gas.SetN(nSlices); // event density defaults to the material's own
                            // feature count (SetN clamps; shell may override)
@@ -738,6 +876,8 @@ struct Engine
     int   callIdx       = -1;
     float callRate      = 1.f;
     bool  callRev       = false;
+    bool  callHeld      = false; /* SAMPLE: the double of a held call is held too */
+    int   callKey       = -1;
 
     /* GATES: raise the lanes for source slice `idx`. Dominant class: the
      * lens's label (1 << stepClass). Multi-label: every band the classifier
@@ -757,7 +897,15 @@ struct Engine
     uint8_t callHits    = 0;    // calls fired since the shell last looked (hit trigger out)
     int     lastCallIdx = -1;   // slice of the last call (velocity out)
     float   callLenMul  = 1.f;  // staccato: fraction of the slice a call plays
-    void FireSlice(int idx, float rate, bool rev, float lenMul = 1.f)
+    /* SAMPLE: a voice's read limit. A grid slice may fade past its own end
+     * but never past the material (the recordings begin there — a choke fade
+     * at the last slice would otherwise play 5 ms of the first recording's
+     * attack); a recorded entry is bounded by its own end. */
+    int ReadEnd(int idx) const
+    {
+        return idx >= nSlices ? slices[idx].start + slices[idx].len : bufLen;
+    }
+    void FireSlice(int idx, float rate, bool rev, float lenMul = 1.f, bool held = false, int key = -1)
     {
         Slice cell = slices[idx];
         if(cell.len < 64) return;
@@ -772,38 +920,248 @@ struct Engine
             if(voices[i].age >= best) { best = voices[i].age; v = &voices[i]; }
         }
         for(int i = 0; i < kVoices; i++)
-            if(&voices[i] != v) voices[i].Choke(bufLen, ep);
-        v->Trigger(cell, rate, rev, bufLen, sliceExt);
+            if(&voices[i] != v) voices[i].Choke(ep);
+        const int bound = ReadEnd(idx);
+        v->Trigger(cell, rate, rev, bound, sliceExt);
         ApplyFades(*v, idx, ep); /* PLAY: calls play honestly — no tail loop */
-        if(lenMul < 0.999f && !rev)   /* staccato style: play a fraction, then the edge guard */
+        if(held)   /* SAMPLE: the sampler rule — read on to the end, until the key comes up */
+        {
+            v->held = true;
+            v->key  = (int8_t)key;
+            if(!rev) { v->natEnd = bound; v->end = bound; }
+            else v->start = idx >= nSlices ? cell.start : 0;   /* backwards to the material's start */
+        }
+        else if(lenMul < 0.999f && !rev)   /* staccato style: play a fraction, then the edge guard */
         {
             int nl = (int)((float)cell.len * lenMul); if(nl < 64) nl = 64;
-            v->natEnd = cell.start + nl; v->end = v->natEnd > bufLen ? bufLen : v->natEnd;
+            v->natEnd = cell.start + nl; v->end = v->natEnd > bound ? bound : v->natEnd;
         }
         trigFlash++;
     }
 
-    void CallSlice(int idx, float rateMul, bool rev, bool punch, bool ratchet, float lenMul = 1.f)
+    // AUDIO thread (the shell defers a poll-thread call through gCallReq).
+    // SAMPLE: `held` = the sampler rule (see FireSlice), `key` tags the voice
+    // for ReleaseKey; both default to the one-shot call, which is unchanged.
+    void CallSlice(int idx, float rateMul, bool rev, bool punch, bool ratchet, float lenMul = 1.f,
+                   bool held = false, int key = -1)
     {
         callLenMul = lenMul;
         if(!buf || nSlices < 1) return;
         if(idx < 0) idx = 0;
-        if(idx >= nSlices) idx = nSlices - 1;
+        if(idx >= nTable) idx = nTable - 1;
         float gridStepSamp = barSeconds * sr / (float)nSlices;
         float rate         = pitch * (nativeStep / gridStepSamp) * rateMul;
-        FireSlice(idx, rate, rev, lenMul);
+        FireSlice(idx, rate, rev, lenMul, held, key);
         if(punch) PunchStep(curStep, idx, rev);
         if(ratchet)
         {
             callCountdown = (int)(gridStepSamp * 0.5f);
-            callIdx = idx; callRate = rate; callRev = rev;
+            callIdx = idx; callRate = rate; callRev = rev; callHeld = held; callKey = key;
         }
         else callCountdown = -1;
     }
 
-    void Process(float* out, int n)
+    /* ── SAMPLE: key table, held release, recording ──────────────────────
+     * The full contract is docs/packages/sample-engine.md. */
+
+    // CONTROL or AUDIO (reads one byte). Which table entry Voice key `key`
+    // (0..kKeys-1, clamped) plays; always a valid index while nTable > 0.
+    int KeySlice(int key) const
+    {
+        if(key < 0) key = 0;
+        if(key >= kKeys) key = kKeys - 1;
+        int s = keySlice[key];
+        if(s < 0) s = 0;
+        if(s >= nTable) s = nTable > 0 ? nTable - 1 : 0;
+        return s;
+    }
+    // CONTROL. Point a key at any table entry (a recorded one or a grid
+    // slice). false = out of range. SetMaterial resets the table.
+    bool SetKeySlice(int key, int slice)
+    {
+        if(key < 0 || key >= kKeys || slice < 0 || slice >= nTable) return false;
+        keySlice[key] = (int8_t)slice;
+        return true;
+    }
+    // AUDIO. The key came up: every held voice tagged with it fades out
+    // with the normal choke geometry (5 ms fixed, or the slice's adaptive
+    // release). One-shot voices are untouched; an unknown key is a no-op.
+    void ReleaseKey(int key)
+    {
+        for(int i = 0; i < kVoices; i++)
+            if(voices[i].active && voices[i].held && voices[i].key == key) voices[i].Release();
+    }
+
+    // Recorded entry owned by `key`, or -1.
+    int RecordedEntry(int key) const
+    {
+        for(int t = nSlices; t < nTable; t++)
+            if(tableKey[t] == key) return t;
+        return -1;
+    }
+    // CONTROL. Arm a recording into `key`. Fails (false) when a take is
+    // armed or pending, when fewer than kRecMin samples remain before
+    // bufCap, or when the table is full and the key has no entry to
+    // replace. The audio thread starts appending at freePos on the next
+    // RecFeed after this returns.
+    bool RecArm(int key)
+    {
+        if(!buf || key < 0 || key >= kKeys || recArmed || recPending) return false;
+        if(bufCap - freePos < kRecMin) return false;
+        if(RecordedEntry(key) < 0 && nTable >= kMaxTable) return false;
+        recKey   = key;
+        recStart = freePos;
+        recPos   = freePos;
+        recFull  = false;
+        recArmed = true;   // last: publishes the take to the audio thread
+        return true;
+    }
+    // AUDIO. Append n input samples at the write head while armed. `inR`
+    // feeds the R plane (nullptr: the L input is copied to both planes);
+    // ignored on mono material. O(n), no per-sample branch; stops itself
+    // (recFull) when the plane is full.
+    void RecFeed(const float* in, const float* inR, int n)
+    {
+        if(!recArmed) return;
+        const int p    = recPos;
+        const int room = bufCap - p;
+        if(n > room) n = room;
+        float* d = buf + p;
+        for(int i = 0; i < n; i++) d[i] = in[i];
+        if(bufR)
+        {
+            const float* s  = inR ? inR : in;
+            float*       dr = bufR + p;
+            for(int i = 0; i < n; i++) dr[i] = s[i];
+        }
+        recPos = p + n;
+        if(p + n >= bufCap) { recFull = true; recArmed = false; }
+    }
+    void RecFeed(const float* in, int n) { RecFeed(in, nullptr, n); }
+    // CONTROL. Stop the take (the audio thread appends nothing after this
+    // returns) and hand its raw region back: [start, start + len) in the
+    // planes, len = the return value (0 = nothing taken). The region then
+    // belongs to the control thread — trim / normalise / analyse it in place
+    // (bb_sample.h) and CommitSlice it, or RecDiscard it; RecArm refuses a
+    // new take until one of the two.
+    int RecStop(int& start, int& len)
+    {
+        recArmed = false;
+        start    = recStart;
+        len      = recKey >= 0 ? recPos - recStart : 0;
+        if(len < 0) len = 0;
+        recPending = len > 0;
+        if(!recPending) recKey = -1;
+        return len;
+    }
+    // CONTROL. Drop a stopped take; its memory is free again.
+    void RecDiscard()
+    {
+        recArmed   = false;
+        recPending = false;
+        recKey     = -1;
+    }
+    // CONTROL. Publish [start, start + len) as key `key`'s slice: a new
+    // table entry (the key's existing recorded entry is replaced instead —
+    // its old memory is orphaned until the set is saved and reloaded),
+    // metadata as given (see bb_sample.h's AnalyseRegion), keySlice[key]
+    // → the entry, freePos advanced past the region. Returns the table
+    // index, or -1 (bad range, shorter than kRecMin, table full).
+    // Publication order matters for the audio thread: region, entry,
+    // count, key — each step leaves a consistent table.
+    int CommitSlice(int key, int start, int len, uint8_t cls, float sal, float dens, bool hit)
+    {
+        if(!buf || key < 0 || key >= kKeys || len < kRecMin || start < 0 || start + len > bufCap) return -1;
+        int t = RecordedEntry(key);
+        if(t < 0)
+        {
+            if(nTable >= kMaxTable) return -1;
+            t = nTable;
+        }
+        recMeta[t] = {cls, sal, dens, hit};
+        slices[t]     = {start, len};
+        tableKey[t]   = (int8_t)key;
+        stepClass[t]  = cls;
+        sliceSal[t]   = sal;
+        sliceDens[t]  = dens;
+        stepHit[t]    = hit;
+        stepBands[t]  = 0;
+        loopState[t]  = 0;
+        if(start + len > freePos) freePos = start + len;
+        if(t == nTable) nTable = t + 1;
+        keySlice[key] = (int8_t)t;
+        recPending    = false;
+        recKey        = -1;
+        return t;
+    }
+    // CONTROL or AUDIO. Re-assert the recorded entries' metadata after the
+    // shell has copied a whole per-slice array (stepClass, sliceSal,
+    // sliceDens, stepBands) from a fresh classification of the grid — those
+    // copies are kMaxSlices wide and would otherwise overwrite entries
+    // [nSlices, kMaxSlices). Idempotent.
+    void SyncRecordedMeta()
+    {
+        for(int t = nSlices; t < nTable; t++)
+        {
+            stepClass[t] = recMeta[t].cls;
+            sliceSal[t]  = recMeta[t].sal;
+            sliceDens[t] = recMeta[t].dens;
+            stepHit[t]   = recMeta[t].hit;
+            stepBands[t] = 0;
+        }
+    }
+    // The pre-SAMPLE Voice map: keys span the grid (k · nSlices / span,
+    // span = min(nSlices, 24); keys past the span play the last slice), then
+    // every recorded entry claims its key.
+    void DefaultKeyTable()
+    {
+        const int span = nSlices < kKeys ? nSlices : kKeys;
+        for(int k = 0; k < kKeys; k++)
+        {
+            const int kk = k >= span ? span - 1 : k;
+            keySlice[k]  = (int8_t)(span > 0 ? (kk * nSlices) / span : 0);
+        }
+        for(int t = nSlices; t < nTable; t++)
+            if(tableKey[t] >= 0 && tableKey[t] < kKeys) keySlice[tableKey[t]] = (int8_t)t;
+    }
+    void MoveEntry(int from, int to)
+    {
+        if(from == to) return;
+        slices[to]   = slices[from];
+        tableKey[to] = tableKey[from];
+        recMeta[to]  = recMeta[from];
+    }
+
+    int8_t  keySlice[kKeys]     = {};   // table entry each Voice key plays
+    int8_t  tableKey[kMaxTable] = {};   // owner key of a recorded entry (grid entries: unused)
+    struct RecMeta { uint8_t cls; float sal, dens; bool hit; };
+    RecMeta recMeta[kMaxTable]  = {};   // shadow metadata of the recorded entries
+    volatile bool recArmed   = false;   // control arms, audio appends, either clears
+    volatile bool recFull    = false;   // the take hit bufCap (audio sets)
+    bool          recPending = false;   // stopped, awaiting CommitSlice / RecDiscard
+    int           recKey     = -1;      // key of the armed / pending take
+    int           recStart   = 0;
+    volatile int  recPos     = 0;       // write head (audio advances)
+    /* ── SAMPLE end ────────────────────────────────────────────────────── */
+
+    // Mono render (the pre-SAMPLE signature): the L plane into `out`.
+    void Process(float* out, int n) { ProcessT<false>(out, nullptr, n); }
+    // SAMPLE: two planes. Mono material renders once and copies L to R.
+    void Process(float* outL, float* outR, int n)
+    {
+        if(bufR) ProcessT<true>(outL, outR, n);
+        else
+        {
+            ProcessT<false>(outL, nullptr, n);
+            for(int i = 0; i < n; i++) outR[i] = outL[i];
+        }
+    }
+
+    template <bool ST>
+    void ProcessT(float* out, float* outR, int n)
     {
         for(int i = 0; i < n; i++) out[i] = 0.f;
+        if constexpr(ST) for(int i = 0; i < n; i++) outR[i] = 0.f;
         if(!buf || bufLen < 2 || nSlices < 1) return;
 
         float blockSec = (float)n / sr;
@@ -812,7 +1170,7 @@ struct Engine
         if(callCountdown >= 0)
         {
             callCountdown -= n;
-            if(callCountdown < 0 && callIdx >= 0) FireSlice(callIdx, callRate, callRev, callLenMul);
+            if(callCountdown < 0 && callIdx >= 0) FireSlice(callIdx, callRate, callRev, callLenMul, callHeld, callKey);
         }
 
         // Quantized cell sequencing: the grid clock runs at OUR tempo; the
@@ -904,7 +1262,13 @@ struct Engine
         for(int v = 0; v < kVoices; v++)
         {
             if(!voices[v].active) continue;
-            for(int i = 0; i < n; i++) out[i] += voices[v].Render(buf);
+            for(int i = 0; i < n; i++)
+            {
+                float l = 0.f, r = 0.f;
+                voices[v].RenderT<ST>(buf, bufR, l, r);
+                out[i] += l;
+                if constexpr(ST) outR[i] += r;
+            }
         }
         for(int i = 0; i < n; i++)
         {
@@ -913,6 +1277,14 @@ struct Engine
             else if(x < -1.f) x = -1.f;
             out[i] = x;
         }
+        if constexpr(ST)
+            for(int i = 0; i < n; i++)
+            {
+                float x = outR[i] * 0.8f;
+                if(x > 1.f) x = 1.f;
+                else if(x < -1.f) x = -1.f;
+                outR[i] = x;
+            }
         timeSec += (double)blockSec;
     }
 
@@ -977,11 +1349,12 @@ struct Engine
         const bool zoom = tailMode == 3 && !stepRev[k] && !reverse;
         Slice zc = cell;
         bool  zoomLoop = false;
+        const int bound = ReadEnd(s);   /* SAMPLE: the material's end, or a recording's own */
         if(zoom)
         {
             int zl = (int)(pitch * slotSrc + 0.5f);
             if(zl < 64) zl = 64;
-            if(cell.start + zl > bufLen) zl = bufLen - cell.start;
+            if(cell.start + zl > bound) zl = bound - cell.start;
             if(zl > cell.len + 160)
             {
                 /* Never read THROUGH an attack: it would play here, pitched, and
@@ -1013,13 +1386,14 @@ struct Engine
                 // not break continuity (adopting the new rate is a sub-cent
                 // pitch step; position re-anchors at the next boundary)
                 if(vv.active && vv.relScale > 0.99f && vv.tail == 0 /* PLAY */
+                   && !vv.held /* SAMPLE: a held voice belongs to its key */
                    && fabsf(vv.rate - rate) < 0.02f * rate
                    && fabs(vv.pos - (double)cell.start) < 160.)
                 {
                     vv.rate   = rate;
                     vv.natEnd = zc.start + zc.len + grace;
                     int e     = zc.start + (int)((float)zc.len * sliceExt) + grace;
-                    vv.end    = e > bufLen ? bufLen : e;
+                    vv.end    = e > bound ? bound : e;
                     if(vv.natEnd > vv.end) vv.natEnd = vv.end;
                     return;
                 }
@@ -1042,8 +1416,8 @@ struct Engine
             }
         }
         for(int i = 0; i < kVoices; i++)
-            if(&voices[i] != v) voices[i].Choke(bufLen, ep);
-        v->Trigger(zc, rate, stepRev[k] || reverse, bufLen, sliceExt);
+            if(&voices[i] != v) voices[i].Choke(ep);
+        v->Trigger(zc, rate, stepRev[k] || reverse, bound, sliceExt);
         ApplyFades(*v, s, ep);           /* PLAY */
         if(outlast) SetTail(*v, s);      /* PLAY */
         if(zoomLoop)                     /* zoom, but the next slice is a drum: loop this tail */
@@ -1055,7 +1429,7 @@ struct Engine
         {
             v->natEnd += grace;
             int e  = v->end + grace;
-            v->end = e > bufLen ? bufLen : e;
+            v->end = e > bound ? bound : e;
             if(v->natEnd > v->end) v->natEnd = v->end;
         }
         trigFlash++;

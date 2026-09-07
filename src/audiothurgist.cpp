@@ -282,6 +282,12 @@ static volatile int   gCallIdx   = 0;
 static volatile float gCallMul   = 1.f;
 static volatile bool  gCallRev = false, gCallPunch = false, gCallRat = false;
 static volatile float gCallLen = 1.f;     /* staccato style: fraction of the slice */
+/* SAMPLE: Voice map key playback — held calls carry their key; the gate's
+ * falling edge asks the audio thread to release it (Options → Key Plays). */
+static volatile bool  gCallHeld = false;
+static volatile int   gCallKey  = -1;
+static volatile int   gRelKey   = -1;     /* poll → audio: release this key (-1 none) */
+/* SAMPLE end */
 static volatile int   gCallFlash = -1;    /* ring: called step flashes */
 static volatile int   gCallFlashT = 0;
 static const char* kVoiceDisp =
@@ -352,6 +358,10 @@ static Sel gOnsetDet = {1};    /* 15 SLICING package */
  * J6 gate in · J7 hit trigger out · J8 velocity out. Follow = Play grammar → Voice. */
 static const char* kJacksDisp = "{\"kind\":\"enum\",\"labels\":[\"Follow grammar\",\"Brain (class gates out)\",\"Voice (2× v/oct + gate)\"]}";
 static Sel gJacks;       /* 16 */
+/* SAMPLE */
+static const char* kKeyPlaysDisp = "{\"kind\":\"enum\",\"labels\":[\"One-shot (the slice)\",\"Held (read on until the gate falls)\"]}";
+static Sel gKeyPlays;    /* 17 SAMPLE: Voice map keys play their slice, or read on while the gate is held */
+/* SAMPLE end */
 static volatile uint8_t gJackMapCur = 0xFFu;   /* applied map: 0 Brain, 1 Voice */
 static volatile int     gHitCd  = 0;           /* Voice map: J7 hit trigger countdown (audio) */
 static volatile float   gHitVel = 0.f;         /* Voice map: J8 velocity volts */
@@ -363,7 +373,7 @@ static volatile float   gHitVel = 0.f;         /* Voice map: J8 velocity volts *
  * fans them out to the plain structs above and raises their dirty flags. */
 struct Options : Serializable
 {
-    static constexpr size_t kBytes = 17u;
+    static constexpr size_t kBytes = 18u;   /* SAMPLE: 17 = Key Plays */
     size_t SerializedSize() const override { return kBytes; }
     void   Serialize(uint8_t* o) const override
     {
@@ -372,6 +382,7 @@ struct Options : Serializable
         o[6] = gGateMode.sel; o[7] = gBars.sel; o[8] = gRests.sel; o[9] = gGateLanes.sel;
         o[10] = gFades.sel; o[11] = gTail.sel; o[12] = gSwaps.sel; o[13] = gDejaVu.sel;
         o[14] = gSwing.sel; o[15] = gOnsetDet.sel; o[16] = gJacks.sel;
+        o[17] = gKeyPlays.sel;   /* SAMPLE */
     }
     static void Put(Sel& s, uint8_t v, uint8_t max)
     {
@@ -391,9 +402,10 @@ struct Options : Serializable
         Put(gGateLanes, in[9], 1); Put(gFades, in[10], 1);   Put(gTail, in[11], 3);
         Put(gSwaps, in[12], 1);    Put(gDejaVu, in[13], 2);  Put(gSwing, in[14], 1);
         Put(gOnsetDet, in[15], 1); Put(gJacks, in[16], 2);
+        Put(gKeyPlays, in[17], 1);   /* SAMPLE */
         return true;
     }
-    uint32_t SchemaHash() const override { return 0x4F505433u; /* 'OPT3' */ }
+    uint32_t SchemaHash() const override { return 0x4F505434u; /* 'OPT4' (SAMPLE: 18 bytes) */ }
     bool     Describe(hostlink::ComponentWriter& w) const override
     {
         using hostlink::FieldType;
@@ -415,6 +427,7 @@ struct Options : Serializable
         ok &=     w.Field("swing",        "Swing",       14, FieldType::Enum, 0.f, kSwingDisp,     2u);
         ok &=     w.Field("onsets",       "Onsets",      15, FieldType::Enum, 0.f, kOnsetDetDisp,  2u);
         ok &=     w.Field("jacks",        "Jacks",       16, FieldType::Enum, 0.f, kJacksDisp,     3u);
+        ok &=     w.Field("key.plays",    "Key Plays",   17, FieldType::Enum, 0.f, kKeyPlaysDisp,  2u);   /* SAMPLE */
         return ok;
     }
 };
@@ -664,14 +677,17 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
     if(gApply || gReapply)
     {
         if(gApply) { float* t = gPlay; gPlay = gLoad; gLoad = t; }   /* re-apply keeps the buffer */
-        /* GRAM */ memcpy(engine.sliceSal, gPendSal, sizeof engine.sliceSal); /* before SetMaterial: its boot pattern ranks the tiers */
+        /* GRAM */ memcpy(engine.sliceSal, gPendSal, sizeof gPendSal); /* before SetMaterial: its boot pattern ranks the tiers */
         engine.swing = gPendSwing;   /* SLICE: read by SetMaterial (boundaries + step timing) */
-        engine.SetMaterial(gPlay, gPendLen, kSr, gPendOnsets, gPendN, gPendClass, gPendHint);
+        /* SAMPLE: the plane's capacity lets recordings land past the material; a
+         * re-apply (same buffer) keeps them, a load (the other buffer) starts over */
+        engine.SetMaterial(gPlay, gPendLen, kSr, gPendOnsets, gPendN, gPendClass, gPendHint, nullptr, kBufMax);
         memcpy(gSal, gPendSal, sizeof gSal);
         /* GATES */
-        memcpy(engine.stepBands, gPendBands, sizeof engine.stepBands);
+        memcpy(engine.stepBands, gPendBands, sizeof gPendBands);   /* SAMPLE: the source's size — the engine's table is wider */
         /* GATES end */
-        memcpy(engine.sliceDens, gPendDens, sizeof engine.sliceDens);   /* PLAY */
+        memcpy(engine.sliceDens, gPendDens, sizeof gPendDens);     /* PLAY */
+        engine.SyncRecordedMeta();   /* SAMPLE: the copies above are grid-wide; recorded entries keep their own */
         memcpy(gEnv, gPendEnv, sizeof gEnv);
         gMatGen = (uint8_t)(gMatGen + 1u);
         gNeedNativeTempo = true;
@@ -691,9 +707,13 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
     if(gPendRegen)   { engine.RegenPattern(); gPendRegen = false; gDiagRegens = (uint16_t)(gDiagRegens + 1u); }
     if(gScrubReq)    { engine.Scrub(gScrubDir); gScrubReq = false; }
     if(gReclass)     { memcpy(engine.stepClass, gReclassBuf, sizeof gReclassBuf); memcpy(gSal, gReclassSal, sizeof gSal);
-                       /* GRAM */ memcpy(engine.sliceSal, gReclassSal, sizeof engine.sliceSal); /* GRAM end */
+                       /* GRAM */ memcpy(engine.sliceSal, gReclassSal, sizeof gReclassSal); /* GRAM end */
+                       engine.SyncRecordedMeta();   /* SAMPLE */
                        gReclass = false; }
-    if(gCallReq)     { engine.CallSlice(gCallIdx, gCallMul, gCallRev, gCallPunch, gCallRat, gCallLen); gCallReq = false; }
+    /* SAMPLE: a call carries its key and the held rule; a release follows the call it belongs to */
+    if(gCallReq)     { engine.CallSlice(gCallIdx, gCallMul, gCallRev, gCallPunch, gCallRat, gCallLen, gCallHeld, gCallKey); gCallReq = false; }
+    if(gRelKey >= 0) { engine.ReleaseKey(gRelKey); gRelKey = -1; }
+    /* SAMPLE end */
 
     int n = (int)size;
     if(n > kScratch) n = kScratch;
@@ -1080,12 +1100,15 @@ static void OnPoll(uint32_t /*t_ms*/)
     if(gJackMapCur == 1u)
     {
         static int  s_note = -99, s_style = 0, s_lastIdx = -1;
+        static int  s_lastKey = -1;   /* SAMPLE: the key of the last call (0..23) */
         auto quant = [](float volts, int& last) {
             const float nf = volts * 12.f; int n = (int)floorf(nf + 0.5f);
             if(fabsf(nf - (float)n) < 0.4f) last = n; else n = last;
             return n; };
         const bool rose = gClkEdge.JustRose(3u);
         const bool held = hw.cv[3].Volts() > 2.5f;
+        /* SAMPLE: the gate's falling edge releases the held key (a no-op for one-shot voices) */
+        if(gClkEdge.JustFell(3u) && s_lastKey >= 0) gRelKey = s_lastKey;
         static int s_lastNote = -99, s_lastStyle = 0;
         const int n  = quant(hw.cv[kVoiceVoctChan].Volts(), s_lastNote);
         const int st = quant(hw.cv[kVoiceGateChan].Volts(), s_lastStyle);
@@ -1099,9 +1122,11 @@ static void OnPoll(uint32_t /*t_ms*/)
                 int idx = s_lastIdx;
                 if(rose && n >= 0)
                 {
-                    const int span = engine.nSlices <= 24 ? engine.nSlices : 24;
-                    const int k    = n >= span ? span - 1 : n;
-                    idx = (k * engine.nSlices) / span;
+                    /* SAMPLE: the engine's key table — the span mapping by default
+                     * (k · nSlices / span, keys past the span play the last slice),
+                     * a recorded key points at its take */
+                    s_lastKey = n >= bb::Engine::kKeys ? bb::Engine::kKeys - 1 : n;
+                    idx       = engine.KeySlice(s_lastKey);
                 }
                 if(idx >= 0)
                 {
@@ -1114,6 +1139,8 @@ static void OnPoll(uint32_t /*t_ms*/)
                     gCallLen   = s == 5 ? 0.5f : 1.f;
                     gCallPunch = gGrammar.mode == 6 ? false   /* Pads: never written */
                                : (((gGrammar.mode == 5) || gVoiceSel.sel == 1) != (s == 6));
+                    gCallHeld  = gKeyPlays.sel == 1;   /* SAMPLE: Options → Key Plays = Held */
+                    gCallKey   = s_lastKey;
                     gCallFlash = idx; gCallFlashT = 6;
                     gCallReq   = true;
                 }
@@ -1614,9 +1641,9 @@ int main()
             const int nsl = SliceCountFor(gPlay, len, gPendOnsets, no, gCondBars, &barsN);
             static uint8_t cls[bb::Engine::kMaxSlices];
             ClassifySteps(gPlay, len, cls, gClass.mode, gSal, nsl, engine.stepBands /* GATES: audio not started */);
-            memcpy(engine.sliceSal, gSal, sizeof engine.sliceSal);   /* GRAM tiers at boot (review M3) */
+            memcpy(engine.sliceSal, gSal, sizeof gSal);   /* GRAM tiers at boot (review M3); SAMPLE: the source's size */
             engine.swing = SwingFor(len, gPendOnsets, no, nsl, barsN);   /* SLICE: boot honours Swing */
-            engine.SetMaterial(gPlay, len, kSr, gPendOnsets, no, cls, nsl);
+            engine.SetMaterial(gPlay, len, kSr, gPendOnsets, no, cls, nsl, nullptr, kBufMax /* SAMPLE */);
             ComputeDensity(gPlay, len, engine.sliceDens, engine.nSlices);   /* PLAY: audio not started yet */
             ComputeEnvelope(gPlay, len, gEnv, nsl);
             gCurFile = 0;
@@ -1632,8 +1659,8 @@ int main()
         memcpy(gPendOnsets, onsets, sizeof(int) * (size_t)no);   /* SLICE: a later Bars/Swing/Onsets
         gPendN = no; gPendCues = false;                              re-apply needs the table (review) */
         ClassifySteps(gPlay, len, cls, gClass.mode, gSal, 0, engine.stepBands /* GATES */);
-        memcpy(engine.sliceSal, gSal, sizeof engine.sliceSal);   /* review M3 */
-        engine.SetMaterial(gPlay, len, kSr, onsets, no, cls);
+        memcpy(engine.sliceSal, gSal, sizeof gSal);   /* review M3; SAMPLE: the source's size */
+        engine.SetMaterial(gPlay, len, kSr, onsets, no, cls, 0, nullptr, kBufMax /* SAMPLE */);
         ComputeDensity(gPlay, len, engine.sliceDens, engine.nSlices);   /* PLAY: audio not started yet */
         ComputeEnvelope(gPlay, len, gEnv);
     }
