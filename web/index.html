@@ -259,7 +259,9 @@ function drawText() {
   $('b_mute').classList.toggle('on', st.muted); $('b_flow').classList.toggle('on', st.flowing); $('g_flow').classList.toggle('live', st.flowing);
   setPill('bpmpill', st.bpm.toFixed(1) + ' BPM' + (st.mult !== 1 ? ' ' + multLabel(st.mult) : ''), '');
   setPill('pagepill', 'page: ' + (st.brain ? 'Brain' : 'Perform'), st.brain ? 'brain' : '');
-  if (st.diag) { const d = st.diag; setPill('diagpill', `poll gap ${(d.gap / 1000).toFixed(1)} ms · audio ${d.audio} µs · jumps ${d.jumps} · regens ${d.regens}`, d.gap > 4000 || d.audio > 400 ? 'warn' : 'ok'); }
+  if (st.diag) { const d = st.diag; const ph = ['—','poll','sdk/host','frame','sdk/frame','render','sdk/leds','handlers','load','analysis'];
+    const extra = st.stallPhase != null ? ` · stall in ${ph[st.stallPhase] || st.stallPhase} · gate late ${(st.gateLateUs / 1000).toFixed(1)} ms · overruns ${st.overruns}` : '';
+    setPill('diagpill', `poll gap ${(d.gap / 1000).toFixed(1)} ms · audio ${d.audio} µs · jumps ${d.jumps} · regens ${d.regens}${extra}`, d.gap > 4000 || d.audio > 400 || (st.overruns > 0) ? 'warn' : 'ok'); }
   setPill('syncpill', st.ext ? (st.locked ? 'clock: locked' : 'clock: following') : 'clock: internal', st.ext ? (st.locked ? 'ok' : 'warn') : '');
   const hs = $('hist'); if (document.activeElement !== hs) { const mx = Math.max(0, st.histN - 1), v = Math.max(0, st.histN - 1 - st.histDepth); if (+hs.max !== mx) hs.max = mx; if (+hs.value !== v) hs.value = v; }
   const sel = $('sample'); if (document.activeElement !== sel && st.file !== 255 && sel.value !== String(st.file)) sel.value = String(st.file);

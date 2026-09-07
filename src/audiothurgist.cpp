@@ -176,7 +176,7 @@ static bb::bardetail::BarScratch ALCHEMY_SDRAM_BSS gBarScratchMem;
 Settings           settings(hw, &pager);
 void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.9.4-frozen", "web");
+                           "0.9.5-diag", "web");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -435,6 +435,19 @@ static volatile uint16_t gDiagAudioUs   = 0;   /* worst audio-callback duration,
 static volatile uint16_t gDiagJumps     = 0;   /* playhead forward jumps > 1.5 steps (lifetime) */
 static volatile uint16_t gDiagRegens    = 0;   /* pattern regenerations (lifetime) */
 static volatile uint32_t gDiagAudioCur  = 0;   /* audio: running max, rolled by OnPoll */
+/* Stall forensics (v0.9.5): WHAT the control thread was doing when the
+ * worst poll gap of the last second happened, how late a gate write lands
+ * after the audio thread armed it, and audio callbacks over budget.
+ * Phases: 1 in OnPoll · 2 SDK between polls (host poll/delay) · 3 OnFrame ·
+ * 4 SDK after frame · 5 OnRender · 6 SDK after render (overlay, LED show) ·
+ * 7 main-loop handlers · 8 ServiceLoad · 9 analysis (KeepClock). */
+static volatile uint8_t  gDiagPhase      = 0;
+static volatile uint8_t  gDiagStallPhase = 0;
+static uint8_t           gDiagStallCur   = 0;
+static volatile uint32_t gGateArmUs[3]   = {0u, 0u, 0u};
+static volatile uint16_t gDiagGateLateUs = 0;
+static uint32_t          gDiagGateLateCur = 0;
+static volatile uint16_t gDiagOverruns   = 0;   /* callbacks > 450 µs, lifetime */
 static double         gLastLp   = -1.;   /* audio thread: < 0 = re-arm the phase guard (new material) */
 static float          gP2ExtRef = -1.f;  /* P2 while following: engage on move */
 static bool           gP2ExtEng = false;
@@ -732,6 +745,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
             volts = bb::GateVolts(vel, sa, engine.gateAccent[c]);
         }
         bb::GateArm(gGateCd[c], gGateLvl[c], gGateRetrig[c], fired, glen, volts, n);
+        if(fired) gGateArmUs[c] = cbStartUs;   /* diag: arm→write latency */
     }
     /* GATES end */
 
@@ -751,11 +765,13 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
     }
     const uint32_t cbUs = daisy::System::GetUs() - cbStartUs;
     if(cbUs > gDiagAudioCur) gDiagAudioCur = cbUs;
+    if(cbUs > 450u) gDiagOverruns = (uint16_t)(gDiagOverruns + 1u);
 }
 
 /* ── control frame ──────────────────────────────────────────────────── */
 static void OnFrame()
 {
+    gDiagPhase = 3;
     float pk = k_chop.Norm();
     engine.patternKnob = pk;
     gVerbSend = pk < 0.22f ? (0.22f - pk) / 0.22f * 0.75f : 0.f;
@@ -802,10 +818,12 @@ static void OnFrame()
         gScrubReq = true;
         gLastP3   = p3;
     }
+    gDiagPhase = 4;
 }
 
 static void OnPoll(uint32_t /*t_ms*/)
 {
+    gDiagPhase = 1;
     if(gNeedNativeTempo)
     {
         gNeedNativeTempo = false;
@@ -966,7 +984,7 @@ static void OnPoll(uint32_t /*t_ms*/)
         gSnapIdx = wi;
         /* Diagnostics: worst poll gap, worst audio callback, pulse jitter — rolled per second. */
         static uint32_t s_lastUs = 0, s_rollUs = 0, s_gapMax = 0;
-        if(s_lastUs) { const uint32_t g = now_us - s_lastUs; if(g > s_gapMax) s_gapMax = g; }
+        if(s_lastUs) { const uint32_t g = now_us - s_lastUs; if(g > s_gapMax) { s_gapMax = g; gDiagStallCur = gDiagPhase; } }
         s_lastUs = now_us;
         if(now_us - s_rollUs >= 1000000u)
         {
@@ -974,6 +992,8 @@ static void OnPoll(uint32_t /*t_ms*/)
             gDiagPollGapUs = (uint16_t)(s_gapMax > 65535u ? 65535u : s_gapMax);
             const uint32_t a = gDiagAudioCur;
             gDiagAudioUs   = (uint16_t)(a > 65535u ? 65535u : a);
+            gDiagStallPhase = gDiagStallCur; gDiagStallCur = 0;
+            gDiagGateLateUs = (uint16_t)(gDiagGateLateCur > 65535u ? 65535u : gDiagGateLateCur); gDiagGateLateCur = 0;
             s_gapMax = 0; gDiagAudioCur = 0;
             uint16_t pk, rms; gJitter.Roll(pk, rms);
             gDiagJitterUs = pk; gDiagJitterRmsUs = rms;
@@ -1013,6 +1033,11 @@ static void OnPoll(uint32_t /*t_ms*/)
         float v = bb::GatePollVolts(gGateCd[c], gGateLvl[c], gGateRetrig[c]);
         if(v != s_lastV[c])
         {
+            if(v > 0.f && s_lastV[c] <= 0.f)   /* rising: how late after the arm? */
+            {
+                const uint32_t lat = daisy::System::GetUs() - gGateArmUs[c];
+                if(lat < 2000000u && lat > gDiagGateLateCur) gDiagGateLateCur = lat;
+            }
             s_lastV[c] = v;
             if(c == 0)      hw.j6.SetVolts(v);
             else if(c == 1) hw.j7.SetVolts(v);
@@ -1068,6 +1093,7 @@ static void OnPoll(uint32_t /*t_ms*/)
         if(!s_b3_loaded) gPendReslice = true;
         s_b3_loaded = false;
     }
+    gDiagPhase = 2;
 }
 
 /* Clock keep-alive for long control-thread analyses (loads, re-slices): the
@@ -1077,6 +1103,7 @@ static void OnPoll(uint32_t /*t_ms*/)
  * thread as OnPoll, never re-entered from it. */
 static void KeepClock()
 {
+    gDiagPhase = 9;
     const uint32_t now_us = daisy::System::GetUs();
     gClock.Tick(now_us);
     const uint8_t wi = (uint8_t)(gSnapIdx ^ 1u);
@@ -1092,6 +1119,7 @@ static void KeepClock()
 /* ── render ─────────────────────────────────────────────────────────── */
 static void OnRender(uint32_t /*t_ms*/)
 {
+    gDiagPhase = 5;
     if(settings.IsActive()) return;   /* the hook fires inside Settings too */
     const bool perfPage = pager.Page() == 0;   /* Brain page keeps its own arcs */
     int ns  = engine.nSlices > 0 ? engine.nSlices : 1;
@@ -1157,6 +1185,7 @@ static void OnRender(uint32_t /*t_ms*/)
             DrawCatchPip(hw.leds, p, st, kAlchemyLabArcGeometry, {0xFF, 0xFF, 0xFF});
         }
     }
+    gDiagPhase = 6;
 }
 
 /* ── SD: scan + load (main-loop only, off the audio thread) ─────────── */
@@ -1188,6 +1217,7 @@ static void ScanSD()
  * into gLoad, then hands off to the audio thread via gApply. */
 static void ServiceLoad()
 {
+    gDiagPhase = 8;
     if(!gLoadReq || gApply || gReapply) return;   /* review L1 */
     gLoadReq = false;
 
@@ -1304,6 +1334,8 @@ struct StateExt : hostlink::IHostlinkExtension
                  * above is the applied one); u8 clkFlags b0 P2 engaged · b1 switch pending ·
                  * b2 lock aligned (~2 s) · b4-7 ext transitions mod 16; u16 jitterRmsUs. */
                 w.U16(gDiagJitterUs); w.U8((uint8_t)gZone.zone); w.U8(gDiagClkFlags); w.U16(gDiagJitterRmsUs);
+                /* v0.9.5 forensics: u8 stallPhase, u16 gateLateUs, u16 overruns (170..174) */
+                w.U8(gDiagStallPhase); w.U16(gDiagGateLateUs); w.U16(gDiagOverruns);
                 return;
             }
             case 0x61u:
@@ -1517,7 +1549,9 @@ int main()
 
     for(;;)
     {
+        gDiagPhase = 2;
         loop.Tick();
+        gDiagPhase = 7;
         if(gSample.dirty && !gLoadReq && !gApply)
         {
             gSample.dirty = false;

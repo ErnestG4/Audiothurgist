@@ -223,6 +223,9 @@ function parseState(b) {
     st.clkFlags = b[167]; st.jitterRmsUs = u16(b, 168);
     st.p2Engaged = !!(st.clkFlags & 1); st.multPending = !!(st.clkFlags & 2); st.aligned = !!(st.clkFlags & 4); st.extTrans = st.clkFlags >> 4;
   }
+  if (b.length >= 175) {   // v0.9.5 forensics
+    st.stallPhase = b[170]; st.gateLateUs = u16(b, 171); st.overruns = u16(b, 173);
+  }
   return st;
 }
 /* GET_ENV: fetch nSlices × 16 envelope bytes in ≤30-slice chunks. */

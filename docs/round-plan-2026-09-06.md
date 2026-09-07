@@ -43,6 +43,8 @@ checklist for Ernest.
 u16 pollGapUs u16 audioUs u16 jumps u16 regens   (148..155, v0.7.3)
 u16 lockMask  f32 nativeBpm u8 gridBars u8 barsOpt (156..163, v0.8.0)
 u16 jitterUs  u8 multZone                          (164..166, CLOCK)
+u8 clkFlags   u16 jitterRmsUs                       (167..169, CLOCK)
+u8 stallPhase u16 gateLateUs u16 overruns           (170..174, v0.9.5 forensics)
 ```
 ACTION ops: 0 dice · 1 reslice · 2 mute · 3 punch(step,slice) · 4 flow(on)
 · 5 scrub(depth) · 6 load(idx) · 7 clear locks · 8 page(0/1).
