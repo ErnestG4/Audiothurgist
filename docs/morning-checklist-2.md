@@ -32,7 +32,8 @@ Defaults as of **v0.9.3-defaults** (stage 17), per Ernest: the recommendations s
 | Gate Fires | **Onsets only** | Onsets only | one gate per drum hit |
 | Gate Lanes | Dominant class | Multi-label | kick+hat step gates both J6 and J8; snares often also mark the hat lane (by design) |
 | Fades | **Adaptive** | Adaptive | pitched-up/chopped material: fewer clicks on bright slices, softer on sustained |
-| Slice Tail | Gate | Loop forward / Ping-pong | pitch +7: the slot keeps sounding instead of gating at the slice end |
+| Slice Tail | **Zoom (BreakFix)** | Gate / Loop forward / Ping-pong | pitch is a zoom on the material (v0.9.8): pitched up the slot reads on into the next slice and re-anchors (the anticipated arrival), pitched down it is cut at the slot end; Gate is the old honest gap |
+| Grammar | — | **Play** (new, 6th) | silent until you play into it: Voice keys punch the bar (the punch keyswitch flips to choke), web punches too; B3 clears it |
 | Swaps | **Class + salience** | Class + salience tier | Chop ~10–11 o'clock on the Amen: ghost notes never replace backbeats |
 | Flow Déjà Vu | **Some** | Some / Lots | B2 hold: bars come back around (¼ / ¾ of the time) |
 | Swing | **Auto** | Auto | a swung break keeps its hats (straight slicing decapitated them) |

@@ -1176,6 +1176,48 @@ int main()
         CHECK(GateEvents(r) == 8, "Classic verbatim, onsets-only: 4 of 16 slices open with a drum → 8 gates (%d)", GateEvents(r));
     }
 
+    SECTION("Zoom tail (default): pitch fills the slot; Play grammar: the bar is what you punch");
+    {
+        Fresh(e, 0, 1.f);
+        e.tailMode = 3; e.pitch = 2.f; e.RegenPattern();
+        Rendered r = RenderLoops(e, 2);
+        int filled = 0;
+        for(int k = 0; k < 14; k++) { const int a = (16 + k) * kStep + kStep * 3 / 4; if(Rms(&r.y[a], kStep / 5) > 0.05f) filled++; }
+        CHECK(filled >= 13, "pitch +12, Zoom: the last quarter of each slot still sounds (%d/14)", filled);
+        Fresh(e, 0, 1.f);
+        e.tailMode = 0; e.pitch = 2.f; e.RegenPattern();
+        r = RenderLoops(e, 2);
+        int gaps = 0;
+        for(int k = 0; k < 14; k++) { const int a = (16 + k) * kStep + kStep * 3 / 4; if(Rms(&r.y[a], kStep / 5) < 0.01f) gaps++; }
+        CHECK(gaps >= 13, "pitch +12, Gate: the last quarter of each slot is silent (%d/14)", gaps);
+        Fresh(e, 0, 1.f);
+        e.tailMode = 3; e.pitch = 0.5f; e.RegenPattern();
+        r = RenderLoops(e, 2);
+        {   // at half rate every slot plays the first half of its own slice, an octave down, for the whole slot
+            int ok = 0;
+            for(int k = 0; k < 14; k++)
+            {
+                const int a = (16 + k) * kStep + 300, n = kStep - 600;
+                const float f = MeasureFreq(&r.y[a], n), want = 0.5f * StepFreq(e.stepSrc[k]);
+                const float tail = Rms(&r.y[(16 + k) * kStep + kStep * 3 / 4], kStep / 5);
+                if(fabsf(f - want) < 20.f && tail > 0.05f) ok++;
+            }
+            CHECK(ok >= 13, "pitch −12, Zoom: each slot plays its own slice an octave down, to the slot end (%d/14)", ok);
+        }
+
+        Fresh(e, 5, 1.f);   // Play
+        Rendered q = RenderLoops(e, 1);
+        CHECK(Rms(q.y.data(), (int)q.y.size()) < 1e-4f, "Play: silent until something is played in");
+        e.barPhase = 3.5 / 16.; float o[24]; e.Process(o, 24);
+        e.CallSlice(7, 1.f, false, true, false);           // punch slice 7 at step 3
+        e.RerollFill();                                     // dice must keep it
+        CHECK(e.stepSrc[3] == 7, "Play: a punch survives a regeneration (step 3 = %d)", e.stepSrc[3]);
+        q = RenderLoops(e, 2);
+        CHECK(SliceAtStep(q, 16 + 3) == 7 && SliceAtStep(q, 16 + 4) == -1, "Play: step 3 sounds slice 7, step 4 stays silent");
+        e.Reslice();
+        CHECK(e.stepSrc[3] < 0, "Play: B3 (reslice) clears the bar");
+    }
+
     printf("\n%d passed, %d failed\n", gPass, gFail);
     return gFail ? 1 : 0;
 }

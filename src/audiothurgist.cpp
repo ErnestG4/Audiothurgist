@@ -176,7 +176,7 @@ static bb::bardetail::BarScratch ALCHEMY_SDRAM_BSS gBarScratchMem;
 Settings           settings(hw, &pager);
 void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.9.7-hits", "web");
+                           "0.9.8-play", "web");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -314,7 +314,7 @@ static GateLvlSel gGateLvlSel;
  * terminator, geometric rolls, repeat repitch). Switching rerolls the fill
  * so it is audible immediately. Hardware tie-in later. */
 static const char* kGrammarDisp = /* GRAM: index 4 = Camp (change ringing) */
-    "{\"kind\":\"enum\",\"labels\":[\"Classic\",\"Collins\",\"Grids\",\"Euclid\",\"Camp\"]}";
+    "{\"kind\":\"enum\",\"labels\":[\"Classic\",\"Collins\",\"Grids\",\"Euclid\",\"Camp\",\"Play (what you play in)\"]}";
 struct GrammarSel
 {
     uint8_t       mode  = 0;
@@ -336,8 +336,8 @@ static const char* kGateLanesDisp = "{\"kind\":\"enum\",\"labels\":[\"Dominant c
 static Sel gGateLanes;   /* 9  GATES package */
 static const char* kFadesDisp     = "{\"kind\":\"enum\",\"labels\":[\"Fixed\",\"Adaptive (keyframe density)\"]}";
 static Sel gFades = {1};       /* 10 PLAYBACK package */
-static const char* kTailDisp      = "{\"kind\":\"enum\",\"labels\":[\"Gate (honest)\",\"Loop forward\",\"Ping-pong\"]}";
-static Sel gTail;        /* 11 PLAYBACK package */
+static const char* kTailDisp      = "{\"kind\":\"enum\",\"labels\":[\"Gate (honest)\",\"Loop forward\",\"Ping-pong\",\"Zoom (read on, BreakFix)\"]}";
+static Sel gTail = {3};  /* 11 PLAYBACK package; 3 = Zoom (BreakFix's pitch rule) */
 static const char* kSwapsDisp     = "{\"kind\":\"enum\",\"labels\":[\"Class only\",\"Class + salience tier\"]}";
 static Sel gSwaps = {1};       /* 12 GRAMMAR package */
 static const char* kDejaVuDisp    = "{\"kind\":\"enum\",\"labels\":[\"Off\",\"Some (¼ of flow bars from history)\",\"Lots (¾)\"]}";
@@ -377,9 +377,9 @@ struct Options : Serializable
         gVoiceSel.sel   = in[2] > 1 ? 0 : in[2];
         gGateLen.sel    = in[3] > 3 ? 0 : in[3];
         gGateLvlSel.sel = in[4] > 1 ? 0 : in[4];
-        v = in[5] > 4 /* GRAM: Camp */ ? 0 : in[5]; if(v != gGrammar.mode)  { gGrammar.mode = v;  gGrammar.dirty = true; }
+        v = in[5] > 5 /* Camp, Play */ ? 0 : in[5]; if(v != gGrammar.mode)  { gGrammar.mode = v;  gGrammar.dirty = true; }
         Put(gGateMode, in[6], 1);  Put(gBars, in[7], 4);     Put(gRests, in[8], 1);
-        Put(gGateLanes, in[9], 1); Put(gFades, in[10], 1);   Put(gTail, in[11], 2);
+        Put(gGateLanes, in[9], 1); Put(gFades, in[10], 1);   Put(gTail, in[11], 3);
         Put(gSwaps, in[12], 1);    Put(gDejaVu, in[13], 2);  Put(gSwing, in[14], 1);
         Put(gOnsetDet, in[15], 1);
         return true;
@@ -394,13 +394,13 @@ struct Options : Serializable
         ok &=     w.Field("voice.mode",   "Voice",        2, FieldType::Enum, 0.f, kVoiceDisp,     2u);
         ok &=     w.Field("gate.len",     "Gate Length",  3, FieldType::Enum, 0.f, kGateLenDisp,   4u);
         ok &=     w.Field("gate.lvl",     "Gate Level",   4, FieldType::Enum, 0.f, kGateLvlDisp,   2u);
-        ok &=     w.Field("grammar.mode", "Grammar",      5, FieldType::Enum, 0.f, kGrammarDisp,   5u /* GRAM */);
+        ok &=     w.Field("grammar.mode", "Grammar",      5, FieldType::Enum, 0.f, kGrammarDisp,   6u /* Camp, Play */);
         ok &=     w.Field("gate.mode",    "Gate Fires",   6, FieldType::Enum, 0.f, kGateModeDisp,  2u);
         ok &=     w.Field("bars",         "Bars",         7, FieldType::Enum, 0.f, kBarsDisp,      5u);
         ok &=     w.Field("rests",        "Rests",        8, FieldType::Enum, 0.f, kRestsDisp,     2u);
         ok &=     w.Field("gate.lanes",   "Gate Lanes",   9, FieldType::Enum, 0.f, kGateLanesDisp, 2u);
         ok &=     w.Field("fades",        "Fades",       10, FieldType::Enum, 0.f, kFadesDisp,     2u);
-        ok &=     w.Field("tail",         "Slice Tail",  11, FieldType::Enum, 0.f, kTailDisp,      3u);
+        ok &=     w.Field("tail",         "Slice Tail",  11, FieldType::Enum, 0.f, kTailDisp,      4u);
         ok &=     w.Field("swaps",        "Swaps",       12, FieldType::Enum, 0.f, kSwapsDisp,     2u);
         ok &=     w.Field("flow.dejavu",  "Flow Déjà Vu",13, FieldType::Enum, 0.f, kDejaVuDisp,    3u);
         ok &=     w.Field("swing",        "Swing",       14, FieldType::Enum, 0.f, kSwingDisp,     2u);
@@ -1057,7 +1057,9 @@ static void OnPoll(uint32_t /*t_ms*/)
             gCallIdx   = (k * engine.nSlices) / 16;      /* 16 keys span the loop */
             gCallMul   = ((gMods & kModHalf) ? 0.5f : 1.f) * ((gMods & kModDouble) ? 2.f : 1.f);
             gCallRev   = (gMods & kModRev) != 0;
-            gCallPunch = ((gVoiceSel.sel == 1) != ((gMods & kModPunch) != 0));
+            /* Play grammar: playing IS writing — the punch keyswitch flips to choke */
+            gCallPunch = gGrammar.mode == 5 ? !((gMods & kModPunch) != 0)
+                                            : ((gVoiceSel.sel == 1) != ((gMods & kModPunch) != 0));
             gCallRat   = (gMods & kModRat) != 0;
             gCallFlash = gCallIdx; gCallFlashT = 6;
             gCallReq   = true;
@@ -1411,8 +1413,7 @@ struct StateExt : hostlink::IHostlinkExtension
                         if(f.len >= 3 && f.body[1] < engine.nSlices && f.body[2] < engine.nSlices)
                         {
                             const int st = f.body[1];
-                            engine.stepSrc[st] = (int8_t)f.body[2]; engine.stepRev[st] = false;
-                            engine.stepRatN[st] = 0; engine.stepRatAccel[st] = false; engine.stepJit[st] = 0;
+                            engine.PunchStep(st, f.body[2], false);
                             gCallFlash = st; gCallFlashT = 6;
                         }
                         break;

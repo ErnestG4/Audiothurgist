@@ -92,7 +92,9 @@ static Manual manual =
             "each class's own nearest hit, lower swaps within the class; a "
             "rest lets the break run on underneath (or gates it: *Rests*). "
             "**Camp** rings the bar's cells through change-ringing "
-            "permutations — deterministic, B2 rings the next change.")
+            "permutations — deterministic, B2 rings the next change. "
+            "**Play** has no pattern of its own: the bar is what you play "
+            "into it from the keyboard or the web page, and B3 clears it.")
         .Section("options", "Options, one line each",
             "**Classifier** — which lens labels kick/snare/hat (Hockman "
             "3-band, the legacy hi/lo split, two-band, or keyframe density). "
@@ -101,8 +103,8 @@ static Manual manual =
             "**Grammar** — the pattern language. **Bars** — override the bar "
             "guess (Auto reads the backbeat). **Rests** — continue or gate. "
             "**Fades** — fixed, or adaptive to each slice's brightness. "
-            "**Slice Tail** — when a slot outlasts its slice (pitched up): "
-            "gate, loop forward, or ping-pong. **Swaps** — class only, or "
+            "**Slice Tail** — what a slot does at pitch: zoom (read on into "
+            "the next slice, the record's way), gate, loop forward, or ping-pong. **Swaps** — class only, or "
             "class + loudness tier (a ghost never replaces a backbeat). "
             "**Flow Déjà Vu** — some flow bars replay from history. **Swing** "
             "— slice and step at the material's own swing. **Onsets** — the "

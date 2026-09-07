@@ -114,6 +114,11 @@ struct Pattern
             GenerateLang(nSteps, cls, vc, mode, fr);
             return;
         }
+        if(mode == 5) // Play: nothing of its own — every step a rest; the
+        {             // engine overlays the bar the player punched in
+            for(int s = 0; s < nSteps; s++) { len[s] = 1; src[s] = -2; }
+            return;
+        }
         if(mode == 4) // GRAM: Camp — change ringing, no draws at all
         {
             float vc = v < 0.f ? 0.f : (v > 1.f ? 1.f : v);

@@ -421,6 +421,26 @@ struct Engine
                                       // step that carries the class (a snare's
                                       // decay steps are still "snare" — that was
                                       // the rapid-fire the field report meant)
+    // PLAY grammar (patternMode 5): the bar is what the player put there.
+    // Punches (Voice, web) land in this layer as well as in stepSrc, so a
+    // regeneration (dice, flow, a Brain knob) re-overlays them; Reslice (B3)
+    // clears the bar — "if you don't like it, re-slice it".
+    int8_t playSrc[kMaxSlices];
+    bool   playRev[kMaxSlices];
+    void   ClearPlay() { for(int i = 0; i < kMaxSlices; i++) { playSrc[i] = -1; playRev[i] = false; } }
+    void   PunchStep(int step, int src, bool rev)
+    {
+        if(step < 0 || step >= nSlices || src < 0 || src >= nSlices) return;
+        stepSrc[step]      = (int8_t)src;
+        stepRev[step]      = rev;
+        stepRatN[step]     = 0;      /* a punched hit is plain: no roll, no jitter */
+        stepRatAccel[step] = false;
+        stepJit[step]      = 0;
+        stepCont[step]     = false;
+        stepAccent[step]   = false;
+        playSrc[step]      = (int8_t)src;
+        playRev[step]      = rev;
+    }
     bool   restSustain = false;       // languages (Grids/Euclid): a rest continues
                                       // the break instead of gating a 16th of
                                       // silence — the shell sets this per grammar.
@@ -537,6 +557,13 @@ struct Engine
         if(fillActive && pat.fillStart >= 0 && pat.fillStart < nSlices)
             FlattenRange(pat.fillStart, nSlices, pat.fsrc, pat.flen, pat.frev,
                          pat.fratN, pat.fratAccel, pat.frep);
+        if(patternMode == 5)   /* Play: overlay the bar the player put there */
+            for(int i = 0; i < nSlices; i++)
+                if(playSrc[i] >= 0 && playSrc[i] < nSlices)
+                {
+                    stepSrc[i] = playSrc[i]; stepRev[i] = playRev[i];
+                    stepRatN[i] = 0; stepRatAccel[i] = false; stepJit[i] = 0; stepCont[i] = false; stepAccent[i] = false;
+                }
     }
     void ApplyPattern(float knob, uint64_t cs, uint64_t fs)
     {
@@ -592,8 +619,9 @@ struct Engine
         PushHistory();
         ApplyPattern(patternKnob, cellSeed, fillSeed);
     }
-    void Reslice() // button 2: new chop tree
+    void Reslice() // button 2: new chop tree (Play: clear the bar)
     {
+        if(patternMode == 5) ClearPlay();
         cellSeed = ((uint64_t)seedRng.Next() << 32) | seedRng.Next();
         PushHistory();
         ApplyPattern(patternKnob, cellSeed, fillSeed);
@@ -690,6 +718,7 @@ struct Engine
         float ts = (barSeconds / 2.f) * (barSeconds / 2.f);
         gas.wellTimeScale = ts < 0.25f ? 0.25f : (ts > 32.f ? 32.f : ts);
         gas.clusterBunches = bars;
+        ClearPlay();
         curStep            = -1;
         ratchetCountdown   = -1;
         ratchetLeft        = 0;
@@ -752,16 +781,7 @@ struct Engine
         float gridStepSamp = barSeconds * sr / (float)nSlices;
         float rate         = pitch * (nativeStep / gridStepSamp) * rateMul;
         FireSlice(idx, rate, rev);
-        if(punch && curStep >= 0 && curStep < nSlices)
-        {
-            stepSrc[curStep] = (int8_t)idx;
-            stepRev[curStep] = rev;
-            stepRatN[curStep]     = 0;      /* a punched hit is plain: no roll, no jitter */
-            stepRatAccel[curStep] = false;
-            stepJit[curStep]      = 0;
-            stepCont[curStep]     = false;
-            stepAccent[curStep]   = false;
-        }
+        if(punch) PunchStep(curStep, idx, rev);
         if(ratchet)
         {
             callCountdown = (int)(gridStepSamp * 0.5f);
@@ -934,8 +954,24 @@ struct Engine
         /* consumption of the slot in SOURCE samples: pitch × the slot's own
          * slice length (under swing the odd slots are shorter — review M2) */
         const float slotSrc = swung ? (float)slices[k].len : nativeStep;
-        const bool outlast = tailMode != 0 && !stepRev[k] && !reverse
+        const bool outlast = (tailMode == 1 || tailMode == 2) && !stepRev[k] && !reverse
                              && pitch * slotSrc - (float)cell.len > 160.f;
+        /* ZOOM (tailMode 3, BreakFix's rule, the default): the slot consumes
+         * slot × pitch source samples whatever the slice's own length —
+         * pitched up it reads on into the next slice and re-anchors at the
+         * next step (the anticipated arrival), pitched down it is cut at the
+         * slot's end. No gaps, no gating: pitch is a zoom on the material.
+         * ("Gate honestly" was the transplant's choice; the field wanted the
+         * record's behaviour back — 2026-09-07.) Reverse keeps the slice. */
+        const bool zoom = tailMode == 3 && !stepRev[k] && !reverse;
+        Slice zc = cell;
+        if(zoom)
+        {
+            int zl = (int)(pitch * slotSrc + 0.5f);
+            if(zl < 64) zl = 64;
+            if(cell.start + zl > bufLen) zl = bufLen - cell.start;
+            zc.len = zl;
+        }
         const int grace = (willCont && !outlast) ? 400 : 0;
 
         // CONTINUITY: if a voice is already playing exactly into this slice
@@ -954,8 +990,8 @@ struct Engine
                    && fabs(vv.pos - (double)cell.start) < 160.)
                 {
                     vv.rate   = rate;
-                    vv.natEnd = cell.start + cell.len + grace;
-                    int e     = cell.start + (int)((float)cell.len * sliceExt) + grace;
+                    vv.natEnd = zc.start + zc.len + grace;
+                    int e     = zc.start + (int)((float)zc.len * sliceExt) + grace;
                     vv.end    = e > bufLen ? bufLen : e;
                     if(vv.natEnd > vv.end) vv.natEnd = vv.end;
                     return;
@@ -980,7 +1016,7 @@ struct Engine
         }
         for(int i = 0; i < kVoices; i++)
             if(&voices[i] != v) voices[i].Choke(bufLen, ep);
-        v->Trigger(cell, rate, stepRev[k] || reverse, bufLen, sliceExt);
+        v->Trigger(zc, rate, stepRev[k] || reverse, bufLen, sliceExt);
         ApplyFades(*v, s, ep);           /* PLAY */
         if(outlast) SetTail(*v, s);      /* PLAY */
         if(grace)
