@@ -7,42 +7,52 @@ first change to the engine's founding assumption (one material buffer,
 sliced on a grid). Everything below is designed to keep that assumption
 intact for the grammars and add a second world beside it.
 
-## 1. The two worlds
+## 1. One buffer, one table, two playback rules (Ernest, 2026-09-07)
 
-- **The break** (today): one buffer, sliced on the grid, played by the
-  grammars and by the Voice's slice keys. Unchanged.
-- **The kit** (new): up to 24 **slots**, one per key of the Voice map's two
-  octaves. A slot is either *empty* (the key plays the break's slice region,
-  exactly as now) or holds a **recording** from J1/J2. Recording into a key
-  replaces that key's slot; clearing it gives the break back. The kit is the
-  Voice's world; the grammars keep playing the break. (Later, optionally:
-  Grids' kick/snare/hat could be pointed at kit slots — not in this plan.)
+There are not two worlds. There is **one material buffer** and **one slice
+table**; a "sample set" is the same thing as a sliced beat — a WAV plus a
+table — and what differs is only the *playback rule*:
 
-Memory: 24 slots × 4 s × 48 kHz × 4 B = 18.4 MB. SDRAM is at 19.8 of 64 MB.
-Fine, with a cap of 4 s per slot (an option can raise it to 8 s later).
+- **Slice**: a key plays its slice, one shot (today).
+- **Held**: a key plays from its slice's start and keeps reading the buffer
+  until the gate releases (or the buffer ends) — the sampler rule.
+
+So: loading a plain WAV gives the grid table (a beat); recording into a key
+appends a region to the buffer and adds a table entry for that key; saving
+a set writes `<name>.wav` + `<name>.json` (the table: start, len, key,
+class, name, plus bars/tempo and the options snapshot); loading a WAV that
+has a JSON beside it takes the table. The grammars address the table by
+index and class exactly as now, so a recorded kit can be chopped like a
+break and a break can be played like a kit. The user fits as many samples
+as the buffer holds.
+
+**Stereo**: Options → Sampling = Mono / **Stereo**. Stereo doubles the
+buffer (L/R planes); voices read both planes with one envelope and
+position; analysis (onsets, classes, density, bars) runs on the mono sum.
+Buffer: 30 s per plane at 48 kHz float = 5.8 MB/plane; double-buffered
+stereo = 23 MB, decode staging 11.5 MB; SDRAM has room (19.8 of 64 MB
+today).
 
 ## 2. Engine changes (core/, pure, host-tested)
 
-1. `Slice` gains a buffer pointer: `{const float* buf; int start; int len;}`.
-   `Voice::Trigger` takes the slice's buffer; `Voice::Render` reads its own.
-   The grid slices all point at the material buffer; kit slots at their own.
-   Continuity/choke/zoom logic is unchanged (all of it is per voice).
-2. `Kit`: `Slot slots[24]` = `{float* buf; int len; uint8_t cls; float sal;
-   float dens; bool hit;}` plus `Record(int slot)` state: the audio thread
-   appends input samples while armed; `Finish()` hands the slot to the
-   control thread for trim / normalise / onset / class / density (the
-   existing pure tools, with `bb::Yield()`), then marks it live.
-3. `CallSlice(key, …)` resolves the key: slot filled → the slot's buffer
-   at rate = pitch × style; empty → today's break slice. Gates (Brain map)
-   and the hit trigger (Voice map) behave as now; a slot's class comes from
-   its own analysis so a recorded snare drives the snare lane.
-4. **Unquantized looper** ("Loop", a Play sub-mode, Quantize option):
-   an event list per loop (≤ 256 events: bar phase as a double, key, style,
-   velocity), overdubbed by playing; `Process` fires each event at its exact
-   sample when the phase crosses it. Quantize = Off (exact) / 16ths (= Play
-   today) / 8ths. B3 clears; the newest overdub can be undone (keep a
-   generation number per event). Length = the loop (the material's bars, or
-   a bar count option when the break is short).
+1. `Slice` gains nothing: the table stays `{start, len}` into the material
+   buffer — one buffer, so the founding assumption holds. The table gains
+   `key` (which note plays it), `name`, and the buffer gains a **free
+   pointer** (where the next recording lands; a recording that does not
+   fit fails loudly, LED red).
+2. **Held rule**: `CallSlice(key, …, held)` — a held call's voice has
+   `natEnd = bufLen` (read on to the end) and is choked by the gate's
+   release (`ReleaseKey(key)`), with the normal fade. One-shot is today.
+3. **Recording** (`Rec` in the engine): `Arm(slot)`, then the audio thread
+   appends input samples at the free pointer while the gate is held (mono
+   sum, L only, or both planes per the Sampling option); `Finish()` hands
+   the region to the control thread for trim / normalise / onset / class /
+   density with `bb::Yield()`, then commits the table entry. Stereo keeps
+   the planes in step.
+4. **Unquantized looper** ("Loop", a Play sub-mode; Quantize = **Off** /
+   16ths / 8ths, default Off): an event list per loop (≤ 256: bar phase as
+   a double, key, style, velocity), overdubbed by playing; `Process` fires
+   each event at its exact sample. B3 clears; the newest overdub undoes.
 
 ## 3. Recording gestures
 
@@ -64,13 +74,14 @@ Fine, with a cap of 4 s per slot (an option can raise it to 8 s later).
   or *the module's own output* (resampling the chop into a slot — the MPC
   trick).
 
-## 4. Persistence
+## 4. Persistence (Ernest: "JSON is cheap, a 20 s WAV is cheap")
 
-Slots are saved to the card as `kit/<preset>/<key>.wav` on preset save, and
-loaded on preset load (the loader already speaks WAV; writing needs a
-small WAV writer — a few dozen lines). Without a card the kit is RAM-only
-and survives until power-off. The looper's event list saves with the
-preset (≤ 256 × 12 B).
+A set = `sets/<name>.wav` (the buffer, mono or stereo) + `sets/<name>.json`
+(the table + bars/tempo + the options snapshot + the looper's events).
+Preset save also writes `presets/<slot>.json` as a human-readable backup
+of every setting, and the kit in use. Load takes the JSON when it sits
+beside the WAV, else the grid. Needs a small WAV writer (a few dozen
+lines) and a tiny JSON emitter/parser (no allocation, fixed schema).
 
 ## 5. Web
 
@@ -94,14 +105,24 @@ A first, then B, C, D in parallel on branches (the engine API is the
 contract), then E and F. Every phase behind the suite; nothing lands on
 the audio thread but the sample copy and the event scheduler.
 
-## 7. Decisions needed from Ernest
+## 7. Decisions (2026-09-07)
 
-1. Record arm: **style note 7 on J5** while holding the key (proposed), or a
-   button gesture?
-2. Record source default: **J1+J2 summed** (proposed), L only, or the
-   module's own output?
-3. Slot cap: **4 s** (proposed; 24 slots = 18 MB).
-4. Loop recording start/stop: **Options → Record = Arm, then B3 tap**
-   (proposed), or a dedicated jack?
-5. Looper quantize default: **Off** (exact timing — the point of it).
-6. Kit persistence on the card: **yes, per preset** (proposed).
+1. Record arm into a key — **under discussion**. Proposal: J5 style note 7
+   = *Record* arms; while it stands, every key held records into that key
+   (release = stop, trim, live) so a whole kit can be sampled key by key;
+   any other style note disarms. Style 8 = *Clear*. Buttons red while
+   armed, brighter while recording.
+2. Sampling: **Mono / Stereo option** (people love their stereo samplers).
+3. **One buffer, one table** — samples fit as the buffer allows; sets save
+   and load like beats.
+4. Loop recording start/stop — **under discussion**. Proposal: arm with
+   Options → Record (or style 9); **start on B3 tap or the first J6 edge**;
+   when clocked the length is the Bars count and it stops itself, and J6
+   edges during the take drop slice markers; unclocked, B3 or J6 stops it.
+5. Looper quantize default **Off**.
+6. **Backups on the card**: sets (WAV + JSON) and settings/presets (JSON).
+
+Aside: Luke has approved the 480 MHz boost; the BSP calls `seed.Init()`
+without the flag, so it needs an `Init(sr, block, boost)` overload upstream
+(asked). Our time base takes any tick rate. SDK v0.11 (clock-follower fix
+for fast clocks, pot filtering, ParamLock v2) is a separate upgrade task.
