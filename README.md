@@ -95,7 +95,9 @@ the SDK's golden vectors.
 ## Building
 
 Siblings expected next to this repo: [`alchemy-sdk`](https://github.com/hermetic-modular/alchemy-sdk)
-(with its vendored libDaisy) and `DaisySP/DaisySP-LGPL`. Then:
+(v0.11 with its vendored libDaisy; until Hermetic's point release the 480 MHz
+boost needs a one-line local patch to `AlchemyLabV2::Init` — see
+`docs/optimizations-2026-09-06.md`) and `DaisySP/DaisySP-LGPL`. Then:
 
 ```sh
 git submodule update --init          # vendor/capicola (not --recursive)

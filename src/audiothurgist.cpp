@@ -176,7 +176,7 @@ static bb::bardetail::BarScratch ALCHEMY_SDRAM_BSS gBarScratchMem;
 Settings           settings(hw, &pager);
 void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.9.10-pads", "web");
+                           "0.10.0-sdk11", "web");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -1532,7 +1532,10 @@ static StateExt gStateExt;
 
 int main()
 {
-    hw.Init();
+    /* 480 MHz (Luke approved 2026-09-07; local SDK patch until Hermetic's point
+     * release carries the same option). TIM2 then ticks at 240 MHz — our time
+     * base reads the tick rate at boot, so nothing else changes. */
+    hw.Init(daisy::SaiHandle::Config::SampleRate::SAI_48KHZ, kEngineBlockSamples, true);
     gTicksPerUs = daisy::System::GetTickFreq() / 1000000u;
     if(gTicksPerUs == 0u) gTicksPerUs = 1u;
     gLastTick   = daisy::System::GetTick();
