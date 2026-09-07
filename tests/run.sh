@@ -6,10 +6,13 @@
 # 2. engine_check   — behavioural suite under ASan/UBSan (see the file).
 # 3. clock_check    — CLOCK package: multiplier-map continuity, lock alignment,
 #                     P2 zones, the jitter meter (ASan/UBSan).
-# 3. bars_check     — builds; with WAVs on the command line, prints the bar/
+# 4. persist_check — PERSIST package: WAV writer ↔ wav_read.h and the firmware
+#                     loader (stdio-shimmed), JSON emitter/parser, set and
+#                     preset round trips (ASan/UBSan).
+# 5. bars_check     — builds; with WAVs on the command line, prints the bar/
 #                     tempo estimate per file (tests/bars_corpus.sh validates
 #                     against the corpus truth set).
-# 4. classify_check — smoke run of the four classifier lenses on any WAVs
+# 6. classify_check — smoke run of the four classifier lenses on any WAVs
 #                     given on the command line (prints, no assertions).
 set -u
 cd "$(dirname "$0")/.."
@@ -33,6 +36,10 @@ $CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $I
 echo; echo "== clock_check (ASan/UBSan) =="
 $CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/clock_check.cpp -o "$OUT/clk" || fail=1
 "$OUT/clk" || fail=1
+
+echo; echo "== persist_check (ASan/UBSan) =="
+$CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/persist_check.cpp -o "$OUT/pc" || fail=1
+"$OUT/pc" "$OUT" || fail=1
 echo; echo "== bars_check (build; corpus run: tests/bars_corpus.sh) =="
 $CXX -O2 -std=gnu++17 $INC tests/bars_check.cpp -o "$OUT/bc" || fail=1
 

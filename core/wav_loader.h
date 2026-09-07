@@ -144,9 +144,9 @@ static int Load(const char* name,
                         }
                         else
                         {
-                            v = ((p[0] << 8) | (p[1] << 16)
-                                 | ((int32_t)(int8_t)p[2] << 24))
-                                >> 8;
+                            v = (int32_t)(((uint32_t)p[0] << 8) | ((uint32_t)p[1] << 16)
+                                          | ((uint32_t)p[2] << 24))
+                                >> 8;   /* UB-free sign extension (persist_check runs this under UBSan) */
                             acc += v * (1.f / 8388608.f);
                             p += 3;
                         }
