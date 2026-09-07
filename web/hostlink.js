@@ -226,6 +226,9 @@ function parseState(b) {
   if (b.length >= 175) {   // v0.9.5 forensics
     st.stallPhase = b[170]; st.gateLateUs = u16(b, 171); st.overruns = u16(b, 173);
   }
+  if (b.length >= 176) {   // v0.9.9 jack map
+    st.jackMap = b[175];
+  }
   return st;
 }
 /* GET_ENV: fetch nSlices × 16 envelope bytes in ≤30-slice chunks. */

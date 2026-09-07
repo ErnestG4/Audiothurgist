@@ -753,10 +753,14 @@ struct Engine
             if(m & (1u << c)) { gateSlice[c] = (int8_t)idx; gateAccent[c] = accent; }
     }
 
-    void FireSlice(int idx, float rate, bool rev)
+    uint8_t callHits    = 0;    // calls fired since the shell last looked (hit trigger out)
+    int     lastCallIdx = -1;   // slice of the last call (velocity out)
+    float   callLenMul  = 1.f;  // staccato: fraction of the slice a call plays
+    void FireSlice(int idx, float rate, bool rev, float lenMul = 1.f)
     {
         Slice cell = slices[idx];
         if(cell.len < 64) return;
+        callHits = (uint8_t)(callHits + 1u); lastCallIdx = idx;
         RaiseGates(idx, false); /* GATES: a call is never accented */
         const bool ep = JoinIsCross(cell.start); /* PLAY */
         Voice*   v    = &voices[0];
@@ -770,17 +774,23 @@ struct Engine
             if(&voices[i] != v) voices[i].Choke(bufLen, ep);
         v->Trigger(cell, rate, rev, bufLen, sliceExt);
         ApplyFades(*v, idx, ep); /* PLAY: calls play honestly — no tail loop */
+        if(lenMul < 0.999f && !rev)   /* staccato style: play a fraction, then the edge guard */
+        {
+            int nl = (int)((float)cell.len * lenMul); if(nl < 64) nl = 64;
+            v->natEnd = cell.start + nl; v->end = v->natEnd > bufLen ? bufLen : v->natEnd;
+        }
         trigFlash++;
     }
 
-    void CallSlice(int idx, float rateMul, bool rev, bool punch, bool ratchet)
+    void CallSlice(int idx, float rateMul, bool rev, bool punch, bool ratchet, float lenMul = 1.f)
     {
+        callLenMul = lenMul;
         if(!buf || nSlices < 1) return;
         if(idx < 0) idx = 0;
         if(idx >= nSlices) idx = nSlices - 1;
         float gridStepSamp = barSeconds * sr / (float)nSlices;
         float rate         = pitch * (nativeStep / gridStepSamp) * rateMul;
-        FireSlice(idx, rate, rev);
+        FireSlice(idx, rate, rev, lenMul);
         if(punch) PunchStep(curStep, idx, rev);
         if(ratchet)
         {
@@ -801,7 +811,7 @@ struct Engine
         if(callCountdown >= 0)
         {
             callCountdown -= n;
-            if(callCountdown < 0 && callIdx >= 0) FireSlice(callIdx, callRate, callRev);
+            if(callCountdown < 0 && callIdx >= 0) FireSlice(callIdx, callRate, callRev, callLenMul);
         }
 
         // Quantized cell sequencing: the grid clock runs at OUR tempo; the

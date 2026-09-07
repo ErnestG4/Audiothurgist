@@ -46,16 +46,20 @@ static Manual manual =
             "real silence, reverb blooming toward full left. B3 relocates the "
             "burst centres. Chops respect the kit: kicks trade with kicks, "
             "snares with snares.")
-        .Section("keymap", "Playing it from a keyboard (J4 v/oct, J5 gate)",
-            "Each gate edge samples v/oct once. Relative to the key that "
-            "outputs 0 V: that key **mutes/unmutes** the loop; the next is a "
-            "gap; the following ten are **latched modifier keyswitches** "
-            "(reverse, half-speed, double, choke/punch override, ratchet); "
-            "two octaves up, **sixteen keys call sixteen slices** spread "
-            "across the loop. Calls replace what is sounding. In *Punch* mode "
-            "(Options) a call also writes itself into the bar at the current "
-            "step — playing is editing. Mute + punch composes a loop from "
-            "silence.")
+        .Section("keymap", "Playing it from a keyboard (the Voice jack map)",
+            "Options → **Jacks** picks the map; *Follow grammar* gives the "
+            "Play grammar the Voice map. **Voice map**: J6 gate, **J4 = the "
+            "slice** (one key per slice region, up to two octaves from 0 V; "
+            "one semitone below 0 V toggles mute), **J5 = the style** (0 V "
+            "plain, then reverse · half-speed · double · ratchet · staccato · "
+            "punch/choke flip, one semitone each). The style is read with "
+            "the hit, and changing it while the key is held re-strikes the "
+            "slice — the left hand plays rhythm. J7 sends a trigger per "
+            "call, J8 its velocity. In Play, calls write the bar (the punch "
+            "style flips to momentary); elsewhere the Voice option decides. "
+            "**Brain map** (J5 gate, J4 v/oct): the older single-keyboard "
+            "layout — 0 V mutes, ten latched modifier keys, sixteen slice "
+            "keys two octaves up — with the class gates on J6/J7/J8.")
         .Section("buttons", "The three buttons",
             "**B1** tap: Perform ↔ Brain page. **B1 held 300 ms + turn a pot**: "
             "record that pot's motion as a loop that replays until you hold "
@@ -108,7 +112,9 @@ static Manual manual =
             "class + loudness tier (a ghost never replaces a backbeat). "
             "**Flow Déjà Vu** — some flow bars replay from history. **Swing** "
             "— slice and step at the material's own swing. **Onsets** — the "
-            "onset detector behind the bar guess and hit gates.")
+            "onset detector behind the bar guess and hit gates. **Jacks** — "
+            "Brain (class gates out) or Voice (two v/oct + gate, hit trigger "
+            "and velocity out); Follow grammar switches with Play.")
         .Section("cards", "Cards and loading",
             "FAT32 microSD, WAVs in the root, 1–4 bar breaks are ideal "
             "(longer files trim to their first four bars; levels normalise on "
@@ -153,12 +159,15 @@ void DescribeManual(hostlink::Host& host)
     jk4.Help("**V/Oct** — the keymap's pitch: mute key, modifiers, sixteen "
              "slice keys. Pair with J5.")
        .SeeAlso(jk5);
-    jk5.Help("**Gate** — each rising edge samples J4 and dispatches.")
+    jk5.Help("**Gate** (Brain map) — each rising edge samples J4 and dispatches. "
+             "**Style v/oct** (Voice map).")
        .SeeAlso(jk4);
-    jk6.Help("**Kick gate out** — every kick-class step, or once per hit "
-             "(Gate Fires); Gate Lanes can add it to mixed hits.");
-    jk7.Help("**Snare gate out** — every snare-class step, or once per hit.");
-    jk8.Help("**Hat gate out** — every hat-class step, or once per hit.");
+    jk6.Help("**Kick gate out** (Brain map) — every kick-class step, or once per hit "
+             "(Gate Fires); Gate Lanes can add it to mixed hits. **Gate in** (Voice map).");
+    jk7.Help("**Snare gate out** (Brain map) — every snare-class step, or once per hit. "
+             "**Hit trigger out** (Voice map): 10 ms per call.");
+    jk8.Help("**Hat gate out** (Brain map) — every hat-class step, or once per hit. "
+             "**Velocity out** (Voice map): 1.5–5 V per call.");
     jk9.Help("Audio out, left.");
     jk10.Help("Audio out, right.");
 

@@ -176,7 +176,7 @@ static bb::bardetail::BarScratch ALCHEMY_SDRAM_BSS gBarScratchMem;
 Settings           settings(hw, &pager);
 void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.9.8-play", "web");
+                           "0.9.9-jacks", "web");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -281,6 +281,7 @@ static volatile bool  gCallReq   = false; /* control → audio handshake */
 static volatile int   gCallIdx   = 0;
 static volatile float gCallMul   = 1.f;
 static volatile bool  gCallRev = false, gCallPunch = false, gCallRat = false;
+static volatile float gCallLen = 1.f;     /* staccato style: fraction of the slice */
 static volatile int   gCallFlash = -1;    /* ring: called step flashes */
 static volatile int   gCallFlashT = 0;
 static const char* kVoiceDisp =
@@ -346,6 +347,14 @@ static const char* kSwingDisp     = "{\"kind\":\"enum\",\"labels\":[\"Straight 1
 static Sel gSwing = {1};       /* 14 SLICING package */
 static const char* kOnsetDetDisp  = "{\"kind\":\"enum\",\"labels\":[\"Spectral flux\",\"Log-filtered flux (Böck 2012)\"]}";
 static Sel gOnsetDet = {1};    /* 15 SLICING package */
+/* Jack maps (spec §3.3, built 2026-09-07). Brain: J3 clock · J4 v/oct · J5 gate ·
+ * J6/J7/J8 kick/snare/hat out. Voice: J3 clock · J4 slice v/oct · J5 style v/oct ·
+ * J6 gate in · J7 hit trigger out · J8 velocity out. Follow = Play grammar → Voice. */
+static const char* kJacksDisp = "{\"kind\":\"enum\",\"labels\":[\"Follow grammar\",\"Brain (class gates out)\",\"Voice (2× v/oct + gate)\"]}";
+static Sel gJacks;       /* 16 */
+static volatile uint8_t gJackMapCur = 0xFFu;   /* applied map: 0 Brain, 1 Voice */
+static volatile int     gHitCd  = 0;           /* Voice map: J7 hit trigger countdown (audio) */
+static volatile float   gHitVel = 0.f;         /* Voice map: J8 velocity volts */
 
 /* ── Options: ONE preset-managed component for the one-byte selectors.
  * The SDK caps managed components at kPresetMaxManaged (8); separate
@@ -354,7 +363,7 @@ static Sel gOnsetDet = {1};    /* 15 SLICING package */
  * fans them out to the plain structs above and raises their dirty flags. */
 struct Options : Serializable
 {
-    static constexpr size_t kBytes = 16u;
+    static constexpr size_t kBytes = 17u;
     size_t SerializedSize() const override { return kBytes; }
     void   Serialize(uint8_t* o) const override
     {
@@ -362,7 +371,7 @@ struct Options : Serializable
         o[3] = gGateLen.sel; o[4] = gGateLvlSel.sel; o[5] = gGrammar.mode;
         o[6] = gGateMode.sel; o[7] = gBars.sel; o[8] = gRests.sel; o[9] = gGateLanes.sel;
         o[10] = gFades.sel; o[11] = gTail.sel; o[12] = gSwaps.sel; o[13] = gDejaVu.sel;
-        o[14] = gSwing.sel; o[15] = gOnsetDet.sel;
+        o[14] = gSwing.sel; o[15] = gOnsetDet.sel; o[16] = gJacks.sel;
     }
     static void Put(Sel& s, uint8_t v, uint8_t max)
     {
@@ -381,10 +390,10 @@ struct Options : Serializable
         Put(gGateMode, in[6], 1);  Put(gBars, in[7], 4);     Put(gRests, in[8], 1);
         Put(gGateLanes, in[9], 1); Put(gFades, in[10], 1);   Put(gTail, in[11], 3);
         Put(gSwaps, in[12], 1);    Put(gDejaVu, in[13], 2);  Put(gSwing, in[14], 1);
-        Put(gOnsetDet, in[15], 1);
+        Put(gOnsetDet, in[15], 1); Put(gJacks, in[16], 2);
         return true;
     }
-    uint32_t SchemaHash() const override { return 0x4F505432u; /* 'OPT2' */ }
+    uint32_t SchemaHash() const override { return 0x4F505433u; /* 'OPT3' */ }
     bool     Describe(hostlink::ComponentWriter& w) const override
     {
         using hostlink::FieldType;
@@ -405,6 +414,7 @@ struct Options : Serializable
         ok &=     w.Field("flow.dejavu",  "Flow Déjà Vu",13, FieldType::Enum, 0.f, kDejaVuDisp,    3u);
         ok &=     w.Field("swing",        "Swing",       14, FieldType::Enum, 0.f, kSwingDisp,     2u);
         ok &=     w.Field("onsets",       "Onsets",      15, FieldType::Enum, 0.f, kOnsetDetDisp,  2u);
+        ok &=     w.Field("jacks",        "Jacks",       16, FieldType::Enum, 0.f, kJacksDisp,     3u);
         return ok;
     }
 };
@@ -683,7 +693,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
     if(gReclass)     { memcpy(engine.stepClass, gReclassBuf, sizeof gReclassBuf); memcpy(gSal, gReclassSal, sizeof gSal);
                        /* GRAM */ memcpy(engine.sliceSal, gReclassSal, sizeof engine.sliceSal); /* GRAM end */
                        gReclass = false; }
-    if(gCallReq)     { engine.CallSlice(gCallIdx, gCallMul, gCallRev, gCallPunch, gCallRat); gCallReq = false; }
+    if(gCallReq)     { engine.CallSlice(gCallIdx, gCallMul, gCallRev, gCallPunch, gCallRat, gCallLen); gCallReq = false; }
 
     int n = (int)size;
     if(n > kScratch) n = kScratch;
@@ -780,12 +790,31 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
     {
         static uint8_t s_div = 0;
         static float   s_last[3] = {-1.f, -1.f, -1.f};
+        /* Voice map: J7 = 10 ms trigger per call (ratchet doubles too), J8 = velocity of the called slice */
+        if(engine.callHits)
+        {
+            const int li = engine.lastCallIdx;
+            gHitVel = 1.5f + 3.5f * ((li >= 0 && li < bb::Engine::kMaxSlices) ? gSal[li] : 1.f);
+            gHitCd  = (int)(0.010f * kSr);
+            engine.callHits = 0;
+        }
+        else if(gHitCd > 0) gHitCd -= n;
         if((++s_div & 1u) == 0u)
-            for(int c = 1; c < 3; c++)
+        {
+            if(gJackMapCur == 1u)
             {
-                const float v = bb::GatePollVolts(gGateCd[c], gGateLvl[c], gGateRetrig[c]);
-                if(v != s_last[c]) { s_last[c] = v; if(c == 1) hw.j7.SetVolts(v); else hw.j8.SetVolts(v); }
+                const float t = gHitCd > 0 ? 5.f : 0.f;
+                if(t != s_last[1]) { s_last[1] = t; hw.j7.SetVolts(t); }
+                const float vv = gHitCd > 0 ? gHitVel : s_last[2];
+                if(vv != s_last[2]) { s_last[2] = vv; hw.j8.SetVolts(vv); }
             }
+            else
+                for(int c = 1; c < 3; c++)
+                {
+                    const float v = bb::GatePollVolts(gGateCd[c], gGateLvl[c], gGateRetrig[c]);
+                    if(v != s_last[c]) { s_last[c] = v; if(c == 1) hw.j7.SetVolts(v); else hw.j8.SetVolts(v); }
+                }
+        }
     }
 
     const float v = gVol, send = gVerbSend;
@@ -1042,8 +1071,57 @@ static void OnPoll(uint32_t /*t_ms*/)
     }
     /* ── end CLOCK ─────────────────────────────────────────────────────── */
 
-    /* Voice keymap: sample v/oct at each gate edge (MONO, latched mods). */
-    if(gClkEdge.JustRose(kVoiceGateChan))
+    /* Voice map keymap: J6 gate · J4 slice v/oct · J5 style v/oct. The note IS
+     * the slice (one key per slice region, up to two octaves from 0 V; one
+     * semitone below 0 V toggles mute). The style note is read with the hit
+     * and a CHANGE of style while the gate is held re-strikes the slice:
+     * 0 plain · 1 reverse · 2 half-speed · 3 double · 4 ratchet · 5 staccato ·
+     * 6 punch/choke flip. */
+    if(gJackMapCur == 1u)
+    {
+        static int  s_note = -99, s_style = 0, s_lastIdx = -1;
+        auto quant = [](float volts, int& last) {
+            const float nf = volts * 12.f; int n = (int)floorf(nf + 0.5f);
+            if(fabsf(nf - (float)n) < 0.4f) last = n; else n = last;
+            return n; };
+        const bool rose = gClkEdge.JustRose(3u);
+        const bool held = hw.cv[3].Volts() > 2.5f;
+        static int s_lastNote = -99, s_lastStyle = 0;
+        const int n  = quant(hw.cv[kVoiceVoctChan].Volts(), s_lastNote);
+        const int st = quant(hw.cv[kVoiceGateChan].Volts(), s_lastStyle);
+        const bool restrike = held && s_lastIdx >= 0 && st != s_style && !rose;
+        s_style = st;
+        if(rose || restrike)
+        {
+            if(rose && n == -1) engine.muted = !engine.muted;
+            else if(engine.nSlices > 0)
+            {
+                int idx = s_lastIdx;
+                if(rose && n >= 0)
+                {
+                    const int span = engine.nSlices <= 24 ? engine.nSlices : 24;
+                    const int k    = n >= span ? span - 1 : n;
+                    idx = (k * engine.nSlices) / span;
+                }
+                if(idx >= 0)
+                {
+                    const int s = st < 0 ? 0 : (st > 6 ? 6 : st);
+                    s_lastIdx  = idx;
+                    gCallIdx   = idx;
+                    gCallRev   = s == 1;
+                    gCallMul   = s == 2 ? 0.5f : (s == 3 ? 2.f : 1.f);
+                    gCallRat   = s == 4;
+                    gCallLen   = s == 5 ? 0.5f : 1.f;
+                    gCallPunch = ((gGrammar.mode == 5) || gVoiceSel.sel == 1) != (s == 6);
+                    gCallFlash = idx; gCallFlashT = 6;
+                    gCallReq   = true;
+                }
+            }
+        }
+        s_note = n;
+    }
+    /* Brain map keymap: sample v/oct at each gate edge (MONO, latched mods). */
+    else if(gClkEdge.JustRose(kVoiceGateChan))
     {
         const float nf = hw.cv[kVoiceVoctChan].Volts() * 12.f;
         int n = (int)floorf(nf + 0.5f);
@@ -1061,6 +1139,7 @@ static void OnPoll(uint32_t /*t_ms*/)
             gCallPunch = gGrammar.mode == 5 ? !((gMods & kModPunch) != 0)
                                             : ((gVoiceSel.sel == 1) != ((gMods & kModPunch) != 0));
             gCallRat   = (gMods & kModRat) != 0;
+            gCallLen   = 1.f;
             gCallFlash = gCallIdx; gCallFlashT = 6;
             gCallReq   = true;
         }
@@ -1069,7 +1148,7 @@ static void OnPoll(uint32_t /*t_ms*/)
     /* Gate CV writes — control thread (I²C-safe), on CHANGE only so J6's
      * MCP4728 isn't hit with a WriteAll+LDAC transaction every millisecond. */
     static float s_lastV[3] = {-1.f, -1.f, -1.f};
-    for(int c = 0; c < 1; c++)   /* J6 only (I²C); J7/J8 are written by the audio thread */
+    for(int c = 0; c < (gJackMapCur == 1u ? 0 : 1); c++)   /* J6 only (I²C), Brain map only; J7/J8 are written by the audio thread */
     {
         /* GATES: consumes a pending retrigger — this poll low, next poll up */
         float v = bb::GatePollVolts(gGateCd[c], gGateLvl[c], gGateRetrig[c]);
@@ -1379,6 +1458,7 @@ struct StateExt : hostlink::IHostlinkExtension
                 w.U16(gDiagJitterUs); w.U8((uint8_t)gZone.zone); w.U8(gDiagClkFlags); w.U16(gDiagJitterRmsUs);
                 /* v0.9.5 forensics: u8 stallPhase, u16 gateLateUs, u16 overruns (170..174) */
                 w.U8(gDiagStallPhase); w.U16(gDiagGateLateUs); w.U16(gDiagOverruns);
+                w.U8(gJackMapCur == 1u ? 1u : 0u);   /* 175: jack map (0 Brain, 1 Voice) */
                 return;
             }
             case 0x61u:
@@ -1646,6 +1726,15 @@ int main()
             gPendLen  = engine.bufLen;
             gPendHint = nsl;
             gReapply  = true;
+        }
+        {   /* Jack map: option, or follow the grammar (Play → Voice). J6 flips
+             * between MCP4728 output and ADC input on the control thread (I²C). */
+            const uint8_t want = gJacks.sel == 0 ? (gGrammar.mode == 5 ? 1u : 0u) : (uint8_t)(gJacks.sel - 1u);
+            if(want != gJackMapCur)
+            {
+                if(want == 1u) hw.j6.DisableCvOutput(); else { hw.j6.EnableCvOutput(); hw.j6.SetVolts(0.f); }
+                gJackMapCur = want;
+            }
         }
         if(gRests.dirty && !gPendReroll)
         {

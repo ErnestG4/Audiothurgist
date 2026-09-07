@@ -1218,6 +1218,21 @@ int main()
         CHECK(e.stepSrc[3] < 0, "Play: B3 (reslice) clears the bar");
     }
 
+    SECTION("Voice calls: staccato length, hit counter for the trigger out");
+    {
+        Fresh(e, 0, 1.f);
+        e.muted = true;   /* only the call sounds */
+        e.CallSlice(5, 1.f, false, false, false, 0.5f);
+        CHECK(e.callHits == 1 && e.lastCallIdx == 5, "a call counts a hit and remembers its slice");
+        float out[24]; e.barPhase = 0.1; float peakEarly = 0.f, peakLate = 0.f;
+        for(int b = 0; b < 250; b++) { e.Process(out, 24); for(float v : out) { float a = fabsf(v); if(b < 100 && a > peakEarly) peakEarly = a; if(b > 160 && a > peakLate) peakLate = a; } }
+        CHECK(peakEarly > 0.1f && peakLate < 0.02f, "staccato 0.5: sounds for the first half of the slice, silent after (%.2f / %.3f)", peakEarly, peakLate);
+        e.callHits = 0;
+        e.CallSlice(2, 1.f, false, false, true);            // ratchet: the double fires later
+        e.barPhase = 0.2; for(int b = 0; b < 200; b++) e.Process(out, 24);
+        CHECK(e.callHits == 2, "a ratcheted call counts two hits (%d)", e.callHits);
+    }
+
     printf("\n%d passed, %d failed\n", gPass, gFail);
     return gFail ? 1 : 0;
 }
