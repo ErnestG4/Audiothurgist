@@ -98,7 +98,9 @@ static Manual manual =
             "**Camp** rings the bar's cells through change-ringing "
             "permutations — deterministic, B2 rings the next change. "
             "**Play** has no pattern of its own: the bar is what you play "
-            "into it from the keyboard or the web page, and B3 clears it.")
+            "into it from the keyboard or the web page, looped; B3 clears it. "
+            "**Pads** is the instrument with no looper: hits sound as you "
+            "play them, nothing is written, keeping the beat is yours.")
         .Section("options", "Options, one line each",
             "**Classifier** — which lens labels kick/snare/hat (Hockman "
             "3-band, the legacy hi/lo split, two-band, or keyframe density). "

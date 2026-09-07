@@ -430,6 +430,7 @@ struct Engine
     void   ClearPlay() { for(int i = 0; i < kMaxSlices; i++) { playSrc[i] = -1; playRev[i] = false; } }
     void   PunchStep(int step, int src, bool rev)
     {
+        if(patternMode == 6) return;   /* Pads: nothing is ever written — you keep the beat */
         if(step < 0 || step >= nSlices || src < 0 || src >= nSlices) return;
         stepSrc[step]      = (int8_t)src;
         stepRev[step]      = rev;

@@ -176,7 +176,7 @@ static bb::bardetail::BarScratch ALCHEMY_SDRAM_BSS gBarScratchMem;
 Settings           settings(hw, &pager);
 void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.9.9-jacks", "web");
+                           "0.9.10-pads", "web");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -315,7 +315,7 @@ static GateLvlSel gGateLvlSel;
  * terminator, geometric rolls, repeat repitch). Switching rerolls the fill
  * so it is audible immediately. Hardware tie-in later. */
 static const char* kGrammarDisp = /* GRAM: index 4 = Camp (change ringing) */
-    "{\"kind\":\"enum\",\"labels\":[\"Classic\",\"Collins\",\"Grids\",\"Euclid\",\"Camp\",\"Play (what you play in)\"]}";
+    "{\"kind\":\"enum\",\"labels\":[\"Classic\",\"Collins\",\"Grids\",\"Euclid\",\"Camp\",\"Play (what you play in, looped)\",\"Pads (free play, nothing written)\"]}";
 struct GrammarSel
 {
     uint8_t       mode  = 0;
@@ -386,7 +386,7 @@ struct Options : Serializable
         gVoiceSel.sel   = in[2] > 1 ? 0 : in[2];
         gGateLen.sel    = in[3] > 3 ? 0 : in[3];
         gGateLvlSel.sel = in[4] > 1 ? 0 : in[4];
-        v = in[5] > 5 /* Camp, Play */ ? 0 : in[5]; if(v != gGrammar.mode)  { gGrammar.mode = v;  gGrammar.dirty = true; }
+        v = in[5] > 6 /* Camp, Play, Pads */ ? 0 : in[5]; if(v != gGrammar.mode)  { gGrammar.mode = v;  gGrammar.dirty = true; }
         Put(gGateMode, in[6], 1);  Put(gBars, in[7], 4);     Put(gRests, in[8], 1);
         Put(gGateLanes, in[9], 1); Put(gFades, in[10], 1);   Put(gTail, in[11], 3);
         Put(gSwaps, in[12], 1);    Put(gDejaVu, in[13], 2);  Put(gSwing, in[14], 1);
@@ -403,7 +403,7 @@ struct Options : Serializable
         ok &=     w.Field("voice.mode",   "Voice",        2, FieldType::Enum, 0.f, kVoiceDisp,     2u);
         ok &=     w.Field("gate.len",     "Gate Length",  3, FieldType::Enum, 0.f, kGateLenDisp,   4u);
         ok &=     w.Field("gate.lvl",     "Gate Level",   4, FieldType::Enum, 0.f, kGateLvlDisp,   2u);
-        ok &=     w.Field("grammar.mode", "Grammar",      5, FieldType::Enum, 0.f, kGrammarDisp,   6u /* Camp, Play */);
+        ok &=     w.Field("grammar.mode", "Grammar",      5, FieldType::Enum, 0.f, kGrammarDisp,   7u /* Camp, Play, Pads */);
         ok &=     w.Field("gate.mode",    "Gate Fires",   6, FieldType::Enum, 0.f, kGateModeDisp,  2u);
         ok &=     w.Field("bars",         "Bars",         7, FieldType::Enum, 0.f, kBarsDisp,      5u);
         ok &=     w.Field("rests",        "Rests",        8, FieldType::Enum, 0.f, kRestsDisp,     2u);
@@ -1112,7 +1112,8 @@ static void OnPoll(uint32_t /*t_ms*/)
                     gCallMul   = s == 2 ? 0.5f : (s == 3 ? 2.f : 1.f);
                     gCallRat   = s == 4;
                     gCallLen   = s == 5 ? 0.5f : 1.f;
-                    gCallPunch = ((gGrammar.mode == 5) || gVoiceSel.sel == 1) != (s == 6);
+                    gCallPunch = gGrammar.mode == 6 ? false   /* Pads: never written */
+                               : (((gGrammar.mode == 5) || gVoiceSel.sel == 1) != (s == 6));
                     gCallFlash = idx; gCallFlashT = 6;
                     gCallReq   = true;
                 }
@@ -1136,7 +1137,8 @@ static void OnPoll(uint32_t /*t_ms*/)
             gCallMul   = ((gMods & kModHalf) ? 0.5f : 1.f) * ((gMods & kModDouble) ? 2.f : 1.f);
             gCallRev   = (gMods & kModRev) != 0;
             /* Play grammar: playing IS writing — the punch keyswitch flips to choke */
-            gCallPunch = gGrammar.mode == 5 ? !((gMods & kModPunch) != 0)
+            gCallPunch = gGrammar.mode == 6 ? false
+                       : gGrammar.mode == 5 ? !((gMods & kModPunch) != 0)
                                             : ((gVoiceSel.sel == 1) != ((gMods & kModPunch) != 0));
             gCallRat   = (gMods & kModRat) != 0;
             gCallLen   = 1.f;
@@ -1729,7 +1731,7 @@ int main()
         }
         {   /* Jack map: option, or follow the grammar (Play → Voice). J6 flips
              * between MCP4728 output and ADC input on the control thread (I²C). */
-            const uint8_t want = gJacks.sel == 0 ? (gGrammar.mode == 5 ? 1u : 0u) : (uint8_t)(gJacks.sel - 1u);
+            const uint8_t want = gJacks.sel == 0 ? (gGrammar.mode >= 5 ? 1u : 0u) : (uint8_t)(gJacks.sel - 1u);
             if(want != gJackMapCur)
             {
                 if(want == 1u) hw.j6.DisableCvOutput(); else { hw.j6.EnableCvOutput(); hw.j6.SetVolts(0.f); }

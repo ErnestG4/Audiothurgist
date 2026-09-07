@@ -1233,6 +1233,19 @@ int main()
         CHECK(e.callHits == 2, "a ratcheted call counts two hits (%d)", e.callHits);
     }
 
+    SECTION("Pads grammar: silent, nothing is ever written");
+    {
+        Fresh(e, 6, 1.f);
+        Rendered q = RenderLoops(e, 1);
+        CHECK(Rms(q.y.data(), (int)q.y.size()) < 1e-4f, "Pads: silent");
+        e.barPhase = 3.5 / 16.; float o[24]; e.Process(o, 24);
+        e.CallSlice(7, 1.f, false, true, false);            // even a punching call writes nothing
+        e.PunchStep(3, 7, false);                            // nor a web punch
+        int written = 0; for(int s = 0; s < 16; s++) written += e.stepSrc[s] >= 0;
+        CHECK(written == 0, "Pads: no step is written (%d)", written);
+        CHECK(e.callHits == 1, "…but the call sounded (hit counted)");
+    }
+
     printf("\n%d passed, %d failed\n", gPass, gFail);
     return gFail ? 1 : 0;
 }
