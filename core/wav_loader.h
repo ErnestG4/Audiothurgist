@@ -10,6 +10,7 @@
 //   1 open failed   2 not RIFF/WAVE   3 unsupported format   4 too short/empty
 #include <cstdint>
 #include <cstring>
+#include "bb_yield.h"
 
 // Placement for the FILE object and DMA staging buffer. On the Pod
 // (BOOT_QSPI) plain .bss is AXI SRAM — DMA-reachable — so this is empty. On
@@ -126,6 +127,7 @@ static int Load(const char* name,
                 uint32_t left = (frames - done) * fb;
                 if(want > left) want = left;
                 if(f_read(&f, ioBuf, want, &br) != FR_OK || br == 0) break;
+                bb::Yield();   /* SD read of a big file: keep the clock alive */
                 uint32_t       n = br / fb;
                 const uint8_t* p = ioBuf;
                 for(uint32_t i = 0; i < n; i++)

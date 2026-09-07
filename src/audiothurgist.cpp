@@ -176,7 +176,7 @@ static bb::bardetail::BarScratch ALCHEMY_SDRAM_BSS gBarScratchMem;
 Settings           settings(hw, &pager);
 void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.9.5-diag", "web");
+                           "0.9.6-time", "web");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -425,7 +425,31 @@ static bool           gWasExt   = false; /* ext/internal transition tracking */
  * since the tick, so a control-thread stall (HostLink, LED render, a load)
  * no longer freezes the playhead and then jumps it — the "thinking moment"
  * that broke verbatim runs through the 160-sample continuity window. */
-struct ClockSnap { uint64_t tick; double frac; double tpu; uint32_t us; bool running; bb::ClockMap map; };
+/* ── Time base (v0.9.6) ──────────────────────────────────────────────
+ * daisy::System::GetUs() is TIM2 (200 MHz, 32-bit) divided down: it WRAPS
+ * EVERY 21.5 s (CNT / 200), while everything downstream — MusicalClock,
+ * ClockFollower, CvGate, our ext window and diag windows — assumes a 2^32-µs
+ * modulus. Every 21.5 s the NCO leaped 50 ms (a dropped moment), the ext
+ * window dropped and the follower re-locked with an alignment shift (the
+ * "×2 then falls back after a few bars" report). Control thread: a 64-bit
+ * tick accumulator, advanced on every poll / keep-alive (must run at least
+ * every 20 s), yields microseconds that really wrap at 2^32. Audio thread:
+ * raw 32-bit ticks, modular — exact for any interval under 21 s, and its
+ * extrapolation is capped at 50 ms anyway. (Review 2026-09-06; the SDK's
+ * clock_sync example has the same bug — report upstream.) */
+static uint32_t gTicksPerUs = 200u;
+static uint64_t gTicks64    = 0;
+static uint32_t gLastTick   = 0;
+static uint32_t NowUs()   /* control thread only */
+{
+    const uint32_t t = daisy::System::GetTick();
+    gTicks64 += (uint32_t)(t - gLastTick);
+    gLastTick = t;
+    return (uint32_t)(gTicks64 / gTicksPerUs);
+}
+static inline uint32_t TickNow() { return daisy::System::GetTick(); }   /* any thread */
+
+struct ClockSnap { uint64_t tick; double frac; double tpu; uint32_t tick32; bool running; bb::ClockMap map; };
 static ClockSnap          gSnap[2];
 static volatile uint8_t   gSnapIdx = 0;
 static constexpr uint32_t kSnapMaxExtrapUs = 50000u;   /* = MusicalClock's catch-up clamp */
@@ -624,7 +648,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
                     daisy::AudioHandle::OutputBuffer out,
                     size_t                           size)
 {
-    const uint32_t cbStartUs = daisy::System::GetUs();   /* diag: callback duration */
+    const uint32_t cbStartTick = TickNow();   /* diag: callback duration (ticks) */
     /* new material ready: swap buffers and re-point the engine (SetMaterial
      * is audio-thread work here exactly as it was on the Pod). */
     if(gApply || gReapply)
@@ -681,7 +705,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
          * ms; without this the playhead froze and then jumped. Capped at the
          * clock's own catch-up clamp so both lose the same time past it. */
         const ClockSnap s = gSnap[gSnapIdx];
-        uint32_t dtUs = daisy::System::GetUs() - s.us;
+        uint32_t dtUs = (TickNow() - s.tick32) / gTicksPerUs;   /* modular ticks: wrap-safe */
         if(dtUs > kSnapMaxExtrapUs) dtUs = kSnapMaxExtrapUs;
         const double extrap = s.running ? s.tpu * (double)dtUs : 0.;
         const double T     = (double)s.tick + s.frac + extrap;
@@ -745,9 +769,24 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
             volts = bb::GateVolts(vel, sa, engine.gateAccent[c]);
         }
         bb::GateArm(gGateCd[c], gGateLvl[c], gGateRetrig[c], fired, glen, volts, n);
-        if(fired) gGateArmUs[c] = cbStartUs;   /* diag: arm→write latency */
+        if(fired) gGateArmUs[c] = cbStartTick;   /* diag: arm→write latency (ticks) */
     }
     /* GATES end */
+    /* J7/J8 (snare, hat) are STM DAC channels in polling mode: SetVolts is
+     * calibration math + a register write, ISR-safe. Writing them here, every
+     * other block (1 ms, the old poll cadence, so the retrigger dip keeps its
+     * width), removes the poll's 1–3 ms jitter and the wait behind J6's I²C
+     * transaction. J6 (MCP4728, I²C) stays on the control thread. */
+    {
+        static uint8_t s_div = 0;
+        static float   s_last[3] = {-1.f, -1.f, -1.f};
+        if((++s_div & 1u) == 0u)
+            for(int c = 1; c < 3; c++)
+            {
+                const float v = bb::GatePollVolts(gGateCd[c], gGateLvl[c], gGateRetrig[c]);
+                if(v != s_last[c]) { s_last[c] = v; if(c == 1) hw.j7.SetVolts(v); else hw.j8.SetVolts(v); }
+            }
+    }
 
     const float v = gVol, send = gVerbSend;
     for(int i = 0; i < n; i++)
@@ -763,7 +802,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
         out[1][i] = r;
         if((i & 3) == 0) { gScope[gScopeW & 1023u] = (int8_t)(l * 127.f); gScopeW = (uint16_t)(gScopeW + 1u); }
     }
-    const uint32_t cbUs = daisy::System::GetUs() - cbStartUs;
+    const uint32_t cbUs = (TickNow() - cbStartTick) / gTicksPerUs;
     if(cbUs > gDiagAudioCur) gDiagAudioCur = cbUs;
     if(cbUs > 450u) gDiagOverruns = (uint16_t)(gDiagOverruns + 1u);
 }
@@ -835,7 +874,7 @@ static void OnPoll(uint32_t /*t_ms*/)
      * P2 zones → NCO tick → lock alignment → multiplier map → snapshot →
      * diagnostics. OnPoll is the only place the NCO ticks; the audio thread
      * only ever reads the published snapshot. docs/packages/clock.md. ──── */
-    const uint32_t now_us = daisy::System::GetUs();
+    const uint32_t now_us = NowUs();
     gClkEdge.Tick(loop.Cv(), loop.NumCv(), now_us);
     const bool rose = gClkEdge.JustRose(kClockChan);
     static uint32_t s_prevPulseUs = 0;
@@ -978,9 +1017,10 @@ static void OnPoll(uint32_t /*t_ms*/)
         gSnap[wi].tick    = gClock.MasterTick();
         gSnap[wi].frac    = gClock.FracTick();
         gSnap[wi].tpu     = gClock.TicksPerUs();
-        gSnap[wi].us      = now_us;
+        gSnap[wi].tick32  = gLastTick;   /* the tick NowUs() just read */
         gSnap[wi].running = gClock.Running();
         gSnap[wi].map     = gMap;
+        __asm__ volatile("dmb" ::: "memory");   /* record complete before the index (review B5) */
         gSnapIdx = wi;
         /* Diagnostics: worst poll gap, worst audio callback, pulse jitter — rolled per second. */
         static uint32_t s_lastUs = 0, s_rollUs = 0, s_gapMax = 0;
@@ -1027,7 +1067,7 @@ static void OnPoll(uint32_t /*t_ms*/)
     /* Gate CV writes — control thread (I²C-safe), on CHANGE only so J6's
      * MCP4728 isn't hit with a WriteAll+LDAC transaction every millisecond. */
     static float s_lastV[3] = {-1.f, -1.f, -1.f};
-    for(int c = 0; c < 3; c++)
+    for(int c = 0; c < 1; c++)   /* J6 only (I²C); J7/J8 are written by the audio thread */
     {
         /* GATES: consumes a pending retrigger — this poll low, next poll up */
         float v = bb::GatePollVolts(gGateCd[c], gGateLvl[c], gGateRetrig[c]);
@@ -1035,7 +1075,7 @@ static void OnPoll(uint32_t /*t_ms*/)
         {
             if(v > 0.f && s_lastV[c] <= 0.f)   /* rising: how late after the arm? */
             {
-                const uint32_t lat = daisy::System::GetUs() - gGateArmUs[c];
+                const uint32_t lat = (TickNow() - gGateArmUs[c]) / gTicksPerUs;
                 if(lat < 2000000u && lat > gDiagGateLateCur) gDiagGateLateCur = lat;
             }
             s_lastV[c] = v;
@@ -1104,15 +1144,16 @@ static void OnPoll(uint32_t /*t_ms*/)
 static void KeepClock()
 {
     gDiagPhase = 9;
-    const uint32_t now_us = daisy::System::GetUs();
+    const uint32_t now_us = NowUs();
     gClock.Tick(now_us);
     const uint8_t wi = (uint8_t)(gSnapIdx ^ 1u);
     gSnap[wi].tick    = gClock.MasterTick();
     gSnap[wi].frac    = gClock.FracTick();
     gSnap[wi].tpu     = gClock.TicksPerUs();
-    gSnap[wi].us      = now_us;
+    gSnap[wi].tick32  = gLastTick;
     gSnap[wi].running = gClock.Running();
     gSnap[wi].map     = gMap;
+    __asm__ volatile("dmb" ::: "memory");
     gSnapIdx = wi;
 }
 
@@ -1409,6 +1450,9 @@ static StateExt gStateExt;
 int main()
 {
     hw.Init();
+    gTicksPerUs = daisy::System::GetTickFreq() / 1000000u;
+    if(gTicksPerUs == 0u) gTicksPerUs = 1u;
+    gLastTick   = daisy::System::GetTick();
     locks.Init();                                   /* SDRAM arena is NOLOAD */
     memset(&gBarScratchMem, 0, sizeof gBarScratchMem);
     bb::bardetail::gBarScratch = &gBarScratchMem;
@@ -1542,6 +1586,7 @@ int main()
     loop.Use(pager).Use(locks).Use(settings).Use(perform).Use(brain).Use(host)
         .OnPoll(OnPoll).OnFrame(OnFrame).OnRender(OnRender);
 
+    presets.SetYield([](void*) { KeepClock(); }, nullptr);   /* QSPI erase/program: keep the clock alive */
     presets.Init();
     presets.BootLoad();   /* HostLink starts here: descriptor + panel USB up */
 
