@@ -71,6 +71,7 @@
   <span id="syncpill" class="pill">clock: —</span>
   <span id="bpmpill" class="pill">— BPM</span>
   <span id="linkpill" class="pill" title="request round-trip (last / worst in the last second) · requests per second · queued">link: —</span>
+  <span id="jackpill" class="pill" title="which jack map is applied: Brain = J3 clock · J4 v/oct · J5 gate · J6/J7/J8 class gates out; Voice = J3 clock · J4 slice v/oct · J5 style v/oct · J6 gate in · J7 hit trigger out · J8 velocity out">jacks: —</span>
   <span id="diagpill" class="pill" title="worst control-loop gap and audio callback in the last second; playhead jumps > 1.5 steps and pattern regenerations since boot">diag: —</span>
 </header>
 <div id="notice"></div>
@@ -259,6 +260,7 @@ function drawText() {
   $('b_mute').classList.toggle('on', st.muted); $('b_flow').classList.toggle('on', st.flowing); $('g_flow').classList.toggle('live', st.flowing);
   setPill('bpmpill', st.bpm.toFixed(1) + ' BPM' + (st.mult !== 1 ? ' ' + multLabel(st.mult) : ''), '');
   setPill('pagepill', 'page: ' + (st.brain ? 'Brain' : 'Perform'), st.brain ? 'brain' : '');
+  if (st.jackMap != null) setPill('jackpill', st.jackMap ? 'jacks: Voice (J4 slice · J5 style · J6 gate · J7 trig · J8 vel)' : 'jacks: Brain (J4 v/oct · J5 gate · J6–8 gates out)', st.jackMap ? 'brain' : '');
   if (st.diag) { const d = st.diag; const ph = ['—','poll','sdk/host','frame','sdk/frame','render','sdk/leds','handlers','load','analysis'];
     const extra = st.stallPhase != null ? ` · stall in ${ph[st.stallPhase] || st.stallPhase} · gate late ${(st.gateLateUs / 1000).toFixed(1)} ms · overruns ${st.overruns}` : '';
     setPill('diagpill', `poll gap ${(d.gap / 1000).toFixed(1)} ms · audio ${d.audio} µs · jumps ${d.jumps} · regens ${d.regens}${extra}`, d.gap > 4000 || d.audio > 400 || (st.overruns > 0) ? 'warn' : 'ok'); }
