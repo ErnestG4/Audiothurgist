@@ -21,6 +21,7 @@
 #include "bb_condition.h"
 #include "bb_swing.h"
 #include "bb_testbreak.h"
+#include "bb_sample.h"     // SAMPLE: TrimRegion, AnalyseRegion
 
 static int gFail = 0, gPass = 0;
 #define CHECK(cond, ...) do { if(cond) { gPass++; } else { gFail++; printf("  FAIL %s:%d  ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while(0)
@@ -841,7 +842,7 @@ int main()
         uint8_t cls[64]; float dens[64];
         bb::ClassifySteps(gMat, kLen, kSr, cls, 3, nullptr, dens);   // the Density lens
         Fresh(e, 0, 1.f);
-        memcpy(e.sliceDens, dens, sizeof e.sliceDens);
+        memcpy(e.sliceDens, dens, sizeof dens);
         e.fadeMode = 0;
         CHECK(e.FadeSamples(0) == 240 && e.FadeSamples(14) == 240 && e.AttackSamples(0) == 48, "Fixed: 5 ms release, 1 ms attack everywhere");
         e.fadeMode = 1;
@@ -855,7 +856,7 @@ int main()
         // Behavioural: the attack ramp measured on the output of a call from
         // silence — output / (0.8 × source) reaches unity after AttackSamples.
         auto AttackLen = [&](int sl) {
-            Fresh(e, 0, 1.f); memcpy(e.sliceDens, dens, sizeof e.sliceDens); e.fadeMode = 1; e.muted = true;
+            Fresh(e, 0, 1.f); memcpy(e.sliceDens, dens, sizeof dens); e.fadeMode = 1; e.muted = true;
             float o[24]; e.barPhase = 0.9; e.Process(o, 24);            // settle curStep
             e.CallSlice(sl, 1.f, false, false, false);
             std::vector<float> y; for(int b = 0; b < 40; b++) { e.Process(o, 24); y.insert(y.end(), o, o + 24); }
@@ -870,11 +871,11 @@ int main()
         CHECK(a0 > a14 && a14 > 0, "rendered attack: sparse slice 0 ramps over %d samples, dense slice 14 over %d", a0, a14);
         CHECK(a0 >= e.AttackSamples(0) - 30 && a0 <= e.AttackSamples(0) + 30, "…and slice 0's ramp matches AttackSamples %d (%d)", e.AttackSamples(0), a0);
         // Adaptive on a chopped loop with rolls: finite, still the map
-        Fresh(e, 1, 0.2f); memcpy(e.sliceDens, dens, sizeof e.sliceDens); e.fadeMode = 1; e.pitch = 1.2f;
+        Fresh(e, 1, 0.2f); memcpy(e.sliceDens, dens, sizeof dens); e.fadeMode = 1; e.pitch = 1.2f;
         Rendered r = RenderLoops(e, 2);
         bool finite = true; for(float v : r.y) if(!std::isfinite(v)) finite = false;
         CHECK(finite, "Adaptive + Collins rolls: finite output");
-        Fresh(e, 0, 1.f); memcpy(e.sliceDens, dens, sizeof e.sliceDens); e.fadeMode = 1;
+        Fresh(e, 0, 1.f); memcpy(e.sliceDens, dens, sizeof dens); e.fadeMode = 1;
         r = RenderLoops(e, 2);
         CHECK(MapMismatches(e, r) == 0 && e.trigFlash <= 4, "Adaptive: verbatim still plays the map as one voice (%u triggers)", e.trigFlash);
     }
@@ -952,7 +953,7 @@ int main()
         // Adaptive + Ping-pong together, Collins rolls: finite
         uint8_t cls[64]; float dens[64];
         bb::ClassifySteps(gMat, kLen, kSr, cls, 3, nullptr, dens);
-        Fresh(e, 1, 0.2f); memcpy(e.sliceDens, dens, sizeof e.sliceDens); e.fadeMode = 1; e.tailMode = 2; e.pitch = 1.5f;
+        Fresh(e, 1, 0.2f); memcpy(e.sliceDens, dens, sizeof dens); e.fadeMode = 1; e.tailMode = 2; e.pitch = 1.5f;
         Rendered r = RenderLoops(e, 3);
         bool finite = true; for(float v : r.y) if(!std::isfinite(v)) finite = false;
         CHECK(finite && MaxStep(r.y) < 0.5f, "Adaptive + Ping-pong + rolls: finite, max |Δ| %.3f", MaxStep(r.y));
@@ -1250,6 +1251,255 @@ int main()
         int written = 0; for(int s = 0; s < 16; s++) written += e.stepSrc[s] >= 0;
         CHECK(written == 0, "Pads: no step is written (%d)", written);
         CHECK(e.callHits == 1, "…but the call sounded (hit counted)");
+    }
+
+    /* ── SAMPLE package: key table, held playback, recording, stereo planes ── */
+    SECTION("SAMPLE: key table — the span mapping by default, overridable");
+    {
+        Fresh(e, 0, 1.f);   // 16 slices: keys 0..15 are the slices, 16..23 the last one
+        int wrong = 0;
+        for(int k = 0; k < 16; k++) if(e.KeySlice(k) != k) wrong++;
+        CHECK(wrong == 0 && e.KeySlice(20) == 15 && e.KeySlice(23) == 15 && e.KeySlice(99) == 15,
+              "16 slices: key k → slice k, keys past the span → the last slice (%d wrong, 20→%d)", wrong, e.KeySlice(20));
+        CHECK(e.nTable == 16 && e.freePos == kLen && e.bufCap == kLen, "no recordings: the table is the grid, no room past it");
+        static float longBuf[48000 * 9];
+        for(int i = 0; i < 48000 * 9; i++) longBuf[i] = 0.1f * sinf(0.01f * i);
+        bb::Engine e2; e2.Init(1); e2.SetMaterial(longBuf, 48000 * 9, kSr, nullptr, 0, nullptr);
+        wrong = 0;
+        for(int k = 0; k < 24; k++) if(e2.KeySlice(k) != (k * 64) / 24) wrong++;
+        CHECK(wrong == 0, "64 slices: key k → k·64/24 (%d wrong)", wrong);
+        CHECK(e.SetKeySlice(3, 9) && e.KeySlice(3) == 9, "SetKeySlice overrides");
+        CHECK(!e.SetKeySlice(3, 16) && !e.SetKeySlice(24, 1) && e.KeySlice(3) == 9, "…and refuses out-of-range slices and keys");
+        Fresh(e, 0, 1.f);
+        CHECK(e.KeySlice(3) == 3, "SetMaterial resets the table");
+    }
+
+    SECTION("SAMPLE: a held call reads past its slice; ReleaseKey fades it out without a click");
+    {
+        Fresh(e, 0, 1.f);
+        e.muted = true;   // only the calls sound
+        float out[24];
+        auto renderN = [&](std::vector<float>& y, int nSamp) {
+            for(int i = 0; i < nSamp; i += 24) { e.Process(out, 24); y.insert(y.end(), out, out + 24); }
+        };
+        std::vector<float> one, held;
+        e.CallSlice(5, 1.f, false, false, false);                 // one-shot: today's behaviour
+        renderN(one, 2 * kStep);
+        Fresh(e, 0, 1.f); e.muted = true;
+        e.CallSlice(5, 1.f, false, false, false, 1.f, true, 5);   // held, tagged key 5
+        renderN(held, 2 * kStep);
+        CHECK(SliceOfFreq(MeasureFreq(&one[300], kStep - 600), Rms(&one[300], kStep - 600)) == 5
+              && SliceOfFreq(MeasureFreq(&held[300], kStep - 600), Rms(&held[300], kStep - 600)) == 5,
+              "both calls open with slice 5");
+        CHECK(Rms(&one[kStep + 300], kStep - 600) < 1e-3f, "one-shot: silent after its slice");
+        CHECK(SliceOfFreq(MeasureFreq(&held[kStep + 300], kStep - 600), Rms(&held[kStep + 300], kStep - 600)) == 6,
+              "held: reads on into slice 6 (natEnd = the material's end)");
+        int hv = -1;
+        for(int i = 0; i < bb::Engine::kVoices; i++) if(e.voices[i].active && e.voices[i].held) hv = i;
+        CHECK(hv >= 0 && e.voices[hv].key == 5 && e.voices[hv].natEnd == kLen, "the held voice carries its key and reads to the end of the buffer");
+        e.ReleaseKey(4);                                          // the wrong key: nothing happens
+        renderN(held, 24);
+        CHECK(e.voices[hv].active && e.voices[hv].held, "ReleaseKey on another key is a no-op");
+        const size_t relAt = held.size();
+        e.ReleaseKey(5);
+        renderN(held, 480);
+        CHECK(!e.voices[hv].active, "ReleaseKey(5): the voice has ended within 10 ms (5 ms choke fade)");
+        CHECK(Rms(&held[relAt + 300], 180) < 2e-3f, "…and is silent after the fade (rms %.4f)", Rms(&held[relAt + 300], 180));
+        std::vector<float> tail(held.begin() + (long)relAt - 48, held.end());
+        const float ms = MaxStep(tail);
+        CHECK(ms < 0.08f, "no click at the release: max |Δ| %.3f (a hard cut would step ~0.4)", ms);
+        // a held reversed call reads BACK to the start of the material
+        Fresh(e, 0, 1.f); e.muted = true;
+        e.CallSlice(2, 1.f, true, false, false, 1.f, true, 2);
+        std::vector<float> rv; renderN(rv, 3 * kStep);
+        CHECK(SliceOfFreq(MeasureFreq(&rv[300], kStep - 600), Rms(&rv[300], kStep - 600)) == 2
+              && SliceOfFreq(MeasureFreq(&rv[kStep + 300], kStep - 600), Rms(&rv[kStep + 300], kStep - 600)) == 1
+              && SliceOfFreq(MeasureFreq(&rv[2 * kStep + 300], kStep - 600), Rms(&rv[2 * kStep + 300], kStep - 600)) == 0,
+              "held reverse: slice 2, then 1, then 0");
+        // the sequencer's continuity branch leaves a held voice alone
+        Fresh(e, 0, 1.f);   // verbatim: step 1 would otherwise adopt a voice sitting at slice 1's start
+        e.extPhase = true; e.barPhase = 0.; e.Process(out, 24);
+        e.CallSlice(0, 1.f, false, false, false, 1.f, true, 0);
+        for(int b = 1; b < 600; b++) { e.barPhase = (double)b * 24. / kSr / (double)e.barSeconds; e.Process(out, 24); }
+        hv = -1;
+        for(int i = 0; i < bb::Engine::kVoices; i++) if(e.voices[i].active && e.voices[i].held) hv = i;
+        CHECK(hv >= 0 && e.voices[hv].natEnd == kLen, "a held voice keeps its end through the grid's steps (continuity does not adopt it)");
+    }
+
+    SECTION("SAMPLE: record into a key — arm, feed, stop, trim, analyse, commit, play");
+    {
+        static float big[kLen + 48000];
+        memcpy(big, gMat, sizeof gMat);
+        const int cap = kLen + 48000;
+        e = bb::Engine(); e.Init(0x1234); e.patternMode = 0; e.patternKnob = 1.f;
+        e.SetMaterial(big, kLen, kSr, nullptr, 0, gCls, 0, nullptr, cap);
+        e.SetBpm(0.f); e.RegenPattern(); e.muted = true;
+        CHECK(e.freePos == kLen && e.bufCap == cap && e.nTable == 16, "fresh material: freePos = len, capacity as given");
+        auto take = [&](int key, int nSamp, float f, int& ts, int& tl, uint8_t& cls) -> int {
+            if(!e.RecArm(key)) return -100;
+            static float in[24]; float out[24]; int fed = 0;
+            for(int i = 0; i < nSamp; i += 24)   // the audio thread: feed, then render, block by block
+            {
+                for(int j = 0; j < 24; j++) in[j] = 0.3f * sinf(6.2831853f * f * (float)(fed + j) / kSr);
+                e.RecFeed(in, 24); e.Process(out, 24); fed += 24;
+            }
+            int rs = 0, rl = 0;
+            const int got = e.RecStop(rs, rl);
+            if(got != nSamp || rs != e.freePos) return -200;
+            if(!bb::TrimRegion(big, nullptr, rs, rl, kSr, ts, tl)) return -300;
+            float sal = 0.f, dens = 0.f; bool hit = false;
+            bb::AnalyseRegion(big, ts, tl, kSr, 0, cls, sal, dens, hit);
+            if(!(sal == 1.f && dens > 0.f && hit)) return -400;
+            return e.CommitSlice(key, ts, tl, cls, sal, dens, hit);
+        };
+        int ts = 0, tl = 0; uint8_t cls = 9;
+        const int t1 = take(3, 12000, 1000.f, ts, tl, cls);
+        CHECK(t1 == 16, "first take into key 3 → table entry 16 (got %d)", t1);
+        CHECK(e.nTable == 17 && e.KeySlice(3) == 16 && e.freePos == ts + tl && e.freePos > kLen,
+              "the table grew, key 3 points at it, freePos advanced (nTable %d key→%d free %d)", e.nTable, e.KeySlice(3), e.freePos);
+        CHECK(tl >= 11000 && tl <= 12000 && e.slices[16].start == ts && e.slices[16].len == tl, "the trimmed region is the slice (%d samples)", tl);
+        CHECK(cls == 1 && e.stepClass[16] == 1 && e.stepHit[16] && e.sliceSal[16] == 1.f, "a 1 kHz tone reads as the mid band (snare), a hit, full salience");
+        {
+            float pk = 0.f; for(int i = ts; i < ts + tl; i++) { const float a = fabsf(big[i]); if(a > pk) pk = a; }
+            CHECK(fabsf(pk - 0.95f) < 0.01f, "normalised to 0.95 (peak %.3f)", pk);
+        }
+        std::vector<float> y; float out[24];
+        e.CallSlice(e.KeySlice(3), 1.f, false, false, false);
+        for(int i = 0; i < 4800; i += 24) { e.Process(out, 24); y.insert(y.end(), out, out + 24); }
+        CHECK(fabsf(MeasureFreq(&y[300], 4000) - 1000.f) < 30.f && Rms(&y[300], 4000) > 0.1f,
+              "key 3 plays the recording (%.0f Hz, rms %.2f)", MeasureFreq(&y[300], 4000), Rms(&y[300], 4000));
+        // metadata survives the shell's grid-wide copies
+        e.stepClass[16] = 3; e.sliceSal[16] = 0.f; e.SyncRecordedMeta();
+        CHECK(e.stepClass[16] == 1 && e.sliceSal[16] == 1.f, "SyncRecordedMeta restores a recorded entry's metadata");
+        // arm refusals
+        CHECK(e.RecArm(3) && !e.RecArm(4), "a second arm while armed is refused");
+        { int rs, rl; e.RecStop(rs, rl); CHECK(rl == 0 && !e.recPending, "stopping an unfed take records nothing"); }
+        // a second take into the same key replaces the entry
+        const int free1 = e.freePos;
+        const int t2 = take(3, 9600, 700.f, ts, tl, cls);
+        CHECK(t2 == 16 && e.nTable == 17 && e.KeySlice(3) == 16 && e.freePos > free1 && e.slices[16].start == ts,
+              "second take into key 3 replaces entry 16 (got %d, nTable %d)", t2, e.nTable);
+        y.clear(); e.CallSlice(e.KeySlice(3), 1.f, false, false, false);
+        for(int i = 0; i < 4800; i += 24) { e.Process(out, 24); y.insert(y.end(), out, out + 24); }
+        CHECK(fabsf(MeasureFreq(&y[300], 4000) - 700.f) < 30.f, "…and the key now plays it (%.0f Hz)", MeasureFreq(&y[300], 4000));
+        // a different key: a new entry; then a take that hits the cap stops itself
+        const int t3 = take(7, 6000, 1500.f, ts, tl, cls);
+        CHECK(t3 == 17 && e.nTable == 18 && e.KeySlice(7) == 17 && e.KeySlice(3) == 16, "key 7 → entry 17 (got %d)", t3);
+        CHECK(e.RecArm(8), "arm key 8 for a take longer than the room left");
+        {
+            static float in[24]; for(int j = 0; j < 24; j++) in[j] = 0.2f;
+            const int room = e.bufCap - e.freePos;
+            for(int i = 0; i < room + 4800; i += 24) e.RecFeed(in, 24);
+            int rs = 0, rl = 0; const int got = e.RecStop(rs, rl);
+            CHECK(e.recFull && got == room && rs + rl == e.bufCap, "the take stops itself at bufCap (got %d of %d)", got, room);
+            e.RecDiscard();
+            CHECK(!e.recPending && e.nTable == 18 && e.freePos == rs, "discarded: nothing committed, the memory is free again");
+        }
+        // a recording that cannot fit is refused at arm time
+        {
+            static float in[24]; for(int j = 0; j < 24; j++) in[j] = 0.2f;
+            CHECK(e.RecArm(9), "arm key 9");
+            const int room = e.bufCap - e.freePos;
+            for(int i = 0; i < room; i += 24) e.RecFeed(in, 24);
+            int rs = 0, rl = 0; e.RecStop(rs, rl);
+            int s2 = 0, l2 = 0;
+            CHECK(bb::TrimRegion(big, nullptr, rs, rl, kSr, s2, l2), "the full take trims");
+            float sal, dens; bool hit; uint8_t c2;
+            bb::AnalyseRegion(big, s2, l2, kSr, 0, c2, sal, dens, hit);
+            CHECK(e.CommitSlice(9, s2, l2, c2, sal, dens, hit) == 18 && e.bufCap - e.freePos < bb::Engine::kRecMin, "…and commits, filling the plane");
+            CHECK(!e.RecArm(10), "no room left: RecArm refuses");
+            CHECK(e.CommitSlice(10, e.bufCap - 100, 200, 0, 1.f, 0.f, true) < 0
+                  && e.CommitSlice(10, 0, bb::Engine::kRecMin - 1, 0, 1.f, 0.f, true) < 0, "CommitSlice refuses a region past the cap or under kRecMin");
+        }
+        // a re-slice of the same planes keeps the recordings; new material drops them
+        {
+            const int keyEntry = e.KeySlice(3);
+            const bb::Slice s3 = e.slices[keyEntry];
+            const int free3 = e.freePos;
+            e.SetMaterial(big, kLen, kSr, nullptr, 0, gCls, 32, nullptr, cap);   // "2 bars" over the same material
+            CHECK(e.nSlices == 32 && e.nTable == 32 + 3 && e.freePos == free3, "re-slice to 32: the three recordings follow (nTable %d)", e.nTable);
+            CHECK(e.KeySlice(3) == 32 && e.slices[32].start == s3.start && e.slices[32].len == s3.len && e.stepClass[32] == 1,
+                  "key 3's take is entry 32 now, same region, same class");
+            CHECK(e.KeySlice(7) == 33 && e.KeySlice(9) == 34 && e.KeySlice(4) == (4 * 32) / 24, "the other keys follow; plain keys span the new grid (key 4 → %d)", e.KeySlice(4));
+            e.SetMaterial(big, kLen, kSr, nullptr, 0, gCls, 0, nullptr, cap);    // back to 16
+            CHECK(e.nSlices == 16 && e.nTable == 19 && e.KeySlice(3) == 16 && e.slices[16].start == s3.start, "…and back to 16: entry 16 again");
+            e.SetMaterial(gMat, kLen, kSr, nullptr, 0, gCls);                      // other planes: new material
+            CHECK(e.nTable == 16 && e.freePos == kLen && e.KeySlice(3) == 3, "new material: the table starts over");
+        }
+    }
+
+    SECTION("SAMPLE: stereo planes — R renders independently, the mono path is byte-identical");
+    {
+        static float sL[kLen], sR[kLen];
+        memcpy(sL, gMat, sizeof gMat);
+        for(int i = 0; i < kLen; i++) sR[i] = 0.5f * sinf(6.2831853f * 1000.f * (float)i / kSr);   // R: a 1 kHz tone everywhere
+        for(int i = 0; i < kStep; i++) sR[15 * kStep + i] = 0.f;
+        e = bb::Engine(); e.Init(0x1234); e.patternMode = 0; e.patternKnob = 1.f;
+        e.SetMaterial(sL, kLen, kSr, nullptr, 0, gCls, 0, sR, kLen);
+        e.SetBpm(0.f); e.RegenPattern(); e.muted = true;
+        std::vector<float> yl, yr; float ol[24], orr[24];
+        e.CallSlice(3, 1.f, false, false, false);
+        for(int i = 0; i < 4800; i += 24) { e.Process(ol, orr, 24); yl.insert(yl.end(), ol, ol + 24); yr.insert(yr.end(), orr, orr + 24); }
+        CHECK(SliceOfFreq(MeasureFreq(&yl[300], 4000), Rms(&yl[300], 4000)) == 3, "L plays slice 3's tone");
+        CHECK(fabsf(MeasureFreq(&yr[300], 4000) - 1000.f) < 30.f && Rms(&yr[300], 4000) > 0.1f, "R plays the R plane (%.0f Hz)", MeasureFreq(&yr[300], 4000));
+        // the stereo entry point on mono material: R is a copy of L
+        Fresh(e, 0, 1.f);
+        Rendered r1 = RenderLoops(e, 1);
+        Fresh(e, 0, 1.f);
+        e.extPhase = true; std::vector<float> ml, mr; double t = 0.;
+        while(t < (double)e.barSeconds - 1e-9) { e.barPhase = fmod(t / (double)e.barSeconds, 1.0); e.Process(ol, orr, 24); ml.insert(ml.end(), ol, ol + 24); mr.insert(mr.end(), orr, orr + 24); t += 24. / kSr; }
+        CHECK(ml == r1.y && mr == ml, "Process(L, R) on mono material: L == Process(out), R == L");
+        // stereo recording lands in both planes; a mono feed is copied to R
+        {
+            static float pL[kLen + 4800], pR[kLen + 4800];
+            memcpy(pL, gMat, sizeof gMat); memcpy(pR, sR, sizeof sR);
+            e = bb::Engine(); e.Init(1); e.SetMaterial(pL, kLen, kSr, nullptr, 0, gCls, 0, pR, kLen + 4800);
+            float inL[24], inR[24]; for(int j = 0; j < 24; j++) { inL[j] = 0.25f; inR[j] = -0.5f; }
+            CHECK(e.RecArm(0), "stereo arm");
+            for(int i = 0; i < 960; i += 24) e.RecFeed(inL, inR, 24);
+            for(int i = 0; i < 960; i += 24) e.RecFeed(inL, 24);
+            int rs, rl; e.RecStop(rs, rl);
+            CHECK(rl == 1920 && pL[rs] == 0.25f && pR[rs] == -0.5f && pL[rs + 1000] == 0.25f && pR[rs + 1000] == 0.25f,
+                  "R plane takes the R input, then the L input when none is given");
+            e.RecDiscard();
+        }
+        // GOLDEN: calls, chokes, a steal, adaptive fades, zoom and a ratchet on
+        // the mono path — FNV-1a of the rendered float bits computed from the
+        // untouched engine (commit 4136106, before SAMPLE) with this exact
+        // driver; identical at -O1 sanitized and -O2 on x86-64 (SSE, no FMA).
+        // The same driver through the stereo entry point, on mono material and
+        // on stereo material whose R plane duplicates L, must match it too.
+        auto drive = [&](bb::Engine& g, float* L, float* R, int mode) -> std::vector<float> {
+            g = bb::Engine(); g.Init(0x1234); g.patternMode = 0; g.patternKnob = 0.3f;
+            g.SetMaterial(L, kLen, kSr, nullptr, 0, gCls, 0, R, kLen); g.SetBpm(0.f); g.RegenPattern();
+            g.fadeMode = 1; g.tailMode = 3; g.pitch = 1.2f;
+            for(int k = 0; k < 16; k++) g.sliceDens[k] = 0.01f + 0.002f * (float)k;
+            g.RegenPattern(); g.extPhase = true;
+            std::vector<float> y; float o[24], o2[24];
+            const int blocks = (int)(2.0 * g.barSeconds * kSr / 24.0);
+            for(int b = 0; b < blocks; b++)
+            {
+                if(b == 40)  g.CallSlice(5, 1.f, false, false, false, 0.5f);
+                if(b == 90)  g.CallSlice(9, 0.5f, true, true, true);
+                if(b == 150) g.CallSlice(2, 2.f, false, false, false);
+                if(b == 152) g.CallSlice(3, 1.f, false, false, false);   // steal right behind
+                g.barPhase = fmod((double)b * 24. / kSr / (double)g.barSeconds, 1.0);
+                if(mode == 0) g.Process(o, 24);
+                else { g.Process(o, o2, 24); if(mode == 2) memcpy(o, o2, sizeof o); }
+                y.insert(y.end(), o, o + 24);
+            }
+            return y;
+        };
+        const uint64_t gold = 0x786e423d477968a2ULL;
+        static float dupR[kLen]; memcpy(dupR, gMat, sizeof gMat);
+        const uint64_t hMono   = Fnv(drive(e, gMat, nullptr, 0));
+        const uint64_t hStL    = Fnv(drive(e, gMat, nullptr, 1));
+        const uint64_t hDupL   = Fnv(drive(e, gMat, dupR, 1));
+        const uint64_t hDupR   = Fnv(drive(e, gMat, dupR, 2));
+        CHECK(hMono == gold, "mono Process: checksum %016llx != golden %016llx", (unsigned long long)hMono, (unsigned long long)gold);
+        CHECK(hStL == gold, "Process(L, R) on mono material: L checksum %016llx != golden", (unsigned long long)hStL);
+        CHECK(hDupL == gold && hDupR == gold, "stereo material with R = L: both planes match the golden (%016llx / %016llx)",
+              (unsigned long long)hDupL, (unsigned long long)hDupR);
     }
 
     printf("\n%d passed, %d failed\n", gPass, gFail);
