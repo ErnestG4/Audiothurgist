@@ -1,8 +1,8 @@
 # Audiothurgist
 
 **A sampling, slicing and rearranging toolkit for the Hermetic Modular
-Alchemy Lab.** Load a break from the card, and one knob travels from *the
-record, verbatim* to chops, rolls and bursts. Patterns hold until you ask
+Alchemy Lab.** Load a break from the card or sample the rack into it, and one
+knob travels from *the record, verbatim* to chops, rolls and bursts. Patterns hold until you ask
 for new ones. Every sound is a slice of real material played from its
 attack, on the grid: no grains, no time-stretch. If you don't like it,
 re-slice it.
@@ -17,12 +17,20 @@ is in the firmware and the edges are still being filed.
 
 - **Chopper** — the knobs and buttons: slice, rearrange, dice, flow,
   history, tempo, pitch.
-- **Voice** — the rack plays *it*: a v/oct + gate pair on J4/J5 calls
-  slices from a keyboard or sequencer (choke or punch-into-the-bar).
+- **Voice** — the rack plays *it*: with the Voice jack map, J4 is the slice
+  note, J5 the style note (reverse, half, double, ratchet, staccato,
+  punch/choke — and Record), J6 the gate; J7 sends a trigger per hit and J8
+  its velocity. Two play grammars: **Play** loops what you play in
+  (unquantized by default), **Pads** is the MPC — nothing written, the beat
+  is yours.
 - **Brain** — it plays the rack: kick, snare and hat gates on J6/J7/J8 as
   the pattern runs; a clock on J3 locks the loop to your master.
 
-The roles run at once; nothing needs a mode.
+The roles run at once; nothing needs a mode. **Sampling**: hold a key with
+the Record style and it records from J1/J2 (mono or stereo) into that key;
+arm Record and B3 or a J6 edge takes a whole loop into the break, with J6
+edges dropping slice markers while it runs. One buffer, one slice table: a
+break and a kit are the same thing, played by different rules (slice or held).
 
 ## Flashing
 
@@ -53,8 +61,10 @@ a dim blue-grey ring is a pot waiting for you to sweep through its value).
 **B3** tap: reslice · hold: load the highlighted file.
 **B2 + B3** held 2 s: Settings (brightness, preset save/load).
 
-Jacks: J1/J2 audio in (recording: coming) · **J3 clock in** · **J4 v/oct ·
-J5 gate** (Voice) · **J6/J7/J8 kick/snare/hat gates out** · J9/J10 audio out.
+Jacks, **Brain map**: J1/J2 audio in · **J3 clock in** · **J4 v/oct · J5
+gate** · **J6/J7/J8 kick/snare/hat gates out** · J9/J10 audio out. **Voice
+map** (Options → Jacks, or automatically with Play/Pads): J4 slice · J5 style
+· **J6 gate in** · J7 hit trigger out · J8 velocity out; the clock stays.
 
 ## Options (in the web app or Hermetic's `/program`)
 
@@ -65,24 +75,32 @@ J5 gate** (Voice) · **J6/J7/J8 kick/snare/hat gates out** · J9/J10 audio out.
 | Voice | **Choke** · Punch (writes the bar) |
 | Gate Length | **6 ms** · 20 ms · 50 ms · Hold to next hit |
 | Gate Level | **Fixed 5 V** · Velocity (accents to the ceiling) |
-| Grammar | **Classic** · Collins · Grids · Euclid · Camp |
+| Grammar | **Classic** · Collins · Grids · Euclid · Camp · Play (looped) · Pads (free) |
 | Gate Fires | Every step · **Onsets only (once per hit)** |
 | Bars | **Auto (backbeat)** · 1 · 2 · 4 · 8 — fixes a break playing at half or double speed |
 | Rests | **Continue the break** · Gate (silence) |
 | Gate Lanes | **Dominant class** · Multi-label |
 | Fades | Fixed · **Adaptive (keyframe density)** |
-| Slice Tail | **Gate** · Loop forward · Ping-pong |
+| Slice Tail | Gate · Loop forward · Ping-pong · **Zoom** (pitch reads on, never through an attack) |
 | Swaps | Class only · **Class + salience tier** |
 | Flow Déjà Vu | Off · **Some** · Lots |
 | Swing | Straight · **Auto (the material's swing)** |
 | Onsets | Spectral flux · **Log-filtered flux** |
+| Jacks | **Follow grammar** · Brain · Voice |
+| Key Plays | **One-shot** · Held (until the gate falls) |
+| Sampling | **Mono (J1+J2)** · Stereo |
+| Record Source | **Inputs** · Output (resample the module) |
+| Record | **Off** · Arm (B3 tap or J6 starts a loop take) |
+| Quantize | **Off (as played)** · 16ths · 8ths — Play's looper |
 
 ## The web app
 
 `web/` is a single-page WebSerial instrument view: the bar ring and loop
 strip, per-slice waveform envelopes, an oscilloscope, every button and
 knob function for the current page and grammar, locks, options, presets,
-the manual, and a diagnostics line. Serve it from a secure context:
+the manual, a diagnostics line, and a **Kit** tab: the 24 keys, each
+recording's waveform with onsets and boundaries, record/clear per key, the
+looper's events, and set save/load. Serve it from a secure context:
 
 ```sh
 cd web && python3 -m http.server 8080     # then http://localhost:8080 in Chrome/Edge
