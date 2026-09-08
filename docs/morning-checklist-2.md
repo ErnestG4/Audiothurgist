@@ -64,3 +64,14 @@ Defaults as of **v0.9.3-defaults** (stage 17), per Ernest: the recommendations s
 - History scrub replays with the current grammar params; presets saved with a card don't load cardless.
 - Least-squares clock period estimator is evaluated (4–5× better than the SDK's EMA on an E-RM-shaped train) but needs an SDK hook — a question for Luke.
 - Onsets = Log-filtered is now the default (v0.9.3); Spectral flux stays selectable.
+
+## 6. Sampling (docs/packages/sample-record.md) — branch `pkg2/record`
+Presets saved under OPT4 re-init (the Options block grew to 21 bytes, schema `OPT5`). Set **Jacks → Voice** (or Grammar → Play) for everything below except the B3 loop take.
+- [ ] **Record into a key.** Patch a drum machine's audio into J1 (and J2), a keyboard's v/oct → J4, gate → J6, and hold the style note **7** on J5 (7 semitones above 0 V). B1/B2/B3 turn dim red. Hold a key on J4 while the source plays: the buttons go full red, P6 meters the input, and on release the key plays the take (trimmed, normalised); its position lights on P5's ring (keys 0..7 = LEDs 0..7, 8..23 pair on 8..15). Record three or four keys, then play them.
+- [ ] **Clear.** Style **8** + a key: that key plays its grid slice again; the ring dot goes out. Any other style note takes the red off the buttons.
+- [ ] **Stereo.** Options → **Sampling = Stereo**, record a key from a stereo source: the take plays in stereo on J9/J10 (Mono sums J1+J2). Load a stereo WAV: its planes stay apart (mono WAVs still load as before).
+- [ ] **Loop take, clocked.** Clock on J3, Options → **Record = Arm** (buttons red; B3's tap/hold are suppressed). Tap **B3** or send the first J6 edge: the take runs the **Bars** count at the followed tempo and stops itself on the bar; hit J6 on the beats you want as slices while it runs — with two or more they become the table. The take loads and plays; Record drops back to Off.
+- [ ] **Loop take, unclocked.** Unpatch J3, Arm, B3 to start, B3 (or J6) to stop: the take is conditioned like a file (trim, bar estimate).
+- [ ] **Resample.** Options → **Record Source = Output**, Arm, start a take while the module plays — the chop becomes the new break (or with style 7 held, into a key). Set it back to Inputs after.
+- [ ] **Room.** After a 17 s load a key take still arms (loads keep 8 s of the 25 s free); the plane full = the take stops itself and commits what it got.
+- [ ] Nothing changed when idle: the goldens hold; verbatim playback and the scope look as before (the scope is now the L+R sum).

@@ -5,7 +5,8 @@
  * reverb in the cluster zone. Boots playing the first WAV on the card (the
  * synth break if none); B1 walks the card. SD read + conditioning + class
  * analysis run off the audio thread; a double buffer swaps in the callback.
- * Record from J1/J2 is M1.6.
+ * Record from J1/J2 (or the module's own mix): the RECORD fences — a key
+ * take (J5 style 7) and a loop take into the break (Options → Record).
  *
  *   P1 Chop · P2 Tempo · P3 History · P4 Pitch · P5 Sample-select · P6 Volume
  *   B1 hold + turn a pot = record a motion loop (ParamLock) · B2 tap refill /
@@ -60,6 +61,8 @@
 #include "bb_bars.h"
 #include "bb_testbreak.h"
 #include "bb_clockmath.h" /* CLOCK: ClockMap, PhaseGuard, MultZone, JitterMeter (pure, host-tested) */
+#include "bb_sample.h"   /* SAMPLE: TrimRegion, AnalyseRegion (a key take, control thread) */
+#include "bb_record.h"   /* RECORD: record input, kit map, take length, markers → cues, TakeRecorder */
 
 using namespace alchemy;
 
@@ -67,6 +70,11 @@ constexpr float kSr       = 48000.f;
 constexpr int   kMaxSec   = 25;
 constexpr int   kBufMax   = 48000 * kMaxSec;
 constexpr int   kStageMax = 96000 * kMaxSec;   /* native-rate decode staging */
+/* RECORD: a load (or a loop take) fills at most kLoadSec of a plane, so
+ * RecArm always finds kRecSec of room past the material for takes into keys */
+constexpr int   kRecSec   = 8;
+constexpr int   kLoadSec  = kMaxSec - kRecSec;   /* 17 s */
+constexpr int   kLoadMax  = 48000 * kLoadSec;
 constexpr int   kScratch  = 128;
 constexpr int   kMaxFiles = 256;
 constexpr int   kMaxOnsets = 128;
@@ -75,6 +83,10 @@ constexpr int   kMaxOnsets = 128;
 static float ALCHEMY_SDRAM_BSS gBufA[kBufMax];
 static float ALCHEMY_SDRAM_BSS gBufB[kBufMax];
 static float ALCHEMY_SDRAM_BSS gStage[kStageMax];
+/* RECORD: R planes (Options → Sampling = Stereo) and the R decode staging — SDRAM */
+static float ALCHEMY_SDRAM_BSS gBufAR[kBufMax];
+static float ALCHEMY_SDRAM_BSS gBufBR[kBufMax];
+static float ALCHEMY_SDRAM_BSS gStageR[kStageMax];
 static bb::OnsetDetector ALCHEMY_SDRAM_BSS gDet;
 static daisysp::ReverbSc ALCHEMY_SDRAM_BSS gVerb;
 static char ALCHEMY_SDRAM_BSS  gFiles[kMaxFiles][128];
@@ -86,6 +98,8 @@ ALCHEMY_SDMMC_BSS alignas(32) static FILINFO gFno;
 
 static float* gPlay = gBufA;   /* engine reads this */
 static float* gLoad = gBufB;   /* loader fills this */
+static float* gPlayR = gBufAR; /* RECORD: the R planes swap with their L */
+static float* gLoadR = gBufBR;
 
 static bb::Engine  engine;
 static AlchemyLab  hw;
@@ -362,6 +376,14 @@ static Sel gJacks;       /* 16 */
 static const char* kKeyPlaysDisp = "{\"kind\":\"enum\",\"labels\":[\"One-shot (the slice)\",\"Held (read on until the gate falls)\"]}";
 static Sel gKeyPlays;    /* 17 SAMPLE: Voice map keys play their slice, or read on while the gate is held */
 /* SAMPLE end */
+/* RECORD */
+static const char* kSamplingDisp = "{\"kind\":\"enum\",\"labels\":[\"Mono (J1+J2 summed)\",\"Stereo (J1 → L, J2 → R)\"]}";
+static Sel gSampling;    /* 18 RECORD: one plane or two (loads, takes) */
+static const char* kRecSrcDisp   = "{\"kind\":\"enum\",\"labels\":[\"Inputs (J1/J2)\",\"Output (the module's own mix)\"]}";
+static Sel gRecSrc;      /* 19 RECORD: what a take hears */
+static const char* kRecordDisp   = "{\"kind\":\"enum\",\"labels\":[\"Off\",\"Arm (B3 tap or J6 starts a loop take)\"]}";
+static Sel gRecord;      /* 20 RECORD: loop record into the break; disarms after one take */
+/* RECORD end */
 static volatile uint8_t gJackMapCur = 0xFFu;   /* applied map: 0 Brain, 1 Voice */
 static volatile int     gHitCd  = 0;           /* Voice map: J7 hit trigger countdown (audio) */
 static volatile float   gHitVel = 0.f;         /* Voice map: J8 velocity volts */
@@ -373,7 +395,7 @@ static volatile float   gHitVel = 0.f;         /* Voice map: J8 velocity volts *
  * fans them out to the plain structs above and raises their dirty flags. */
 struct Options : Serializable
 {
-    static constexpr size_t kBytes = 18u;   /* SAMPLE: 17 = Key Plays */
+    static constexpr size_t kBytes = 21u;   /* SAMPLE: 17 = Key Plays; RECORD: 18 Sampling, 19 Record Source, 20 Record */
     size_t SerializedSize() const override { return kBytes; }
     void   Serialize(uint8_t* o) const override
     {
@@ -383,6 +405,7 @@ struct Options : Serializable
         o[10] = gFades.sel; o[11] = gTail.sel; o[12] = gSwaps.sel; o[13] = gDejaVu.sel;
         o[14] = gSwing.sel; o[15] = gOnsetDet.sel; o[16] = gJacks.sel;
         o[17] = gKeyPlays.sel;   /* SAMPLE */
+        o[18] = gSampling.sel; o[19] = gRecSrc.sel; o[20] = gRecord.sel;   /* RECORD */
     }
     static void Put(Sel& s, uint8_t v, uint8_t max)
     {
@@ -403,9 +426,10 @@ struct Options : Serializable
         Put(gSwaps, in[12], 1);    Put(gDejaVu, in[13], 2);  Put(gSwing, in[14], 1);
         Put(gOnsetDet, in[15], 1); Put(gJacks, in[16], 2);
         Put(gKeyPlays, in[17], 1);   /* SAMPLE */
+        Put(gSampling, in[18], 1); Put(gRecSrc, in[19], 1); Put(gRecord, in[20], 1);   /* RECORD */
         return true;
     }
-    uint32_t SchemaHash() const override { return 0x4F505434u; /* 'OPT4' (SAMPLE: 18 bytes) */ }
+    uint32_t SchemaHash() const override { return 0x4F505435u; /* 'OPT5' (RECORD: 21 bytes) */ }
     bool     Describe(hostlink::ComponentWriter& w) const override
     {
         using hostlink::FieldType;
@@ -428,11 +452,36 @@ struct Options : Serializable
         ok &=     w.Field("onsets",       "Onsets",      15, FieldType::Enum, 0.f, kOnsetDetDisp,  2u);
         ok &=     w.Field("jacks",        "Jacks",       16, FieldType::Enum, 0.f, kJacksDisp,     3u);
         ok &=     w.Field("key.plays",    "Key Plays",   17, FieldType::Enum, 0.f, kKeyPlaysDisp,  2u);   /* SAMPLE */
+        /* RECORD */
+        ok &=     w.Field("sampling",     "Sampling",    18, FieldType::Enum, 0.f, kSamplingDisp,  2u);
+        ok &=     w.Field("rec.src",      "Record Source",19, FieldType::Enum, 0.f, kRecSrcDisp,   2u);
+        ok &=     w.Field("record",       "Record",      20, FieldType::Enum, 0.f, kRecordDisp,    2u);
+        /* RECORD end */
         return ok;
     }
 };
 static Options gOptions;
 /* ── end GRAMMAR ───────────────────────────────────────────────────────── */
+/* ── RECORD ── record state. The control thread owns every gesture and the
+ * analysis; the audio thread only feeds (engine.RecFeed for a take into a
+ * key, gTake.Feed for a loop take into the other buffer) and meters. ──── */
+static bool             gKeyArm      = false;   /* J5 style 7 stands: buttons red, keys record */
+static bool             gKeyTake     = false;   /* a take into gKeyTakeKey is armed in the engine */
+static int              gKeyTakeKey  = -1;
+static volatile bool    gKeyTakeDone = false;   /* OnPoll → main loop: RecStop → trim → analyse → commit */
+static bb::TakeRecorder gTake;                  /* the loop take, into gLoad (+ gLoadR) */
+static bool             gTakeActive  = false;   /* control: a loop take runs, or waits to be serviced */
+static bool             gTakeClocked = false;
+static int              gTakeBars    = 0;       /* a clocked take's bar count (0 = unclocked) */
+static int  ALCHEMY_SDRAM_BSS gMarkers[kMaxOnsets];   /* J6 edges during a clocked take, take-relative */
+static int              gNumMarkers  = 0;
+static int              gGridBars    = 1;       /* the bar count behind the current grid (control) */
+static volatile bool    gPendStereo  = false;   /* the pending load / take carries an R plane */
+static volatile int     gReapplyR    = -1;      /* a re-apply's plane change: -1 keep, 0 mono, 1 gPlayR */
+static volatile float   gRecPeak     = 0.f;     /* audio → render: the record input's peak while a take runs */
+static float            gRecMix[kScratch];      /* the mono record mix (audio thread) */
+static float            gOutR[kScratch];        /* the engine's R render (audio thread) */
+/* ── end RECORD ────────────────────────────────────────────────────────── */
 /* ── CLOCK ── control-thread clock state; the math is core/bb_clockmath.h ── */
 static volatile float gClkFlash = 0.f;   /* B1 white flash per detected pulse */
 static volatile float gClkMult  = 1.f;   /* APPLIED multiplier (telemetry mirror of gMap.mult) */
@@ -667,7 +716,7 @@ static void ComputeEnvelope(const float* x, int len, uint8_t env[][kEnvPts][2], 
 /* ── audio ──────────────────────────────────────────────────────────── */
 static float gMono[kScratch];
 
-static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
+static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed the takes */
                     daisy::AudioHandle::OutputBuffer out,
                     size_t                           size)
 {
@@ -676,12 +725,19 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
      * is audio-thread work here exactly as it was on the Pod). */
     if(gApply || gReapply)
     {
-        if(gApply) { float* t = gPlay; gPlay = gLoad; gLoad = t; }   /* re-apply keeps the buffer */
+        float* bR;   /* RECORD: the R plane the material takes (nullptr = mono) */
+        if(gApply)
+        {
+            float* t = gPlay; gPlay = gLoad; gLoad = t;   /* re-apply keeps the buffer */
+            t = gPlayR; gPlayR = gLoadR; gLoadR = t;       /* RECORD: the R planes swap with their L */
+            bR = gPendStereo ? gPlayR : nullptr;
+        }
+        else { bR = gReapplyR < 0 ? engine.bufR : (gReapplyR == 1 ? gPlayR : nullptr); gReapplyR = -1; }   /* RECORD */
         /* GRAM */ memcpy(engine.sliceSal, gPendSal, sizeof gPendSal); /* before SetMaterial: its boot pattern ranks the tiers */
         engine.swing = gPendSwing;   /* SLICE: read by SetMaterial (boundaries + step timing) */
         /* SAMPLE: the plane's capacity lets recordings land past the material; a
          * re-apply (same buffer) keeps them, a load (the other buffer) starts over */
-        engine.SetMaterial(gPlay, gPendLen, kSr, gPendOnsets, gPendN, gPendClass, gPendHint, nullptr, kBufMax);
+        engine.SetMaterial(gPlay, gPendLen, kSr, gPendOnsets, gPendN, gPendClass, gPendHint, bR /* RECORD */, kBufMax);
         memcpy(gSal, gPendSal, sizeof gSal);
         /* GATES */
         memcpy(engine.stepBands, gPendBands, sizeof gPendBands);   /* SAMPLE: the source's size — the engine's table is wider */
@@ -773,7 +829,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
     }
     /* ── end CLOCK ─────────────────────────────────────────────────────── */
 
-    engine.Process(gMono, n);
+    engine.Process(gMono, gOutR, n);   /* RECORD: both planes (mono material copies L to R) */
 
     /* per-class trigger bitmask → ARM gate countdowns (sample-accurate).
      * The CV writes themselves happen in OnPoll, never here: J3–J6 are
@@ -840,17 +896,32 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
     const float v = gVol, send = gVerbSend;
     for(int i = 0; i < n; i++)
     {
-        float d = gMono[i];
+        const float dl = gMono[i], dr = gOutR[i];   /* RECORD: stereo-aware mix; mono material has dr == dl */
         float wl, wr;
-        gVerb.Process(d * send, d * send, &wl, &wr);
-        float l = (d + wl * 0.85f) * v;
-        float r = (d + wr * 0.85f) * v;
+        gVerb.Process(dl * send, dr * send, &wl, &wr);
+        float l = (dl + wl * 0.85f) * v;
+        float r = (dr + wr * 0.85f) * v;
         if(l > 1.f) l = 1.f; else if(l < -1.f) l = -1.f;
         if(r > 1.f) r = 1.f; else if(r < -1.f) r = -1.f;
         out[0][i] = l;
         out[1][i] = r;
-        if((i & 3) == 0) { gScope[gScopeW & 1023u] = (int8_t)(l * 127.f); gScopeW = (uint16_t)(gScopeW + 1u); }
+        if((i & 3) == 0) { gScope[gScopeW & 1023u] = (int8_t)(0.5f * (l + r) * 127.f); gScopeW = (uint16_t)(gScopeW + 1u); }   /* RECORD: the scope keeps the mono sum */
     }
+    /* RECORD: feed the takes — the engine's (into a key, past the material)
+     * and the shell's (the loop, into the other buffer); both return at once
+     * when idle. Record Source: J1/J2, or what just left J9/J10 (the
+     * resampling trick). Sampling: (J1+J2)/2 into L, or J1 → L, J2 → R. */
+    if(engine.recArmed || gTake.running)
+    {
+        const bool fromOut = gRecSrc.sel == bb::kSrcOutput;
+        const bb::RecPlanes rp = bb::RecordInput(gSampling.sel, fromOut ? out[0] : in[kCodecInChJ1],
+                                                 fromOut ? out[1] : in[kCodecInChJ2], gRecMix, n);
+        engine.RecFeed(rp.L, rp.R, n);
+        gTake.Feed(rp.L, rp.R, n);
+        const float pk = bb::BlockPeak(rp.L, rp.R, n);
+        if(pk > gRecPeak) gRecPeak = pk;
+    }
+    /* RECORD end */
     const uint32_t cbUs = (TickNow() - cbStartTick) / gTicksPerUs;
     if(cbUs > gDiagAudioCur) gDiagAudioCur = cbUs;
     if(cbUs > 450u) gDiagOverruns = (uint16_t)(gDiagOverruns + 1u);
@@ -1097,6 +1168,8 @@ static void OnPoll(uint32_t /*t_ms*/)
      * and a CHANGE of style while the gate is held re-strikes the slice:
      * 0 plain · 1 reverse · 2 half-speed · 3 double · 4 ratchet · 5 staccato ·
      * 6 punch/choke flip. */
+    /* RECORD: the record styles live on the Voice map — leaving it disarms and ends a key take */
+    if(gJackMapCur != 1u) { gKeyArm = false; if(gKeyTake) gKeyTakeDone = true; }
     if(gJackMapCur == 1u)
     {
         static int  s_note = -99, s_style = 0, s_lastIdx = -1;
@@ -1112,11 +1185,36 @@ static void OnPoll(uint32_t /*t_ms*/)
         static int s_lastNote = -99, s_lastStyle = 0;
         const int n  = quant(hw.cv[kVoiceVoctChan].Volts(), s_lastNote);
         const int st = quant(hw.cv[kVoiceGateChan].Volts(), s_lastStyle);
-        const bool restrike = held && s_lastIdx >= 0 && st != s_style && !rose;
+        /* RECORD: J5 style 7 = Record (armed: every key held records into
+         * that key), 8 = Clear (the key goes back to its grid slice); any
+         * other style disarms. Neither calls the slice, neither re-strikes.
+         * A running key take ends when the gate falls, the plane fills, or
+         * the style moves off 7; the main loop finishes it (ServiceRecord). */
+        const int  sty    = st < 0 ? 0 : st;
+        const bool recSty = sty >= 7;
+        gKeyArm = sty == 7 && !gTakeActive;
+        if(gKeyTake && (gClkEdge.JustFell(3u) || engine.recFull || sty != 7)) gKeyTakeDone = true;
+        /* RECORD end */
+        const bool restrike = held && s_lastIdx >= 0 && st != s_style && !rose && !recSty /* RECORD */;
         s_style = st;
         if(rose || restrike)
         {
             if(rose && n == -1) engine.muted = !engine.muted;
+            /* RECORD */
+            else if(recSty)
+            {
+                if(rose && n >= 0 && engine.nSlices > 0)
+                {
+                    const int key = n >= bb::Engine::kKeys ? bb::Engine::kKeys - 1 : n;
+                    if(sty == 7)
+                    {
+                        if(!gKeyTake && !gKeyTakeDone && !gTakeActive && engine.RecArm(key))
+                        { gKeyTake = true; gKeyTakeKey = key; gRecPeak = 0.f; }
+                    }
+                    else engine.SetKeySlice(key, bb::SpanSlice(key, engine.nSlices));   /* 8: Clear */
+                }
+            }
+            /* RECORD end */
             else if(engine.nSlices > 0)
             {
                 int idx = s_lastIdx;
@@ -1229,8 +1327,44 @@ static void OnPoll(uint32_t /*t_ms*/)
         else         { gPendReroll = true; }
     }
 
-    /* B3: tap = reslice · hold = load next WAV on the card. */
+    /* RECORD: loop record into the break (Options → Record = Arm). B3 tap
+     * or the first J6 rising edge (Voice map: J6 is the gate in) starts a
+     * take into the OTHER buffer from the record source. Clocked (a clock on
+     * J3), the take is the Bars count of bars at the followed tempo (× P2's
+     * multiplier) and stops itself on the bar; J6 edges during it are slice
+     * MARKERS. Unclocked, B3 or J6 stops it. B3's tap (reslice) and hold
+     * (load) are suppressed while armed; the arm drops after one take. */
     static bool s_b3_loaded = false;
+    if(gRecord.sel == 1 || gTakeActive)
+    {
+        const bool j6  = gJackMapCur == 1u && gClkEdge.JustRose(3u);
+        const bool tap = b3.FallingEdge();
+        if(!gTakeActive)
+        {
+            if((tap || j6) && gRecord.sel == 1 && !gLoadReq && !gApply && !gReapply && !gKeyTake)
+            {
+                const bool clocked = gWasExt;
+                const int  bars    = gBars.sel >= 1 ? 1 << (gBars.sel - 1) : (gGridBars > 0 ? gGridBars : 1);
+                const int  target  = clocked ? bb::TakeSamples(bars, gClock.Bpm() * gClkMult, kSr) : 0;
+                gTakeClocked = clocked && target > 0 && target <= kLoadMax;   /* longer than the plane: analysed like an unclocked take */
+                gTakeBars    = gTakeClocked ? bars : 0;
+                gNumMarkers  = 0;
+                gRecPeak     = 0.f;
+                gTake.Start(gLoad, gSampling.sel == bb::kSampStereo ? gLoadR : nullptr, kLoadMax, gTakeClocked ? target : 0);
+                gTakeActive  = true;
+            }
+        }
+        else if(gTake.running)
+        {
+            if(gTakeClocked) { if(j6 && gNumMarkers < kMaxOnsets) gMarkers[gNumMarkers++] = gTake.pos; }
+            else if(tap || j6) gTake.Stop();
+        }
+        s_b3_loaded = false;
+    }
+    else
+    {
+    /* RECORD end */
+    /* B3: tap = reslice · hold = load next WAV on the card. */
     if(b3.Pressed() && b3.TimeHeldMs() > 400.f && !s_b3_loaded
        && gNumFiles > 0 && !gLoadReq && !gApply)
     {
@@ -1243,6 +1377,7 @@ static void OnPoll(uint32_t /*t_ms*/)
         if(!s_b3_loaded) gPendReslice = true;
         s_b3_loaded = false;
     }
+    }   /* RECORD */
     gDiagPhase = 2;
 }
 
@@ -1317,6 +1452,18 @@ static void OnRender(uint32_t /*t_ms*/)
     }
     hw.leds.SetButtonPair(kButtonB2, gFlowing ? Rgb{20, 160, 60} : Rgb{6, 10, 6});
     hw.leds.SetButtonPair(kButtonB3, Rgb{12, 6, 2});
+    /* RECORD: the three buttons red while armed (a key: J5 style 7; the
+     * loop: Options → Record), full red while a take runs */
+    const bool recArmed  = gKeyArm || gRecord.sel == 1 || gKeyTake || gTakeActive;
+    const bool recTaking = gKeyTake || gTakeActive;
+    if(recArmed)
+    {
+        const Rgb c = recTaking ? Rgb{255, 8, 0} : Rgb{80, 2, 0};
+        hw.leds.SetButtonPair(kButtonB1, c);
+        hw.leds.SetButtonPair(kButtonB2, c);
+        hw.leds.SetButtonPair(kButtonB3, c);
+    }
+    /* RECORD end */
 
     /* FROZEN dials (Ernest, 2026-09-06): a pot that has not yet swept through
      * its stored value — after a page switch or a preset load — is inert
@@ -1336,6 +1483,29 @@ static void OnRender(uint32_t /*t_ms*/)
             DrawCatchPip(hw.leds, p, st, kAlchemyLabArcGeometry, {0xFF, 0xFF, 0xFF});
         }
     }
+    /* RECORD: the kit map on P5's ring — every key whose slot holds a
+     * recording (24 keys over 16 LEDs: keys 0..7 own LEDs 0..7, keys 8..23
+     * pair up on 8..15), the key being taken brighter; while a take runs,
+     * the record input's level on P6's ring. Perform page only. */
+    if(perfPage)
+    {
+        for(int k = 0; k < bb::Engine::kKeys; k++)
+        {
+            const bool taking = gKeyTake && k == gKeyTakeKey;
+            if(taking || engine.RecordedEntry(k) >= 0)
+                hw.leds.SetRingByOffset(P_SPACE, (uint8_t)bb::KeyLed(k), taking ? Rgb{255, 30, 10} : Rgb{160, 20, 8});
+        }
+        if(recTaking)
+        {
+            static float s_lvl = 0.f;
+            const float pk = gRecPeak; gRecPeak = 0.f;
+            s_lvl = pk > s_lvl ? pk : s_lvl * 0.85f;
+            hw.leds.ClearRing(P_VOL);
+            DrawLevelArc(hw.leds, P_VOL, kAlchemyLabArcGeometry, s_lvl > 1.f ? 1.f : s_lvl, {0.6f, 0.9f},
+                         Rgb{20, 160, 60}, Rgb{220, 180, 30}, Rgb{255, 20, 10});
+        }
+    }
+    /* RECORD end */
     gDiagPhase = 6;
 }
 
@@ -1364,12 +1534,112 @@ static void ScanSD()
         }
 }
 
+/* RECORD: the load pipeline's tail, shared by a card load and a loop take.
+ * gLoad (+ gLoadR when `stereo`) holds `len` raw samples; `cues` are FILE
+ * positions — a WAV's cue chunk, or a clocked take's J6 markers, the same
+ * path; knownBars > 0 = a clocked take of exactly that many bars (no trim,
+ * no bar cut: a silent first 16th is still the first 16th). Conditions →
+ * onset table → bars → swing → classes → density → bands → envelope →
+ * gApply (the audio thread swaps and calls SetMaterial). Control thread;
+ * every long loop yields to the clock. */
+static void PrepareMaterial(int len, int* cues, int nCues, bool stereo, int knownBars)
+{
+    /* SLICE: detector mode from Options → Onsets; the conditioning reports the
+     * whole-bar count it cut the buffer to (0 when the prior applied) */
+    gDet.mode = gOnsetDet.sel;
+    bb::ConditionInfo ci;
+    if(knownBars > 0) bb::NormalisePlanes(gLoad, stereo ? gLoadR : nullptr, len);
+    else
+    {
+        len = bb::ConditionBuffer(gLoad, len, kSr, gDet, &ci, gBars.sel == 0 /* review M5 */);
+        if(stereo) bb::ConditionPlane(gLoadR, ci, len);   /* the R plane takes the same cut and gain */
+    }
+    gCondBars = ci.bars > 0 ? ci.bars : knownBars;
+    gPendCues = nCues >= 2;
+
+    /* cue chunk positions are file positions: re-base by the head cut
+     * (silence + downbeat) and drop what fell outside (review M1) —
+     * bb::CuesToOnsets, the same code factored out */
+    if(nCues >= 2) gPendN = bb::CuesToOnsets(cues, nCues, ci.trimmedStart, len, kSr, gPendOnsets, bb::Engine::kMaxSlices);
+    else           gPendN = gDet.Detect(gLoad, len, kSr, gPendOnsets, kMaxOnsets, nullptr);
+
+    int barsN  = 0;
+    gPendHint  = SliceCountFor(gLoad, len, gPendOnsets, gPendN, gCondBars, &barsN);
+    gGridBars  = barsN > 0 ? barsN : 1;
+    gPendSwing = SwingFor(len, gPendOnsets, gPendN, gPendHint, barsN);   /* SLICE */
+    ClassifySteps(gLoad, len, gPendClass, gClass.mode, gPendSal, gPendHint, gPendBands /* GATES */);
+    ComputeDensity(gLoad, len, gPendDens, gPendHint);   /* PLAY */
+    ComputeEnvelope(gLoad, len, gPendEnv, gPendHint);
+    gPendLen    = len;
+    gPendStereo = stereo;
+    gLoadFlash  = 1.f;
+    gApply      = true;     /* audio thread swaps + SetMaterial */
+}
+
+/* RECORD: stage a re-apply of the CURRENT material (the Bars handler's
+ * recipe) — used when Options → Sampling adds or drops the R plane. */
+static void StageReapply()
+{
+    int barsN = 0;
+    const int nsl = SliceCountFor(gPlay, engine.bufLen, gPendOnsets, gPendN, gCondBars, &barsN);
+    gPendSwing = SwingFor(engine.bufLen, gPendOnsets, gPendN, nsl, barsN);
+    ClassifySteps(gPlay, engine.bufLen, gPendClass, gClass.mode, gPendSal, nsl, gPendBands);
+    ComputeDensity(gPlay, engine.bufLen, gPendDens, nsl);
+    ComputeEnvelope(gPlay, engine.bufLen, gPendEnv, nsl);
+    gPendLen  = engine.bufLen;
+    gPendHint = nsl;
+    gReapply  = true;
+}
+
+/* RECORD: finish takes on the control thread (main loop, like ServiceLoad —
+ * the trim and the analysis yield to the clock). A key take: RecStop →
+ * TrimRegion → AnalyseRegion (the current classifier lens) → CommitSlice,
+ * and the key plays it; a loop take: markers → cues → the load pipeline. */
+static void ServiceRecord()
+{
+    if(gKeyTakeDone)
+    {
+        gKeyTakeDone = false;
+        const int key = gKeyTakeKey;
+        gKeyTake = false; gKeyTakeKey = -1;
+        int rs = 0, rl = 0;
+        if(engine.RecStop(rs, rl) > 0)
+        {
+            int ts = 0, tl = 0;
+            if(bb::TrimRegion(gPlay, engine.bufR, rs, rl, kSr, ts, tl))
+            {
+                uint8_t cls = 3; float sal = 0.f, dens = 0.f; bool hit = false;
+                bb::AnalyseRegion(gPlay, ts, tl, kSr, gClass.mode, cls, sal, dens, hit);
+                if(engine.CommitSlice(key, ts, tl, cls, sal, dens, hit) < 0) engine.RecDiscard();
+            }
+            else engine.RecDiscard();
+        }
+        gRecPeak = 0.f;
+    }
+    if(gTakeActive && !gTake.running && !gApply && !gReapply)
+    {
+        gTakeActive = false;
+        const int len = gTake.pos;
+        if(gRecord.sel == 1) gRecord.sel = 0;   /* one take per arm */
+        if(len >= (int)(0.25f * kSr))
+        {
+            /* a clocked take cut short (Record → Off mid-take) is analysed like an unclocked one */
+            const int bars = (gTakeBars > 0 && len >= gTake.target) ? gTakeBars : 0;
+            int cues[kMaxOnsets];
+            const int nCues = bb::MarkersToCues(gMarkers, gNumMarkers, len, (int)(0.010f * kSr), cues, kMaxOnsets);
+            gCurFile = -1;   /* the material is a take, not a card file */
+            PrepareMaterial(len, cues, nCues, gTake.R != nullptr, bars);
+        }
+        gRecPeak = 0.f;
+    }
+}
+
 /* Runs between control ticks; does the heavy SD read → condition → classify
  * into gLoad, then hands off to the audio thread via gApply. */
 static void ServiceLoad()
 {
     gDiagPhase = 8;
-    if(!gLoadReq || gApply || gReapply) return;   /* review L1 */
+    if(!gLoadReq || gApply || gReapply || gTakeActive /* RECORD: the loop take owns gLoad */) return;   /* review L1 */
     gLoadReq = false;
 
     char path[140];
@@ -1377,49 +1647,18 @@ static void ServiceLoad()
     strncpy(path + 3, gFiles[gLoadIdx], 136);
     path[139] = 0;
 
+    /* RECORD: at most kLoadSec (17 s) of the 25 s plane, so a take into a key
+     * always finds room; Sampling = Stereo keeps a stereo file's planes apart */
+    const bool wantR = gSampling.sel == bb::kSampStereo;
+    bool gotR = false;
     int cues[kMaxOnsets], nCues = 0, err = 0;
-    int len = bbwav::Load(path, gStage, kStageMax, gLoad, kBufMax, kSr,
-                          kMaxSec, cues, &nCues, kMaxOnsets, &err);
+    int len = bbwav::Load(path, gStage, kStageMax, gLoad, kLoadMax, kSr,
+                          kLoadSec, cues, &nCues, kMaxOnsets, &err,
+                          wantR ? gLoadR : nullptr, wantR ? gStageR : nullptr, &gotR);
     if(len <= 0) return;   /* leave current material playing on failure */
 
-    /* SLICE: detector mode from Options → Onsets; the conditioning reports the
-     * whole-bar count it cut the buffer to (0 when the prior applied) */
-    gDet.mode = gOnsetDet.sel;
-    bb::ConditionInfo ci;
-    len = bb::ConditionBuffer(gLoad, len, kSr, gDet, &ci, gBars.sel == 0 /* review M5 */);
-    gCondBars = ci.bars;
-    gPendCues = nCues >= 2;
-
-    if(nCues >= 2)
-    {
-        /* cue chunk positions are file positions: re-base by the head cut
-         * (silence + downbeat) and drop what fell outside (review M1) */
-        int nc = 0;
-        for(int i = 0; i < nCues; i++) { const int q = cues[i] - ci.trimmedStart; if(q >= 0 && q < len) cues[nc++] = q; }
-        nCues = nc;
-        for(int i = 1; i < nCues; i++)
-            for(int j = i; j > 0 && cues[j - 1] > cues[j]; j--)
-            { int t = cues[j - 1]; cues[j - 1] = cues[j]; cues[j] = t; }
-        gPendN = 0;
-        if(nCues == 0 || cues[0] > (int)(0.02f * kSr)) gPendOnsets[gPendN++] = 0;
-        for(int i = 0; i < nCues && gPendN < bb::Engine::kMaxSlices; i++)
-            gPendOnsets[gPendN++] = cues[i];
-    }
-    else
-    {
-        gPendN = gDet.Detect(gLoad, len, kSr, gPendOnsets, kMaxOnsets, nullptr);
-    }
-
-    int barsN  = 0;
-    gPendHint  = SliceCountFor(gLoad, len, gPendOnsets, gPendN, gCondBars, &barsN);
-    gPendSwing = SwingFor(len, gPendOnsets, gPendN, gPendHint, barsN);   /* SLICE */
-    ClassifySteps(gLoad, len, gPendClass, gClass.mode, gPendSal, gPendHint, gPendBands /* GATES */);
-    ComputeDensity(gLoad, len, gPendDens, gPendHint);   /* PLAY */
-    ComputeEnvelope(gLoad, len, gPendEnv, gPendHint);
-    gPendLen   = len;
-    gCurFile   = gLoadIdx;
-    gLoadFlash = 1.f;
-    gApply     = true;     /* audio thread swaps + SetMaterial */
+    gCurFile = gLoadIdx;
+    PrepareMaterial(len, cues, nCues, gotR, 0);   /* RECORD: the shared tail */
 }
 
 /* ── StateExt: the web frontend's window into the instrument ────────────
@@ -1488,6 +1727,11 @@ struct StateExt : hostlink::IHostlinkExtension
                 /* v0.9.5 forensics: u8 stallPhase, u16 gateLateUs, u16 overruns (170..174) */
                 w.U8(gDiagStallPhase); w.U16(gDiagGateLateUs); w.U16(gDiagOverruns);
                 w.U8(gJackMapCur == 1u ? 1u : 0u);   /* 175: jack map (0 Brain, 1 Voice) */
+                /* RECORD tail (176..180): u8 recFlags b0 key armed · b1 key take · b2 loop armed ·
+                 * b3 loop take · b4 stereo material; u32 kitMask bit k = key k holds a recording */
+                w.U8((uint8_t)((gKeyArm ? 1u : 0u) | (gKeyTake ? 2u : 0u) | (gRecord.sel == 1 ? 4u : 0u)
+                               | (gTakeActive ? 8u : 0u) | (engine.bufR ? 16u : 0u)));
+                { uint32_t km = 0; for(int k = 0; k < bb::Engine::kKeys; k++) if(engine.RecordedEntry(k) >= 0) km |= 1u << k; w.U32(km); }
                 return;
             }
             case 0x61u:
@@ -1615,8 +1859,8 @@ int main()
         path[0] = '0'; path[1] = ':'; path[2] = '/';
         strncpy(path + 3, gFiles[0], 136); path[139] = 0;
         int cues[kMaxOnsets], nCues = 0, err = 0;
-        len = bbwav::Load(path, gStage, kStageMax, gPlay, kBufMax, kSr,
-                          kMaxSec, cues, &nCues, kMaxOnsets, &err);
+        len = bbwav::Load(path, gStage, kStageMax, gPlay, kLoadMax, kSr,
+                          kLoadSec, cues, &nCues, kMaxOnsets, &err);   /* RECORD: mono at boot (presets apply Sampling after), 17 s cap */
         if(len > 0)
         {
             bb::ConditionInfo ci;                                  /* SLICE */
@@ -1639,6 +1883,7 @@ int main()
              * (v0.8.0 sliced it by the prior alone) */
             int barsN = 0;
             const int nsl = SliceCountFor(gPlay, len, gPendOnsets, no, gCondBars, &barsN);
+            gGridBars = barsN > 0 ? barsN : 1;   /* RECORD */
             static uint8_t cls[bb::Engine::kMaxSlices];
             ClassifySteps(gPlay, len, cls, gClass.mode, gSal, nsl, engine.stepBands /* GATES: audio not started */);
             memcpy(engine.sliceSal, gSal, sizeof gSal);   /* GRAM tiers at boot (review M3); SAMPLE: the source's size */
@@ -1792,6 +2037,26 @@ int main()
             engine.restSustain = (gGrammar.mode == 2 || gGrammar.mode == 3) && gRests.sel == 0;   /* Grids/Euclid rests continue the break */
             gPendReroll        = true;
         }
+        /* RECORD: Options → Sampling re-applies the material with (or
+         * without) its R plane now when no key holds a recording — the
+         * engine keeps recordings only on the same planes — else it applies
+         * at the next load or loop take. Record Source is read live by the
+         * audio thread; Record → Off stops an unclocked take. */
+        if(gSampling.dirty && !gApply && !gReapply && !gLoadReq && !gReclass && !gTakeActive && !gKeyTake && engine.bufLen > 0)
+        {
+            gSampling.dirty = false;
+            const bool wantR = gSampling.sel == bb::kSampStereo, haveR = engine.bufR != nullptr;
+            if(wantR != haveR && engine.nTable == engine.nSlices)
+            {
+                if(wantR) for(int i = 0; i < engine.bufLen; i++) { gPlayR[i] = gPlay[i]; if((i & 4095) == 4095) bb::Yield(); }
+                gReapplyR = wantR ? 1 : 0;
+                StageReapply();
+            }
+        }
+        if(gRecSrc.dirty) gRecSrc.dirty = false;
+        if(gRecord.dirty) { gRecord.dirty = false; if(gRecord.sel == 0 && gTakeActive && gTake.running) gTake.Stop(); }
+        ServiceRecord();
+        /* RECORD end */
         ServiceLoad();
     }
 }

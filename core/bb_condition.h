@@ -30,6 +30,7 @@ struct ConditionInfo
     int   bars = 0;   // whole bars kept (1, 2, 4), 0 = prior
     float conf = 0.f;
     int   trimmedStart = 0; // samples removed at the head (silence + downbeat)
+    float gain = 1.f;       // RECORD: the normalising gain applied (1 = none) — the R plane takes the same
 };
 
 // allowBarCut = false (Options → Bars set by hand): skip 3a so the user's bar
@@ -64,10 +65,12 @@ inline int ConditionBuffer(float* x, int len, float sr, OnsetDetector& det, Cond
     const int lenValid = len - a;   // samples still in memory past the tail trim
     len = n2;
     const int headTrim = a;
+    if(info) info->trimmedStart = headTrim;   /* RECORD: the prior path reports the head cut too (the bar cut adds its own below) */
 
     // 2) normalize (the trimmed tail too: 3a may take it back)
     float g = 0.95f / peak;
     for(int i = 0; i < lenValid; i++) x[i] *= g;
+    if(info) info->gain = g;   /* RECORD */
 
     /* SLICE: 3a) whole bars of the material's own bar, when confident. Two
      * attempts: the whole file, then (a long song excerpt can carry a tempo
