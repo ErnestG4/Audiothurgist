@@ -70,7 +70,7 @@ map** (Options → Jacks, or automatically with Play/Pads): J4 slice · J5 style
 
 | Option | Choices (default in bold) |
 |---|---|
-| Classifier | **Hockman 3-band** · Legacy 120/900 (hi/lo) · Two-band · Density (keyframes) |
+| Classifier | **Hockman 3-band** · Legacy 120/900 (hi/lo) · Two-band · Density (keyframes) · Adaptive (onset, clustered) |
 | Clock In | **24** · 4 · 2 · 1 · 48 · 96 · 16 · 8 PPQN |
 | Voice | **Choke** · Punch (writes the bar) |
 | Gate Length | **6 ms** · 20 ms · 50 ms · Hold to next hit |

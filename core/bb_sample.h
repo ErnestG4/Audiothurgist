@@ -63,9 +63,9 @@ inline bool TrimRegion(float* x, float* xR, int start, int len, float sr, int& o
 // region (the L plane, or the shell's mono sum) — the recorded twin of the
 // per-step analysis a load runs on the grid:
 //  cls  — the dominant band of the WHOLE region, judged absolutely (the
-//         loop-relative rule of ClassifySteps has no loop here): modes 0
-//         and 3 use the Hockman edges 325 / 4000 Hz (the Density lens needs
-//         a population to rank, so it borrows the bands), 1 the legacy
+//         loop-relative rule of ClassifySteps has no loop here): modes 0,
+//         3 and 4 use the Hockman edges 325 / 4000 Hz (the Density and
+//         Adaptive lenses need a population, so they borrow the bands), 1 the legacy
 //         120 / 900 split, 2 the two-band lo/hi rule; silence → 3.
 //  sal  — the region's RMS relative to refRms, clamped to 1 (pass the
 //         loudest grid slice's RMS to rank the take against the break);
