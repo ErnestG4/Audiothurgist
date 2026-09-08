@@ -129,7 +129,8 @@ static Manual manual =
 "**Key Plays** — one-shot, or held until the gate falls. "
             "**Sampling** — mono, or stereo planes. **Record Source** — the "
             "inputs, or the module's own output. **Record** — arm a loop "
-            "take into the break (see Sampling).")
+            "take into the break (see Sampling). **Tap Allowance** — how far "
+            "back a tap-while-playing mark lands (your reaction time): 0–80 ms.")
         .Section("sampling", "Sampling (record into a key, loop-record the break)",
             "One buffer, one slice table: a loaded break and a recorded kit "
             "are the same thing. **Into a key** (Voice map): play J5 style "
