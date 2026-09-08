@@ -70,7 +70,15 @@ static Manual manual =
             "**B3** tap: reslice (new cell tree; in Play: clear the loop); "
             "hold: load the highlighted file. **B2 + B3 held 2 s**: Settings "
             "(brightness, preset save/load); B2 or B3 leaves. B1 also shows "
-            "the clock: white per pulse, green when locked.")
+            "the clock: white per pulse, green when locked. **B1 held + B3 "
+            "tap: the Edit page** (B1 amber; B1 tap leaves): P1 selects a "
+            "slice — its segment pulses on the bar ring as it plays and its "
+            "keys pulse on P5, a Voice-map note selects too — P2 / P3 nudge "
+            "its start / end ±50 ms once swept through centre, each move "
+            "re-playing the new edge; B3 tap drops a marker at the playhead "
+            "(onset-snapped, Options → Tap Allowance), B3 hold reslices; B2 "
+            "tap undoes, B2 hold puts the slice back on the grid (a marker: "
+            "deletes it). Refusals blink red.")
         .Section("brain", "Clock in, gates out",
             "Patch a clock into J3 and set its PPQN in Options; B1 flashes "
             "white per pulse and sits green when locked (the loop aligns to "

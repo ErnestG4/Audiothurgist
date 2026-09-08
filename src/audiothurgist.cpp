@@ -1171,7 +1171,7 @@ static constexpr Rgb kNudgePos  { 40, 200, 120};   /* later (the pitch ring's +)
 static constexpr Rgb kNudgeNeg  {235,  70,  20};   /* earlier (its −) */
 static constexpr Rgb kNudgeDimP { 10,  50,  30};   /* …before the pot has picked up */
 static constexpr Rgb kNudgeDimN { 60,  18,   5};
-/* EDIT-PANEL: B2 tap → EditOp::Undo (package 6) — the journal's depth lights B2; 0 until it lands. */
+/* EDIT-PANEL: B2 tap → EditOp::Undo (package 6) — integrator: `return engine.UndoDepth();` once pkg4/edit-undo is in. */
 static int     PanelUndoDepth() { return 0; }
 static uint8_t PanelSelByte()   { return (gEdit && gSel >= 0 && gSel < 255) ? (uint8_t)gSel : 255u; }
 /* The selection's span (and its neighbours') becomes the nudge origin; both pickups re-arm. */
@@ -3008,7 +3008,8 @@ static void ServicePanel()
         }
         case kPanelUndo:
         {
-            /* EDIT-PANEL: B2 tap → EditOp::Undo (package 6) */
+            /* EDIT-PANEL: B2 tap → EditOp::Undo (package 6) — integrator: replace the next line with
+             * `EditReq r; r.op = EditOp::Undo; if(EditBusy() || PostEdit(r, nullptr) != EditStatus::Ok) refused = true; else PanelArm();` */
             refused = true;
             break;
         }

@@ -60,6 +60,19 @@ a dim blue-grey ring is a pot waiting for you to sweep through its value).
 **B2** tap: dice (new arrangement) · hold: flow (a new bar every loop).
 **B3** tap: reslice · hold: load the highlighted file.
 **B2 + B3** held 2 s: Settings (brightness, preset save/load).
+**B1 held + B3 tap**: the **Edit page** (B1 amber; B1 tap leaves and commits;
+the Perform/Brain page underneath is untouched) — see the table below.
+
+| | Edit page (B1 held + B3 tap) |
+|---|---|
+| P1 | **Select** a slice: grid, then markers; the bar ring shows its bar with its segment amber, pulsing as it plays; a Voice-map note selects its key's entry |
+| P2 | **Start nudge** ±50 ms — inert until swept through centre (a dim fan shows where it would land), then live in 1 ms steps; every move re-plays the first 250 ms |
+| P3 | **End nudge** ±50 ms, the same; every move re-plays the last 250 ms |
+| P4 | Pitch, as ever |
+| P5 | The kit map, with the selection's key cells pulsing |
+| B1 | tap: leave (commit) |
+| B2 | tap: undo the last edit · hold: revert the slice to the computed grid (a marker: delete it) |
+| B3 | tap while the break plays: a marker at the playhead, onset-snapped (Options → Tap Allowance) · hold: reslice |
 
 Jacks, **Brain map**: J1/J2 audio in · **J3 clock in** · **J4 v/oct · J5
 gate** · **J6/J7/J8 kick/snare/hat gates out** · J9/J10 audio out. **Voice
