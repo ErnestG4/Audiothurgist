@@ -281,5 +281,22 @@ await link.start();
   await l.close();
 }
 
+/* ── the Android path: Google's Web Serial polyfill (vendored, unmodified) and the install manifest ── */
+{
+  const here = new URL('.', import.meta.url);
+  let m = null; try { m = await import(new URL('vendor/web-serial-polyfill/serial.js', here).href); } catch (e) { m = { err: e }; }
+  check('polyfill imports', m && !m.err, m && m.err ? m.err.message : '');
+  check('polyfill has requestPort/getPorts', m && m.serial && typeof m.serial.requestPort === 'function' && typeof m.serial.getPorts === 'function');
+  check('polyfill SerialPort has the port surface', m && m.SerialPort && ['open', 'close'].every(k => typeof m.SerialPort.prototype[k] === 'function') && ['readable', 'writable'].every(k => Object.getOwnPropertyDescriptor(m.SerialPort.prototype, k)?.get));
+  const fs = await import('node:fs');
+  let man = null; try { man = JSON.parse(fs.readFileSync(new URL('manifest.webmanifest', here), 'utf8')); } catch {}
+  check('manifest parses', man && man.name === 'Audiothurgist' && man.display === 'standalone' && man.start_url === './');
+  check('manifest icons exist', man && man.icons.every(i => fs.existsSync(new URL(i.src, here))) && man.icons.some(i => i.sizes === '512x512'));
+  const sw = fs.readFileSync(new URL('sw.js', here), 'utf8'); const shell = [...sw.matchAll(/'(\.\/[^']+)'/g)].map(x => x[1]).filter(x => x !== './');
+  check('service worker shell files exist', shell.length >= 6 && shell.every(f => fs.existsSync(new URL(f, here))), shell.filter(f => !fs.existsSync(new URL(f, here))).join(','));
+  const html = fs.readFileSync(new URL('index.html', here), 'utf8');
+  check('page links manifest and loads the polyfill only without navigator.serial', /rel="manifest"/.test(html) && /!navigator\.serial && navigator\.usb/.test(html) && /serialApi\(\)/.test(html));
+}
+
 console.log(`${fail ? 'FAIL' : 'OK'}: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

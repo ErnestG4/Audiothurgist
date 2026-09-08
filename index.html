@@ -4,11 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Audiothurgist</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<meta name="theme-color" content="#0e0e10">
 <!--
   Audiothurgist — the instrument's face in a browser.
   Speaks HostLink over WebSerial (hostlink.js) plus the firmware's StateExt
   (0x60–0x6F). No dependencies; serve web/ as static files from a secure
-  context (https:// or http://localhost) in a Chromium browser. Close
+  context (https:// or http://localhost) in a Chromium browser. On Chrome
+  for Android, which has WebUSB but no Web Serial, Google's polyfill
+  (vendor/web-serial-polyfill) speaks to the module's CDC interface
+  directly — a USB OTG cable is all a phone or tablet needs. Close
   Hermetic's /program tab first — one page holds the port at a time.
   Append ?demo to the URL to drive the page from the fake module in demo.js.
 -->
@@ -210,6 +217,16 @@
 <footer>Runs over the module's front USB-C. Hermetic's <code>/program</code> keeps flashing, presets and settings; this page is the instrument's window. Sources: codeberg.org/combust/Audiothurgist</footer>
 
 <script src="hostlink.js"></script>
+<!-- Web Serial on top of WebUSB for Chrome on Android (desktop Chromium has
+     navigator.serial and never loads this). A module script so the vendored
+     file stays byte-for-byte upstream; it fails quietly on file://. -->
+<script type="module">
+  if (!navigator.serial && navigator.usb) {
+    try { const m = await import('./vendor/web-serial-polyfill/serial.js'); window.serialPolyfill = m.serial; document.dispatchEvent(new Event('serial-polyfill')); }
+    catch (e) { console.warn('web-serial-polyfill failed to load', e); }
+  }
+  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('./sw.js').catch(() => {});
+</script>
 <script src="demo.js"></script>
 <script>
 'use strict';
@@ -729,7 +746,7 @@ async function connectPort(port, isDemo) {
     await port.open({ baudRate: 115200 });
     link = new Link(port); link.onError = e => notice('Serial read error: ' + e.message); await link.start();
     info = await hello(link);
-    setPill('modpill', `${info.name} ${info.fw}${isDemo ? ' (demo)' : ''}`, 'ok'); $('connect').textContent = 'Disconnect'; $('demo').disabled = true;
+    setPill('modpill', `${info.name} ${info.fw}${isDemo ? ' (demo)' : transportName() === 'WebUSB' ? ' · WebUSB' : ''}`, 'ok'); $('connect').textContent = 'Disconnect'; $('demo').disabled = true;
     desc = await getDescriptor(link, info).catch(e => { notice('Descriptor unreadable: ' + e.message); return null; });
     labels = { grammar: fieldLabels(desc, 'grammar.mode'), classifier: fieldLabels(desc, 'class.mode'), sample: fieldLabels(desc, 'sample.idx') };
     pager = pagerInfo(desc); opts = optionsInfo(desc); manual = manualInfo(desc);
@@ -747,11 +764,31 @@ async function connectPort(port, isDemo) {
     startPolling();
   } catch (e) { notice('Connect failed: ' + e.message); if (link) await link.close(); setDisconnected(); }
 }
+/* The transport: native Web Serial where the browser has it (desktop
+ * Chrome / Edge / Opera), Google's polyfill over WebUSB on Chrome for
+ * Android. Both hand back a port with the same open / readable / writable
+ * / close surface, so nothing above this line knows which one it got. */
+function serialApi() { return navigator.serial || (navigator.usb && window.serialPolyfill) || null; }
+function transportName() { return navigator.serial ? 'Web Serial' : (navigator.usb && window.serialPolyfill) ? 'WebUSB' : null; }
+function describeNoSerial() {
+  const secure = window.isSecureContext, ua = navigator.userAgent;
+  if (!secure) return 'This page is not in a secure context, so the browser hides its USB APIs. Open it over https:// (Codeberg Pages) or http://localhost — on a phone, `adb reverse` makes the PC\'s localhost yours.';
+  if (/iPhone|iPad|iPod/.test(ua)) return 'iOS and iPadOS browsers have neither Web Serial nor WebUSB, so this page cannot reach the module from here. Use Chrome on Android, or a desktop browser.';
+  if (/Android/.test(ua) && !navigator.usb) return 'This browser has no WebUSB. Use Chrome (or another Chromium browser) on Android with a USB OTG cable.';
+  return 'This browser has no Web Serial and no WebUSB. Use Chrome, Edge or Opera on the desktop, or Chrome on Android.';
+}
 async function connect() {
   notice('');
   if (link) { const l = link; setDisconnected(); await l.close(); return; }
-  try { const port = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x0483 }] }); await connectPort(port, false); }
-  catch (e) { if (e.name !== 'NotFoundError') notice('Connect failed: ' + e.message); }
+  const api = serialApi();
+  if (!api) { notice(describeNoSerial()); return; }
+  try { const port = await api.requestPort({ filters: [{ usbVendorId: 0x0483 }] }); await connectPort(port, false); }
+  catch (e) {
+    if (e.name === 'NotFoundError') return;
+    let m = 'Connect failed: ' + e.message;
+    if (transportName() === 'WebUSB' && /(claim|busy|access|denied|LIBUSB|unable to claim)/i.test(e.message)) m += ' — another app or the system may hold the USB interface; unplug and replug the OTG cable, and make sure no other page is connected.';
+    notice(m);
+  }
 }
 /* ?demo[=brain,ext,pending,grids,euclid,camp,locks,kit,swing,old,short,v099,nosets]
  * — the fake module, optionally started on the Brain page, following a
