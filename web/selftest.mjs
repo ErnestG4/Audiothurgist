@@ -822,9 +822,10 @@ const ED = require('./edit.js');
   check('the Chop pad: TAP_MARK(60, 40 ms from the option), gen unchecked, an orange marker, "tap → marker N"', rt.ok && sent.some(b => b[0] === 29 && b[1] === 60 && b[2] === 40 && b.length === 3) && Hh.table.entries[rt.newIdx].flags === HL.EDIT.orange && ed.history.list()[0].label === `tap → marker ${rt.newIdx}`);
   Hh.status.length = 0; const ru = await ed.undo(); await settle();
   check('undo on a firmware without package 6: BAD_ARGS, said, nothing else', ru.status === 2 && /BAD_ARGS/.test(Hh.status[Hh.status.length - 1]));
-  check('one edit at a time: a second commit while one is in flight is turned away', (() => { const p1 = ed.copyOut(14); const p2 = ed.copyOut(15); return p2.then(r => r === null && /one edit at a time/.test(Hh.status[Hh.status.length - 1])).then(async ok => { await p1; return ok; }); })() instanceof Promise);
-  await settle(); await refetch();
-  check('…and the first one landed', Hh.table.entries.some(e => ED.isLive(e) && e.start === Hh.table.entries[14].start && e.len === Hh.table.entries[14].len && ED.isOrange(e)));
+  { const c0 = ed.stats.commits; const p1 = ed.copyOut(14); const p2 = ed.copyOut(15); const r2 = await p2; await p1; await settle(); await refetch();
+    check('one edit at a time: a second gesture op while one is in flight is turned away, the first lands', r2 === null && Hh.status.some(s => /one edit at a time/.test(s)) && Hh.table.entries.some(e => ED.isLive(e) && e.start === Hh.table.entries[14].start && e.len === Hh.table.entries[14].len && ED.isOrange(e)) && ed.stats.commits === c0 + 1); }
+  { const before = Hh.st.keySlice[11]; const q1 = ed.setKey(11, 4); const q2 = ed.setKey(11, 6); const r = await q2; await q1; await settle();
+    check('a panel op queues behind a pending reply instead: both SET_KEYs land in order', r && r.ok && Hh.st.keySlice[11] === 6 && before !== 6); }
   /* history from the tail: a change the page did not make gets the module's label */
   d.recordKey(9, 0.2, 1); await refetch(); ed.noteState(Hh.st);
   check('a take on the module: "changed on the module" from tableGen', ed.history.list()[0].label === 'changed on the module' && ed.history.undoDepth === 0);
@@ -849,6 +850,125 @@ const ED = require('./edit.js');
   check('noedit: a tap inside a marker selects, never splits', ed.selT === m1 && !sent.some(b => b[0] === 19));
   check('noedit: no handles are offered from the wave', ed.tagAt(px(5 * SL), 170, W, 180).h === null);
   await l.close();
+}
+
+/* ── 9. EDIT-UI, the page itself: index.html's inline script under a DOM stub, connected to the fake module through
+ *       `?demo=kit`, then the DOM paths driven with synthetic pointer events — the handle drag from the canvas, the
+ *       key cells' tap / drag / swap prompt, the Chop pad, the field, and `?demo=noedit`'s view-only fallback ── */
+import vm from 'node:vm';
+const ED9 = require('./edit.js');
+function domStub(html) {
+  const ids = new Set([...html.matchAll(/ id="([^"]+)"/g)].map(m => m[1]));
+  const errors = [], warns = [];
+  class El {
+    constructor(tag, id) { this.tagName = String(tag).toUpperCase(); this.id = id || ''; this.className = ''; this.style = {}; this.dataset = {}; this.hidden = false; this.disabled = false; this.value = ''; this._text = ''; this._html = ''; this._on = {}; this.children = []; this._q = new Map(); this._parent = null; this._calls = 0; this.offsetWidth = 200; this.offsetHeight = 100; this.width = 0; this.height = 0; this._w = 600; this._h = 290; this.checked = false; this.title = ''; this.textContentSet = 0; }
+    get classList() { const el = this; return { add: (...c) => { for (const x of c) if (!el.classList.contains(x)) el.className = (el.className + ' ' + x).trim(); }, remove: (...c) => { el.className = el.className.split(/\s+/).filter(x => x && !c.includes(x)).join(' '); }, toggle: (x, on) => { const has = el.classList.contains(x); const want = on == null ? !has : !!on; if (want && !has) el.classList.add(x); if (!want && has) el.classList.remove(x); return want; }, contains: x => el.className.split(/\s+/).includes(x) }; }
+    get textContent() { return this._text; } set textContent(v) { this._text = String(v); this.textContentSet++; }
+    get innerHTML() { return this._html; } set innerHTML(v) { this._html = String(v); this.children.length = 0; this._q.clear(); }
+    addEventListener(t, f) { (this._on[t] = this._on[t] || []).push(f); } removeEventListener() {}
+    appendChild(c) { c._parent = this; this.children.push(c); return c; } remove() { if (this._parent) this._parent.children = this._parent.children.filter(c => c !== this); }
+    querySelector(sel) { if (!this._q.has(sel)) { const c = new El(sel.startsWith('.') ? 'button' : sel, ''); c.className = sel.replace(/^\./, ''); c._parent = this; this._q.set(sel, c); } return this._q.get(sel); }
+    querySelectorAll() { return []; }
+    contains(x) { for (let e = x; e; e = e._parent) if (e === this) return true; return false; }
+    closest(sel) { for (let e = this; e; e = e._parent) if (e.classList.contains(sel.replace(/^\./, ''))) return e; return null; }
+    getBoundingClientRect() { return { left: 0, top: 0, width: this._w, height: this._h, right: this._w, bottom: this._h }; }
+    setPointerCapture() {} releasePointerCapture() {} focus() {} blur() {}
+    getContext() { const el = this; return new Proxy({}, { get: (o, k) => { if (k === 'measureText') return () => ({ width: 10 }); if (typeof k === 'string' && k in o) return o[k]; return (...a) => { el._calls++; }; }, set: (o, k, v) => { o[k] = v; return true; } }); }
+  }
+  const byId = new Map();
+  const document = {
+    getElementById: id => { if (!ids.has(id)) throw new Error('no element with id ' + id); if (!byId.has(id)) byId.set(id, new El(/canvas id="/.test(html.slice(html.indexOf(`id="${id}"`) - 12, html.indexOf(`id="${id}"`))) ? 'canvas' : 'div', id)); return byId.get(id); },
+    createElement: tag => new El(tag), addEventListener: () => {}, removeEventListener: () => {}, querySelectorAll: () => [], visibilityState: 'visible', activeElement: null, _at: null,
+    elementFromPoint: () => document._at,
+  };
+  const sandbox = { document, console: { log: () => {}, warn: (...a) => warns.push(a.join(' ')), error: (...a) => errors.push(a.join(' ')) }, errors, warns,
+    navigator: { userAgent: 'node', usb: undefined, serial: undefined }, location: { search: '', hash: '', protocol: 'http:', href: 'http://localhost/' }, history: { replaceState: () => {} },
+    performance, TextDecoder, TextEncoder, ReadableStream, WritableStream, Uint8Array, Int8Array, Uint32Array, Float32Array, DataView, Promise, Map, Set, Math, JSON, Number, String, Array, Object, Error, Date, isNaN, parseInt, parseFloat, RegExp, Symbol,
+    setTimeout: (f, ms) => setTimeout((...a) => { try { f(...a); } catch (e) { errors.push('timer: ' + (e.stack || e)); } }, ms), clearTimeout, setInterval: (f, ms) => { const t = setInterval(() => { try { f(); } catch (e) { errors.push('interval: ' + (e.stack || e)); } }, ms); t.unref(); return t; }, clearInterval,
+    requestAnimationFrame: f => setTimeout(() => { try { f(performance.now()); } catch (e) { errors.push('rAF: ' + (e.stack || e)); } }, 16),
+    confirm: () => true, alert: () => {}, isSecureContext: true, devicePixelRatio: 1, addEventListener: () => {}, HL, DEMO, ED: ED9 };
+  sandbox.window = sandbox; sandbox.globalThis = sandbox;
+  return { sandbox, errors, warns, El, byId };
+}
+const fireEv = (el, type, ev) => { const e = Object.assign({ preventDefault() {}, stopPropagation() {}, target: el, currentTarget: el, pointerId: 1, clientX: 0, clientY: 0, key: '' }, ev); for (const f of el._on[type] || []) f(e); if (typeof el['on' + type] === 'function') el['on' + type](e); };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const until = async (f, ms = 3000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (f()) return true; await sleep(20); } return f(); };
+async function loadPage(search) {
+  const html = readFileSync(path.join(here, 'index.html'), 'utf8');
+  const script = [...html.matchAll(/<script>\n([\s\S]*?)<\/script>/g)].pop()[1];
+  const D = domStub(html); D.sandbox.location.search = search; const ctx = vm.createContext(D.sandbox);
+  vm.runInContext(script, ctx, { filename: 'index.html' });
+  const G = expr => vm.runInContext(expr, ctx);
+  return { D, ctx, G, html };
+}
+{
+  const { D, G } = await loadPage('?demo=kit');
+  check('page: the inline script runs to the end under the stub (no throw), the Kit tab is on', D.errors.length === 0 && G('kitShown') === true, D.errors.join(' | ').slice(0, 300));
+  check('page: the table, the hits and the state arrive from the fake', await until(() => G('table && hits && st && st.srcPos != null')), D.errors.concat(D.warns).join(' | ').slice(0, 300));
+  await sleep(150);
+  check('page: with "edit" the editor is on — the panel, the field row, the status pill, the 290 px canvas; the 14-byte form was asked for', G('editOk') === true && !G("$('editor').hidden") && !G("$('ed_field').hidden") && G("$('kitwave').style.height") === '290px' && G('table.entries[0].flags') === 0 && G('demoDevice.log').includes(HL.CMD.table));
+  check('page: the Tap Allowance option is read from the live blob (40 ms)', G('tapAllowMs()') === 40 && G("$('chop_allow').textContent") === '40 ms');
+  check('page: the kit waveform, the histogram and the cells drew without a runtime error', G("$('kitwave')._calls") > 100 && G("$('onsethist')._calls") > 10 && G('keyCells[3].el.className').includes('rec') && D.errors.length === 0, D.errors.join(' | ').slice(0, 300));
+  /* a handle drag on the canvas: boundary 5, −15 px */
+  const SL = DEMO.SLICE_LEN; G('view.a = 0; view.b = st.bufLen'); await sleep(40);
+  const s5 = G('demoDevice.table[5].start'), kw = G("$('kitwave')"), x5 = G('demoDevice.table[5].start / st.bufLen * 600');   /* the kit demo swings: slice 5 opens late */
+  const posted0 = G('demoDevice.auditionPosted');
+  fireEv(kw, 'pointerdown', { clientX: x5, clientY: 222 }); for (let i = 1; i <= 15; i++) fireEv(kw, 'pointermove', { clientX: x5 - i, clientY: 222 });
+  check('page: the drag is local (the editor holds it, the fake is untouched)', G('ed.drag && ed.drag.kind') === 'handle' && G('ed.drag.pos') === s5 - 4800 && G('demoDevice.table[5].start') === s5);
+  fireEv(kw, 'pointerup', { clientX: x5 - 15, clientY: 222 });
+  check('page: release → SET_BOUNDARY on the fake, then the page\'s table follows (the refetch), orange, the history line', await until(() => G('demoDevice.table[5].start') === s5 - 4800) && await until(() => G('table.entries[5].start') === s5 - 4800) && G('table.entries[5].flags & 1') === 1 && await until(() => G("$('ed_hist').innerHTML").includes('boundary 5 −100 ms')) && G('demoDevice.auditionPosted') > posted0);
+  check('page: the wave windows survived the edit (no cache clear on a table-only change)', G('wave.cache.size') > 0);
+  /* the key cells: a tap selects and auditions; cell 7 dragged onto cell 3 (both recordings) → the red prompt → swap */
+  const c3 = G('keyCells[3].el'), c7 = G('keyCells[7].el');
+  const aud0 = G('demoDevice.auditionPosted');
+  fireEv(c3, 'pointerdown', { clientX: 50, clientY: 50 }); await sleep(30); fireEv(c3, 'pointerup', { clientX: 50, clientY: 50 });
+  check('page: tap a cell → selected key and entry, the cell pulses, one audition', G('selKey') === 3 && G('ed.selT') === 32 && await until(() => G('keyCells[3].el.className').includes('pulse')) && await until(() => G('demoDevice.auditionPosted') === aud0 + 1));
+  D.sandbox.document._at = c3;
+  fireEv(c7, 'pointerdown', { clientX: 300, clientY: 50 }); fireEv(c7, 'pointermove', { clientX: 280, clientY: 52 }); fireEv(c7, 'pointermove', { clientX: 120, clientY: 55 });
+  check('page: dragging a cell shows the ghost and lights the target red (the recording would be orphaned)', !G("$('ed_ghost').hidden") && G("$('ed_ghost').textContent").includes('swap') && G('keyCells[3].el.className').includes('drop') && G('keyCells[3].el.className').includes('red'));
+  fireEv(c7, 'pointerup', { clientX: 120, clientY: 55 }); await sleep(30);
+  const menu = G("$('ed_menu')");
+  check('page: the prompt opens, red, swap as the default', !menu.hidden && menu.className.includes('red') && menu.children.some(b => b.className === 'primary' && /swap/.test(b.textContent)));
+  menu.children.find(b => /swap/.test(b.textContent)).onclick();
+  check('page: swap → SWAP_KEYS(7, 3) on the fake, both recordings keep a key', await until(() => G('demoDevice.keySlice[3]') === 33 && G('demoDevice.keySlice[7]') === 32) && await until(() => G('st.keySlice[3]') === 33) && G("$('ed_menu').hidden") === true && G("$('ed_ghost').hidden") === true);
+  /* the Chop pad: TAP_MARK with the option's allowance; a marker lands */
+  G('demoDevice.srcPos = () => 8 * ' + SL + ' + 1000'); const n0 = G('demoDevice.nTable');
+  fireEv(G("$('chop')"), 'pointerdown', {});
+  check('page: Chop → TAP_MARK → an orange marker at the kick (8 SL, the allowance backed off 1920 and the snap found it), the history says so', await until(() => G('demoDevice.nTable') === n0 + 1) && G('demoDevice.table[' + n0 + '].start') === 8 * SL && G('demoDevice.table[' + n0 + '].flags') === 1 && await until(() => G("$('ed_hist').innerHTML").includes('tap → marker')));
+  /* the typed field: select the new marker, type an end in ms */
+  await until(() => G('table.entries.length') === n0 + 1); G('ed.select(' + n0 + ')'); await sleep(50);
+  const mEnd = G('demoDevice.table[' + n0 + '].start + demoDevice.table[' + n0 + '].len');
+  check('page: the field shows the selection\'s start and end', G("$('ed_sel').textContent") === `marker ${n0}` && G("$('ed_start').value") === String(8 * SL) && G("$('ed_end').value") === String(mEnd));
+  G("$('ed_unit').value = 'ms'"); fireEv(G("$('ed_unit')"), 'change', { target: G("$('ed_unit')") }); await sleep(40);
+  check('page: the unit switches the field', G("$('ed_end').value") === ED9.fmtMs(mEnd));
+  G("$('ed_end').value = '1150'"); fireEv(G("$('ed_end')"), 'change', { target: G("$('ed_end')") });
+  check('page: a typed end commits SET_ENTRY', await until(() => G('demoDevice.table[' + n0 + '].len') === 1150 * 48 - 8 * SL));
+  /* the onset panel: the threshold from a pointer on the histogram, Make markers */
+  const oh = G("$('onsethist')"); oh._h = 96; fireEv(oh, 'pointerdown', { clientX: 10, clientY: 8 }); fireEv(oh, 'pointerup', {});
+  await sleep(40); const thr = G('edThresh');
+  check('page: the histogram\'s pointer sets the threshold near the top, the button says how many', thr > 220 && /^Make \d+ marker/.test(G("$('ed_onsets').textContent")));
+  const want = +G("$('ed_onsets').textContent").match(/\d+/)[0]; G("$('ed_onsets').onclick()");
+  check('page: Make markers → FROM_ONSETS with that count', await until(() => G("$('ed_hist').innerHTML").includes(`→ ${want}`)) && G('demoDevice.table.filter((e, i) => i >= demoDevice.nSlices && e.len > 0 && !(e.flags & 1) && e.key < 0).length') === want);
+  /* nudge; undo stays disabled (undoDepth 0); keys follow the grid asks (confirm → true) */
+  const b6 = G('demoDevice.table[6].start'); G("$('ed_nudge_p').onclick()");
+  check('page: nudge all +5 ms', await until(() => G('demoDevice.table[6].start') === b6 + 240));
+  check('page: Undo / Redo disabled while undoDepth is 0, the depth line says why', G("$('ed_undo').disabled") === true && G("$('ed_redo').disabled") === true && /no journal/.test(G("$('ed_depth').textContent")));
+  G("$('ed_follow').onclick()");
+  check('page: keys follow the grid (confirmed, queued behind the nudge\'s reply) → every key on its span', await until(() => { const ks = G('Array.from(demoDevice.keySlice)'); return ks.every((t, k) => t === ED9.spanSlice(k, 32)); }, 6000));
+  check('page: no runtime errors or link warnings through all of it', D.errors.length === 0 && !D.warns.some(w => /table|state|hits/.test(w)), D.errors.concat(D.warns).join(' | ').slice(0, 400));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+  check('page: disconnect resets the editor and hides the panel', G('editOk') === false && G("$('editor').hidden") === true && G('ed.selT') === -1);
+}
+{
+  const { D, G } = await loadPage('?demo=noedit,kit');
+  check('noedit page: loads, connects', D.errors.length === 0 && await until(() => G('table && st')), D.errors.join(' | ').slice(0, 300));
+  await sleep(120);
+  check('noedit page: no editor — the panel hidden, no field, the 180 px canvas, the 13-byte table, no handles, no Chop', G('editOk') === false && G("$('editor').hidden") === true && G("$('ed_field').hidden") === true && G("$('kitwave').style.height") === '180px' && G('ed.layout(600, 180).edit') === false && G('demoDevice.table[0].flags') === 0 && G('table.entries[32].flags') === 0);
+  const kw = G("$('kitwave')"); kw._h = 180; G('view.a = 0; view.b = st.bufLen'); await sleep(30); const a0 = G('view.a');
+  fireEv(kw, 'pointerdown', { clientX: 300, clientY: 90 }); for (let i = 1; i <= 15; i++) fireEv(kw, 'pointermove', { clientX: 300 - 2 * i, clientY: 90 }); fireEv(kw, 'pointerup', { clientX: 270, clientY: 90 });
+  check('noedit page: a drag on the wave pans, exactly as before; nothing was sent', G('view.a') > a0 && !G('demoDevice.log').slice(-40).some(t => t === HL.CMD.action));
+  check('noedit page: no runtime errors', D.errors.length === 0, D.errors.join(' | ').slice(0, 300));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
 }
 
 /* ── the Android path: Google's Web Serial polyfill (vendored, unmodified) and the install manifest ── */
