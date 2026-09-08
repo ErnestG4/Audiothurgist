@@ -78,6 +78,10 @@
   .meter{width:160px} .meter i{background:#9be0b0;transition:width .08s linear} .meter.hot i{background:#ff6a5a}
   .usage i.mat{background:#3c78e6} .usage i.rec{background:#28c878}
   .wvbtns{display:flex;gap:4px;align-items:center;font-weight:400;text-transform:none;letter-spacing:0}
+  /* Scope */
+  .sc-ch{display:inline-flex;align-items:center;gap:6px;padding:4px 9px;font-size:12px;color:var(--mute)} .sc-ch i{width:10px;height:10px;border-radius:2px;display:inline-block;opacity:.3}
+  .sc-ch.on{color:var(--ink);border-color:#3a3a42} .sc-ch.on i{opacity:1} .sc-ch.auto{border-style:dashed}
+  #sc_clip{color:#ff6a5a;border-color:#6b2a24;font-weight:600}
 </style>
 </head>
 <body>
@@ -95,7 +99,7 @@
   <span id="diagpill" class="pill" title="worst control-loop gap and audio callback in the last second; playhead jumps > 1.5 steps and pattern regenerations since boot">diag: —</span>
 </header>
 <div id="notice"></div>
-<nav><button id="tab_play" class="on">Play</button><button id="tab_kit">Kit</button><button id="tab_opts">Options</button><button id="tab_man">Manual</button></nav>
+<nav><button id="tab_play" class="on">Play</button><button id="tab_kit">Kit</button><button id="tab_scope">Scope</button><button id="tab_opts">Options</button><button id="tab_man">Manual</button></nav>
 
 <main id="play" class="show">
   <section class="wide">
@@ -203,6 +207,23 @@
   </section>
 </main>
 
+<main id="scope">
+  <section class="wide">
+    <h2>Scope — out L · out R · in L (J1) · in R (J2) <span class="wvbtns"><span id="sc_fps" class="pill" title="frames per second the link delivers · requests per frame · bytes per second · last frame's round trip">—</span><span id="sc_win" class="pill" title="samples per channel × decimation = the window; whether the trace is triggered">—</span><span id="sc_clip" class="pill" title="a sample hit full scale (the module's own clip, or the gain here)" hidden>clip</span></span></h2>
+    <canvas id="bigscope" style="height:380px"></canvas>
+    <div class="row" style="margin-top:8px;gap:10px">
+      <span id="sc_chans" class="row" style="gap:4px"></span>
+      <label class="ctl" style="min-width:0;flex-direction:row;align-items:center;gap:6px">Time<select id="sc_decim" class="inline" title="samples per point: ×1 shows every sample (the shortest window), ×16 one in sixteen (the longest, ~80 ms — the ring holds 85 ms)"><option value="1">×1</option><option value="2">×2</option><option value="4" selected>×4</option><option value="8">×8</option><option value="16">×16</option></select></label>
+      <label class="ctl" style="min-width:0;flex-direction:row;align-items:center;gap:6px">Gain<select id="sc_gain" class="inline" title="display gain; a trace pinned to the edge lights the clip pill"><option value="1">×1</option><option value="2">×2</option><option value="4">×4</option><option value="8">×8</option></select></label>
+      <button id="sc_trig" class="mini on" title="start each window on the most recent rising zero crossing of the first shown channel (hysteresis ±3 %) — a stable trace; off = free-running">Trigger</button>
+      <button id="sc_peak" class="mini" title="each point is the largest-magnitude sample of its group instead of the first — clicks and hats survive a long window">Peak</button>
+      <button id="sc_glow" class="mini" title="draw the previous frames dimmer behind the current one">Afterglow</button>
+      <button id="sc_freeze" class="mini" title="stop polling and keep the last frame (the other tabs keep their own polls)">Freeze</button>
+    </div>
+    <p id="sc_help" style="font-size:12px;color:var(--mute);margin:8px 0 0">Four channels at full rate from the firmware's rings, one snapshot per frame so they are sample-aligned; polled as fast as the link allows while this tab shows (≤ 30 frames/s, the state poll eased to 4 Hz). Click a channel to show or hide it — the inputs show themselves while a signal is present. Time zooms the window, Gain the height. Needs firmware with <code>scope2</code>; older firmware shows its mono output trace here.</p>
+  </section>
+</main>
+
 <main id="opts">
   <section class="wide">
     <h2>Options <span id="opt_status" class="pill">—</span></h2>
@@ -231,7 +252,7 @@
 <script src="demo.js"></script>
 <script>
 'use strict';
-const { CMD, ACT, REC, ZONE_MULT, keyName, Link, hello, getDescriptor, getLive, setLive, parseState, fetchEnv, parseScope, fetchWave, fetchTable, fetchHits, fieldLabels, pagerInfo, optionsInfo, manualInfo, SET_STATE, SET_RESULT, setNameOk, setLabelName, saveSet, loadSet } = HL;
+const { CMD, ACT, REC, ZONE_MULT, keyName, Link, hello, getDescriptor, getLive, setLive, parseState, fetchEnv, parseScope, SCOPE, SCOPE_CH, scopePlan, fetchScopeFrame, fetchWave, fetchTable, fetchHits, fieldLabels, pagerInfo, optionsInfo, manualInfo, SET_STATE, SET_RESULT, setNameOk, setLabelName, saveSet, loadSet } = HL;
 const $ = id => document.getElementById(id);
 const COL = ['#eb4614', '#28c878', '#e6c828', '#3c78e6'];
 const CLS_NAME = ['kick', 'snare', 'hat', 'other'];
@@ -251,11 +272,15 @@ let setsOk = false, setSeqShown = -1, setAsked = null;
 const view = { a: 0, b: 1 };
 const wave = { cache: new Map(), queue: [], planSig: '', plane: 0, step: 1 };
 const WAVE_N = 480, WAVE_MS = 334;   /* ≤ 3 waveform windows per second */
+/* Scope tab (declared here: the hash may open the tab before the tab's code below runs). */
+const sc = { on: [true, true, null, null], decim: 4, gain: 1, trig: true, peak: false, glow: false, freeze: false,
+             frames: [], busy: false, timer: null, seen: [0, 0, 0, 0], fps: 0, rps: 0, bps: 0, fpsN: 0, bytes: 0, reqs: 0, fpsT: 0, lastMs: 0, err: '' };
+let scopeShown = false, scope2Ok = false;
 
 /* ───────────── Notice / tabs ───────────── */
 function notice(msg) { const n = $('notice'); n.style.display = msg ? 'block' : 'none'; n.textContent = msg || ''; }
-const TABS = { tab_play: 'play', tab_kit: 'kit', tab_opts: 'opts', tab_man: 'man' };
-function showTab(t) { for (const k in TABS) { $(k).classList.toggle('on', k === t); $(TABS[k]).classList.toggle('show', k === t); } kitShown = t === 'tab_kit'; }
+const TABS = { tab_play: 'play', tab_kit: 'kit', tab_scope: 'scope', tab_opts: 'opts', tab_man: 'man' };
+function showTab(t) { for (const k in TABS) { $(k).classList.toggle('on', k === t); $(TABS[k]).classList.toggle('show', k === t); } kitShown = t === 'tab_kit'; scopeShown = t === 'tab_scope'; if (scopeShown) { scopeKick(); invalidate(D.bigscope); } }
 for (const t in TABS) $(t).onclick = () => { showTab(t); history.replaceState(null, '', '#' + TABS[t]); if (kitShown) invalidate(D.kit | D.kitwave); };
 { const t = Object.keys(TABS).find(k => '#' + TABS[k] === location.hash); if (t) showTab(t); }
 
@@ -263,10 +288,10 @@ for (const t in TABS) $(t).onclick = () => { showTab(t); history.replaceState(nu
  * Nothing draws on arrival; frames flag what changed and a single
  * requestAnimationFrame draws only those parts. Canvas backing stores are
  * sized by ResizeObserver, never measured in the draw loop. */
-const D = { bar: 1, wave: 2, scope: 4, text: 8, controls: 16, kit: 32, kitwave: 64, all: 127 };
+const D = { bar: 1, wave: 2, scope: 4, text: 8, controls: 16, kit: 32, kitwave: 64, bigscope: 128, all: 255 };
 let dirty = 0, rafPending = false;
 function invalidate(m) { dirty |= m; if (!rafPending) { rafPending = true; requestAnimationFrame(draw); } }
-const canvases = ['ring', 'strip', 'wave', 'scope', 'kitwave'].map($);
+const canvases = ['ring', 'strip', 'wave', 'scope', 'kitwave', 'bigscope'].map($);
 function sizeCanvas(c) {
   const r = c.getBoundingClientRect(), d = window.devicePixelRatio || 1;
   const w = Math.max(1, Math.round(r.width * d)), h = Math.max(1, Math.round(r.height * d));
@@ -289,6 +314,7 @@ if ('IntersectionObserver' in window) new IntersectionObserver(es => { scopeVisi
 
 function draw() {
   rafPending = false; const m = dirty; dirty = 0;
+  if (m & D.bigscope) drawBigScope();
   if (!st) return;
   const ns = Math.max(1, st.nSlices), cur = Math.min(st.cur, ns - 1), base = Math.floor(cur / 16) * 16;
   if (m & D.bar) {
@@ -437,15 +463,15 @@ const popcount = n => { let c = 0; while (n) { c += n & 1; n >>= 1; } return c; 
  * Each stream keeps at most one request outstanding; user actions go out
  * `urgent` and are pumped before any queued poll. Paused while hidden. */
 const poll = { on: false, timer: null, tState: 0, tScope: 0, tLink: 0, tWave: 0, pState: null, pScope: null, pEnv: null, pLive: null, pTable: null, pHits: null, pWave: null };
-const STATE_MS = 100, SCOPE_MS = 200;
+const STATE_MS = 100, SCOPE_MS = 200, SCOPE_TAB_STATE_MS = 250;   /* the Scope tab eases the state poll to 4 Hz */
 function startPolling() { poll.on = true; poll.tState = poll.tScope = 0; tick(); }
 function stopPolling() { poll.on = false; clearTimeout(poll.timer); }
 function tick() {
   if (!poll.on || !link || link.closed) return;
   const now = performance.now();
   if (document.visibilityState !== 'hidden') {
-    if (!poll.pState && now - poll.tState >= STATE_MS) { poll.tState = now; poll.pState = link.request(CMD.state, undefined, { key: 'state' }).then(onState, e => warn('state', e)).finally(() => { poll.pState = null; }); }
-    if (!poll.pScope && scopeVisible && !kitShown && now - poll.tScope >= SCOPE_MS) { poll.tScope = now; poll.pScope = link.request(CMD.scope, undefined, { key: 'scope' }).then(b => { scope = parseScope(b); invalidate(D.scope); }, e => warn('scope', e)).finally(() => { poll.pScope = null; }); }
+    if (!poll.pState && now - poll.tState >= (scopeShown ? SCOPE_TAB_STATE_MS : STATE_MS)) { poll.tState = now; poll.pState = link.request(CMD.state, undefined, { key: 'state' }).then(onState, e => warn('state', e)).finally(() => { poll.pState = null; }); }
+    if (!poll.pScope && scopeVisible && !kitShown && !scopeShown && now - poll.tScope >= SCOPE_MS) { poll.tScope = now; poll.pScope = link.request(CMD.scope, undefined, { key: 'scope' }).then(b => { scope = parseScope(b); invalidate(D.scope); }, e => warn('scope', e)).finally(() => { poll.pScope = null; }); }
     /* Waveform windows: only while the Kit tab shows, one at a time, ≤ 3/s. */
     if (kitShown && wave.queue.length && !poll.pWave && now - poll.tWave >= WAVE_MS && st && st.freePos) {
       const q = wave.queue.shift(); poll.tWave = now;
@@ -455,7 +481,7 @@ function tick() {
   }
   poll.timer = setTimeout(tick, 25);
 }
-document.addEventListener('visibilitychange', () => { if (document.visibilityState !== 'hidden' && poll.on) { poll.tState = poll.tScope = 0; } });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState !== 'hidden' && poll.on) { poll.tState = poll.tScope = 0; if (scopeShown) scopeKick(); } });
 let warned = 0;
 function warn(what, e) { if (e && e.message === 'link closed') return; if (warned++ < 20) console.warn(what, e && e.message); }
 const arrEq = (a, b) => { for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false; return true; };
@@ -656,6 +682,96 @@ function syncKit(s) {
   if (s.matGen !== hitsGen && !poll.pHits) { const gen = s.matGen; poll.pHits = fetchHits(link).then(hh => { hits = hh; hitsGen = gen; invalidate(D.kitwave | D.wave); }, e => warn('hits', e)).finally(() => { poll.pHits = null; }); }
 }
 
+/* ───────────── Scope tab ─────────────
+ * The four-channel scope: 0x62 with a body (descriptor "scope2"), out L ·
+ * out R · in L · in R at full rate from the firmware's rings, one snapshot
+ * per frame so the channels are sample-aligned. Polled as fast as the link
+ * allows while the tab shows: the next frame goes out the moment the last
+ * one lands, floored at SCOPE_MIN_MS (~30 Hz); the state poll eases to 4 Hz
+ * meanwhile (SCOPE_TAB_STATE_MS). A frame is ONE request when max_body holds
+ * every channel beside the 10-byte header — the firmware's 1024 gives 253
+ * samples × 4 channels (1022 bytes); a 512-byte module gets two requests of
+ * two channels, the second pinned to the first one's pos (scopePlan /
+ * fetchScopeFrame in hostlink.js). Old firmware without "scope2" answers the
+ * empty body only: one mono trace here, at the Play tab's 256 × ×4. */
+const SC_COL = ['#9be0b0', '#e6c828', '#78a0ff', '#ff6a5a'];   /* out L · out R · in L · in R */
+const SCOPE_MIN_MS = 33, SCOPE_GLOW = 3, SCOPE_SEEN_MS = 3000;
+const scChanBtns = [];
+(function buildScopeChans() {
+  const host = $('sc_chans');
+  for (let c = 0; c < 4; c++) {
+    const b = document.createElement('button'); b.className = 'mini sc-ch'; b.innerHTML = `<i style="background:${SC_COL[c]}"></i>${SCOPE_CH[c]}`;
+    b.title = c < 2 ? `${SCOPE_CH[c]} — click to hide / show` : `${SCOPE_CH[c]} (J${c - 1}) — shows itself while a signal is present; click to force it on or off`;
+    b.onclick = () => { sc.on[c] = !scShown(c); invalidate(D.bigscope); };
+    host.appendChild(b); scChanBtns.push(b);
+  }
+})();
+/* on: true / false, or null = auto (an input shows itself while it carries a signal). Auto channels are still requested. */
+const scShown = c => sc.on[c] === true || (sc.on[c] === null && performance.now() - sc.seen[c] < SCOPE_SEEN_MS);
+function scMask() { let m = 0; for (let c = 0; c < 4; c++) if (sc.on[c] !== false) m |= 1 << c; return m || 1; }
+function scopeKick() { clearTimeout(sc.timer); sc.timer = null; if (!sc.busy) scopeLoop(); }
+async function scopeLoop() {
+  sc.timer = null;
+  if (!scopeShown || !link || link.closed || !info || sc.freeze || sc.busy || document.visibilityState === 'hidden') return;
+  sc.busy = true; const t0 = performance.now();
+  try {
+    let f;
+    if (scope2Ok) f = await fetchScopeFrame(link, scopePlan(info.maxBody, scMask(), sc.decim), sc.decim, (sc.trig ? SCOPE.trig : 0) | (sc.peak ? SCOPE.peak : 0));
+    else { const b = await link.request(CMD.scope, undefined, { key: 'scope' }); const d = parseScope(b); f = { n: d.length, decim: 4, pos: 0, triggered: false, ch: { 0: d }, reqs: 1, bytes: b.length, mono: true }; }
+    onScopeFrame(f, performance.now() - t0);
+  } catch (e) { sc.err = e.message; warn('scope', e); }
+  finally { sc.busy = false; if (scopeShown && !sc.freeze && link && !link.closed) sc.timer = setTimeout(scopeLoop, Math.max(0, SCOPE_MIN_MS - (performance.now() - t0))); }
+}
+function onScopeFrame(f, ms) {
+  const now = performance.now(); f.peak = {};
+  for (const c in f.ch) { const d = f.ch[c]; let pk = 0; for (let i = 0; i < d.length; i++) { const a = d[i] < 0 ? -d[i] : d[i]; if (a > pk) pk = a; } f.peak[c] = pk; if (pk > 3) sc.seen[c] = now; }
+  sc.frames.push(f); while (sc.frames.length > SCOPE_GLOW) sc.frames.shift();
+  sc.fpsN++; sc.bytes += f.bytes; sc.reqs += f.reqs; sc.lastMs = ms; sc.err = '';
+  if (now - sc.fpsT >= 1000) { const dt = (now - sc.fpsT) / 1000; sc.fps = sc.fpsN / dt; sc.bps = sc.bytes / dt; sc.rps = sc.reqs / dt; sc.fpsN = sc.bytes = sc.reqs = 0; sc.fpsT = now; }
+  invalidate(D.bigscope);
+}
+const fmtMs = ms => ms >= 10 ? ms.toFixed(0) + ' ms' : ms >= 1 ? ms.toFixed(2) + ' ms' : (ms * 1000).toFixed(0) + ' µs';
+function drawBigScope() {
+  const c = $('bigscope'), [g, w, h] = ctx(c); g.clearRect(0, 0, w, h);
+  const cur = sc.frames[sc.frames.length - 1];
+  const n = cur ? cur.n : 256, decim = cur ? cur.decim : sc.decim, winMs = n * decim / SR * 1000, mid = h / 2;
+  /* grid: ten divisions of time, quarters of level; the centre line brighter */
+  g.strokeStyle = '#1c1c21'; g.lineWidth = 1; g.beginPath();
+  for (let i = 1; i < 10; i++) { const x = Math.round(i * w / 10) + 0.5; g.moveTo(x, 0); g.lineTo(x, h); }
+  for (let i = 1; i < 4; i++) { if (i === 2) continue; const y = Math.round(i * h / 4) + 0.5; g.moveTo(0, y); g.lineTo(w, y); }
+  g.stroke(); g.strokeStyle = '#2a2a30'; g.beginPath(); g.moveTo(0, Math.round(mid) + 0.5); g.lineTo(w, Math.round(mid) + 0.5); g.stroke();
+  g.fillStyle = '#5e5c55'; g.font = '11px system-ui'; g.textAlign = 'left';
+  g.fillText(`${fmtMs(winMs / 10)} / div · ${fmtMs(winMs)} window · gain ×${sc.gain}`, 6, h - 6);
+  g.textAlign = 'right'; g.fillText(`±${(1 / sc.gain).toFixed(sc.gain > 1 ? 3 : 0).replace(/0+$/, '').replace(/\.$/, '')} full scale`, w - 6, 12);
+  if (!cur) {
+    g.textAlign = 'center'; g.fillStyle = '#8a887f'; g.font = '12px system-ui';
+    g.fillText(!link ? 'connect (or press Demo) to see the four channels' : sc.freeze ? 'frozen — nothing captured yet' : sc.err ? 'scope: ' + sc.err : 'waiting for the first frame…', w / 2, mid - 10);
+    setPill('sc_fps', '—', ''); setPill('sc_win', '—', ''); $('sc_clip').hidden = true; return;
+  }
+  let clipped = false; const scale = mid * 0.96 / 127;
+  const trace = (d, col, alpha, width) => {
+    g.strokeStyle = col; g.globalAlpha = alpha; g.lineWidth = width; g.beginPath();
+    for (let i = 0; i < d.length; i++) {
+      let v = d[i] * sc.gain; if (v >= 127) { v = 127; clipped = true; } else if (v <= -127) { v = -127; clipped = true; }
+      const x = i / Math.max(1, d.length - 1) * w, y = mid - v * scale; i ? g.lineTo(x, y) : g.moveTo(x, y);
+    }
+    g.stroke(); g.globalAlpha = 1;
+  };
+  const frames = sc.glow ? sc.frames : [cur];
+  frames.forEach((f, k) => { const last = f === cur; for (let ch = 0; ch < 4; ch++) { if (!f.ch[ch] || !scShown(ch)) continue; trace(f.ch[ch], f.mono ? SC_COL[0] : SC_COL[ch], last ? 1 : 0.15 + 0.15 * k, last ? 1.5 : 1); } });
+  if (cur.triggered) { g.fillStyle = '#e8e6df'; g.beginPath(); g.moveTo(0, mid - 6); g.lineTo(7, mid); g.lineTo(0, mid + 6); g.fill(); }
+  $('sc_clip').hidden = !clipped;
+  for (let ch = 0; ch < 4; ch++) { const b = scChanBtns[ch], on = scShown(ch) && !!cur.ch[ch]; b.classList.toggle('on', on); b.classList.toggle('auto', sc.on[ch] === null); b.disabled = !!cur.mono && ch > 0; }
+  setPill('sc_fps', sc.freeze ? 'frozen' : `${sc.fps.toFixed(0)} fps · ${cur.reqs} req/frame · ${(sc.bps / 1024).toFixed(1)} KB/s · ${sc.lastMs.toFixed(0)} ms`, sc.freeze ? 'warn' : (sc.fps >= 15 ? 'ok' : ''));
+  setPill('sc_win', `n = ${cur.n}, ×${cur.decim} → ${fmtMs(winMs)} · ${cur.mono ? 'mono output (old firmware)' : cur.triggered ? 'triggered' : sc.trig ? 'no trigger found (free-running)' : 'free-running'}${sc.peak && !cur.mono ? ' · peak' : ''}`, cur.mono ? 'warn' : '');
+}
+$('sc_decim').onchange = e => { sc.decim = +e.target.value; };
+$('sc_gain').onchange = e => { sc.gain = +e.target.value; invalidate(D.bigscope); };
+$('sc_trig').onclick = () => { sc.trig = !sc.trig; $('sc_trig').classList.toggle('on', sc.trig); };
+$('sc_peak').onclick = () => { sc.peak = !sc.peak; $('sc_peak').classList.toggle('on', sc.peak); };
+$('sc_glow').onclick = () => { sc.glow = !sc.glow; $('sc_glow').classList.toggle('on', sc.glow); invalidate(D.bigscope); };
+$('sc_freeze').onclick = () => { sc.freeze = !sc.freeze; $('sc_freeze').classList.toggle('on', sc.freeze); if (!sc.freeze) scopeKick(); invalidate(D.bigscope); };
+
 /* ───────────── Options (live blob edits) ─────────────
  * Values live in the running blob: read it fresh, change one byte, write it
  * back as a live audition. The read happens right before the write so the
@@ -739,6 +855,7 @@ function setDisconnected() {
   stopPolling(); link = null; info = null; desc = null; live = null; st = null; env = null; envGen = -1; scope = null; demoDevice = null; ctlSig = '';
   table = null; tableSig = ''; hits = null; hitsGen = -1; kitOk = false; wave.cache.clear(); wave.queue.length = 0; wave.planSig = ''; keyCells.forEach(c => { c.sig = ''; });
   setsOk = false; setSeqShown = -1; setAsked = null; setPill('s_status', '—', ''); $('s_save').disabled = $('s_load').disabled = true;
+  scope2Ok = false; clearTimeout(sc.timer); sc.timer = null; sc.frames.length = 0; sc.fps = sc.rps = sc.bps = 0; sc.err = ''; invalidate(D.bigscope);
   $('connect').textContent = 'Connect'; $('demo').disabled = false; setPill('modpill', 'not connected', ''); setPill('linkpill', 'link: —', ''); setPill('kit_status', '—', '');
   invalidate(D.kit | D.kitwave);
 }
@@ -757,12 +874,13 @@ async function connectPort(port, isDemo) {
     else if (!desc || !desc.audiothurgist) notice('Connected, but this firmware does not advertise the Audiothurgist state extension (0x60). Flash v0.7.0+ for the live view.');
     kitOk = !!(desc && desc.audiothurgist && desc.audiothurgist.table);   /* GET_TABLE / GET_WAVE / GET_HITS advertised */
     setsOk = !!(desc && desc.audiothurgist && desc.audiothurgist.sets);    /* ACTION 14 / 15 + the 219.. tail */
+    scope2Ok = !!(desc && desc.audiothurgist && desc.audiothurgist.scope2); /* SCOPE: the four-channel 0x62 body */
     fillSetList();
     setPill('kit_status', kitOk ? 'reading…' : 'this firmware has no sample-mode commands (0x64–0x66)', kitOk ? '' : 'warn');
     buildManual();
     if (opts) { try { live = await getLive(link, info); } catch (e) { notice('Options unreadable: ' + e.message); } }
     buildOptions(); setPill('opt_status', live ? 'live' : '—', live ? 'ok' : '');
-    startPolling();
+    startPolling(); if (scopeShown) scopeKick(); invalidate(D.bigscope);
   } catch (e) { notice('Connect failed: ' + e.message); if (link) await link.close(); setDisconnected(); }
 }
 /* The transport: native Web Serial where the browser has it (desktop
@@ -813,18 +931,21 @@ async function connect() {
     notice(m);
   }
 }
-/* ?demo[=brain,ext,pending,grids,euclid,camp,locks,kit,swing,old,short,v099,nosets]
+/* ?demo[=brain,ext,pending,grids,euclid,camp,locks,kit,swing,old,short,v099,nosets,scope,noin,body512]
  * — the fake module, optionally started on the Brain page, following a
  * clock (with a multiplier switch left pending), in a grammar, with locks,
  * with three keys recorded and a swung grid (kit: opens the Kit tab), with
  * a pre-v0.8.0 state body (no tails), the 167-byte CLOCK body (no flags),
  * the 176-byte v0.9.9 body (no sample-mode tail) or the 219-byte sample body
- * (no sets tail). */
+ * (no sets tail); `scope` opens the Scope tab, `noin` leaves J1/J2 silent
+ * (the input traces stay hidden), `body512` announces the protocol's
+ * default max_body so a frame takes two requests. */
 async function connectDemo(flags = '') {
   if (link) return; notice('');
   const f = new Set(flags.split(',').filter(Boolean));
-  demoDevice = new DEMO.FakeDevice({ tail: f.has('old') ? 148 : f.has('short') ? 167 : f.has('v099') ? 176 : f.has('nosets') ? 219 : 255, latencyMs: 6, kit: f.has('kit'), swing: f.has('kit') || f.has('swing') });
+  demoDevice = new DEMO.FakeDevice({ tail: f.has('old') ? 148 : f.has('short') ? 167 : f.has('v099') ? 176 : f.has('nosets') ? 219 : 255, latencyMs: 6, kit: f.has('kit'), swing: f.has('kit') || f.has('swing'), inputs: !f.has('noin'), maxBody: f.has('body512') ? 512 : DEMO.MAX_BODY });
   const d = demoDevice;
+  if (f.has('scope')) showTab('tab_scope');
   if (f.has('kit')) { showTab('tab_kit'); setInterval(() => { if (demoDevice === d && d.looperEvents < 16 && Math.random() < 0.5) d.looperEvents++; }, 3000); }
   if (f.has('brain')) d.brain = true;
   if (f.has('ext')) { d.ext = true; d.locked = true; d.mult = 2; d.multZone = 3; d.p2Engaged = true; }
