@@ -600,6 +600,10 @@ ALCHEMY_SDMMC_BSS alignas(32) static uint8_t gSetStage[16384];       /* WAV stag
 alignas(32) static char    ALCHEMY_SDRAM_BSS gSetJson[bb::kSetJsonMax];          /* one f_write / f_read of the whole text */
 alignas(8)  static uint8_t ALCHEMY_SDRAM_BSS gSetInfoMem[sizeof(bb::SetInfo)];   /* NOLOAD: placement-new'd at boot (NSDMI) */
 alignas(8)  static uint8_t ALCHEMY_SDRAM_BSS gSetLooperMem[sizeof(bb::Looper)];
+/* EDIT-UNDO (docs/packages/slice-edit-undo.md): the inverse-op journal — 64 records of 440 B plus the capture
+ * in flight, 28.6 KB, NOLOAD in SDRAM; a POD the engine clears through SetUndoJournal at boot. The audio thread
+ * alone writes it (inside ApplyEdit); the tail reads the two depths. */
+static bb::UndoJournal ALCHEMY_SDRAM_BSS gUndoJournal;
 static bb::SetInfo*  gSet       = nullptr;   /* the set being saved / loaded */
 static bb::Looper*   gSetLooper = nullptr;   /* looper staging, audio ↔ control, whole copies (Looper::Adopt) */
 static bb::SetPlan   ALCHEMY_SDRAM_BSS gSetPlan;   /* trivially constructible; PlanSet clears it */
@@ -2514,9 +2518,9 @@ static void ServiceLoad()
  *                   189 u8 nTable · 190 u32 bufLen · 194 i8 keySlice[24] · 218 u8 keyPlays ·
  *                   SETS: 219 u8 setState · 220 u8 setProgress · 221 u8 setResult ·
  *                   222 u8 setSeq · 223 char setName[32] (ends at 255) ·
- *                   EDIT: 255 u8 tableGen · 256 u8 undoDepth (0 until EDIT-UNDO) · 257 u8 selSlice
+ *                   EDIT: 255 u8 tableGen · 256 u8 undoDepth (EDIT-UNDO: journal steps back) · 257 u8 selSlice
  *                   (255 until EDIT-PANEL) · 258 u32 srcPos (the youngest voice's material position,
- *                   snapshotted by the audio thread once per block) — ends at 262
+ *                   snapshotted by the audio thread once per block) · EDIT-UNDO: 262 u8 redoDepth — ends at 263
  *   EDIT (docs/packages/slice-edit-proto.md; capability "edit":1; every body may carry a
  *   trailing u8 gen, 0 = unchecked, else it must equal tableGen or the op is BAD_STATE):
  *   0x63 ACTION     16 SET_BOUNDARY(u8 i, u32 pos) · 17 SET_ENTRY(u8 t, u32 start, u32 len) ·
@@ -2533,6 +2537,9 @@ static void ServiceLoad()
  *                   → u8 status (0 OK · 2 BAD_ARGS · 3 BAD_STATE: a stale gen, a take in flight, a set
  *                   op, a swap pending, the table full, no material), then on success u8 tableGen, then
  *                   for 18 / 19 / 29 u8 newIdx, for 26 u8 count. 27 / 28 answer u8 status alone.
+ *   EDIT-UNDO (docs/packages/slice-edit-undo.md): 30 UNDO_EDIT · 31 REDO_EDIT — no fields (an optional
+ *                   trailing gen as the others); one journal step either way → u8 status (2 BAD_ARGS = nothing to
+ *                   undo / redo, or a history something went past; 3 BAD_STATE as the other ops), u8 tableGen.
  *   0x65 GET_TABLE  ← [u8 first, u8 count, u8 form] — form 1 = entries carry a trailing u8 flags
  *                   (b0 orange · b1 tombstone), 14 bytes each; absent / 0 = the 13-byte form. */
 /* WEB → RECORD: ACTION 9 / 10. -1 = nothing requested; the consumer clears
@@ -2544,7 +2551,7 @@ static volatile bool    gWebLooperUndo  = false;   /* WEB → LOOPER */
 static volatile bool    gWebLooperClear = false;   /* WEB → LOOPER */
 /* WEB */
 
-/* ── EDIT: the ACTION 16..29 handler's helpers (control thread) ─────────── */
+/* ── EDIT: the ACTION 16..31 handler's helpers (control thread) ─────────── */
 /* The fields after the op byte, little-endian; Gen() is the byte after them. */
 struct EditBody
 {
@@ -2554,7 +2561,7 @@ struct EditBody
     uint32_t U32() { uint32_t v = (uint32_t)p[at] | ((uint32_t)p[at + 1] << 8) | ((uint32_t)p[at + 2] << 16) | ((uint32_t)p[at + 3] << 24); at += 4; return v; }
     uint8_t  Gen() const { return at < n ? p[at] : 0u; }
 };
-static const uint8_t kEditNeed[14] = {5u, 9u, 10u, 5u, 1u, 1u, 2u, 2u, 3u, 2u, 3u, 7u, 0u, 2u};   /* field bytes of ops 16..29 */
+static const uint8_t kEditNeed[16] = {5u, 9u, 10u, 5u, 1u, 1u, 2u, 2u, 3u, 2u, 3u, 7u, 0u, 2u, 0u, 0u};   /* field bytes of ops 16..31 */
 /* HostLink status for an EditStatus: Ok → 0; a refusal of the arguments → BAD_ARGS; a refusal of the
  * moment (stale gen, no room, no material) → BAD_STATE. */
 static uint8_t EditToStatus(bb::EditStatus s)
@@ -2605,7 +2612,7 @@ static void EditMeta(bb::EditReq& r)
     bb::AnalyseEntry(engine, r.start, r.len, r.meta, gClass.mode);
     r.flags |= bb::EditReq::kMeta;
 }
-/* ACTION 16..29. Writes the whole reply. */
+/* ACTION 16..31. Writes the whole reply. */
 static void HandleEdit(uint8_t op, const hostlink::ParsedFrame& f, hostlink::FrameWriter& w)
 {
     using bb::EditOp; using bb::EditReq; using bb::EditStatus;
@@ -2645,6 +2652,8 @@ static void HandleEdit(uint8_t op, const hostlink::ParsedFrame& f, hostlink::Fra
         case 23: r.op = EditOp::SwapKeys; r.a = b.U8(); r.b = b.U8(); break;
         case 24: { const int16_t ms = (int16_t)b.U16(); r.op = EditOp::NudgeAll; r.a = (int)ms * kEditMsToSamp; r.b = b.U8(); break; }
         case 25: r.op = EditOp::Promote; r.t = b.U8(); r.i = b.U8(); break;
+        case 30: r.op = EditOp::Undo; break;   /* EDIT-UNDO: one journal step back; BadArgs when there is none */
+        case 31: r.op = EditOp::Redo; break;   /* EDIT-UNDO: one step forward */
         case 26:
         {
             /* FROM_ONSETS: one op, several applies — the grey markers inside the break go first (a
@@ -2655,13 +2664,14 @@ static void HandleEdit(uint8_t op, const hostlink::ParsedFrame& f, hostlink::Fra
             uint8_t gen = b.Gen();
             if(engine.nSlices < 1 || engine.bufLen < 1) { w.U8(3u); return; }
             EditStatus st = EditStatus::Ok;
+            uint8_t join = 0u;   /* EDIT-UNDO: the first apply heads the undo step, every later one joins it */
             for(int t = engine.nSlices; t < engine.nTable && st == EditStatus::Ok; t++)
             {
                 const uint8_t fl = engine.TableFlags(t);
                 if((fl & (bb::Engine::kFlagTomb | bb::Engine::kFlagOrange)) || engine.tableKey[t] >= 0 || engine.slices[t].start >= engine.bufLen) continue;
-                EditReq d; d.op = EditOp::Tombstone; d.t = t; d.gen = gen;
+                EditReq d; d.op = EditOp::Tombstone; d.t = t; d.gen = gen; d.flags = join;
                 st = PostEdit(d, nullptr);
-                if(st == EditStatus::Ok) gen = 0u;
+                if(st == EditStatus::Ok) { gen = 0u; join = EditReq::kJoin; }
                 bb::Yield();
             }
             if(st != EditStatus::Ok) { w.U8(EditToStatus(st)); return; }
@@ -2679,12 +2689,12 @@ static void HandleEdit(uint8_t op, const hostlink::ParsedFrame& f, hostlink::Fra
             {
                 const int end = j + 1 < na ? acc[j + 1] : engine.bufLen;
                 if(end - acc[j] < bb::Engine::kRecMin) continue;
-                EditReq a; a.op = EditOp::AddEntry; a.key = -1; a.start = acc[j]; a.len = end - acc[j]; a.flags = 0u; a.gen = gen;
+                EditReq a; a.op = EditOp::AddEntry; a.key = -1; a.start = acc[j]; a.len = end - acc[j]; a.flags = join; a.gen = gen;
                 EditMeta(a);
                 int idx = -1;
                 st = PostEdit(a, &idx);
                 if(st != EditStatus::Ok) break;
-                gen = 0u; count++;
+                gen = 0u; join = EditReq::kJoin; count++;
                 bb::Yield();
             }
             if(st != EditStatus::Ok && !(st == EditStatus::Full && count > 0)) { w.U8(EditToStatus(st)); return; }
@@ -2803,9 +2813,12 @@ struct StateExt : hostlink::IHostlinkExtension
                  * the set the material came from (NUL-padded; empty = a loose file or a take). */
                 w.U8(gSetState); w.U8(gSetProgress); w.U8(gSetResult); w.U8(gSetSeq);
                 w.Bytes((const uint8_t*)gSetCurName, sizeof gSetCurName);
-                /* EDIT tail (255..261): u8 tableGen · u8 undoDepth (0 until EDIT-UNDO) · u8 selSlice (255 until
-                 * EDIT-PANEL) · u32 srcPos (the audio thread's snapshot: the youngest voice's material position). */
-                w.U8(engine.tableGen); w.U8(0u); w.U8(255u); w.U32(gSrcPos);
+                /* EDIT tail (255..261): u8 tableGen · u8 undoDepth (EDIT-UNDO: steps back, saturating) · u8 selSlice
+                 * (255 until EDIT-PANEL) · u32 srcPos (the audio thread's snapshot: the youngest voice's material
+                 * position). EDIT-UNDO tail (262): u8 redoDepth (steps forward). */
+                { const int ud = engine.UndoDepth(); w.U8(engine.tableGen); w.U8((uint8_t)(ud > 255 ? 255 : ud)); }
+                w.U8(255u); w.U32(gSrcPos);
+                { const int rd = engine.RedoDepth(); w.U8((uint8_t)(rd > 255 ? 255 : rd)); }   /* 262 */
                 return;
             }
             case 0x61u:
@@ -2935,8 +2948,9 @@ struct StateExt : hostlink::IHostlinkExtension
                         gSetReq = op == 14u ? 1u : 2u;
                         break;
                     }
-                    /* EDIT: 16..29 — the table ops, the audition voice, the tap mark (HandleEdit writes the reply) */
+                    /* EDIT: 16..29 — the table ops, the audition voice, the tap mark; EDIT-UNDO: 30 / 31 (HandleEdit writes the reply) */
                     case 16: case 17: case 18: case 19: case 20: case 21: case 22: case 23: case 24: case 25: case 26: case 27: case 28: case 29:
+                    case 30: case 31:
                         HandleEdit(op, f, w); return;
                     default: w.U8(2u); return;   /* BAD_ARGS */
                 }
@@ -3065,6 +3079,7 @@ int main()
     gVerb.SetLpFreq(9000.f);
 
     engine.Init(0xA0D107);
+    engine.SetUndoJournal(&gUndoJournal);   /* EDIT-UNDO: the SDRAM ring, cleared here */
 
     /* Boot material: first WAV on the card, else the synth break. */
     ScanSD();
