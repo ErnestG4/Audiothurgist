@@ -2148,6 +2148,136 @@ int main()
         CHECK(e.SetKeyTable(keys) && e.KeySlice(1) == idx, "…alive again after the slot is reused: accepted");
     }
 
+    /* ── EDIT-AUDITION package (docs/packages/slice-edit-proto.md): the scratch voice, the tap-mark rule ── */
+    SECTION("EDIT-AUDITION: CallRegion plays exactly [start, start + len) with the fades; a retrigger chokes; from-end; loop + ReleaseRegion; refusals");
+    {
+        float out[24];
+        auto renderN = [&](std::vector<float>& y, int nSamp) {
+            for(int i = 0; i < nSamp; i += 24) { e.Process(out, 24); y.insert(y.end(), out, out + 24); }
+        };
+        auto maxAbs = [](const std::vector<float>& y, size_t a, size_t b) { float m = 0.f; for(size_t i = a; i < b && i < y.size(); i++) { const float v = fabsf(y[i]); if(v > m) m = v; } return m; };
+        auto scratchVoice = [&]() { int sv = -1; for(int i = 0; i < bb::Engine::kVoices; i++) if(e.voices[i].active && e.voices[i].scratch) sv = i; return sv; };
+        auto scratchCount = [&]() { int n = 0; for(int i = 0; i < bb::Engine::kVoices; i++) n += e.voices[i].active && e.voices[i].scratch; return n; };
+        // 1. the region, exactly: slice 3 from +1000, 4800 samples
+        Fresh(e, 0, 1.f); e.muted = true;
+        const int st = 3 * kStep + 1000, ln = 4800;
+        CHECK(e.CallRegion(st, ln, 1.f, 0), "CallRegion accepted");
+        int sv = scratchVoice();
+        CHECK(sv >= 0 && e.voices[sv].start == st && e.voices[sv].end == st + ln && e.voices[sv].natEnd == st + ln - 240 && e.voices[sv].bound == st + ln && !e.voices[sv].held,
+              "the scratch voice's bounds are the region's (the release ramp inside its last 5 ms), tagged, not held");
+        std::vector<float> y; renderN(y, 9600);
+        CHECK(SliceOfFreq(MeasureFreq(&y[300], 4000), Rms(&y[300], 4000)) == 3, "it plays slice 3's tone (%.0f Hz)", MeasureFreq(&y[300], 4000));
+        CHECK(maxAbs(y, 0, 24) < 0.21f && maxAbs(y, 100, 300) > 0.3f, "the 1 ms attack: half gain over the first 24 samples (%.3f), full after (%.3f)", maxAbs(y, 0, 24), maxAbs(y, 100, 300));
+        CHECK(maxAbs(y, ln - 24, ln) < 0.06f && Rms(&y[ln + 48], 2000) < 1e-4f, "the 5 ms edge guard closes it at start + len (%.3f), then silence", maxAbs(y, ln - 24, ln));
+        CHECK(MaxStep(y) < 0.08f, "no click anywhere (max |Δ| %.3f)", MaxStep(y));
+        CHECK(scratchCount() == 0, "…and the voice has ended");
+        CHECK(e.trigFlash == 0 && e.callHits == 0 && e.gateFired == 0, "not a call: no trigger flash, no hit, no gate");
+        // 2. a retrigger: the old audition fades (5 ms) while the new one attacks
+        Fresh(e, 0, 1.f); e.muted = true;
+        e.CallRegion(3 * kStep, 4800, 1.f, 0);
+        std::vector<float> z; renderN(z, 1008);
+        e.CallRegion(7 * kStep, 4800, 1.f, 0);
+        CHECK(scratchCount() == 2, "right after the retrigger two tagged voices: the fading one and the new one (%d)", scratchCount());
+        renderN(z, 480);
+        CHECK(scratchCount() == 1, "10 ms on: the old one has faded out (%d)", scratchCount());
+        renderN(z, 2400);
+        CHECK(SliceOfFreq(MeasureFreq(&z[1488], 2400), Rms(&z[1488], 2400)) == 7, "only the new region sounds (%.0f Hz)", MeasureFreq(&z[1488], 2400));
+        CHECK(MaxStep(z) < 0.08f, "the choke is a fade, not a cut (max |Δ| %.3f)", MaxStep(z));
+        // 3. from-end: `start` is the END of the region
+        Fresh(e, 0, 1.f); e.muted = true;
+        CHECK(e.CallRegion(5 * kStep, 2400, 1.f, bb::Engine::kRegionFromEnd), "from-end accepted");
+        sv = scratchVoice();
+        CHECK(sv >= 0 && e.voices[sv].start == 5 * kStep - 2400 && e.voices[sv].end == 5 * kStep, "from-end: [end − len, end) = the last 2400 samples of slice 4");
+        std::vector<float> fe; renderN(fe, 4800);
+        CHECK(SliceOfFreq(MeasureFreq(&fe[300], 1800), Rms(&fe[300], 1800)) == 4 && Rms(&fe[2448], 2000) < 1e-4f, "…plays slice 4's tail then stops (%.0f Hz)", MeasureFreq(&fe[300], 1800));
+        // 4. loop: repeats until ReleaseRegion, which fades it out without a click
+        Fresh(e, 0, 1.f); e.muted = true;
+        CHECK(e.CallRegion(2 * kStep, 2400, 1.f, bb::Engine::kRegionLoop), "loop accepted");
+        std::vector<float> lp; renderN(lp, 7200);
+        sv = scratchVoice();
+        CHECK(sv >= 0 && e.voices[sv].looping && SliceOfFreq(MeasureFreq(&lp[4800], 2400), Rms(&lp[4800], 2400)) == 2,
+              "three lengths later the loop still plays slice 2 (%.0f Hz)", MeasureFreq(&lp[4800], 2400));
+        const size_t relAt = lp.size();
+        e.ReleaseRegion();
+        renderN(lp, 480);
+        CHECK(scratchCount() == 0 && Rms(&lp[relAt + 300], 180) < 2e-3f, "ReleaseRegion: ended within 10 ms, silent after the fade (rms %.4f)", Rms(&lp[relAt + 300], 180));
+        CHECK(MaxStep(lp) < 0.1f, "no click at the seams or the release (max |Δ| %.3f)", MaxStep(lp));
+        CHECK(e.trigFlash == 0 && e.callHits == 0, "still not a call");
+        // 5. refusals and clamps
+        Fresh(e, 0, 1.f); e.muted = true;
+        CHECK(!e.CallRegion(0, 63, 1.f, 0) && !e.CallRegion(e.freePos + 1, 480, 1.f, 0) && !e.CallRegion(0, 480, 0.f, 0), "refused: under 64 samples, past freePos, rate 0");
+        CHECK(e.CallRegion(e.freePos - 100, 4800, 1.f, 0) && scratchVoice() >= 0 && e.voices[scratchVoice()].end == e.freePos, "a region past freePos is clamped to it");
+        e.ReleaseRegion();
+        CHECK(e.CallRegion(100, 2400, 1.f, bb::Engine::kRegionFromEnd) && e.voices[scratchVoice()].start == 0 && e.voices[scratchVoice()].end == 100 && e.voices[scratchVoice()].natEnd == 50,
+              "from-end before the buffer's start is clamped to [0, end); a short region fades over its second half");
+        e.ReleaseRegion();
+        // 6. the sequencer's continuity is unaffected: (with a scratch voice) − (without) == (the scratch voice alone)
+        auto run = [&](bool call, bool mute) {
+            Fresh(e, 0, 1.f); e.muted = mute; e.extPhase = true;
+            std::vector<float> r; float o[24];
+            const int blocks = (int)(2. * e.barSeconds * kSr / 24.);
+            for(int b = 0; b < blocks; b++)
+            {
+                e.barPhase = fmod((double)b * 24. / kSr / (double)e.barSeconds, 1.0);
+                if(call && b == 1050) e.CallRegion(9 * kStep, 4800, 1.f, 0);   // sample 25200: mid step 4 of loop 1
+                e.Process(o, 24); r.insert(r.end(), o, o + 24);
+            }
+            return r;
+        };
+        std::vector<float> a = run(false, false); const unsigned fa = e.trigFlash;
+        std::vector<float> b = run(true, false);  const unsigned fb = e.trigFlash;
+        std::vector<float> c = run(true, true);
+        float worst = 0.f; for(size_t i = 0; i < a.size(); i++) { const float d = fabsf(b[i] - a[i] - c[i]); if(d > worst) worst = d; }
+        CHECK(fa <= 4 && fb == fa, "the verbatim run re-splices as often with the audition as without (%u vs %u)", fb, fa);
+        CHECK(worst < 1e-5f && Rms(&c[25200], 4800) > 0.1f, "the audition adds exactly itself to the loop (max |Δ| %.2e; its own rms %.3f)", worst, Rms(&c[25200], 4800));
+        // 7. the looper never records it
+        Prime(0);
+        e.barPhase = 0.25; e.CallRegion(3 * kStep, 2400, 1.f, 0);
+        CHECK(e.looper.n == 0, "Play with the looper on: CallRegion writes nothing (%d)", e.looper.n);
+        e.CallSlice(3, 1.f, false, true, false);
+        CHECK(e.looper.n == 1, "…while a written call does (%d)", e.looper.n);
+        // 8. SrcPos: the youngest non-scratch voice, else the current step's source
+        Fresh(e, 0, 1.f); e.muted = true;
+        CHECK(e.SrcPos() == 0, "nothing sounding: the start of what the step plays (%d)", e.SrcPos());
+        e.CallSlice(5, 1.f, false, false, false);
+        std::vector<float> sp; renderN(sp, 480);
+        CHECK(e.SrcPos() >= 5 * kStep + 470 && e.SrcPos() <= 5 * kStep + 490, "a call: its voice's position (%d)", e.SrcPos());
+        e.CallRegion(9 * kStep, 2400, 1.f, 0);
+        renderN(sp, 24);
+        CHECK(e.SrcPos() >= 5 * kStep + 490 && e.SrcPos() < 6 * kStep, "an audition does not count (%d)", e.SrcPos());
+    }
+
+    SECTION("EDIT-AUDITION: the TAP_MARK rule (bb::TapMarkAt) — allowance, onset snap, the length to the next onset, the caps and the limit");
+    {
+        const int on[6] = {0, 6000, 12000, 18000, 18300, 30000};
+        bb::TapMark m = bb::TapMarkAt(9000, 0, 480, on, 6, 96000);
+        CHECK(!m.snapped && m.start == 9000 && m.len == 3000, "no onset within ±480: raw, to the next onset (%d +%d)", m.start, m.len);
+        m = bb::TapMarkAt(12500, 480, 480, on, 6, 96000);
+        CHECK(m.snapped && m.start == 12000 && m.len == 6000, "the allowance pulls 12500 back to 12020, which snaps to 12000 (%d +%d)", m.start, m.len);
+        m = bb::TapMarkAt(12500, 0, 480, on, 6, 96000);
+        CHECK(!m.snapped && m.start == 12500 && m.len == 5500, "…without it 12500 is 500 from the onset: raw, to the next one (%d +%d)", m.start, m.len);
+        m = bb::TapMarkAt(12400, 0, 480, on, 6, 96000);
+        CHECK(m.snapped && m.start == 12000, "…and 12400 is within ±480 (%d)", m.start);
+        m = bb::TapMarkAt(30100, 0, 480, on, 6, 96000);
+        CHECK(m.snapped && m.start == 30000 && m.len == 12000, "past the last onset: the 250 ms cap (%d +%d)", m.start, m.len);
+        m = bb::TapMarkAt(3000, 0, 3000, on, 6, 96000);
+        CHECK(m.snapped && m.start == 0, "a tie snaps to the earlier onset (%d)", m.start);
+        m = bb::TapMarkAt(18100, 0, 480, on, 6, 96000);
+        CHECK(m.snapped && m.start == 18000 && m.len == 480, "the next onset 300 samples on: the length is held to kRecMin (%d +%d)", m.start, m.len);
+        m = bb::TapMarkAt(9000, 0, 0, on, 6, 96000);
+        CHECK(!m.snapped && m.start == 9000, "snap 0: only an exact onset snaps");
+        m = bb::TapMarkAt(12000, 0, 0, on, 6, 96000);
+        CHECK(m.snapped && m.start == 12000, "…which 12000 is");
+        m = bb::TapMarkAt(100, 480, 0, on, 6, 96000);
+        CHECK(m.start == 0 && m.snapped && m.len == 6000, "an allowance past the start clamps to 0 (an onset)");
+        m = bb::TapMarkAt(30300, 0, 480, on, 6, 33000);
+        CHECK(m.snapped && m.start == 30000 && m.len == 3000, "a span past the limit is shortened to it (%d +%d)", m.start, m.len);
+        m = bb::TapMarkAt(32900, 0, 0, on, 6, 33000);
+        CHECK(m.start == 32520 && m.len == 480, "…unless that leaves under kRecMin: then the start is pulled back (%d +%d)", m.start, m.len);
+        m = bb::TapMarkAt(50, 0, 0, on, 6, 300);
+        CHECK(m.start == 0 && m.len == 300, "a limit under kRecMin: what ApplyEdit will refuse, nothing worse (%d +%d)", m.start, m.len);
+    }
+
     printf("\n%d passed, %d failed\n", gPass, gFail);
     return gFail ? 1 : 0;
 }

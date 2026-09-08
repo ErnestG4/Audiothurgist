@@ -27,6 +27,43 @@ inline bool Engine::OnsetHit(int start, int len) const
     return false;
 }
 
+/* ── EDIT-AUDITION: the TAP_MARK rule, pure (docs/packages/slice-edit-proto.md) ──
+ * A tap while the break plays: the audio thread's material position at the
+ * tap (`srcPos`), minus the reaction allowance (`allow` samples, the Tap
+ * Allowance option), snapped to the nearest onset within ±`snap` samples
+ * (the earlier onset wins a tie), else left raw. The marker runs to the next
+ * onset after its start, capped at `maxLen` (the shell's 250 ms) and never
+ * under `minLen` (kRecMin); a span past `limit` (the shell's freePos) is
+ * shortened to it, and only when that leaves less than minLen is the start
+ * pulled back. With limit < minLen the result is what ApplyEdit will refuse
+ * (BadArgs) — the caller need not special-case it. */
+struct TapMark { int start, len; bool snapped; };
+inline TapMark TapMarkAt(int srcPos, int allow, int snap, const int* onsets, int n, int limit,
+                         int maxLen = 12000, int minLen = Engine::kRecMin)
+{
+    TapMark m = {0, 0, false};
+    int p = srcPos - allow;
+    if(p < 0) p = 0;
+    int best = -1, bestD = snap + 1;
+    for(int i = 0; i < n; i++)
+    {
+        int d = onsets[i] - p; if(d < 0) d = -d;
+        if(d < bestD) { bestD = d; best = i; }
+    }
+    if(best >= 0) { p = onsets[best]; m.snapped = true; }
+    int len = maxLen;
+    for(int i = 0; i < n; i++)
+        if(onsets[i] > p && onsets[i] - p < len) len = onsets[i] - p;
+    if(len < minLen) len = minLen;
+    if(p + len > limit)
+    {
+        len = limit - p;
+        if(len < minLen) { len = minLen; p = limit - len; if(p < 0) { p = 0; len = limit; } }
+    }
+    m.start = p; m.len = len;
+    return m;
+}
+
 inline int Engine::FreeSlot() const
 {
     for(int t = nSlices; t < nTable; t++)

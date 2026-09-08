@@ -53,6 +53,12 @@ struct Voice
      * belongs to its key: the sequencer's continuity branch leaves it alone. */
     bool   held = false;
     int8_t key  = -1;
+    /* EDIT-AUDITION: the scratch voice (Engine::CallRegion) — a one-shot
+     * with explicit bounds beside whatever plays. The sequencer's continuity
+     * branch never adopts it, a hit never chokes it (WouldChoke is false), the
+     * looper never sees it (CallRegion records nothing); only CallRegion
+     * (which steals it with the 5 ms choke) and ReleaseRegion end it early. */
+    bool   scratch = false;
 
     /* PLAY: per-voice fade geometry (Options → Fades). Trigger resets these
      * to the fixed 1 ms attack / 5 ms release; Adaptive mode then rewrites
@@ -80,6 +86,7 @@ struct Voice
         bound  = bufLen;
         held   = false;
         key    = -1;
+        scratch = false;   /* EDIT-AUDITION: a stolen scratch voice is an ordinary one again */
         start  = s.start;
         natEnd = s.start + s.len;
         int e  = s.start + (int)((float)s.len * ext);
@@ -108,6 +115,7 @@ struct Voice
     // tail (PLAY): the tail fills silence and always yields to a hit.
     bool WouldChoke() const
     {
+        if(scratch) return false;   /* EDIT-AUDITION: an audition sits beside the hits, never under them */
         return active && (tail != 0 || (rate >= 0.f && pos > (double)(natEnd - 480)));
     }
 
@@ -1166,6 +1174,92 @@ struct Engine
                      (e.style & Looper::kStaccato) ? 0.5f : 1.f, (e.style & Looper::kHeld) != 0, e.key);
     }
 
+    /* ── EDIT-AUDITION (docs/packages/slice-edit-proto.md): the scratch voice ──
+     * AUDIO. A one-shot with explicit bounds — the page's "play this region"
+     * while a handle is dragged. [start, start + len) at `rateMul` × the
+     * file's rate (no tempo varispeed: an audition is about the boundaries,
+     * not the groove), the fixed 1 ms attack and a 5 ms fade closing the
+     * region (its natural end sits chokeLen short of the region's end, so
+     * the release ramp runs inside it — a grid one-shot ends on the click
+     * bridge instead), clamped into [0, freePos) and refused under kGridMin.
+     * flags b0 (kRegionFromEnd): `start` is the region's END — play
+     * [start − len, start), the last len samples up to it. b1
+     * (kRegionLoop): repeat the region until ReleaseRegion (the tail loop
+     * mechanism: loopA = the start, loopB two samples short of the end, the
+     * click bridge covers the seam). One scratch voice sounds at a time: a
+     * new call fades the previous one with the normal choke geometry (still
+     * tagged, so nothing adopts it while it fades) and starts a fresh
+     * voice. Never chokes the sequencer's voices, never counted as a call
+     * (no gate, no hit trigger, no trigFlash), never recorded. */
+    static constexpr uint8_t kRegionFromEnd = 1u;
+    static constexpr uint8_t kRegionLoop    = 2u;
+    bool CallRegion(int start, int len, float rateMul, uint8_t flags)
+    {
+        if(!buf || freePos < kGridMin || !(rateMul > 0.f)) return false;
+        if(flags & kRegionFromEnd) start -= len;
+        if(start < 0) { len += start; start = 0; }
+        if(start > freePos) return false;
+        if(len > freePos - start) len = freePos - start;
+        if(len < kGridMin) return false;
+        for(int i = 0; i < kVoices; i++)
+            if(voices[i].active && voices[i].scratch) ScratchFade(voices[i]);
+        Voice*   v    = &voices[0];
+        uint32_t best = 0;
+        for(int i = 0; i < kVoices; i++)
+        {
+            if(!voices[i].active) { v = &voices[i]; break; }
+            if(!voices[i].scratch && voices[i].age >= best) { best = voices[i].age; v = &voices[i]; }
+        }
+        const Slice cell = {start, len};
+        v->Trigger(cell, rateMul, false, start + len, 1.f);   /* bound = end = the region's end */
+        v->scratch = true;
+        if(flags & kRegionLoop)
+        {
+            v->tail  = 1;
+            v->loopA = (double)start;
+            v->loopB = (double)(start + len - 2);
+        }
+        else
+        {
+            const int fade = len >= v->chokeLen + kGridMin ? v->chokeLen : len / 2;
+            v->natEnd = start + len - fade;   /* the release ramp runs over the region's last 5 ms */
+        }
+        return true;
+    }
+    // AUDIO. Every scratch voice fades out from here (5 ms), whatever its position.
+    void ReleaseRegion()
+    {
+        for(int i = 0; i < kVoices; i++)
+            if(voices[i].active && voices[i].scratch) ScratchFade(voices[i]);
+    }
+    static void ScratchFade(Voice& v)
+    {
+        if(v.tail) { v.Fade(v.epShape); return; }   /* a looping audition: the tail branch fades forward from pos */
+        if(v.pos >= (double)v.natEnd) return;        /* already in its edge guard */
+        v.Fade(v.epShape);
+    }
+    /* AUDIO (the shell snapshots it once per block for the state tail's
+     * srcPos). The material position of the youngest sounding voice that is
+     * not an audition, or — with nothing sounding — the start of what the
+     * current step plays (its source slice, else the grid slice). */
+    int SrcPos() const
+    {
+        int      p    = -1;
+        uint32_t best = 0xFFFFFFFFu;
+        for(int i = 0; i < kVoices; i++)
+        {
+            const Voice& v = voices[i];
+            if(!v.active || v.scratch || v.age >= best) continue;
+            best = v.age;
+            p    = (int)v.pos;
+        }
+        if(p >= 0) return p;
+        if(nSlices < 1) return 0;
+        const int k = curStep < 0 ? 0 : (curStep >= nSlices ? nSlices - 1 : curStep);
+        const int s = stepSrc[k] >= 0 && stepSrc[k] < nTable ? stepSrc[k] : k;
+        return slices[s].start;
+    }
+
     // Recorded entry owned by `key`, or -1.
     int RecordedEntry(int key) const
     {
@@ -1668,6 +1762,7 @@ struct Engine
                 // pitch step; position re-anchors at the next boundary)
                 if(vv.active && vv.relScale > 0.99f && vv.tail == 0 /* PLAY */
                    && !vv.held /* SAMPLE: a held voice belongs to its key */
+                   && !vv.scratch /* EDIT-AUDITION: an audition is not a run */
                    && fabsf(vv.rate - rate) < 0.02f * rate
                    && fabs(vv.pos - (double)cell.start) < 160.)
                 {
