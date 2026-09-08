@@ -94,13 +94,31 @@ function stateBody(len) {
     check('scope plan: 1024 holds four channels in one request (253)', p1.n === 253 && p1.masks.length === 1 && p1.masks[0] === 0x0f && 10 + 4 * p1.n <= 1024);
     check('scope plan: 512 splits four channels into two requests of two (251)', p2.n === 251 && p2.masks.length === 2 && p2.masks[0] === 0x03 && p2.masks[1] === 0x0c && 10 + 2 * p2.n <= 512);
     check('scope plan: 512 holds two channels in one request', p3.n === 251 && p3.masks.length === 1);
-    check('scope plan: ×16 is held to the ring (240)', p4.n === 240 && p4.masks.length === 1);
+    check('scope plan: ×16 at 1024 is still one request of four (253: the 64 K ring holds 512 × 16)', p4.n === 253 && p4.masks.length === 1 && HL.scopePlan(1024, 0x01, 16).n === 512);
     const p7 = HL.scopePlan(512, 0x0f, 16);
-    check('scope plan: a split frame at ×16 leaves slack for the second request (210)', p7.n === 210 && p7.masks.length === 2 && 210 * 16 <= HL.SCOPE.usable - HL.SCOPE.slack);
+    check('scope plan: a split frame at 512 is two requests of two channels (251)', p7.n === 251 && p7.masks.length === 2 && p7.reqs[1].mask === 0x0c);
+    /* the ext form: jacks, their own decimation, the trigger level and source */
+    const pe = HL.scopePlan(1024, 0x01, 4, 512, 200, 0x38, 1), pe2 = HL.scopePlan(1024, 0x0f, 4, 512, 200, 0x3f, 4), pe3 = HL.scopePlan(1024, 0, 1, 512, 200, 0x02, 32), pe4 = HL.scopePlan(512, 0x01, 16, 512, 200, 0x38, 1);
+    check('scope plan: out L + J6/J7/J8 at 1024 in one request (252)', pe.ext && pe.n === 252 && pe.reqs.length === 1 && pe.reqs[0].mask === 1 && pe.reqs[0].maskHi === 0x38 && 14 + 4 * 252 <= 1024);
+    check('scope plan: all ten channels at 1024 → two requests of five (202)', pe2.n === 202 && pe2.reqs.length === 2 && pe2.reqs[0].mask === 0x0f && pe2.reqs[0].maskHi === 1 && pe2.reqs[1].mask === 0 && pe2.reqs[1].maskHi === 0x3e);
+    check('scope plan: a lone jack at ×32 is held to the cv ring (511)', pe3.n === 511 && pe3.reqs.length === 1 && 511 * 32 <= HL.SCOPE.cvUsable);
+    check('scope plan: the gates preset at 512 splits into two requests', pe4.ext && pe4.reqs.length === 2 && pe4.n === 249);
+    const re = HL.scopeReq(0x01, 16, 249, HL.SCOPE.trig, null, { maskHi: 0x38, cvDecim: 1, level: 25, trig: HL.SCOPE.trigSet | 7 });
+    check('scope2 ext request: 13 bytes, ext flag, pos 0, maskHi / cvDecim / level / trigSrc', re.length === 13 && re[4] === (HL.SCOPE.trig | HL.SCOPE.ext) && HL.u32(re, 5) === 0 && re[9] === 0x38 && re[10] === 1 && re[11] === 25 && re[12] === 0x87);
+    const rea = HL.scopeReq(0x01, 16, 249, HL.SCOPE.trig, 777, { maskHi: 0x38, cvDecim: 1, level: -3, trig: 0 });
+    check('scope2 ext request with pos: at + ext, a negative level as i8', rea.length === 13 && rea[4] === (HL.SCOPE.trig | HL.SCOPE.at | HL.SCOPE.ext) && HL.u32(rea, 5) === 777 && rea[11] === 253);
+    { const b = new Uint8Array(14 + 3 * 2); b[0] = 0; b[1] = 0x01; b[2] = 4; b[3] = 2; b[4] = 0; b[5] = 1 | 4 | 8; new DataView(b.buffer).setUint32(6, 1610612000, true); b[10] = 0x28; b[11] = 8; b[12] = 24; b[13] = 7;
+      b.set([5, 6], 14); b.set([127, 0], 16); b.set([-64 & 0xff, 25], 18);
+      const f = HL.parseScope2(b);
+      check('scope2 ext reply: header, flags, jacks keyed 4..9 in bit order', f && f.ext && f.detached && f.triggered && f.maskHi === 0x28 && f.cvDecim === 8 && f.cvDiv === 24 && f.trigSrc === 7 && f.ch[0][1] === 6 && f.ch[7][0] === 127 && f.ch[9][0] === -64 && f.ch[9][1] === 25 && !f.ch[4] && !f.ch[8]);
+      check('scope2 ext reply too short for its header → null', HL.parseScope2(b.subarray(0, 12)) === null); }
+    check('scope volts', HL.scopeVolts(127) > 4.99 && HL.scopeVolts(127) < 5.01 && HL.scopeCvCode(1) === 25 && HL.scopeCvCode(-9) === -127 && HL.scopeCvCode(0) === 0);
+    check('scope age wraps at the clock', HL.scopeAge(10, 5) === 5 && HL.scopeAge(3, HL.SCOPE.wrap - 2) === 5 && HL.scopeAge(3, HL.SCOPE.cvWrap - 2, HL.SCOPE.cvWrap) === 5 && HL.SCOPE.cvWrap * 24 === HL.SCOPE.wrap);
+    check('jack roles under both maps', HL.SCOPE_JACK_ROLE[0][3] === 'kick gate out' && HL.SCOPE_JACK_ROLE[1][3] === 'gate in' && HL.SCOPE_JACK_IN[0].filter(Boolean).length === 3 && HL.SCOPE_JACK_IN[1].filter(Boolean).length === 4 && HL.SCOPE_CH.length === 10 && HL.SCOPE_CH[9] === 'J8');
     check('scope plan: 2048 gives 509 × 4 in one request', p5.n === 509 && p5.masks.length === 1);
     check('scope plan: one channel at 512 → 502', p6.n === 502 && p6.masks.length === 1);
     check('scope plan: empty mask → nothing', HL.scopePlan(1024, 0, 4).masks.length === 0);
-    check('scope channel names', HL.SCOPE_CH.length === 4 && HL.SCOPE_CH[2] === 'in L'); }
+    check('scope channel names', HL.SCOPE_CH.length === 10 && HL.SCOPE_CH[2] === 'in L' && HL.SCOPE_CH[4] === 'J3'); }
   /* SAMPLE / WEB tails: 176 (looper), 177..193 (record + buffer), 194..217 (key table). */
   const s5 = HL.parseState(stateBody(176));
   check('state 176: jack map, no looper', s5.jackMap === 1 && s5.looperEvents === undefined && s5.recState === undefined && s5.keySlice === undefined);
@@ -309,7 +327,7 @@ await link.start();
   const d = new DEMO.FakeDevice({ tail: 255, latencyMs: 1 }); d.t0 -= 2000;   /* two seconds of signal in the rings */
   const l = new HL.Link(new DEMO.FakePort(d)); await l.start();
   const info = await HL.hello(l); const desc = await HL.getDescriptor(l, info);
-  check('demo advertises scope2 and max_body 1024', desc.audiothurgist.scope2 === 1 && desc.audiothurgist.scope === 98 && info.maxBody === 1024);
+  check('demo advertises scope2 = 2 (jacks) and max_body 1024', desc.audiothurgist.scope2 === 2 && desc.audiothurgist.scope === 98 && info.maxBody === 1024);
   /* the empty body: the pre-SCOPE reply, 256 × ×4 of the mono sum */
   const old = await l.request(HL.CMD.scope);
   const os = HL.parseScope(old);
@@ -329,14 +347,15 @@ await link.start();
   /* peak decimation at ×16 keeps the transients plain picking drops: compare the two on the same window */
   const pp = HL.scopePlan(info.maxBody, 0x01, 16);
   const fa = await HL.fetchScopeFrame(l, pp, 16, HL.SCOPE.trig | HL.SCOPE.peak);
-  check('peak frame: ×16 held to 240 samples', fa.n === 240 && fa.ch[0].length === 240);
+  check('peak frame: ×16 × 512 (the 64 K ring)', fa.n === 512 && fa.ch[0].length === 512);
   const fb = await HL.fetchScopeFrame(l, HL.scopePlan(info.maxBody, 0x01, 4), 4, HL.SCOPE.trig);   /* ×4: 2048 of the 3840 usable, room for two more round trips */
   const bPlain = HL.parseScope2(await l.request(HL.CMD.scope, HL.scopeReq(0x01, 4, fb.n, 0, fb.pos)));
   const bPeak = HL.parseScope2(await l.request(HL.CMD.scope, HL.scopeReq(0x01, 4, fb.n, HL.SCOPE.peak, fb.pos)));
   const energy = a => a.reduce((s, v) => s + Math.abs(v), 0);
   check('at-pos: both requests honoured at the same pos', bPlain.atHonoured && bPeak.atHonoured && bPlain.pos === fb.pos && bPeak.pos === fb.pos && bPlain.n === fb.n);
   check('at-pos: the plain re-read equals the triggered frame sample for sample', bPlain.ch[0].every((v, i) => v === fb.ch[0][i]));
-  { const full = HL.parseScope2(await l.request(HL.CMD.scope, HL.scopeReq(0x01, 16, 240, 0, fa.pos))); check('a full-span (×16 × 240) window cannot be re-read a round trip later: not honoured', !full.atHonoured); }
+  { const back = k => fa.pos >= k ? fa.pos - k : fa.pos + HL.SCOPE.wrap - k; const full = HL.parseScope2(await l.request(HL.CMD.scope, HL.scopeReq(0x01, 16, 512, 0, back(50000)))); check('a pos 50 000 samples back at ×16 × 512 (8192 span, 65 280 usable) is honoured', full.atHonoured); }
+  { const gone = HL.parseScope2(await l.request(HL.CMD.scope, HL.scopeReq(0x01, 16, 512, 0, HL.scopeAge(fa.pos, 70000) >= 0 ? (fa.pos >= 70000 ? fa.pos - 70000 : fa.pos + HL.SCOPE.wrap - 70000) : 0))); check('a pos 70 000 samples back has left the audio ring: not honoured', !gone.atHonoured); }
   check('peak decimation keeps at least the energy plain picking sees', energy(bPeak.ch[0]) >= energy(bPlain.ch[0]) && bPeak.ch[0].every((v, i) => Math.abs(v) >= Math.abs(bPlain.ch[0][i])));
   /* the split plan (a 512-byte module): two requests of two channels pinned to one pos */
   const d5 = new DEMO.FakeDevice({ tail: 255, latencyMs: 1, maxBody: 512 }); d5.t0 -= 2000;
@@ -347,7 +366,7 @@ await link.start();
   check('512: a four-channel frame is two requests of 251, both ≤ 512 bytes', f5.reqs === 2 && f5.n === 251 && d5.log.filter(t => t === HL.CMD.scope).length === 2 && f5.bytes === 2 * (10 + 2 * 251) && Object.keys(f5.ch).length === 4);
   check('512: the second request was pinned to the first pos (channels aligned)', f5.triggered && f5.ch[2].length === 251 && f5.ch[3].length === 251);
   /* a pos the ring no longer holds is not honoured → the frame is reported torn */
-  { let bad = null; try { await l5.request(HL.CMD.scope, HL.scopeReq(0x0c, 4, 251, 0, f5.pos - 100000)); const t = HL.parseScope2(await l5.request(HL.CMD.scope, HL.scopeReq(0x0c, 4, 251, 0, f5.pos - 100000))); if (!t.atHonoured) bad = 'not honoured'; } catch (e) { bad = e.message; } check('a stale pos is answered but not honoured', bad === 'not honoured'); }
+  { let bad = null; try { const t = HL.parseScope2(await l5.request(HL.CMD.scope, HL.scopeReq(0x0c, 4, 251, 0, f5.pos >= 100000 ? f5.pos - 100000 : f5.pos + HL.SCOPE.wrap - 100000))); if (!t.atHonoured) bad = 'not honoured'; } catch (e) { bad = e.message; } check('a stale pos is answered but not honoured', bad === 'not honoured'); }
   await l5.close();
   /* BAD_ARGS: mask 0, mask 16, decim 0 / 17, n 0, a short body, at without pos */
   const bad = async body => { try { await l.request(HL.CMD.scope, body); return null; } catch (e) { return e.message; } };
@@ -361,6 +380,28 @@ await link.start();
   /* clamps: n over 512, and over what fits */
   const big = HL.parseScope2(await l.request(HL.CMD.scope, HL.scopeReq(0x03, 1, 9999)));
   check('scope2 clamps n to what fits two channels at 1024 (507)', big.n === 507 && big.ch[1].length === 507);
+  /* ── the jacks: cv-only, mixed aligned, gate-triggered, detached, ext BAD_ARGS ── */
+  const cvPlan = HL.scopePlan(info.maxBody, 0, 1, 512, 200, 0x3f, 4);
+  const fc = await HL.fetchScopeFrame(l, cvPlan, 1, 0, {}, { cvDecim: 4, level: 0, trig: 0 });
+  check('cv-only frame: six jacks split 3 + 3 × 336 (168 in one request would be too coarse), ext header, 1 s window', cvPlan.reqs.length === 2 && cvPlan.reqs[0].maskHi === 0x07 && fc.reqs === 2 && fc.n === 336 && fc.cvDecim === 4 && fc.cvDiv === 24 && Object.keys(fc.ch).join() === '4,5,6,7,8,9' && fc.bytes === 2 * (14 + 3 * 336));
+  check('cv-only: J4 carries the slow LFO (a fifth of its period in 672 ms), J5 a 0/5 V gate, J3 (no clock patched) rests near 0', Math.max(...fc.ch[5]) - Math.min(...fc.ch[5]) >= 40 && fc.ch[6].every(v => v === 127 || v === 0) && fc.ch[6].includes(127) && fc.ch[6].includes(0) && fc.ch[4].every(v => Math.abs(v) <= 1));
+  { const lf = await HL.fetchScopeFrame(l, HL.scopePlan(info.maxBody, 0, 1, 512, 200, 0x02, 32), 1, 0, {}, { cvDecim: 32, level: 0, trig: 0 });
+    check('J4 over 8 s (×32): the full ±5 V swing of the LFO', lf.n === 511 && Math.min(...lf.ch[5]) <= -125 && Math.max(...lf.ch[5]) >= 125); }
+  check('cv-only: pos is on a block (the cv clock)', fc.pos % 24 === 0);
+  const mixed = await HL.fetchScopeFrame(l, HL.scopePlan(info.maxBody, 0x01, 4, 512, 200, 0x08, 1), 4, HL.SCOPE.trig, {}, { cvDecim: 1, level: 0, trig: 0 });
+  check('mixed frame triggered on out L (auto): aligned, not detached, J6 along', mixed.triggered && !mixed.detached && mixed.trigSrc === 0 && mixed.ch[0] && mixed.ch[7] && mixed.n === 505);
+  const gate = await HL.fetchScopeFrame(l, HL.scopePlan(info.maxBody, 0x01, 16, 512, 200, 0x38, 1), 16, HL.SCOPE.trig, {}, { cvDecim: 1, level: 25, trig: HL.SCOPE.trigSet | 7 });
+  check('gates preset: triggered on J6 at 1 V, the gate high from the first cv sample, the kick under it', gate.triggered && gate.trigSrc === 7 && !gate.detached && gate.ch[7][0] === 127 && gate.ch[7][11] === 127 && gate.ch[7][12] < 25 && gate.pos % 6000 === 0 && gate.ch[0].slice(0, 20).some(v => v !== 0));
+  const lfo = await HL.fetchScopeFrame(l, HL.scopePlan(info.maxBody, 0x01, 4, 512, 200, 0x02, 32), 4, 0, {}, { cvDecim: 32, level: 0, trig: 0 });
+  check('an 8 s cv window with audio shown: the audio tier detaches to its newest window', lfo.detached && lfo.ch[0] && lfo.ch[5] && lfo.n * 32 <= HL.SCOPE.cvUsable);
+  const badE = async body => { try { await l.request(HL.CMD.scope, body); return null; } catch (e) { return e.message; } };
+  check('ext BAD_ARGS: maskHi bit 6', /BAD_ARGS/.test(await badE(HL.scopeReq(0, 4, 100, 0, null, { maskHi: 0x40, cvDecim: 1 }))));
+  check('ext BAD_ARGS: cvDecim 0 / 65', /BAD_ARGS/.test(await badE(Uint8Array.of(0, 4, 100, 0, HL.SCOPE.ext, 0, 0, 0, 0, 1, 0, 0, 0))) && /BAD_ARGS/.test(await badE(HL.scopeReq(0, 4, 100, 0, null, { maskHi: 1, cvDecim: 65 }))));
+  check('ext BAD_ARGS: trigSrc 10, trigSrc without the set bit', /BAD_ARGS/.test(await badE(HL.scopeReq(1, 4, 100, 0, null, { maskHi: 1, cvDecim: 1, trig: HL.SCOPE.trigSet | 10 }))) && /BAD_ARGS/.test(await badE(HL.scopeReq(1, 4, 100, 0, null, { maskHi: 1, cvDecim: 1, trig: 3 }))));
+  check('ext BAD_ARGS: no channel at all', /BAD_ARGS/.test(await badE(HL.scopeReq(0, 4, 100, 0, null, { maskHi: 0, cvDecim: 1 }))));
+  check('ext BAD_ARGS: a short ext body', /BAD_ARGS/.test(await badE(Uint8Array.of(1, 4, 100, 0, HL.SCOPE.ext, 0, 0, 0, 0, 1, 1, 0))));
+  { const ten = await HL.fetchScopeFrame(l, HL.scopePlan(info.maxBody, 0x0f, 4, 512, 200, 0x3f, 4), 4, HL.SCOPE.trig, {}, { cvDecim: 4, level: 0, trig: 0 });
+    check('all ten channels: two requests pinned to one pos, 202 each', ten.reqs === 2 && ten.n === 202 && Object.keys(ten.ch).length === 10 && ten.triggered); }
   const one = HL.parseScope2(await l.request(HL.CMD.scope, HL.scopeReq(0x01, 1, 9999)));
   check('scope2 clamps n to 512 for one channel', one.n === 512);
   /* silent inputs: the traces are flat, the outputs still play */
@@ -393,7 +434,7 @@ await link.start();
   check('service worker shell files exist', shell.length >= 6 && shell.every(f => fs.existsSync(new URL(f, here))), shell.filter(f => !fs.existsSync(new URL(f, here))).join(','));
   const html = fs.readFileSync(new URL('index.html', here), 'utf8');
   check('page links manifest and loads the polyfill only without navigator.serial', /rel="manifest"/.test(html) && /!navigator\.serial && navigator\.usb/.test(html) && /serialApi\(\)/.test(html));
-  check('page has the Scope tab wired to scope2', /id="tab_scope"/.test(html) && /id="bigscope"/.test(html) && /desc\.audiothurgist\.scope2/.test(html) && /fetchScopeFrame\(/.test(html) && /SCOPE_TAB_STATE_MS/.test(html));
+  check('page has the Scope tab wired to scope2', /id="tab_scope"/.test(html) && /id="bigscope"/.test(html) && /desc\.audiothurgist\.scope2/.test(html) && /fetchScopeFrame\(/.test(html) && /SCOPE_TAB_STATE_MS/.test(html) && /id="sc_cvchans"/.test(html) && /id="sc_p_gates"/.test(html) && /scope2 >= 2/.test(html));
 }
 
 console.log(`${fail ? 'FAIL' : 'OK'}: ${pass} passed, ${fail} failed`);
