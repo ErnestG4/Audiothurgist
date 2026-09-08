@@ -299,3 +299,23 @@ and a 5-fold LDA on the same 18 features 76.4 % — the supervised ceiling of
 these features under the ADTOF truth. More breaks do not help: the fit is
 saturated, and the remaining error is the features and the truth's own
 noise (ADTOF snare precision 72 %). The 147-file anchors stay.
+
+## Addendum 2026-09-08: the canonical bar as a prior ("the bop")
+
+Ernest's proposal: weight the labels by position in the bar — kick on 1,
+snare (and ghosts) from 5, kick again from 9, snare or cymbal from 13.
+Measured on the feature dumps with P(class | step mod 16) fitted on the 971
+training files (ADTOF truth): the shape is real (step 1 kick 71 %, step 5
+snare 72 %, step 13 snare 67 %) but step 9 is only 43 % kick and the twelve
+other positions are close to flat. As a classifier on its own the prior
+scores 43 % (canon) / 50 % (sample). Multiplied into the acoustic evidence
+(nearest-anchor distances, strength α = 0.5 … 6, with or without a search
+over the sixteen bar phases) it moves hit-step accuracy by at most +0.3
+points at α ≤ 1 and loses ground above that; on the backbeat positions
+themselves the evidence is already 77–86 % right and the prior pushes hats
+and crashes that genuinely sit on 1 or 5 into snare/kick. Pure per-loop
+k-means with clusters NAMED by the prior (no corpus anchors) reaches 59 % /
+57 % against 74 % / 70 % for the same clusters named by anchors. The lens
+already carries the bop: the one and the five are where it is most right.
+The place for the canonical bar is the grammar (what to keep on 1/5/9/13
+when swapping) and the bar-phase estimate, not the labels. Not shipped.
