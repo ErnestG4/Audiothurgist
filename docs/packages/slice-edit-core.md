@@ -240,6 +240,9 @@ new keep / restore / overlay path and the tombstone guards.
    the relaxed `PlanSet`, and skips tombstones on save (re-indexing the
    saved looper's keyless events as it goes). Note the pre-existing case:
    a set saved after `ClearKey` already fails to load for the same reason.
+   *Done — [slice-edit-persist.md](slice-edit-persist.md): `SetGridBoundaries`
+   gained a `flags` argument, `CommitEntry` joined `CommitSlice`, both
+   loader calls run where the table above says.*
 3. **Package 2 (EDIT-PROTO)** posts `EditReq` from the ACTION handler
    through a mailbox with an ack, refuses (`BAD_STATE`) while a take is
    armed or pending and during a set op, exports `TableFlags` in

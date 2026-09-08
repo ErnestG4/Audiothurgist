@@ -217,7 +217,7 @@ static bb::bardetail::BarScratch ALCHEMY_SDRAM_BSS gBarScratchMem;
 Settings           settings(hw, &pager);
 void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.12.0-edit-proto", "web");
+                           "0.12.1-edit-persist", "web");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -426,6 +426,14 @@ static const char* kTapAllowDisp = "{\"kind\":\"enum\",\"labels\":[\"0 ms\",\"20
 static Sel gTapAllow = {2};    /* 22 EDIT: Tap Allowance, 40 ms */
 static constexpr uint8_t kTapAllowMs[5] = {0u, 20u, 40u, 60u, 80u};
 /* EDIT end */
+/* EDIT-PERSIST (docs/packages/slice-edit-persist.md): Options byte 23 —
+ * Autosave. On (the default, Ernest 2026-09-08): 2 s after the last table
+ * change the table + key map are written to the current set's JSON (never
+ * its WAV), or to sets/<wavname>.slices.json beside a loose file. Byte 22 is
+ * EDIT-PROTO's Tap Allowance (the integrator merges; a placeholder here). */
+static const char* kAutosaveDisp = "{\"kind\":\"enum\",\"labels\":[\"Off\",\"On (2 s after an edit)\"]}";
+static Sel gAutosave = {1};   /* 23 EDIT-PERSIST: control reads .sel */
+/* EDIT-PERSIST end */
 static volatile uint8_t gJackMapCur = 0xFFu;   /* applied map: 0 Brain, 1 Voice */
 static volatile int     gHitCd  = 0;           /* Voice map: J7 hit trigger countdown (audio) */
 static volatile float   gHitVel = 0.f;         /* Voice map: J8 velocity volts */
@@ -437,7 +445,7 @@ static volatile float   gHitVel = 0.f;         /* Voice map: J8 velocity volts *
  * fans them out to the plain structs above and raises their dirty flags. */
 struct Options : Serializable
 {
-    static constexpr size_t kBytes = 23u;   /* SAMPLE: 17 Key Plays · RECORD: 18 Sampling, 19 Record Source, 20 Record · LOOPER: 21 Quantize · EDIT: 22 Tap Allowance */
+    static constexpr size_t kBytes = 24u;   /* SAMPLE: 17 Key Plays · RECORD: 18 Sampling, 19 Record Source, 20 Record · LOOPER: 21 Quantize · EDIT-PROTO: 22 Tap Allowance · EDIT-PERSIST: 23 Autosave */
     size_t SerializedSize() const override { return kBytes; }
     void   Serialize(uint8_t* o) const override
     {
@@ -450,6 +458,7 @@ struct Options : Serializable
         o[18] = gSampling.sel; o[19] = gRecSrc.sel; o[20] = gRecord.sel;   /* RECORD */
         o[21] = gQuantize.sel;                                              /* LOOPER */
         o[22] = gTapAllow.sel;                                              /* EDIT */
+        o[23] = gAutosave.sel;                                              /* EDIT-PERSIST */
     }
     static void Put(Sel& s, uint8_t v, uint8_t max)
     {
@@ -473,9 +482,10 @@ struct Options : Serializable
         Put(gSampling, in[18], 1); Put(gRecSrc, in[19], 1); Put(gRecord, in[20], 1);   /* RECORD */
         Put(gQuantize, in[21], 2);                                                    /* LOOPER */
         Put(gTapAllow, in[22], 4);                                                    /* EDIT */
+        Put(gAutosave, in[23], 1);                                                    /* EDIT-PERSIST */
         return true;
     }
-    uint32_t SchemaHash() const override { return 0x4F505437u; /* 'OPT7' (23 bytes) */ }
+    uint32_t SchemaHash() const override { return 0x4F505438u; /* 'OPT8' (24 bytes: 22 Tap Allowance, 23 Autosave) */ }
     bool     Describe(hostlink::ComponentWriter& w) const override
     {
         using hostlink::FieldType;
@@ -505,10 +515,12 @@ struct Options : Serializable
         /* RECORD end */
         /* LOOPER */ ok &= w.Field("quantize", "Quantize", 21, FieldType::Enum, 0.f, kQuantizeDisp, 3u); /* LOOPER end */
         /* EDIT */   ok &= w.Field("tap.allow", "Tap Allowance", 22, FieldType::Enum, 0.f, kTapAllowDisp, 5u); /* EDIT end */
+        /* EDIT-PERSIST */ ok &= w.Field("autosave", "Autosave", 23, FieldType::Enum, 0.f, kAutosaveDisp, 2u); /* EDIT-PERSIST end */
         return ok;
     }
 };
 static Options gOptions;
+static_assert(Options::kBytes == (size_t)bb::kSetOptionsToday, "the set / preset JSON's option width (bb_set.h) must follow Options::kBytes");   /* EDIT-PERSIST */
 /* ── end GRAMMAR ───────────────────────────────────────────────────────── */
 /* ── RECORD ── record state. The control thread owns every gesture and the
  * analysis; the audio thread only feeds (engine.RecFeed for a take into a
@@ -600,7 +612,25 @@ static char             gSetReqName[bb::kSetMaxName] = {};   /* ACTION 14 / 15's
 static volatile uint8_t gSetReq        = 0;      /* 1 save · 2 load — serviced by the main loop */
 static volatile bool    gSetSnapReq    = false;  /* control → audio: copy engine.looper into *gSetLooper */
 static volatile bool    gSetPendLooper = false;  /* control → audio: adopt *gSetLooper at the apply */
-static bool             gSetPendCommit = false;  /* after the apply: CommitSetRecordings */
+static bool             gSetPendCommit = false;  /* after the apply: CommitSetRecordings, the key table, the autosave baseline */
+/* EDIT-PERSIST: the file's grid starts (gSetPlan.starts / gridFlags / nGrid)
+ * go through Engine::SetGridBoundaries on the AUDIO thread right after
+ * SetMaterial at the apply — never from the main loop while voices sound.
+ * An old file carries the computed grid: a no-op there. */
+static volatile bool    gSetPendGrid   = false;  /* control → audio, consumed at the apply */
+static int              gSetWavLen     = 0;      /* the current set's WAV: frames per plane (what its JSON may describe) */
+static bool             gSetWavStereo  = false;  /*   … and its plane count */
+/* EDIT-PERSIST: autosave — Options byte 23. The table's generation is the
+ * trigger: 2 s after it last moved (and only while nothing else touches the
+ * card or the planes) the JSON half of a save goes to the card. `gAutoClean`
+ * is the generation the card already holds (set after a load's hooks and
+ * after every save, success or failure — one attempt per generation). */
+static uint8_t          gAutoClean     = 0;      /* the generation on the card */
+static uint8_t          gAutoSeen      = 0;      /* the generation the 2 s timer was started for */
+static uint32_t         gAutoT0        = 0;      /* NowUs() when it was seen */
+static bool             gAutoArm       = false;  /* a load is in flight: take the post-apply generation as clean */
+static constexpr uint32_t kAutosaveUs  = 2000000u;
+/* EDIT-PERSIST end */
 static bool             gSetFull       = false;  /* the sink saw a short write (card full) */
 static float            gSetErrT       = 0.f;    /* B-LED red flash, frames */
 static uint32_t         gSetTotal = 0, gSetDone = 0;   /* the save's byte count */
@@ -870,6 +900,8 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
         /* SAMPLE: the plane's capacity lets recordings land past the material; a
          * re-apply (same buffer) keeps them, a load (the other buffer) starts over */
         engine.SetMaterial(gPlay, gPendLen, kSr, gPendOnsets, gPendN, gPendClass, gPendHint, bR /* RECORD */, kBufMax);
+        /* EDIT-PERSIST: a set's (or a sidecar's) grid starts, before anything can trigger — the audio thread is where slices[] is written */
+        if(gSetPendGrid) { engine.SetGridBoundaries(gSetPlan.starts, gSetPlan.nGrid, gSetPlan.gridFlags); gSetPendGrid = false; }
         memcpy(gSal, gPendSal, sizeof gSal);
         /* GATES */
         memcpy(engine.stepBands, gPendBands, sizeof gPendBands);   /* SAMPLE: the source's size — the engine's table is wider */
@@ -1787,7 +1819,23 @@ static void ScanSD()
  * onset table → bars → swing → classes → density → bands → envelope →
  * gApply (the audio thread swaps and calls SetMaterial). Control thread;
  * every long loop yields to the clock. */
-static void PrepareMaterial(int len, int* cues, int nCues, bool stereo, int knownBars)
+/* EDIT-PERSIST: a loose file's sidecar (*gSet, read by ReadSidecar) against
+ * the conditioned material: the plan is staged only when the sidecar was
+ * made from this very buffer (its material length matches — the
+ * conditioning is deterministic for the same file, options and firmware);
+ * its grid starts apply at the audio thread's swap when the slice count
+ * still matches (else the markers and their keys still come back and the
+ * grid keys default), its swing replaces the analysis's so the untouched
+ * boundaries land where the file has them. A sidecar that does not fit is
+ * ignored: the file loads as it always did. */
+static void StageSidecar(int len)
+{
+    if(!bb::PlanSet(*gSet, gSetPlan) || gSetPlan.material != len || gSetPlan.len != len)
+    { memset(&gSetPlan, 0, sizeof gSetPlan); return; }
+    if(gSetPlan.nGrid == gPendHint) { gPendSwing = gSetPlan.swing; gSetPendGrid = true; }
+    gSetPendCommit = true;
+}
+static void PrepareMaterial(int len, int* cues, int nCues, bool stereo, int knownBars, bool sidecar = false)
 {
     /* SLICE: detector mode from Options → Onsets; the conditioning reports the
      * whole-bar count it cut the buffer to (0 when the prior applied) */
@@ -1819,6 +1867,8 @@ static void PrepareMaterial(int len, int* cues, int nCues, bool stereo, int know
     gPendStereo = stereo;
     gLoadFlash  = 1.f;
     gSetCurName[0] = 0;     /* SETS: a loose file or a take, not a set */
+    if(sidecar) StageSidecar(len);   /* EDIT-PERSIST: a loose file's saved table, before the apply */
+    gAutoArm    = true;              /* EDIT-PERSIST: the post-apply generation is the card's */
     gApply      = true;     /* audio thread swaps + SetMaterial */
 }
 
@@ -1934,14 +1984,62 @@ static int AddSetEntry(const char* name)
 }
 /* The looper snapshot: the audio thread copies its list into *gSetLooper
  * between two blocks (Insert's memmove must not be read half-way). */
-static void SnapshotLooper()
+static bool SnapshotLooper()
 {
     gSetSnapReq = true;
     {   /* wait ≥ 2 audio blocks by the clock, not by iterations (review M5) */
         const uint32_t t0 = TickNow();
         while(gSetSnapReq && (TickNow() - t0) < 2000u * gTicksPerUs) bb::Yield();
     }
-    if(gSetSnapReq) { gSetSnapReq = false; SetFinish(6); return; }   /* the audio thread never ran: refuse rather than save a stale looper */
+    if(gSetSnapReq) { gSetSnapReq = false; return false; }   /* the audio thread never ran: refuse rather than save a stale looper */
+    return true;
+}
+/* EDIT-PERSIST: the JSON half of a save — SetInfo → sets/<name>.json (or a
+ * sidecar path), written to `<path>.tmp` and renamed over, so an interrupted
+ * write never leaves a half document beside a good WAV. */
+static bool WriteSetJson(const char* path, const bb::SetInfo& s)
+{
+    char tmp[176];
+    const size_t n = strlen(path);
+    if(n + 5 > sizeof tmp) return false;
+    memcpy(tmp, path, n); memcpy(tmp + n, ".tmp", 5);
+    gSetTotal = 0;
+    bool ok = f_open(&gSetFil, tmp, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK;
+    if(!ok) return false;
+    ok = bb::SetWriter::Json(bbwav::Sink{&SdSink, &gSetFil}, s, gSetJson, sizeof gSetJson);
+    ok = (f_close(&gSetFil) == FR_OK) && ok;
+    if(ok) { f_unlink(path); ok = f_rename(tmp, path) == FR_OK; }
+    if(!ok) f_unlink(tmp);
+    return ok;
+}
+/* EDIT-PERSIST: "0:/sets/<basename of entry>.slices.json" — the loose
+ * file's sidecar (the entry's directory is dropped: sets/plain.wav, a
+ * JSON-less WAV in sets/, gets sets/plain.wav.slices.json). */
+static bool SidecarPath(const char* entry, char* out, size_t cap)
+{
+    const char* base = strrchr(entry, '/');
+    base = base ? base + 1 : entry;
+    const size_t n = strlen(base);
+    if(n == 0 || 8 + n + 13 > cap) { if(cap) out[0] = 0; return false; }
+    memcpy(out, "0:/sets/", 8); memcpy(out + 8, base, n); memcpy(out + 8 + n, ".slices.json", 13);
+    return true;
+}
+/* EDIT-PERSIST: a loose file's sidecar, read into *gSet before the load
+ * pipeline runs (the FatFs part; the plan is staged by StageSidecar once the
+ * conditioned length is known). true = *gSet holds a parsed sidecar. */
+static bool ReadSidecar(const char* entry)
+{
+    char path[160];
+    if(!SidecarPath(entry, path, sizeof path) || !CardReady()) return false;
+    SdCard::BusyGuard busy(sd);
+    if(f_stat(path, &gFno) != FR_OK) return false;
+    if(f_open(&gSetFil, path, FA_READ) != FR_OK) return false;
+    const uint32_t sz = (uint32_t)f_size(&gSetFil);
+    UINT       br = 0;
+    const bool rd = sz > 0 && sz < sizeof gSetJson && f_read(&gSetFil, gSetJson, (UINT)sz, &br) == FR_OK && br == sz;
+    f_close(&gSetFil);
+    bb::Yield();
+    return rd && bb::SetReader::Json(gSetJson, sz, *gSet) && gSet->sr == (int)kSr;
 }
 /* Save the playing material as sets/<name>: the WAV first (PCM16, both
  * planes when the material is stereo, cues = the table's starts), then the
@@ -1957,10 +2055,10 @@ static void SaveSet(const char* name)
     SdCard::BusyGuard busy(sd);
     gSetState = 1; gSetProgress = 0; gSetFull = false;
     if(!SetDirsOk()) { SetFinish(3); return; }
-    SnapshotLooper();
+    if(!SnapshotLooper()) { SetFinish(6); return; }
     bb::SetInfo& s = *gSet;
     new(&s) bb::SetInfo();
-    bb::SetFromEngine(engine, *gSetLooper, s, engine.bufR != nullptr, (int)kSr);
+    bb::SetFromEngine(engine, *gSetLooper, s, engine.bufR != nullptr, (int)kSr);   /* EDIT-PERSIST: compacted, with flags, grid and keys */
     strncpy(s.name, name, sizeof s.name - 1);
     s.bars     = gGridBars;
     s.bpm      = engine.NativeBpm();
@@ -2004,6 +2102,8 @@ static void SaveSet(const char* name)
     if(!wavOk || !jsonOk) { SetFinish(gSetFull ? 2 : 3); return; }
     gCurFile = AddSetEntry(name);
     strncpy(gSetCurName, name, sizeof gSetCurName - 1); gSetCurName[sizeof gSetCurName - 1] = 0;
+    gSetWavLen = s.len; gSetWavStereo = s.stereo;   /* EDIT-PERSIST: what an autosave may describe */
+    gAutoClean = engine.tableGen; gAutoSeen = gAutoClean;
     SetFinish(0);
 }
 /* A set from the card into the load buffer: the WAV whole (no 17 s cap — a
@@ -2037,6 +2137,7 @@ static int LoadSet(const char* name, int fileIdx)
     gOptions.Serialize(opt);
     bb::MergeOptions(*gSet, opt, opt, (int)Options::kBytes);
     opt[20] = 0;   /* Record: a load never arms a take */
+    opt[23] = gAutosave.sel;   /* EDIT-PERSIST: Autosave is the device's, not the set's */
     gOptions.Deserialize(opt);
     gBars.dirty = false; gSwing.dirty = false; gOnsetDet.dirty = false; gSampling.dirty = false; gClass.dirty = false;
     const bool wantR = gSampling.sel == bb::kSampStereo && gSet->stereo;
@@ -2067,7 +2168,10 @@ static int LoadSet(const char* name, int fileIdx)
     const int nEv = bb::LooperFromSet(*gSet, *gSetLooper);
     gSetLooper->divisions = nsl;
     gSetPendLooper = nEv > 0;          /* the audio thread adopts it right after SetMaterial (which empties the loop) */
-    gSetPendCommit = p.nRec > 0;       /* CommitSlice needs the new planes: after the swap */
+    gSetPendGrid   = true;             /* EDIT-PERSIST: the file's grid starts at the apply (an old file: a no-op) */
+    gSetPendCommit = true;             /* the markers (CommitEntry needs the new planes), the key table, the autosave baseline: after the swap */
+    gAutoArm       = true;
+    gSetWavLen = gSet->len; gSetWavStereo = gSet->stereo;   /* EDIT-PERSIST: what an autosave may describe */
     gCurFile = fileIdx;
     strncpy(gSetCurName, name, sizeof gSetCurName - 1); gSetCurName[sizeof gSetCurName - 1] = 0;
     gLoadFlash = 1.f;
@@ -2210,17 +2314,80 @@ static int RestorePresetBackups()
     }
     return restored;
 }
-/* Main loop: the recordings of a loaded set once the audio thread has the
- * planes, ACTION 14 / 15, the preset backups. */
+/* EDIT-PERSIST: the autosave — the JSON half of a save, 2 s after the table
+ * last moved. Into sets/<name>.json when the material came from a set (the
+ * WAV is never rewritten, so only what lies inside it is described: a take
+ * since the save waits for an explicit Save set); into
+ * sets/<wavname>.slices.json — the sidecar, the set JSON without the
+ * material, options or looper — beside a loose card file; nowhere for a
+ * take. Main loop, under BusyGuard, the sink yields; never during a take or
+ * a set op (the caller checks). false = failed, reported once as code 8. */
+static bool AutosaveNow()
+{
+    if(!CardReady()) return false;
+    SdCard::BusyGuard busy(sd);
+    if(!SetDirsOk()) return false;
+    bb::SetInfo& s = *gSet;
+    new(&s) bb::SetInfo();
+    char path[160];
+    if(gSetCurName[0])
+    {
+        if(!SnapshotLooper()) return false;
+        bb::SetFromEngine(engine, *gSetLooper, s, gSetWavStereo, (int)kSr, gSetWavLen);
+        strncpy(s.name, gSetCurName, sizeof s.name - 1);
+        s.bars     = gGridBars;
+        s.bpm      = engine.NativeBpm();
+        s.nOptions = (int)Options::kBytes;
+        gOptions.Serialize(s.options);
+        char wav[64];
+        if(!bb::SetPaths(gSetCurName, wav, path, sizeof wav)) return false;
+    }
+    else if(gCurFile >= 0 && gCurFile < gNumFiles)
+    {
+        gSetLooper->Clear();   /* the sidecar carries no looper */
+        bb::SetFromEngine(engine, *gSetLooper, s, false, (int)kSr, engine.bufLen);
+        strncpy(s.name, gFiles[gCurFile], sizeof s.name - 1);
+        s.bars = gGridBars;
+        s.bpm  = engine.NativeBpm();
+        if(!SidecarPath(gFiles[gCurFile], path, sizeof path)) return false;
+    }
+    else return true;   /* a take: nothing on the card to attach to */
+    if(s.len <= 0 || s.nSlices <= 0) return false;
+    return WriteSetJson(path, s);
+}
+static void ServiceAutosave()
+{
+    const uint8_t gen = engine.tableGen;
+    if(gAutoArm)
+    {
+        if(gApply || gReapply || gSetPendCommit) return;   /* the load's hooks first */
+        gAutoArm = false; gAutoClean = gen; gAutoSeen = gen;
+        return;
+    }
+    if(gen == gAutoClean) return;
+    if(gen != gAutoSeen) { gAutoSeen = gen; gAutoT0 = NowUs(); return; }   /* the table moved: (re)start the 2 s */
+    if(gAutosave.sel == 0) return;                                         /* Off: the timer idles, the edit stays pending */
+    if((uint32_t)(NowUs() - gAutoT0) < kAutosaveUs) return;
+    if(gSetState || gSetReq || gLoadReq || gApply || gReapply || gTakeActive || gKeyTake || engine.recArmed || engine.recPending) return;   /* try again next pass */
+    const bool ok = AutosaveNow();
+    gAutoClean = gen;   /* one attempt per generation, success or failure */
+    if(!ok) SetFinish(8);
+}
+/* Main loop: the markers, key table and flags of a loaded set (or a loose
+ * file's sidecar) once the audio thread has the planes, ACTION 14 / 15, the
+ * autosave, the preset backups. */
 static void ServiceSets()
 {
     if(gSetPendCommit && !gApply)
     {
         gSetPendCommit = false;
+        int8_t live[bb::Engine::kKeys];
         bb::CommitSetRecordings(engine, *gSet, gSetPlan, [](int start, int len) {
             uint8_t cls = 3; float sal = 0.f, dens = 0.f; bool hit = false;
             bb::AnalyseRegion(engine.buf, start, len, kSr, gClass.mode, cls, sal, dens, hit);
-            return dens; });
+            return dens; }, live);
+        /* EDIT-PERSIST: the file's key map (24 one-byte writes the audio thread reads whole; an old file has none) */
+        if(gSetPlan.hasKeys) engine.SetKeyTable(live);
     }
     if(gSetReq && !gLoadReq && !gApply && !gReapply && !gTakeActive && !gSetState)
     {
@@ -2229,6 +2396,7 @@ static void ServiceSets()
         if(req == 1u) SaveSet(gSetReqName);
         else { gLoadIdx = -1; gLoadReq = true; }   /* by name: ServiceLoad resolves it */
     }
+    ServiceAutosave();   /* EDIT-PERSIST */
     ServicePresetBackup();
 }
 /* ── end SETS ──────────────────────────────────────────────────────────── */
@@ -2271,7 +2439,8 @@ static void ServiceLoad()
     if(len <= 0) { if(gLoadIdx < 0) SetFinish(7); return; }   /* leave current material playing on failure; SETS: a by-name miss is reported */
 
     gCurFile = idx;
-    PrepareMaterial(len, cues, nCues, gotR, 0);   /* RECORD: the shared tail */
+    const bool sidecar = ReadSidecar(entry);   /* EDIT-PERSIST: sets/<file>.slices.json, an autosaved table for this loose file */
+    PrepareMaterial(len, cues, nCues, gotR, 0, sidecar);   /* RECORD: the shared tail */
 }
 
 /* ── StateExt: the web frontend's window into the instrument ────────────

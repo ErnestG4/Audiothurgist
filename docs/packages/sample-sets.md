@@ -13,8 +13,8 @@ additions in `bb_set.h`, `tests/sets_check.cpp`, the Kit tab's set card.*
 
 | | Where | What |
 |---|---|---|
-| **Save a set** | Kit tab → Set → name + **Save set** (ACTION 14) | `sets/<name>.wav`: PCM16, the whole used plane (the break, then the recordings, = `freePos`), both planes when the material is stereo, a `cue ` chunk at every table start. `sets/<name>.json`: the table (grid entries with `key −1`, recorded ones with their key; class, salience, hit), the break's length (`material`) and swing, bars/bpm, the 22 Options bytes, the looper's events with `slice`. The WAV goes first; if it fails nothing is left; if only the JSON fails the WAV stays (a plain break is a valid load). |
-| **Load a set** | P5 + B3 hold on a "name [set]" entry · the Sample dropdown · ACTION 6 on that entry · Kit tab **Load set** (ACTION 15, by name) | WAV through the existing loader (no 17 s cap, no conditioning — a set was saved conditioned, its positions are the buffer's) into the other buffer, both planes when the file is stereo **and** Options → Sampling = Stereo. Then the JSON: options through `Options::Deserialize` (the blob-write path, so the dirty flags fire — minus Bars / Swing / Onsets / Sampling / Classifier, the set's table *is* that re-slice; Record forced Off), the grid rebuilt by `SetMaterial` from the set's count, swing and hit onsets with the file's classes and salience, the recorded entries through `CommitSlice` after the swap, the looper adopted by the audio thread at the swap. A WAV in `sets/` with no JSON beside it is a plain load. |
+| **Save a set** | Kit tab → Set → name + **Save set** (ACTION 14) | `sets/<name>.wav`: PCM16, the whole used plane (the break, then the recordings, = `freePos`), both planes when the material is stereo, a `cue ` chunk at every table start. `sets/<name>.json`: the table (grid entries with `key −1`, recorded ones with their key; class, salience, hit; EDIT-PERSIST: `flags`, tombstones skipped, `grid`, `keys`), the break's length (`material`) and swing, bars/bpm, the 24 Options bytes, the looper's events with `slice`. The WAV goes first; if it fails nothing is left; if only the JSON fails the WAV stays (a plain break is a valid load). |
+| **Load a set** | P5 + B3 hold on a "name [set]" entry · the Sample dropdown · ACTION 6 on that entry · Kit tab **Load set** (ACTION 15, by name) | WAV through the existing loader (no 17 s cap, no conditioning — a set was saved conditioned, its positions are the buffer's) into the other buffer, both planes when the file is stereo **and** Options → Sampling = Stereo. Then the JSON: options through `Options::Deserialize` (the blob-write path, so the dirty flags fire — minus Bars / Swing / Onsets / Sampling / Classifier, the set's table *is* that re-slice; Record forced Off), the grid rebuilt by `SetMaterial` from the set's count, swing and hit onsets with the file's classes and salience — then (EDIT-PERSIST) the file's grid starts through `SetGridBoundaries` on the audio thread, the markers through `CommitEntry` after the swap and the key map through `SetKeyTable`, the looper adopted by the audio thread at the swap. A WAV in `sets/` with no JSON beside it is a plain load (which reads a `sets/<file>.slices.json` sidecar if one exists). |
 | **Preset backups** | every preset save — the Settings gesture, a host `PRESET_SAVE`, an import | `presets/<slot>.json` (`bb::PresetBackup`): the slot's own bytes (not the live state) — options, the pager's 12 pot values, the sample entry, the name. A slot erased from the browser loses its backup too. |
 | **Restore at boot** | after `presets.BootLoad()`, before audio | every slot the flash no longer honours (empty, or its schema hash moved with a firmware's managed set — "presets re-init on OPT bumps") whose JSON exists is applied to the live state and **saved back** into flash, so the slot is valid again under the new schema; slot 0 is re-loaded afterwards so what plays is the boot preset. Locks and Settings (brightness) are not in the backup: a restored slot carries the live ones. |
 
@@ -99,7 +99,8 @@ char setName[32]                                    (223..254)
 ```
 `setState` 0 idle · 1 saving · 2 loading; `setProgress` 0..255 of a save;
 `setResult` of the last op: 0 ok · 1 no card · 2 card full · 3 write
-failed · 4 bad name · 5 not found · 6 busy · 7 bad file; `setSeq` bumps
+failed · 4 bad name · 5 not found · 6 busy · 7 bad file · 8 autosave
+failed (EDIT-PERSIST: once per table generation); `setSeq` bumps
 when an op finishes (the page shows each result once); `setName` = the set
 the playing material came from (empty: a loose file or a take). The
 descriptor advertises `"sets":1`.
@@ -109,13 +110,13 @@ descriptor advertises `"sets":1`.
 | | |
 |---|---|
 | `SetNameOk` · `IsSetEntry` · `SetStem` · `SetEntry` · `SetLabel` · `SetPaths` · `SetLockPath` · `PresetPath` · `FindEntry` | the naming: name ↔ entry ↔ label ↔ card paths, case-insensitive lookup |
-| `SetFromEngine(engine, looperSnapshot, info, stereo, sr)` | table, keys, classes, salience, hits, `material`, `swing`, the events |
-| `PlanSet(info, plan)` | → `nGrid`, `material`, hit onsets, classes, salience, the validated recorded entries; refuses a malformed set (no grid, out-of-order grid, a recording inside the break or past the file or under `kRecMin`, a bad or duplicate key) |
-| `CommitSetRecordings(engine, info, plan, densFn)` | the entries through `CommitSlice` after `SetMaterial`; `densFn` = `bb::AnalyseRegion` on the plane (density is not in the file) |
+| `SetFromEngine(engine, looperSnapshot, info, stereo, sr, maxLen = 0)` | table (compacted: tombstones skipped, everything re-indexed), flags, `grid`, the key map, classes, salience, hits, `material`, `swing`, the events; `maxLen` bounds what the file describes (EDIT-PERSIST) |
+| `PlanSet(info, plan)` | → `nGrid`, `material`, hit onsets, classes, salience, the grid's `starts` / `gridFlags`, the `keys` map, the validated markers; refuses a malformed set (no grid, a grid that does not tile `[0, material)` in ≥ 64-sample slices, a marker outside the file or under `kRecMin`, a bad or duplicate key, a key-map index the file lacks) |
+| `CommitSetRecordings(engine, info, plan, densFn, liveKeys = nullptr)` | the markers through `CommitEntry` after `SetMaterial` (keys, flags); `densFn` = `bb::AnalyseRegion` on the plane (density is not in the file); `liveKeys` = the file's key map as live indices for `SetKeyTable` |
 | `LooperFromSet(info, looper)` | `Clear` + `Add` each event + `Seal` — for `Looper::Adopt` |
 | `MergeOptions(info, live, out, n)` | the set's bytes, the live ones past its count |
 
-`tests/sets_check.cpp` (70 checks, ASan/UBSan, in `tests/run.sh`): the
+`tests/sets_check.cpp` (70 checks here, 144 with EDIT-PERSIST's, ASan/UBSan, in `tests/run.sh`): the
 naming; a real engine with a swung 32-step grid, two recorded keys and
 three looper events → `SetFromEngine` → JSON → `SetReader` → `PlanSet` →
 a second engine whose table, keys, hits, classes, salience, density, looper
@@ -180,6 +181,11 @@ Card in, module booted, browser connected (`web/index.html`), Kit tab.
    (the clock snapshot relaxes its age clamp under `BusyGuard`).
 
 ## Known / deferred
+
+- EDIT-PERSIST (2026-09-08): edited tables, the key map, the autosave and
+  the loose-file sidecar — [slice-edit-persist.md](slice-edit-persist.md).
+  The key table is set one main-loop pass after the swap, with the
+  recordings (below).
 
 - The dropdown in the browser is rendered at boot; a set saved this session
   is in the firmware's list (P5, ACTION 6, presets) but appears in the

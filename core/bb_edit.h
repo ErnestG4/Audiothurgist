@@ -143,8 +143,11 @@ inline void Engine::ApplyOverlay(bool samePlanes)
 // The grid's starts wholesale: n == nSlices, starts[0] == 0, ascending by
 // ≥ kGridMin, the last one ≥ kGridMin before bufLen. Boundaries that differ
 // from the current grid become orange (a file carrying the computed grid
-// is a no-op and leaves nothing orange). false = refused, nothing written.
-inline bool Engine::SetGridBoundaries(const int* starts, int n)
+// is a no-op and leaves nothing orange). `flags` (EDIT-PERSIST, optional):
+// the file's per-slice flags — an orange bit on a boundary that already sits
+// where the file puts it is restored too (so the overlay pins it), boundary
+// 0 never. false = refused, nothing written.
+inline bool Engine::SetGridBoundaries(const int* starts, int n, const uint8_t* flags)
 {
     if(!buf || !starts || n != nSlices || n < 1 || starts[0] != 0) return false;
     for(int i = 1; i < n; i++) if(starts[i] - starts[i - 1] < kGridMin) return false;
@@ -152,9 +155,16 @@ inline bool Engine::SetGridBoundaries(const int* starts, int n)
     bool any = false, changed[kMaxSlices] = {};
     for(int i = 0; i < n; i++)
         if(starts[i] != slices[i].start) { slices[i].start = starts[i]; tableFlags[i] |= kFlagOrange; changed[i] = true; if(i > 0) changed[i - 1] = true; any = true; }
-    if(!any) return true;
-    for(int i = 0; i < n; i++) slices[i].len = (i + 1 < n ? slices[i + 1].start : bufLen) - slices[i].start;
-    for(int i = 0; i < n; i++) if(changed[i]) RefreshEntry(i);
+    bool anyFlag = false;
+    if(flags)
+        for(int i = 1; i < n; i++)
+            if((flags[i] & kFlagOrange) && !(tableFlags[i] & kFlagOrange)) { tableFlags[i] |= kFlagOrange; anyFlag = true; }
+    if(!any && !anyFlag) return true;
+    if(any)
+    {
+        for(int i = 0; i < n; i++) slices[i].len = (i + 1 < n ? slices[i + 1].start : bufLen) - slices[i].start;
+        for(int i = 0; i < n; i++) if(changed[i]) RefreshEntry(i);
+    }
     SaveOverlay();
     BumpGen();
     return true;

@@ -342,8 +342,10 @@ static bb::SetInfo MakeSet()
         s.slices[i].cls   = (uint8_t)(i % 4);
         s.slices[i].sal   = 0.1f * (i + 1);
         s.slices[i].hit   = (i % 2) == 0;
+        s.slices[i].flags = (uint8_t)((i == 1 || i == 4) ? bb::kSetFlagOrange : 0);   /* EDIT-PERSIST */
         strcpy(s.slices[i].name, names[i]);
     }
+    s.nGrid = 1; s.hasKeys = true; s.keys[3] = 2; s.keys[7] = 4; s.keys[23] = 0;   /* EDIT-PERSIST: grid count + key map */
     s.nOptions = 17;
     for(int i = 0; i < 17; i++) s.options[i] = (uint8_t)(i * 15);
     s.nLooper = 3;
@@ -361,9 +363,10 @@ static void CheckSame(const bb::SetInfo& a, const bb::SetInfo& b, const char* wh
     for(int i = 0; i < a.nSlices && i < b.nSlices; i++)
     {
         const bb::SetSlice &x = a.slices[i], &y = b.slices[i];
-        CHECK(x.start == y.start && x.len == y.len && x.key == y.key && x.cls == y.cls && fabsf(x.sal - y.sal) < 1e-5f && x.hit == y.hit && !strcmp(x.name, y.name),
+        CHECK(x.start == y.start && x.len == y.len && x.key == y.key && x.cls == y.cls && fabsf(x.sal - y.sal) < 1e-5f && x.hit == y.hit && x.flags == y.flags && !strcmp(x.name, y.name),
               "%s: slice %d", what, i);
     }
+    CHECK(a.nGrid == b.nGrid && a.hasKeys == b.hasKeys && !memcmp(a.keys, b.keys, sizeof a.keys), "%s: grid %d vs %d, keys", what, a.nGrid, b.nGrid);   /* EDIT-PERSIST */
     CHECK(a.nOptions == b.nOptions && !memcmp(a.options, b.options, a.nOptions), "%s: options", what);
     CHECK(a.nLooper == b.nLooper, "%s: nLooper %d vs %d", what, a.nLooper, b.nLooper);
     for(int i = 0; i < a.nLooper && i < b.nLooper; i++)
@@ -423,6 +426,40 @@ static void TestSet()
         CHECK(t.nSlices == 2 && t.slices[0].hit && t.slices[0].key == 1 && t.slices[1].start == 100 && t.slices[1].len == 200 && t.slices[1].name[0] == 0, "future slices");
         CHECK(t.nOptions == 5 && t.options[3] == 255 && t.options[4] == 0, "options clamped: %d %d", t.options[3], t.options[4]);
         CHECK(t.nLooper == 1 && t.looper[0].style == 3 && t.looper[0].vel == 1.f, "future looper");
+    }
+    /* EDIT-PERSIST: an old file (no grid / keys / flags) reads with the defaults; bogus values clamp */
+    {
+        std::string old = json;
+        auto strip = [&](const char* key, char endc) {
+            for(;;) { const size_t a = old.find(key); if(a == std::string::npos) return; size_t b = old.find(endc, a); if(b == std::string::npos) return; b++; if(b < old.size() && old[b] == ',') b++; old.erase(a, b - a); }
+        };
+        strip("\"grid\":", ','); strip("\"keys\":[", ']'); strip("\"flags\":", ',');
+        CHECK(old.find("\"grid\"") == std::string::npos && old.find("\"keys\"") == std::string::npos && old.find("\"flags\"") == std::string::npos, "old-format text");
+        bb::SetInfo t;
+        CHECK(bb::SetReader::Json(old.data(), old.size(), t) && t.nGrid == 0 && !t.hasKeys && t.slices[1].flags == 0 && t.slices[4].flags == 0 && t.nSlices == 5, "old JSON: grid 0 (inferred later), no keys, flags 0");
+        bool def = true; for(int k = 0; k < bb::kSetKeys; k++) def = def && t.keys[k] == -1;
+        CHECK(def, "…every key at the default");
+        const char* odd = "{\"audiothurgist\":1,\"sr\":48000,\"len\":1000,\"grid\":-3,\"slices\":[{\"start\":0,\"len\":500,\"flags\":3},{\"start\":500,\"len\":500,\"flags\":2}],"
+                          "\"keys\":[1,-5,200,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,7,8,9,10]}";
+        CHECK(bb::SetReader::Json(odd, strlen(odd), t) && t.nGrid == 0 && t.slices[0].flags == 1 && t.slices[1].flags == 0 && t.hasKeys && t.keys[0] == 1 && t.keys[1] == -1 && t.keys[2] == -1 && t.keys[23] == 1,
+              "clamps: a negative grid → 0, flags masked to the orange bit, keys outside −1..127 → −1, 28 keys → 24");
+        const char* big = "{\"audiothurgist\":1,\"sr\":48000,\"len\":1000,\"grid\":9,\"slices\":[{\"start\":0,\"len\":1000}]}";
+        CHECK(bb::SetReader::Json(big, strlen(big), t) && t.nGrid == 0, "a grid count past the entries → 0 (inferred)");
+        const char* few = "{\"audiothurgist\":1,\"sr\":48000,\"len\":1000,\"keys\":[5,6]}";
+        CHECK(bb::SetReader::Json(few, strlen(few), t) && t.hasKeys && t.keys[0] == 5 && t.keys[1] == 6 && t.keys[2] == -1, "a short key list: the rest default");
+    }
+    /* EDIT-PERSIST: the Options schema pin — 24 bytes (OPT8: 22 Tap Allowance, 23 Autosave); the shell static_asserts Options::kBytes against it */
+    {
+        CHECK(bb::kSetOptionsToday == 24, "kSetOptionsToday = %d (OPT8)", bb::kSetOptionsToday);
+        bb::SetInfo o; o.sr = 48000; o.len = 10; o.nOptions = bb::kSetOptionsToday;
+        for(int i = 0; i < bb::kSetOptionsToday; i++) o.options[i] = (uint8_t)(i * 9);
+        char ob[4096]; size_t on = 0;
+        CHECK(bb::SetWriter::Json(o, ob, sizeof ob, &on) && strstr(ob, "\"options\":[0,9,18,") && strstr(ob, ",198,207]"), "24 option bytes emitted");
+        bb::SetInfo t;
+        CHECK(bb::SetReader::Json(ob, on, t) && t.nOptions == 24 && t.options[22] == 198 && t.options[23] == 207, "…and read back: byte 23 (Autosave) = 207");
+        bb::PresetInfo p; p.nOptions = bb::kSetOptionsToday; for(int i = 0; i < 24; i++) p.options[i] = (uint8_t)(23 - i);
+        char pb[1024]; size_t pn = 0; bb::PresetInfo q;
+        CHECK(bb::PresetBackup::Write(p, pb, sizeof pb, &pn) && bb::PresetBackup::Read(pb, pn, q) && q.nOptions == 24 && q.options[23] == 0 && q.options[22] == 1, "a preset backup carries all 24");
     }
     // capacity: 100 slices in the file → 64 kept, rest consumed, still valid
     {

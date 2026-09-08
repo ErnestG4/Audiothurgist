@@ -16,8 +16,10 @@
 // No allocation, no exceptions, no STL: fixed arrays sized for the engine's
 // whole table (kSetMaxSlices = Engine::kMaxTable: 64 grid + 32 recorded), the
 // looper (kSetMaxLooper events) and the Options block (kSetMaxOptions bytes —
-// 22 today, room for growth). The shell's side: core/bb_sets.h and
-// docs/packages/sample-sets.md.
+// kSetOptionsToday in use, room for growth). The shell's side: core/bb_sets.h
+// and docs/packages/sample-sets.md. EDIT-PERSIST (docs/packages/
+// slice-edit-persist.md) added per-entry `flags`, the top-level `grid` count
+// and `keys` map — still schema 1: older firmware skips them.
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
@@ -35,18 +37,25 @@ constexpr int kSetMaxName     = 32;    // set / slice / preset names (incl. NUL)
 constexpr int kSetMaxFile     = 64;    // preset backup's sample filename
 constexpr int kSetMaxPages    = 4;     // pager pages backed up
 constexpr int kSetPots        = 6;     // pots per page
+constexpr int kSetKeys        = 24;    // the key map's width (Engine::kKeys) /* EDIT-PERSIST */
+constexpr uint8_t kSetFlagOrange = 1u; // SetSlice::flags b0: user-placed / user-moved (Engine::kFlagOrange) /* EDIT-PERSIST */
+// The Options block's width today (Options::kBytes in the shell, which
+// static_asserts against this): 24 = OPT8. A set or a preset carries this
+// many bytes; an older file's shorter list merges over the live block.
+constexpr int kSetOptionsToday = 24;   /* EDIT-PERSIST: byte 23 Autosave (22 = Tap Allowance, EDIT-PROTO) */
 // JSON buffer the shell should lend: a full 96-entry / 256-event set emits
-// under 28 KB (persist_check prints the figure); the reader takes any length.
+// under 30 KB (persist_check prints the figure); the reader takes any length.
 constexpr size_t kSetJsonMax  = 32768;   /* SETS: was 24 KiB for 64 slices */
 
 struct SetSlice
 {
     int     start = 0;      // frames into the buffer
     int     len   = 0;      // frames
-    int8_t  key   = -1;     // Voice key 0..23 of a RECORDED entry; -1 = a grid slice /* SETS */
+    int8_t  key   = -1;     // Voice key 0..23 that RECORDED the entry (provenance); -1 = a grid slice or a keyless marker /* SETS / EDIT-PERSIST */
     uint8_t cls   = 0;      // class: 0 kick 1 snare 2 hat 3 other
     float   sal   = 0.f;    // salience 0..1
     bool    hit   = false;  // begins with a detected onset
+    uint8_t flags = 0;      // kSetFlagOrange; tombstones are never written /* EDIT-PERSIST */
     char    name[kSetMaxName] = {};
 };
 
@@ -71,6 +80,13 @@ struct SetInfo
     float   bpm      = 0.f;
     int     nSlices  = 0;
     SetSlice slices[kSetMaxSlices];
+    /* EDIT-PERSIST: the grid's entry count ("grid"; 0 = absent: the leading
+     * key −1 entries inside the material, an old file's only kind) and the
+     * key map ("keys": the entry each Voice key plays as an index into
+     * slices[], −1 = the default; hasKeys = the file carried one). */
+    int     nGrid    = 0;
+    bool    hasKeys  = false;
+    int8_t  keys[kSetKeys] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
     int     nOptions = 0;
     uint8_t options[kSetMaxOptions] = {};
     int     nLooper  = 0;
@@ -164,6 +180,7 @@ struct SetWriter
         o.KeyFloat("swing", s.swing);                                  /* SETS */
         o.KeyInt("bars", s.bars);
         o.KeyFloat("bpm", s.bpm);
+        if(s.nGrid > 0) o.KeyInt("grid", s.nGrid);   /* EDIT-PERSIST: markers may follow the grid keyless, so the count is explicit */
         o.Key("slices"); o.BeginArray();
         for(int i = 0; i < s.nSlices && i < kSetMaxSlices; i++)
         {
@@ -175,9 +192,14 @@ struct SetWriter
             o.KeyInt("cls", sl.cls);
             o.KeyFloat("sal", sl.sal);
             o.KeyInt("hit", sl.hit ? 1 : 0);
+            o.KeyInt("flags", sl.flags & kSetFlagOrange);   /* EDIT-PERSIST */
             o.KeyString("name", sl.name);
             o.EndObject();
         }
+        o.EndArray();
+        /* EDIT-PERSIST: the key map, always — an index into the file's slices[], −1 = the default */
+        o.Key("keys"); o.BeginArray();
+        for(int k = 0; k < kSetKeys; k++) o.Int(s.keys[k]);
         o.EndArray();
         detail::OptionsOut(o, s.options, s.nOptions);
         o.Key("looper"); o.BeginArray();
@@ -234,7 +256,9 @@ struct SetReader
             else if(!strcmp(key, "swing"))  { if(!in.Float(out.swing)) return false; }      /* SETS */
             else if(!strcmp(key, "bars"))   { if(!in.Int(out.bars)) return false; }
             else if(!strcmp(key, "bpm"))    { if(!in.Float(out.bpm)) return false; }
+            else if(!strcmp(key, "grid"))   { if(!in.Int(out.nGrid)) return false; }          /* EDIT-PERSIST */
             else if(!strcmp(key, "slices")) { if(!Slices(in, out)) return false; }
+            else if(!strcmp(key, "keys"))   { if(!Keys(in, out)) return false; }              /* EDIT-PERSIST */
             else if(!strcmp(key, "options")){ if(!detail::OptionsIn(in, out.options, out.nOptions)) return false; }
             else if(!strcmp(key, "looper")) { if(!Looper(in, out)) return false; }
             else if(!in.Skip()) return false;
@@ -243,10 +267,26 @@ struct SetReader
         if(!sawVersion || version != kSetSchema) return false;
         if(out.sr <= 0 || out.len < 0) return false;
         if(out.material <= 0 || out.material > out.len) out.material = out.len;   /* SETS: absent / bogus → the whole file */
+        if(out.nGrid < 0 || out.nGrid > out.nSlices) out.nGrid = 0;                 /* EDIT-PERSIST: bogus → inferred */
         return true;
     }
 
   private:
+    /* EDIT-PERSIST: "keys":[…] — one int per Voice key; extras consumed and
+     * dropped, a short list leaves the rest at −1 (the default). */
+    static bool Keys(JsonIn& in, SetInfo& out)
+    {
+        if(!in.BeginArray()) return false;
+        int k = 0;
+        while(in.ArrayMore())
+        {
+            int v; if(!in.Int(v)) return false;
+            if(k < kSetKeys) out.keys[k] = (int8_t)(v < -1 || v > 127 ? -1 : v);
+            k++;
+        }
+        out.hasKeys = in.ok;
+        return in.ok;
+    }
     static bool Slices(JsonIn& in, SetInfo& out)
     {
         if(!in.BeginArray()) return false;
@@ -264,6 +304,7 @@ struct SetReader
                 else if(!strcmp(key, "cls")) { if(!in.Int(v)) return false; sl.cls = (uint8_t)v; }
                 else if(!strcmp(key, "sal")) { if(!in.Float(sl.sal)) return false; }
                 else if(!strcmp(key, "hit")) { bool b; if(!in.Bool(b)) return false; sl.hit = b; }
+                else if(!strcmp(key, "flags")) { if(!in.Int(v)) return false; sl.flags = (uint8_t)(v & kSetFlagOrange); }   /* EDIT-PERSIST: only the orange bit is a file's to say */
                 else if(!strcmp(key, "name")){ if(!in.String(sl.name, sizeof sl.name)) return false; }
                 else if(!in.Skip()) return false;
             }

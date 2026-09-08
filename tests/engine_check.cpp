@@ -2132,6 +2132,25 @@ int main()
         e.SetMaterial(gMat, kLen, kSr, nullptr, 0, gCls);
         bool same = true; for(int i = 0; i < 16; i++) same = same && e.slices[i].start == back[i];
         CHECK(same, "…and they are in the overlay: a re-apply keeps them");
+        {   /* EDIT-PERSIST: the file's orange bits ride along — a boundary the file marks orange but leaves where the grid computes it is pinned too */
+            Fresh(e, 0, 1.f);
+            int comp[16]; for(int i = 0; i < 16; i++) comp[i] = e.slices[i].start;
+            uint8_t fl[16] = {}; fl[0] = bb::Engine::kFlagOrange; fl[3] = bb::Engine::kFlagOrange;
+            const uint8_t g1 = e.tableGen;
+            CHECK(e.SetGridBoundaries(comp, 16, fl) && e.tableGen != g1 && (e.TableFlags(3) & bb::Engine::kFlagOrange) && !(e.TableFlags(0) & bb::Engine::kFlagOrange)
+                  && e.slices[3].start == comp[3] && ((e.ovOrange >> 3) & 1) && !((e.ovOrange >> 0) & 1),
+                  "flags: an unchanged boundary marked orange by the file is orange and in the overlay; boundary 0 never");
+            e.SetMaterial(gMat, kLen, kSr, nullptr, 0, gCls);
+            CHECK((e.TableFlags(3) & bb::Engine::kFlagOrange) && e.slices[3].start == comp[3], "…and survives a re-apply");
+            uint8_t none[16] = {};
+            const uint8_t g2 = e.tableGen;
+            CHECK(e.SetGridBoundaries(comp, 16, none) && e.tableGen == g2, "flags with nothing new: still a no-op");
+        }
+        Fresh(e, 0, 1.f);
+        for(int i = 0; i < 16; i++) starts[i] = e.slices[i].start;
+        starts[5] = 27000; starts[9] = 52000;
+        e.SetGridBoundaries(starts, 16);
+        for(int i = 0; i < 16; i++) back[i] = e.slices[i].start;
         int bad[16];
         memcpy(bad, back, sizeof bad); CHECK(!e.SetGridBoundaries(bad, 15), "refused: n ≠ nSlices");
         memcpy(bad, back, sizeof bad); bad[0] = 1;  CHECK(!e.SetGridBoundaries(bad, 16), "refused: starts[0] ≠ 0");
