@@ -262,6 +262,57 @@ struct Voice
     }
 };
 
+/* ── EDIT (docs/packages/slice-edit-core.md): editing the table ──────────
+ * Per-entry metadata as one record (the recorded entries' shadow copy, and
+ * what an edit request carries for a new or moved region), and the edit
+ * request the shell posts to the audio thread. Engine::ApplyEdit is the
+ * only writer of slices[] once audio runs; the control thread analyses
+ * (bb::AnalyseEntry, bb_sample.h) and posts, the audio thread applies at
+ * block start. Field use per op is the table in Engine::ApplyEdit. */
+struct EntryMeta { uint8_t cls; float sal, dens; bool hit; };
+
+enum class EditOp : uint8_t
+{
+    None = 0,
+    SetBoundary,   // grid, linked: slice i starts at `start`; i−1 ends there
+    SetEntry,      // marker t = [start, start + len)
+    AddEntry,      // a new marker [start, start + len), key assigned if given
+    Split,         // marker t = [t.start, start); a new marker [start, t.end)
+    Merge,         // marker t swallows the marker ending at its start (else the previous one)
+    Tombstone,     // marker t: deleted (len 0, keys re-pointed, region kept)
+    SetKey,        // key → entry t (grid or marker)
+    SwapKeys,      // keys a and b trade entries
+    NudgeAll,      // every grid boundary (b = 0) or marker start (b = 1) by `a` samples
+    Promote        // SetBoundary(i, marker t's start)
+};
+enum class EditStatus : uint8_t
+{
+    Ok = 0,
+    BadOp,        // unknown op
+    BadArgs,      // an index, span or key out of range; a neighbour would drop under 64 samples
+    Full,         // no table slot (kMaxTable, tombstones reused first)
+    NotMarker,    // the op wants a marker (t ≥ nSlices) and got a grid slice
+    NotGrid,      // SetBoundary / Promote: i is 0 or ≥ nSlices
+    Tomb,         // the entry is a tombstone
+    Stale,        // req.gen ≠ 0 and ≠ tableGen: the page's view is old — refetch, retry
+    NoMaterial    // nothing loaded
+};
+struct EditReq
+{
+    static constexpr uint8_t kOrange = 1u;       // ADD: the entry is user-placed (flag b0)
+    static constexpr uint8_t kMeta   = 1u << 7;  // `meta` is filled (AnalyseEntry ran)
+    EditOp    op    = EditOp::None;
+    uint8_t   gen   = 0;    // 0 = unchecked; else must equal Engine::tableGen
+    uint8_t   flags = 0;
+    int       t     = -1;   // the entry: SetEntry, Split, Merge, Tombstone, SetKey, Promote
+    int       i     = -1;   // the grid slice: SetBoundary, Promote
+    int       key   = -1;   // SetKey; AddEntry (−1 or ≥ kKeys = none)
+    int       a = 0, b = 0; // SwapKeys (a, b) · NudgeAll (a = samples, b = which)
+    int       start = 0;    // SetEntry / AddEntry: the span · SetBoundary / Split: the position
+    int       len   = 0;    // SetEntry / AddEntry
+    EntryMeta meta  = {3, 0.f, 0.f, false};
+};
+
 struct Engine
 {
     static constexpr int kMaxSlices = 64;   // grid steps per loop: the grammars' world
@@ -270,6 +321,11 @@ struct Engine
     static constexpr int kMaxTable  = kMaxSlices + 32; // grid + recorded entries
     static constexpr int kKeys      = 24;              // Voice map notes 0..23
     static constexpr int kRecMin    = 480;             // 10 ms: the shortest usable recording
+    /* EDIT */
+    static constexpr int     kMaxOnsets  = 128;        // the onset table SetMaterial keeps (the shell's size)
+    static constexpr int     kGridMin    = 64;         // the shortest grid slice an edit may leave
+    static constexpr uint8_t kFlagOrange = 1u;         // tableFlags b0: user-placed / user-moved
+    static constexpr uint8_t kFlagTomb   = 2u;         // tableFlags b1: deleted (len 0, no keys)
 
     float* buf     = nullptr; // L plane: the material, then the recordings
     float* bufR    = nullptr; // R plane, nullptr = mono                    /* SAMPLE */
@@ -527,6 +583,7 @@ struct Engine
     {
         if(patternMode == 6) return;   /* Pads: nothing is ever written — you keep the beat */
         if(step < 0 || step >= nSlices || src < 0 || src >= nTable) return;   /* SAMPLE: a recording may be punched in */
+        if(tableFlags[src] & kFlagTomb) return;                               /* EDIT: a deleted marker is not */
         stepSrc[step]      = (int8_t)src;
         stepRev[step]      = rev;
         stepRatN[step]     = 0;      /* a punched hit is plain: no roll, no jitter */
@@ -767,19 +824,48 @@ struct Engine
                      float* bR = nullptr, int cap = 0)
     {
         const bool newPlanes = b != buf;   /* LOOPER: a load empties the loop; a re-apply keeps it */
-        /* SAMPLE: which recorded entries survive? */
+        /* SAMPLE / EDIT: which entries past the grid survive? The same planes
+         * keep every marker that is not a tombstone, still lies inside the
+         * used region, and is not a recording the new material grew over
+         * (it began past the old material and inside the new). Survivors
+         * are compacted in place here — order kept, dest ≤ src, so nothing
+         * is overwritten before it moves — and relocated behind the new
+         * grid below. `map` (old index → new, −1 dropped; grid indices map
+         * to themselves) re-targets the looper's keyless events. */
         const int keepFrom = nSlices;
+        const int oldN = nSlices, oldTable = nTable, oldLen = bufLen;
+        const bool samePlanes = b == buf && bR == bufR;
+        int8_t oldKeys[kKeys];
+        for(int k = 0; k < kKeys; k++) oldKeys[k] = keySlice[k];
+        int8_t map[kMaxTable];
+        for(int t = 0; t < kMaxTable; t++) map[t] = (int8_t)(t < oldN ? t : -1);
         int       keepN    = 0;
-        if(b == buf && bR == bufR && nTable > nSlices)
+        if(samePlanes && nTable > nSlices)
         {
-            keepN = nTable - nSlices;
-            for(int t = nSlices; t < nTable; t++)
-                if(slices[t].start < len) { keepN = 0; break; }
+            int w = oldN;
+            for(int t = oldN; t < oldTable; t++)
+            {
+                const Slice& s = slices[t];
+                const bool grownOver = s.start >= oldLen && s.start < len;
+                const bool keep = !(tableFlags[t] & kFlagTomb) && s.len > 0 && !grownOver
+                                  && s.start >= 0 && s.start + s.len <= freePos;
+                if(!keep) continue;
+                if(w != t) MoveEntry(t, w);
+                map[t] = (int8_t)w;
+                w++;
+            }
+            keepN = w - oldN;
         }
         recArmed   = false;
         recPending = false;
         recKey     = -1;
         const int oldFree = freePos;
+        /* EDIT: the onset table, for per-entry hit refreshes after an edit */
+        onsetsGiven = onsets != nullptr && nOnsets > 0;
+        nOnsetTab   = 0;
+        if(onsetsGiven)
+            for(int o = 0; o < nOnsets && nOnsetTab < kMaxOnsets; o++)
+                if(onsets[o] >= 0 && onsets[o] < len) onsetTab[nOnsetTab++] = onsets[o];
 
         buf    = b;
         bufR   = bR;
@@ -809,7 +895,11 @@ struct Engine
             else if(nSlices > keepFrom)
                 for(int i = keepN - 1; i >= 0; i--) MoveEntry(keepFrom + i, nSlices + i);
         }
+        for(int t = oldN; t < oldTable; t++)   /* EDIT: the map's final form */
+            if(map[t] >= 0) { const int r = map[t] - oldN; map[t] = (int8_t)(r < keepN ? nSlices + r : -1); }
         nTable  = nSlices + keepN;
+        for(int i = 0; i < nSlices; i++) tableFlags[i] = 0;              /* EDIT: the fresh grid is white; the overlay re-marks */
+        for(int t = nTable; t < kMaxTable; t++) tableFlags[t] = 0;
         bufCap  = cap > 0 ? cap : (keepN > 0 ? bufCap : len);
         if(bufCap < len) bufCap = len;
         freePos = keepN > 0 ? oldFree : len;
@@ -861,8 +951,14 @@ struct Engine
                 else if(s + 1 < nSlices && slices[s + 1].start - p <= (int)(0.010f * sampleRate))
                     stepHit[s + 1] = true;
             }
+        ApplyOverlay(samePlanes);   /* EDIT: user-moved grid boundaries come back on the same material */
         SyncRecordedMeta();   /* SAMPLE: the kept recordings' class/salience/density/hit */
-        DefaultKeyTable();    /* SAMPLE: keys span the grid; recorded keys point at their entries */
+        /* SAMPLE / EDIT: the key table. New material: keys span the grid and
+         * every recorded entry claims its key. The same planes: each key
+         * follows its entry (a kept marker → its new index; a grid slice →
+         * itself when the count is unchanged, else the span default). */
+        if(samePlanes) RestoreKeyTable(oldKeys, map, oldN, oldTable);
+        else           DefaultKeyTable();
         SetBpm(0.f); // every load opens at ITS OWN tempo — inheriting the
                      // previous break's BPM chipmunks the new one (field bug)
         RegenPattern();
@@ -896,6 +992,8 @@ struct Engine
         looper.divisions = nSlices;
         looper.ResetPlayhead();
         if(newPlanes) looper.Clear();
+        else if(samePlanes) looper.RemapSlices(map, oldTable);   /* EDIT: keyless events follow the compaction */
+        BumpGen();   /* EDIT: indices moved; a page holding the old gen must refetch */
     }
 
     // ── Voice role (M3): the rack plays slices ────────────────────────
@@ -1029,12 +1127,17 @@ struct Engine
         if(s >= nTable) s = nTable > 0 ? nTable - 1 : 0;
         return s;
     }
-    // CONTROL. Point a key at any table entry (a recorded one or a grid
-    // slice). false = out of range. SetMaterial resets the table.
+    // CONTROL or AUDIO (one byte). Point a key at any table entry (a recorded
+    // one or a grid slice). false = out of range, or a tombstone. New material
+    // resets the table; a re-apply of the same planes keeps it (EDIT).
+    // The audio-thread path is ApplyEdit(SetKey); this direct call is safe
+    // from the control thread because it writes one int8 the audio thread
+    // reads whole (KeySlice clamps whatever it finds).
     bool SetKeySlice(int key, int slice)
     {
-        if(key < 0 || key >= kKeys || slice < 0 || slice >= nTable) return false;
+        if(key < 0 || key >= kKeys || slice < 0 || slice >= nTable || (tableFlags[slice] & kFlagTomb)) return false;
         keySlice[key] = (int8_t)slice;
+        BumpGen();
         return true;
     }
     // AUDIO. The key came up: every held voice tagged with it fades out
@@ -1079,7 +1182,7 @@ struct Engine
     {
         if(!buf || key < 0 || key >= kKeys || recArmed || recPending) return false;
         if(bufCap - freePos < kRecMin) return false;
-        if(RecordedEntry(key) < 0 && nTable >= kMaxTable) return false;
+        if(RecordedEntry(key) < 0 && FreeSlot() < 0) return false;   /* EDIT: a tombstone's slot counts as free */
         recKey   = key;
         recStart = freePos;
         recPos   = freePos;
@@ -1146,8 +1249,8 @@ struct Engine
         int t = RecordedEntry(key);
         if(t < 0)
         {
-            if(nTable >= kMaxTable) return -1;
-            t = nTable;
+            t = FreeSlot();   /* EDIT: the first tombstone's slot, else the end */
+            if(t < 0) return -1;
         }
         recMeta[t] = {cls, sal, dens, hit};
         slices[t]     = {start, len};
@@ -1158,11 +1261,13 @@ struct Engine
         stepHit[t]    = hit;
         stepBands[t]  = 0;
         loopState[t]  = 0;
+        tableFlags[t] = 0;   /* EDIT: a recording is neither orange nor a tombstone (a reused slot comes alive here) */
         if(start + len > freePos) freePos = start + len;
         if(t == nTable) nTable = t + 1;
         keySlice[key] = (int8_t)t;
         recPending    = false;
         recKey        = -1;
+        BumpGen();
         return t;
     }
     // CONTROL or AUDIO. Re-assert the recorded entries' metadata after the
@@ -1192,32 +1297,46 @@ struct Engine
     {
         if(key < 0 || key >= kKeys) return;
         for(int t = nSlices; t < nTable; t++) if(tableKey[t] == key) tableKey[t] = -1;
+        keySlice[key] = (int8_t)SpanSlice(key);
+        BumpGen();
+    }
+    // The span mapping: key k → grid slice k · nSlices / span, span =
+    // min(nSlices, 24); keys past the span play the last slice.
+    int SpanSlice(int key) const
+    {
         const int span = nSlices < kKeys ? nSlices : kKeys;
-        const int kk = key >= span ? span - 1 : key;
-        keySlice[key] = (int8_t)(span > 0 ? (kk * nSlices) / span : 0);
+        const int kk   = key >= span ? span - 1 : key;
+        return span > 0 ? (kk * nSlices) / span : 0;
     }
     void DefaultKeyTable()
     {
-        const int span = nSlices < kKeys ? nSlices : kKeys;
-        for(int k = 0; k < kKeys; k++)
-        {
-            const int kk = k >= span ? span - 1 : k;
-            keySlice[k]  = (int8_t)(span > 0 ? (kk * nSlices) / span : 0);
-        }
+        for(int k = 0; k < kKeys; k++) keySlice[k] = (int8_t)SpanSlice(k);
         for(int t = nSlices; t < nTable; t++)
             if(tableKey[t] >= 0 && tableKey[t] < kKeys) keySlice[tableKey[t]] = (int8_t)t;
+    }
+    /* EDIT: the same planes re-applied — every key follows its entry. */
+    void RestoreKeyTable(const int8_t* oldKeys, const int8_t* map, int oldN, int oldTable)
+    {
+        for(int k = 0; k < kKeys; k++)
+        {
+            const int o = oldKeys[k];
+            if(o >= oldN && o < oldTable && map[o] >= 0) keySlice[k] = map[o];
+            else if(o >= 0 && o < oldN && nSlices == oldN) keySlice[k] = (int8_t)o;
+            else keySlice[k] = (int8_t)SpanSlice(k);
+        }
     }
     void MoveEntry(int from, int to)
     {
         if(from == to) return;
-        slices[to]   = slices[from];
-        tableKey[to] = tableKey[from];
-        recMeta[to]  = recMeta[from];
+        slices[to]     = slices[from];
+        tableKey[to]   = tableKey[from];
+        recMeta[to]    = recMeta[from];
+        tableFlags[to] = tableFlags[from];   /* EDIT */
     }
 
     int8_t  keySlice[kKeys]     = {};   // table entry each Voice key plays
     int8_t  tableKey[kMaxTable] = {};   // owner key of a recorded entry (grid entries: unused)
-    struct RecMeta { uint8_t cls; float sal, dens; bool hit; };
+    using RecMeta = EntryMeta;
     RecMeta recMeta[kMaxTable]  = {};   // shadow metadata of the recorded entries
     volatile bool recArmed   = false;   // control arms, audio appends, either clears
     volatile bool recFull    = false;   // the take hit bufCap (audio sets)
@@ -1226,6 +1345,48 @@ struct Engine
     int           recStart   = 0;
     volatile int  recPos     = 0;       // write head (audio advances)
     /* ── SAMPLE end ────────────────────────────────────────────────────── */
+
+    /* ── EDIT: slice editing (docs/packages/slice-edit-core.md) ──────────
+     * The bodies live in core/bb_edit.h (included at the foot of this file).
+     * THREAD RULE: ApplyEdit, SetGridBoundaries and SetKeyTable write
+     * slices[] and run on the AUDIO thread at block start (the shell posts
+     * an EditReq through a mailbox with an ack, exactly as gCallReq); the
+     * control thread only reads, and analyses a region with
+     * bb::AnalyseEntry before posting. No op allocates, searches audio or
+     * costs more than O(kMaxTable) (+ O(looper.n) for a delete or merge). */
+    uint8_t tableGen = 1;               // bumps on every table change; never 0 (0 = "unchecked" in EditReq)
+    uint8_t tableFlags[kMaxTable] = {}; // kFlagOrange · kFlagTomb, per entry
+    int     onsetTab[kMaxOnsets]  = {}; // the material's onset table (SetMaterial keeps a copy)
+    int     nOnsetTab   = 0;
+    bool    onsetsGiven = false;        // false: no onset table → every slice is a hit
+    /* the boundary overlay: user-moved grid starts, re-applied by SetMaterial
+     * on the same planes when the material length and slice count hold */
+    int      ovStart[kMaxSlices] = {};
+    uint64_t ovOrange = 0;              // bit i = boundary i was moved by the user
+    int      ovN = 0, ovLen = 0;
+
+    EditStatus ApplyEdit(const EditReq& r, int* newIdx = nullptr);   // AUDIO
+    bool       SetGridBoundaries(const int* starts, int n);            // AUDIO (or before audio runs)
+    bool       SetKeyTable(const int8_t* keys);                        // AUDIO (or before audio runs)
+    uint8_t    TableFlags(int t) const { return t >= 0 && t < nTable ? tableFlags[t] : 0; }
+    bool       IsTomb(int t) const { return t >= 0 && t < kMaxTable && (tableFlags[t] & kFlagTomb) != 0; }
+    bool       OnsetHit(int start, int len) const;                     // the per-entry form of SetMaterial's hit rule
+    int        FreeSlot() const;                                       // the first tombstone ≥ nSlices, else nTable, else −1
+    void       BumpGen() { tableGen = (uint8_t)(tableGen + 1u); if(tableGen == 0) tableGen = 1; }
+    void       RefreshEntry(int t);                                    // loopState, stepHit, recMeta mirror, gas well
+    void       SaveOverlay();
+    void       ApplyOverlay(bool samePlanes);
+    // op bodies (all return without touching anything on refusal)
+    EditStatus EdMoveBoundary(int i, int pos);
+    EditStatus EdSetEntry(int t, int start, int len);
+    EditStatus EdAdd(const EditReq& r, int& idx);
+    EditStatus EdSplit(const EditReq& r, int& idx);
+    EditStatus EdMerge(int t);
+    EditStatus EdTomb(int t);
+    EditStatus EdSetKey(int key, int t);
+    EditStatus EdSwapKeys(int a, int b);
+    EditStatus EdNudge(int delta, int which);
+    /* ── EDIT end ──────────────────────────────────────────────────────── */
 
     // Mono render (the pre-SAMPLE signature): the L plane into `out`.
     void Process(float* out, int n) { ProcessT<false>(out, nullptr, n); }
@@ -1415,6 +1576,7 @@ struct Engine
     void TriggerStep(int k)
     {
         int s = stepSrc[k];
+        if(s < 0 || (tableFlags[s] & kFlagTomb)) return;   /* EDIT: a deleted marker punched into a step: no gate, no voice */
         /* a continuation is not a hit: no gate; in onsets-only mode neither
          * is a slice that does not open with a drum */
         /* a map hit (Grids/Euclid) IS a hit by definition — it gates in
@@ -1557,3 +1719,5 @@ struct Engine
 };
 
 } // namespace bb
+
+#include "bb_edit.h"   /* EDIT: the ApplyEdit / overlay / key-table bodies */
