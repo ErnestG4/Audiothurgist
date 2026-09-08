@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# tools/web/search "query" [n]  — DuckDuckGo results (title, url, snippet) without an API key.
+# Agents: run this from Bash instead of the built-in WebSearch when that tool is rate-limited.
+cd "$(dirname "$0")"
+exec .venv/bin/python - "$@" <<'PY'
+import sys
+from ddgs import DDGS
+q = sys.argv[1]; n = int(sys.argv[2]) if len(sys.argv) > 2 else 10
+for r in DDGS().text(q, max_results=n):
+    print(f"- {r.get('title','').strip()}\n  {r.get('href','')}\n  {r.get('body','').strip()}\n")
+PY

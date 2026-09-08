@@ -14,3 +14,4 @@ tests/neural/ADTOF-pytorch/
 tests/neural/idmt/
 tests/neural/*.csv
 tests/neural/__pycache__/
+tools/web/.venv/
