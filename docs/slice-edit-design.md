@@ -315,3 +315,10 @@ every start.
 6. The panel Edit page gesture: B1 hold + B3 tap — check it against the
    current button map before it is taken.
 7. `0x67 SLICE` with gen checking rather than more ACTION ops.
+
+**Decided 2026-09-08 (Ernest):** 1 yes; 2 whatever serves the UX without
+costing stability or performance → the firmware journal; 3 Autosave
+**default On**; 4 yes; 5 yes, if the UX can be nailed; 6 to be tested
+against the button map; 7 held — resolution: **ACTION ops with an optional
+trailing `u8 gen` (0 = unchecked)**, sent for split / merge / delete, not
+for drags; a dedicated command only if the op space gets crowded.
