@@ -85,6 +85,7 @@
   <h1><span>Audio</span>thurgist</h1>
   <button id="connect" class="primary">Connect</button>
   <button id="demo" class="mini" title="drive the page from a fake module (demo.js) — no hardware needed">Demo</button>
+  <button id="usbscan" class="mini" style="display:none" title="WebUSB: list every USB device the phone can see, to tell a cable problem from a filter problem">Scan USB</button>
   <span id="modpill" class="pill">not connected</span>
   <span id="pagepill" class="pill">page: —</span>
   <span id="syncpill" class="pill">clock: —</span>
@@ -777,6 +778,28 @@ function describeNoSerial() {
   if (/Android/.test(ua) && !navigator.usb) return 'This browser has no WebUSB. Use Chrome (or another Chromium browser) on Android with a USB OTG cable.';
   return 'This browser has no Web Serial and no WebUSB. Use Chrome, Edge or Opera on the desktop, or Chrome on Android.';
 }
+/* WebUSB diagnostic (Android): the chooser with no filter shows everything
+ * the phone enumerates. The module is 0483:5740, device class 2 (CDC) with a
+ * class-2 control interface and a class-10 data interface — if it is not in
+ * the list at all, the cable is not making a host connection (a C-to-C
+ * cable into a device port without CC pull-downs does exactly that: try an
+ * OTG adapter plus an A-to-C cable). If it IS listed but Connect never
+ * offers it, the filter is wrong and the printed classes say how. */
+const hex4 = v => v.toString(16).padStart(4, '0');
+async function scanUsb() {
+  if (!navigator.usb) { notice('No WebUSB in this browser.'); return; }
+  try {
+    const d = await navigator.usb.requestDevice({ filters: [] });
+    const ifs = ((d.configurations[0] || {}).interfaces || []).map(i => (i.alternates[0] || {})).map(a => `${a.interfaceClass}/${a.interfaceSubclass}/${a.interfaceProtocol}`).join(', ');
+    const id = `${d.manufacturerName || '?'} ${d.productName || '?'} ${hex4(d.vendorId)}:${hex4(d.productId)} class ${d.deviceClass}/${d.deviceSubclass}/${d.deviceProtocol} interfaces [${ifs}]`;
+    notice('USB device seen: ' + id + (d.vendorId === 0x0483 ? ' — that is the module, so the phone enumerates it and only the Connect filter is at fault; copy this line into the chat.' : ' — not the module (0483:5740). If the module was missing from the list, the phone is not enumerating it: try a USB-C OTG adapter with an A-to-C cable, or another port on a hub.'));
+  } catch (e) {
+    if (e.name === 'NotFoundError') notice('USB scan: nothing chosen. If the list was empty the phone sees no USB device on that cable at all — a C-to-C cable into a device port without CC pull-downs does that; try a USB-C OTG adapter plus an A-to-C cable.');
+    else notice('USB scan: ' + e.message);
+  }
+}
+$('usbscan').onclick = scanUsb;
+document.addEventListener('serial-polyfill', () => { if (!navigator.serial) $('usbscan').style.display = ''; });
 async function connect() {
   notice('');
   if (link) { const l = link; setDisconnected(); await l.close(); return; }
@@ -784,7 +807,7 @@ async function connect() {
   if (!api) { notice(describeNoSerial()); return; }
   try { const port = await api.requestPort({ filters: [{ usbVendorId: 0x0483 }] }); await connectPort(port, false); }
   catch (e) {
-    if (e.name === 'NotFoundError') return;
+    if (e.name === 'NotFoundError') { if (transportName() === 'WebUSB') notice('No module chosen. If Chrome\'s list was empty, press Scan USB to see whether the phone enumerates anything on this cable.'); return; }
     let m = 'Connect failed: ' + e.message;
     if (transportName() === 'WebUSB' && /(claim|busy|access|denied|LIBUSB|unable to claim)/i.test(e.message)) m += ' — another app or the system may hold the USB interface; unplug and replug the OTG cable, and make sure no other page is connected.';
     notice(m);
