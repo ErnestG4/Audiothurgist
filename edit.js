@@ -154,13 +154,22 @@ function histLabel(op, a = {}) {
     default: return op;
   }
 }
-/* The page's own label list keyed by tableGen — a viewer over the firmware's journal (package 6), never a second
- * source of truth. A gen the page did not cause (a take, the panel, a re-slice) gets the 'module' label. */
+/* The page's own label list keyed by tableGen — a viewer over the firmware's journal (EDIT-UNDO), never a second
+ * source of truth. A gen the page did not cause (a take, the panel, a re-slice) gets the 'module' label. An undo
+ * marks the newest live entry `undone` (it stays listed, struck through), a redo un-marks the oldest undone one, a new
+ * op drops the undone entries (the module cleared its redo half), and the tail's redoDepth reconciles: 0 → nothing is
+ * undone any more. The depths are the module's; the marks are only a picture of them. */
 class History {
-  constructor(max = K.histMax) { this.max = max; this.items = []; this.gen = null; this.undoDepth = 0; }
-  push(gen, label) { this.items.push({ gen, label }); if (this.items.length > this.max) this.items.shift(); this.gen = gen; }
-  /* the state's tail: a gen the page has not labelled is the module's */
-  note(gen, undoDepth = 0) { this.undoDepth = undoDepth; if (gen == null) return false; if (this.gen == null) { this.gen = gen; return false; } if (gen !== this.gen) { this.push(gen, histLabel('module')); return true; } return false; }
+  constructor(max = K.histMax) { this.max = max; this.items = []; this.gen = null; this.undoDepth = 0; this.redoDepth = 0; }
+  push(gen, label) { this.items = this.items.filter(x => !x.undone); this.items.push({ gen, label, undone: false }); if (this.items.length > this.max) this.items.shift(); this.gen = gen; }
+  undo(gen) { for (let i = this.items.length - 1; i >= 0; i--) if (!this.items[i].undone) { this.items[i].undone = true; break; } this.gen = gen; }
+  redo(gen) { for (let i = 0; i < this.items.length; i++) if (this.items[i].undone) { this.items[i].undone = false; break; } this.gen = gen; }
+  /* the state's tail: a gen the page has not labelled is the module's; a redo depth of 0 means nothing is undone */
+  note(gen, undoDepth = 0, redoDepth = 0) {
+    this.undoDepth = undoDepth; this.redoDepth = redoDepth;
+    if (!redoDepth && this.items.some(x => x.undone)) this.items = this.items.filter(x => !x.undone);
+    if (gen == null) return false; if (this.gen == null) { this.gen = gen; return false; } if (gen !== this.gen) { this.push(gen, histLabel('module')); return true; } return false;
+  }
   list() { return this.items.slice().reverse(); }
 }
 
@@ -445,12 +454,13 @@ class Editor {
       this.busy = null;   /* the link is free: what follows is a poll */
       if (r.ok) {
         this.stats.commits++; const full = op === 'split' || op === 'copy' || op === 'tap' ? histLabel(op, Object.assign({}, args, { newIdx: r.newIdx })) : op === 'onsets' ? histLabel(op, Object.assign({}, args, { count: r.count })) : label;
-        this.history.push(r.tableGen, full); this.cb.status(full + (retried ? ' (after a refetch)' : ''), 'ok');
+        if (op === 'undo') this.history.undo(r.tableGen); else if (op === 'redo') this.history.redo(r.tableGen); else this.history.push(r.tableGen, full);
+        this.cb.status(full + (retried ? ' (after a refetch)' : ''), 'ok');
         await this.cb.refetch(); this.local = null; this.cb.redraw();
       } else {
         this.stats.refused++; this.local = null;
         if (r.status === 3 && why === 'stale') why = 'stale: the table changed under you — refetched; the target is gone, try again';
-        else if (r.status !== 3) why = r.status === 2 ? 'refused (BAD_ARGS): the module rejected the span, index or key' : HL.statusName(r.status);
+        else if (r.status !== 3) why = r.status === 2 ? (op === 'undo' || op === 'redo' ? 'refused (BAD_ARGS): nothing to ' + op + ' — the journal is empty, or this firmware has none' : 'refused (BAD_ARGS): the module rejected the span, index or key') : HL.statusName(r.status);
         this.lastErr = why; this.cb.status(label + ' — ' + why, 'warn'); this.cb.redraw();
       }
       return r;
@@ -526,8 +536,8 @@ class Editor {
     return items;
   }
   menuFor(t, cx, cy) { this.select(t); const items = this.menuItems(t); if (items.length && this.cb.menu) this.cb.menu(items, cx, cy, t); }
-  /* the state tail: history from tableGen / undoDepth */
-  noteState(st) { if (!st) return; this.history.note(st.tableGen, st.undoDepth || 0); }
+  /* the state tail: history from tableGen / undoDepth / redoDepth */
+  noteState(st) { if (!st) return; this.history.note(st.tableGen, st.undoDepth || 0, st.redoDepth || 0); }
   /* the strip's overview needs nothing of the editor; the field under the handle reads these */
   fieldValues() {
     const c = this.d.ctx(), tb = c.table, t = this.selT; if (!tb || t < 0 || t >= tb.entries.length) return null;

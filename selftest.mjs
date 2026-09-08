@@ -60,6 +60,7 @@ function stateBody(len) {
   if (len >= 255) { const nm = 'Amen_kit-2'; for (let i = 0; i < nm.length; i++) b[223 + i] = nm.charCodeAt(i); }
   if (len >= 258) { b[255] = 77; b[256] = 3; b[257] = 255; }              /* EDIT: tableGen 77, undo depth 3, no selection */
   if (len >= 262) dv.setUint32(258, 123456, true);                        /* EDIT: srcPos */
+  if (len >= 263) b[262] = 2;                                             /* EDIT-UNDO: redo depth 2 */
   return b;
 }
 {
@@ -432,7 +433,10 @@ await link.start();
   const e1 = HL.parseState(stateBody(258)); check('state 258: tableGen, undoDepth, selSlice −1; no srcPos', e1.tableGen === 77 && e1.undoDepth === 3 && e1.selSlice === -1 && e1.srcPos === undefined);
   const e2 = HL.parseState(stateBody(262)); check('state 262: srcPos', e2.srcPos === 123456 && e2.tableGen === 77);
   { const b = stateBody(262); b[257] = 9; check('selSlice 9', HL.parseState(b).selSlice === 9); }
-  check('state 300: a longer body still parses', HL.parseState(stateBody(300)).srcPos === 123456);
+  check('state 262: no redoDepth (EDIT-PROTO without the journal)', HL.parseState(stateBody(262)).redoDepth === undefined);
+  check('state 263: redoDepth (EDIT-UNDO)', HL.parseState(stateBody(263)).redoDepth === 2 && HL.parseState(stateBody(263)).undoDepth === 3);
+  check('state 300: a longer body still parses', HL.parseState(stateBody(300)).srcPos === 123456 && HL.parseState(stateBody(300)).redoDepth === 2);
+  check('ACT: the journal ops 30 / 31', HL.ACT.undoEdit === 30 && HL.ACT.redoEdit === 31);
   { const t = new Uint8Array(3 + 2 * HL.TABLE_ENTRY_EDIT); t[0] = 0; t[1] = 32; t[2] = 34; const dv = new DataView(t.buffer);
     dv.setUint32(3, 100, true); dv.setUint32(7, 6000, true); t[11] = 0xff; t[12] = 0; t[13] = 240; t[14] = 1; t[15] = 60; t[16] = HL.EDIT.orange;
     dv.setUint32(17, 192000, true); dv.setUint32(21, 0, true); t[25] = 0xff; t[26] = 2; t[27] = 255; t[28] = 0; t[29] = 210; t[30] = HL.EDIT.tomb;
@@ -450,7 +454,7 @@ await link.start();
   const table = () => HL.fetchTable(l, { edit: true });
   check('demo advertises edit', desc.audiothurgist.edit === 1 && desc.audiothurgist.sets === 1);
   const s0 = await state();
-  check('tail: tableGen ≥ 1, undoDepth 0, selSlice −1, srcPos inside the material', s0.tableGen >= 1 && s0.undoDepth === 0 && s0.selSlice === -1 && s0.srcPos >= 0 && s0.srcPos < s0.bufLen && s0.nTable === 35);
+  check('tail: tableGen ≥ 1, undoDepth 0, redoDepth 0, selSlice −1, srcPos inside the material', s0.tableGen >= 1 && s0.undoDepth === 0 && s0.redoDepth === 0 && s0.selSlice === -1 && s0.srcPos >= 0 && s0.srcPos < s0.bufLen && s0.nTable === 35);
   const t0 = await table();
   check('14-byte form: 32 grid + 3 recordings, every flag white', t0.entries.length === 35 && t0.entries.every(e => e.flags === 0) && t0.entries[32].key === 3);
   const t13 = await HL.fetchTable(l);
@@ -597,7 +601,80 @@ await link.start();
   const raw = await ol.request(HL.CMD.table, Uint8Array.of(0, 39, 1));
   check('noedit: form 1 is ignored — 13-byte entries', (raw.length - 3) % 13 === 0 && (raw.length - 3) / 13 === 35);
   check('noedit: the page\'s 13-byte fetch parses it', (await HL.fetchTable(ol)).entries.length === 35);
-  check('noedit: ACTION 16 / 27 / 29 → BAD_ARGS (unknown op)', (await HL.editBoundary(ol, 5, 100)).status === 2 && (await HL.audition(ol, 0, 100)).status === 2 && (await HL.tapMark(ol, 10, 20)).status === 2);
+  check('noedit: ACTION 16 / 27 / 29 / 30 / 31 → BAD_ARGS (unknown op)', (await HL.editBoundary(ol, 5, 100)).status === 2 && (await HL.audition(ol, 0, 100)).status === 2 && (await HL.tapMark(ol, 10, 20)).status === 2 && (await HL.editUndo(ol)).status === 2 && (await HL.editRedo(ol)).status === 2);
+  await ol.close();
+
+  /* ── EDIT-UNDO (docs/packages/slice-edit-undo.md): ACTION 30 / 31 against the fake's journal — every op undone restores
+   * the 14-byte table and the key map byte for byte, redo re-applies, a new op clears the redo half, the ring holds 64,
+   * BAD_ARGS when empty, BAD_STATE during a take, a take ends the history. ── */
+  {
+    const u = new DEMO.FakeDevice({ kit: true, nSlices: 32, latencyMs: 1 });
+    const ul = new HL.Link(new DEMO.FakePort(u)); await ul.start(); await HL.hello(ul);
+    const ustate = async () => HL.parseState(await ul.request(HL.CMD.state));
+    /* the raw form-1 table plus the key map, as one string */
+    const snap = async () => { const t = await HL.fetchTable(ul, { edit: true }); const st = await ustate(); return JSON.stringify([t.nSlices, t.nTable, t.entries, Array.from(st.keySlice)]); };
+    let st = await ustate();
+    check('undo tail: a 263-byte body, both depths 0; UNDO / REDO on an empty journal → BAD_ARGS, gen untouched', st.undoDepth === 0 && st.redoDepth === 0 && (await HL.editUndo(ul)).status === 2 && (await HL.editRedo(ul)).status === 2 && (await ustate()).tableGen === st.tableGen);
+    let steps = 0;
+    const roundTrip = async (name, fn) => {
+      const before = await snap(); const g0 = (await ustate()).tableGen;
+      const r = await fn(); if (!r.ok) { check(name + ': the op lands', false, 'status ' + r.status); return; }
+      steps++;
+      const after = await snap(); const s1 = await ustate();
+      const ru = await HL.editUndo(ul); const back = await snap(); const s2 = await ustate();
+      check(name + ': undo restores the table and keys byte for byte; gen moves; depths', ru.ok && ru.tableGen === s2.tableGen && back === before && s2.tableGen !== s1.tableGen && s2.tableGen !== g0 && s2.undoDepth === steps - 1 && s2.redoDepth === 1);
+      const rr = await HL.editRedo(ul); const again = await snap(); const s3 = await ustate();
+      check(name + ': redo re-applies it; depths', rr.ok && again === after && s3.undoDepth === steps && s3.redoDepth === 0);
+    };
+    await roundTrip('SET_BOUNDARY(5)', () => HL.editBoundary(ul, 5, 5 * SL - 1000));
+    await roundTrip('ADD(key 5, orange)', () => HL.editAdd(ul, 5, 7 * SL, 2400));
+    await roundTrip('SET_ENTRY(35)', () => HL.editEntry(ul, 35, 7 * SL + 100, 4000));
+    await roundTrip('SPLIT(35)', () => HL.editSplit(ul, 35, 7 * SL + 100 + 2000));
+    await roundTrip('SET_KEY(6, 36)', () => HL.editSetKey(ul, 6, 36));
+    await roundTrip('SET_KEY(7, 2) — a grid slice', () => HL.editSetKey(ul, 7, 2));
+    await roundTrip('SWAP_KEYS(3, 9) — the recording\'s owner trades', () => HL.editSwapKeys(ul, 3, 9));
+    await roundTrip('MERGE(36) swallows 35', () => HL.editMerge(ul, 36));
+    await roundTrip('PROMOTE(36, 8)', () => HL.editPromote(ul, 36, 8));
+    await roundTrip('NUDGE_ALL(+5 ms, grid)', () => HL.editNudgeAll(ul, 5, HL.EDIT.grid));
+    await roundTrip('NUDGE_ALL(−3 ms, markers)', () => HL.editNudgeAll(ul, -3, HL.EDIT.markers));
+    await roundTrip('FROM_ONSETS(210, 35) — one step', () => HL.editFromOnsets(ul, 210, 35));
+    u.srcPos = () => 8 * SL + 1000;
+    await roundTrip('TAP_MARK', () => HL.tapMark(ul, 10, 40));
+    await roundTrip('TOMBSTONE(36) with key 6 on it', () => HL.editTombstone(ul, 36));
+    await roundTrip('TOMBSTONE(32) — the recording', () => HL.editTombstone(ul, 32));
+    st = await ustate();
+    check('undo depth counts every step', st.undoDepth === steps && st.redoDepth === 0);
+    /* a stale gen on UNDO: BAD_STATE, nothing moved; gen 0 unchecked */
+    { const before = await snap(); const r = await HL.editOp(ul, HL.ACT.undoEdit, [], (st.tableGen % 255) + 1);
+      check('UNDO with a stale gen: BAD_STATE, nothing done', r.status === 3 && (await snap()) === before && (await ustate()).undoDepth === steps); }
+    /* two undos, then a new op: the redo half is gone */
+    { await HL.editUndo(ul); await HL.editUndo(ul); st = await ustate();
+      check('two undone: redo depth 2', st.redoDepth === 2 && st.undoDepth === steps - 2);
+      const r = await HL.editSetKey(ul, 0, 1); st = await ustate();
+      check('a new op clears the redo half; REDO → BAD_ARGS', r.ok && st.redoDepth === 0 && st.undoDepth === steps - 1 && (await HL.editRedo(ul)).status === 2); }
+    /* undo-all restores the fresh kit; redo-all comes back */
+    { const end = await snap(); let n = 0; while ((await HL.editUndo(ul)).ok) n++;
+      const st0 = await ustate();
+      const fresh = new DEMO.FakeDevice({ kit: true, nSlices: 32, latencyMs: 1 }); const fl = new HL.Link(new DEMO.FakePort(fresh)); await fl.start(); await HL.hello(fl);
+      const t0 = await HL.fetchTable(fl, { edit: true }); const f0 = HL.parseState(await fl.request(HL.CMD.state)); await fl.close();
+      check('undo-all: back to the fresh kit, byte for byte', n === steps - 1 && st0.undoDepth === 0 && st0.redoDepth === steps - 1 && (await snap()) === JSON.stringify([t0.nSlices, t0.nTable, t0.entries, Array.from(f0.keySlice)]));
+      let m = 0; while ((await HL.editRedo(ul)).ok) m++;
+      check('redo-all: back to the end', m === n && (await snap()) === end && (await ustate()).redoDepth === 0); }
+    /* the ring: 70 boundary moves keep 64 */
+    { for (let k = 0; k < 70; k++) await HL.editBoundary(ul, 4, 4 * SL + 10 * (k + 1));
+      st = await ustate(); check('the depth saturates at 64 (the ring)', st.undoDepth === 64 && st.redoDepth === 0);
+      let n = 0; while ((await HL.editUndo(ul)).ok) n++;
+      check('64 undos, the 65th BAD_ARGS; the table is where op 6 left it', n === 64 && (await HL.fetchTable(ul, { edit: true })).entries[4].start === 4 * SL + 60 && (await ustate()).redoDepth === 64); }
+    /* BAD_STATE during a take; a take ends the history */
+    { await HL.editBoundary(ul, 5, 5 * SL + 500);
+      u.rec = { state: 1, key: 2, t: Date.now(), pos: u.freePos };
+      check('UNDO / REDO during a take: BAD_STATE', (await HL.editUndo(ul)).status === 3 && (await HL.editRedo(ul)).status === 3);
+      u.rec = { state: 0, key: -1, t: 0, pos: 0 };
+      u.recordKey(9, 0.2, 1); st = await ustate();
+      check('a take past the journal ends it: both depths 0, UNDO BAD_ARGS', st.undoDepth === 0 && st.redoDepth === 0 && (await HL.editUndo(ul)).status === 2);
+      check('…the next op restarts it at 1', (await HL.editSetKey(ul, 0, 2)).ok && (await ustate()).undoDepth === 1); }
+    await ul.close();
+  }
   void os;
   await ol.close();
 }
@@ -641,7 +718,13 @@ const ED = require('./edit.js');
   check('history labels', ED.histLabel('split', { t: 7, newIdx: 40 }) === 'split 7 → 40' && ED.histLabel('start', { t: 3, d: -192 }) === 'start 3 −4 ms' && ED.histLabel('boundary', { i: 5, d: 96 }) === 'boundary 5 +2 ms' && ED.histLabel('onsets', { thresh: 128, count: 8 }) === 'onsets ≥ 50 % → 8' && ED.histLabel('key', { key: 0, t: 33 }) === 'C1 → 33' && ED.histLabel('swap', { a: 0, b: 13 }) === 'C1 ↔ C♯2' && ED.histLabel('nudge', { ms: 5, which: HL.EDIT.grid }) === 'nudge grid +5 ms' && ED.histLabel('merge', { t: 36, u: 35 }) === 'merge 35 into 36' && ED.histLabel('tap', { newIdx: 37 }) === 'tap → marker 37');
   { const h = new ED.History(3);
     check('History: the first gen seen is silent, a foreign gen is the module\'s, the page\'s own gen is not', h.note(5) === false && h.items.length === 0 && h.note(6) === true && h.items[0].label === 'changed on the module' && (h.push(7, 'split 7'), h.note(7)) === false && h.items.length === 2);
-    h.push(8, 'a'); h.push(9, 'b'); check('History: newest first, capped', h.list().map(x => x.label).join('|') === 'b|a|split 7' && h.items.length === 3 && h.note(9, 4) === false && h.undoDepth === 4); }
+    h.push(8, 'a'); h.push(9, 'b'); check('History: newest first, capped', h.list().map(x => x.label).join('|') === 'b|a|split 7' && h.items.length === 3 && h.note(9, 4, 1) === false && h.undoDepth === 4 && h.redoDepth === 1);
+    /* EDIT-UNDO: undo marks the newest live entry, redo un-marks the oldest undone, a new op drops the undone ones, the tail reconciles */
+    h.undo(10); check('History: undo strikes the newest entry, keeps it listed', h.list()[0].label === 'b' && h.list()[0].undone === true && h.list()[1].undone === false && h.gen === 10);
+    h.undo(11); check('History: a second undo strikes the next', h.list()[1].undone === true && h.list()[2].undone === false);
+    h.redo(12); check('History: redo un-marks the oldest undone', h.list()[1].undone === false && h.list()[0].undone === true);
+    h.push(13, 'c'); check('History: a new op drops the undone entries (the redo half is gone)', h.list().map(x => x.label).join('|') === 'c|a|split 7' && h.items.every(x => !x.undone));
+    h.undo(14); h.note(14, 2, 0); check('History: the tail\'s redo depth 0 drops the marks the page still had', h.items.every(x => !x.undone) && h.items.length === 2); }
   /* the drop rule */
   const ks = Int8Array.from({ length: 24 }, (_, k) => ED.spanSlice(k, 4)); ks[3] = 6;   /* key 3 plays its recording (entry 6) */
   const dctx = { table: tb, keySlice: ks, nSlices: 4 };
@@ -820,8 +903,10 @@ const ED = require('./edit.js');
   check('nudge all +5 ms (grid)', Hh.table.entries[5].start === b5 + 240 && ed.history.list()[0].label === 'nudge grid +5 ms');
   d.srcPos = () => 8 * SL + 1000; sent.length = 0; const rt = await ed.tapMark(); await settle();
   check('the Chop pad: TAP_MARK(60, 40 ms from the option), gen unchecked, an orange marker, "tap → marker N"', rt.ok && sent.some(b => b[0] === 29 && b[1] === 60 && b[2] === 40 && b.length === 3) && Hh.table.entries[rt.newIdx].flags === HL.EDIT.orange && ed.history.list()[0].label === `tap → marker ${rt.newIdx}`);
-  Hh.status.length = 0; const ru = await ed.undo(); await settle();
-  check('undo on a firmware without package 6: BAD_ARGS, said, nothing else', ru.status === 2 && /BAD_ARGS/.test(Hh.status[Hh.status.length - 1]));
+  Hh.status.length = 0; const nBefore = Hh.table.nTable; const ru = await ed.undo(); await settle(); ed.noteState(Hh.st);
+  check('undo through the editor: the tap marker is gone, the label is struck through, the tail says redo 1', ru.ok && Hh.table.nTable === nBefore - 1 && ed.history.list()[0].undone === true && /tap → marker/.test(ed.history.list()[0].label) && Hh.st.redoDepth === 1 && ed.history.redoDepth === 1);
+  const rr = await ed.redo(); await settle(); ed.noteState(Hh.st);
+  check('redo through the editor: the marker is back, the mark cleared', rr.ok && Hh.table.nTable === nBefore && ed.history.list()[0].undone === false && Hh.st.redoDepth === 0);
   { const c0 = ed.stats.commits; const p1 = ed.copyOut(14); const p2 = ed.copyOut(15); const r2 = await p2; await p1; await settle(); await refetch();
     check('one edit at a time: a second gesture op while one is in flight is turned away, the first lands', r2 === null && Hh.status.some(s => /one edit at a time/.test(s)) && Hh.table.entries.some(e => ED.isLive(e) && e.start === Hh.table.entries[14].start && e.len === Hh.table.entries[14].len && ED.isOrange(e)) && ed.stats.commits === c0 + 1); }
   { const before = Hh.st.keySlice[11]; const q1 = ed.setKey(11, 4); const q2 = ed.setKey(11, 6); const r = await q2; await q1; await settle();
@@ -949,10 +1034,14 @@ async function loadPage(search) {
   check('page: the histogram\'s pointer sets the threshold near the top, the button says how many', thr > 220 && /^Make \d+ marker/.test(G("$('ed_onsets').textContent")));
   const want = +G("$('ed_onsets').textContent").match(/\d+/)[0]; G("$('ed_onsets').onclick()");
   check('page: Make markers → FROM_ONSETS with that count', await until(() => G("$('ed_hist').innerHTML").includes(`→ ${want}`)) && G('demoDevice.table.filter((e, i) => i >= demoDevice.nSlices && e.len > 0 && !(e.flags & 1) && e.key < 0).length') === want);
-  /* nudge; undo stays disabled (undoDepth 0); keys follow the grid asks (confirm → true) */
+  /* nudge; Undo enables from the tail's depth, Redo from the redo depth, the list strikes the undone entry; keys follow the grid asks (confirm → true) */
   const b6 = G('demoDevice.table[6].start'); G("$('ed_nudge_p').onclick()");
   check('page: nudge all +5 ms', await until(() => G('demoDevice.table[6].start') === b6 + 240));
-  check('page: Undo / Redo disabled while undoDepth is 0, the depth line says why', G("$('ed_undo').disabled") === true && G("$('ed_redo').disabled") === true && /no journal/.test(G("$('ed_depth').textContent")));
+  check('page: Undo enabled from undoDepth, Redo disabled while redoDepth is 0, the depth line says both', await until(() => G("$('ed_undo').disabled") === false) && G("$('ed_redo').disabled") === true && /undo \d+ · redo 0/.test(G("$('ed_depth').textContent")));
+  G("$('ed_undo').onclick()");
+  check('page: Undo → the nudge is gone, Redo enabled, the entry struck through in the list', await until(() => G('demoDevice.table[6].start') === b6) && await until(() => G("$('ed_redo').disabled") === false) && await until(() => /class="undone"/.test(G("$('ed_hist').innerHTML"))) && /redo 1/.test(G("$('ed_depth').textContent")));
+  G("$('ed_redo').onclick()");
+  check('page: Redo → the nudge is back, nothing struck', await until(() => G('demoDevice.table[6].start') === b6 + 240) && await until(() => !/class="undone"/.test(G("$('ed_hist').innerHTML"))));
   G("$('ed_follow').onclick()");
   check('page: keys follow the grid (confirmed, queued behind the nudge\'s reply) → every key on its span', await until(() => { const ks = G('Array.from(demoDevice.keySlice)'); return ks.every((t, k) => t === ED9.spanSlice(k, 32)); }, 6000));
   check('page: no runtime errors or link warnings through all of it', D.errors.length === 0 && !D.warns.some(w => /table|state|hits/.test(w)), D.errors.concat(D.warns).join(' | ').slice(0, 400));
