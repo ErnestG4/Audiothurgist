@@ -602,6 +602,255 @@ await link.start();
   await ol.close();
 }
 
+/* ── 8. EDIT-UI: the pure editor (edit.js) — magnets, clamps, handles, positions, labels, the drop rule, the onset
+ *       preview, the audition window, the gesture recogniser — then the Editor driven against the fake module ── */
+const ED = require('./edit.js');
+{
+  const SL = DEMO.SLICE_LEN;
+  check('spanSlice: the engine\'s arithmetic', ED.spanSlice(0, 32) === 0 && ED.spanSlice(23, 32) === 30 && ED.spanSlice(5, 16) === 5 && ED.spanSlice(20, 16) === 15);
+  /* magnets */
+  const hits = [1000, 2000];
+  check('nearest onset within ±12 ms, the earlier wins a tie, none past the radius', ED.nearestOnset(hits, 1300) === 1000 && ED.nearestOnset(hits, 1500) === 1000 && ED.nearestOnset(hits, 1700) === 2000 && ED.nearestOnset(hits, 3000) === null && ED.nearestOnset(null, 1000) === null);
+  const wav = [1, 1, 1, -1, -1, -1, 1, 1], sAt = i => (i >= 0 && i < wav.length ? wav[i] : null);
+  check('zero crossing: the nearest sign change, a gap in the cache gives up, a flat run has none', ED.zeroCross(2, 4, sAt) === 3 && ED.zeroCross(5, 4, sAt) === 6 && ED.zeroCross(4, 1, sAt) === 3 && ED.zeroCross(1, 1, () => 1) === null && ED.zeroCross(7, 3, sAt) === 6 && ED.zeroCross(2, 3, i => (i < 4 ? 1 : null)) === null && ED.zeroCross(2, 4, null) === null);
+  check('snap: onset first, then the zero crossing; off = raw', ED.snap(1300, { hits, zero: false }).by === 'onset' && ED.snap(1300, { hits, zero: false }).pos === 1000 && ED.snap(1300, { hits, off: true }).pos === 1300 && ED.snap(1300, { hits, off: true }).by === null
+    && ED.snap(2, { hits: [4], zero: true, sampleAt: sAt, onsetR: 3, zeroR: 2 }).pos === 3 && ED.snap(2, { hits: [4], zero: true, sampleAt: sAt, onsetR: 3, zeroR: 2 }).by === 'onset+zero' && ED.snap(2, { hits: [], zero: true, sampleAt: sAt, zeroR: 2 }).by === 'zero');
+  /* clamps on a synthetic table: four grid slices of 6000, a marker over slice 1, a tombstone, a recording past the break */
+  const tb = { nSlices: 4, entries: [] }; for (let i = 0; i < 4; i++) tb.entries.push({ start: i * 6000, len: 6000, key: -1, cls: i & 3, sal: 200, hit: true, dens: 0, flags: 0 });
+  tb.entries.push({ start: 6000, len: 6000, key: -1, cls: 1, sal: 0, hit: false, dens: 0, flags: HL.EDIT.orange });            /* 4: a marker over slice 1 */
+  tb.entries.push({ start: 12000, len: 0, key: -1, cls: 0, sal: 0, hit: false, dens: 0, flags: HL.EDIT.tomb });                /* 5: a tombstone */
+  tb.entries.push({ start: 24000, len: 9600, key: 3, cls: 0, sal: 255, hit: true, dens: 0, flags: 0 });                       /* 6: a recording (key 3) */
+  tb.entries.push({ start: 12000, len: 6000, key: -1, cls: 1, sal: 0, hit: false, dens: 0, flags: 0 });                       /* 7: a grey marker ending where 4… no, adjacent to 4's end */
+  check('clampBoundary: 64 from either neighbour\'s far end; 0 and n cannot move', ED.clampBoundary(tb, 1, 10) === 64 && ED.clampBoundary(tb, 1, 11990) === 11936 && ED.clampBoundary(tb, 1, 8000) === 8000 && ED.clampBoundary(tb, 0, 100) === null && ED.clampBoundary(tb, 4, 100) === null && ED.clampBoundary(null, 1, 1) === null);
+  check('clampStart keeps the end and 480; clampEnd keeps the start, ≤ freePos', JSON.stringify(ED.clampStart(tb.entries[4], 11800, 33600)) === '{"start":11520,"len":480}' && ED.clampStart(tb.entries[4], -50, 33600).start === 0 && ED.clampEnd(tb.entries[6], 99999, 33600).len === 9600 && ED.clampEnd(tb.entries[6], 24000, 33600).len === 480);
+  /* handles and hit-testing */
+  const hl = ED.handleList(tb, 4);
+  check('handleList: boundaries 1..3, the live markers\' starts, the selected marker\'s end, no tombstone', hl.length === 3 + 3 + 1 && hl.filter(h => h.kind === 'grid').map(h => h.t).join() === '1,2,3' && hl.filter(h => h.kind === 'start').map(h => h.t).join() === '4,6,7' && hl.find(h => h.kind === 'end').pos === 12000 && ED.handleList(tb, 6).find(h => h.kind === 'end').t === 6 && !ED.handleList(tb, 2).some(h => h.kind === 'end'));
+  const xOf = p => p / 24000 * 600;   /* the break over 600 px: 25 px per 1000 samples */
+  check('hitHandle: within the slop, nearest first, the selection wins a tie, nothing past 22 px', ED.hitHandle(hl, 150 + 10, xOf).t === 1 && ED.hitHandle(hl, 150 + 23, xOf) === null && ED.hitHandle(hl, 300, xOf, 22, 4).kind === 'end' && ED.hitHandle(hl, 300, xOf, 22, 7).kind === 'start' && ED.hitHandle(hl, 300, xOf, 22, 2).t === 2);
+  check('entryAt: the smallest marker over the grid, the grid where none, −1 past the end', ED.entryAt(tb, 7000) === 4 && ED.entryAt(tb, 1000) === 0 && ED.entryAt(tb, 13000) === 7 && ED.entryAt(tb, 25000) === 6 && ED.entryAt(tb, 99999) === -1);
+  check('mergeTarget: adjacent when a marker ends at the start, else the previous live one, null with none', ED.mergeTarget(tb, 7).u === 4 && ED.mergeTarget(tb, 7).adjacent && ED.mergeTarget(tb, 6).u === 4 && !ED.mergeTarget(tb, 6).adjacent && ED.mergeTarget(tb, 4) === null && ED.mergeTarget(tb, 5) === null && ED.mergeTarget(tb, 1) === null);
+  check('nearestBoundary for PROMOTE', ED.nearestBoundary(tb, 11000) === 2 && ED.nearestBoundary(tb, 500) === 1 && ED.nearestBoundary({ nSlices: 1, entries: [tb.entries[0]] }, 5) === -1);
+  check('keysOn', ED.keysOn(Int8Array.from([0, 6, 6, 2]), 6).join() === '1,2' && ED.keysOn(null, 0).length === 0);
+  /* positions */
+  const pc = { nativeBpm: 120, gridBars: 2, bufLen: 192000, nSlices: 32 };
+  check('bar:beat:16th from nativeBpm (120 → 6000 per 16th), 1-based', ED.stepLen(pc) === 6000 && ED.fmtBbs(0, pc) === '1:1:1' && ED.fmtBbs(6000 * 17, pc) === '2:1:2' && ED.fmtBbs(6000 * 7 + 100, pc) === '1:2:4' && ED.fmtBbs(100, { bufLen: 192000, nSlices: 32 }) === '1:1:1' && ED.fmtBbs(100, {}) === '—');
+  check('parsePos: bar:beat:16th, ms, s, samples, the field\'s unit, garbage', ED.parsePos('2:1:2', 'samples', pc) === 102000 && ED.parsePos('12.5ms') === 600 && ED.parsePos(' 0.5 s') === 24000 && ED.parsePos('1234') === 1234 && ED.parsePos('10', 'ms') === 480 && ED.parsePos('−4 ms') === -192 && ED.parsePos('x') === null && ED.parsePos('1:1:1', 'bbs', {}) === null && ED.parsePos('3', 'bbs', pc) === null);
+  check('fmtPos / fmtMs / fmtDelta', ED.fmtPos(4800, 'ms') === '100 ms' && ED.fmtPos(120, 'ms') === '2.5 ms' && ED.fmtPos(102000, 'bbs', pc) === '2:1:2' && ED.fmtPos(7.4, 'samples') === '7' && ED.fmtDelta(-192) === '−4 ms' && ED.fmtDelta(96) === '+2 ms');
+  /* labels and the history viewer */
+  check('history labels', ED.histLabel('split', { t: 7, newIdx: 40 }) === 'split 7 → 40' && ED.histLabel('start', { t: 3, d: -192 }) === 'start 3 −4 ms' && ED.histLabel('boundary', { i: 5, d: 96 }) === 'boundary 5 +2 ms' && ED.histLabel('onsets', { thresh: 128, count: 8 }) === 'onsets ≥ 50 % → 8' && ED.histLabel('key', { key: 0, t: 33 }) === 'C1 → 33' && ED.histLabel('swap', { a: 0, b: 13 }) === 'C1 ↔ C♯2' && ED.histLabel('nudge', { ms: 5, which: HL.EDIT.grid }) === 'nudge grid +5 ms' && ED.histLabel('merge', { t: 36, u: 35 }) === 'merge 35 into 36' && ED.histLabel('tap', { newIdx: 37 }) === 'tap → marker 37');
+  { const h = new ED.History(3);
+    check('History: the first gen seen is silent, a foreign gen is the module\'s, the page\'s own gen is not', h.note(5) === false && h.items.length === 0 && h.note(6) === true && h.items[0].label === 'changed on the module' && (h.push(7, 'split 7'), h.note(7)) === false && h.items.length === 2);
+    h.push(8, 'a'); h.push(9, 'b'); check('History: newest first, capped', h.list().map(x => x.label).join('|') === 'b|a|split 7' && h.items.length === 3 && h.note(9, 4) === false && h.undoDepth === 4); }
+  /* the drop rule */
+  const ks = Int8Array.from({ length: 24 }, (_, k) => ED.spanSlice(k, 4)); ks[3] = 6;   /* key 3 plays its recording (entry 6) */
+  const dctx = { table: tb, keySlice: ks, nSlices: 4 };
+  let pl = ED.dropPlan(dctx, { t: 4 }, 5);
+  check('drop a marker on an unoccupied key: SET_KEY, no prompt', pl.kind === 'set' && !pl.red && pl.choices[0].ops[0].join() === 'setKey,5,4');
+  pl = ED.dropPlan(dctx, { key: 3 }, 5);
+  check('drop a cell on an unoccupied cell: SWAP_KEYS', pl.kind === 'swap' && pl.choices[0].ops[0].join() === 'swapKeys,3,5');
+  pl = ED.dropPlan(dctx, { t: 4 }, 3);
+  check('drop a keyless marker on the recording\'s only key: red, replace or cancel (no swap possible), default replace', pl.kind === 'choose' && pl.red && pl.def === 'replace' && pl.choices.map(c => c.id).join() === 'replace,cancel');
+  ks[7] = 7; pl = ED.dropPlan(dctx, { key: 7 }, 3);
+  check('drop a cell on the recording\'s only key: red, swap / replace / cancel, default swap', pl.kind === 'choose' && pl.red && pl.def === 'swap' && pl.choices.map(c => c.id).join() === 'swap,replace,cancel' && pl.choices[0].ops[0].join() === 'swapKeys,7,3');
+  ks[9] = 6; pl = ED.dropPlan(dctx, { key: 7 }, 3);
+  check('…not red when another key still plays the recording; default replace', pl.kind === 'choose' && !pl.red && pl.def === 'replace'); ks[9] = ED.spanSlice(9, 4);
+  ks[10] = 4; pl = ED.dropPlan(dctx, { t: 4 }, 3);
+  check('a marker with a key can swap: the key that plays it trades with the target', pl.choices[0].id === 'swap' && pl.choices[0].ops[0].join() === 'swapKeys,10,3' && pl.def === 'swap');
+  pl = ED.dropPlan(dctx, { key: 10 }, 7);
+  check('drop on an occupied grey key (not a recording): a prompt, not red', pl.kind === 'choose' && !pl.red && pl.def === 'replace');
+  check('drop on itself, a tombstone, a bad key: nothing', ED.dropPlan(dctx, { key: 3 }, 3) === null && ED.dropPlan(dctx, { t: 5 }, 1) === null && ED.dropPlan(dctx, { t: 4 }, 24) === null && ED.dropPlan({ table: null }, { t: 4 }, 1) === null);
+  /* the onset histogram */
+  const bars = ED.onsetBars([100, 6100, 12100, 30000], tb);
+  check('onsetBars: strength = the grid slice\'s salience, 0 past the break', bars.map(b => b.strength).join() === '200,200,200,0');
+  const acc = ED.onsetAccept([{ pos: 0, strength: 250 }, { pos: 100, strength: 250 }, { pos: 6000, strength: 100 }, { pos: 12000, strength: 250 }, { pos: 23800, strength: 250 }], 150, 1680, 24000);
+  check('onsetAccept: threshold, the min gap, spans to the next accepted, the short tail skipped', acc.positions.join() === '0,12000,23800' && acc.count === 2 && acc.spans[1].len === 11800);
+  /* the audition window */
+  const rg = new ED.RateGate(100);
+  check('RateGate: the first goes, the next is held, the held one goes when due, a later one replaces', rg.offer('a', 0) === 'a' && rg.offer('b', 50) === null && rg.due(80) === null && rg.offer('c', 90) === null && rg.due(100) === 'c' && rg.due(150) === null && rg.offer('d', 250) === 'd');
+  /* the gesture recogniser */
+  const g = new ED.Gesture({ slop: 10, dblMs: 300, holdMs: 500 }); const types = evs => evs.map(e => e.type).join();
+  check('tap', types(g.down(1, 10, 10, 0, 'a')) === 'press' && types(g.move(1, 12, 11, 20)) === '' && types(g.up(1, 12, 11, 40)) === 'tap,release');
+  check('double tap (same tag, within 300 ms), then a fresh tap', types(g.down(1, 11, 11, 100, 'a').concat(g.up(1, 11, 11, 120))) === 'press,dbltap,release' && types(g.down(1, 11, 11, 200, 'a').concat(g.up(1, 11, 11, 220))) === 'press,tap,release');
+  check('a different tag is not a double tap', types(g.down(1, 11, 11, 300, 'b').concat(g.up(1, 11, 11, 320))) === 'press,tap,release');
+  check('drag past the slop: dragstart, drag…, dragend, release — no tap', types(g.down(1, 0, 0, 1000).concat(g.move(1, 5, 0, 1010), g.move(1, 20, 0, 1020), g.move(1, 30, 0, 1030), g.up(1, 30, 0, 1040))) === 'press,dragstart,drag,drag,dragend,release');
+  check('hold: the clock fires it once, a still lift is no tap, a later move is no drag', types(g.down(1, 0, 0, 2000)) === 'press' && types(g.tick(2400)) === '' && types(g.tick(2600)) === 'hold' && types(g.tick(2700)) === '' && types(g.move(1, 40, 0, 2800)) === '' && types(g.up(1, 40, 0, 2900)) === 'release' && g.up(1, 40, 0, 2900).length === 0);
+  check('second finger: second / secondup around the first, pinch when both move', types(g.down(1, 0, 0, 3000)) === 'press' && types(g.down(2, 100, 0, 3010)) === 'second' && types(g.move(2, 120, 0, 3020)) === '' && g.move(2, 150, 0, 3030)[0].type === 'pinch' && g.move(2, 175, 0, 3040)[0].scale > 1 && types(g.up(2, 175, 0, 3050)) === 'secondup' && types(g.up(1, 0, 0, 3060)) === 'release' && !g.active);
+  check('cancel: dragend (cancelled) and release', types(g.down(1, 0, 0, 4000).concat(g.move(1, 50, 0, 4010), g.cancel(1))) === 'press,dragstart,drag,cancel,dragend,release' && !g.active);
+
+  /* ── the Editor over the fake module: a page-shaped harness with the view over the whole break at 600 × 290 ── */
+  const d = new DEMO.FakeDevice({ kit: true, nSlices: 32, latencyMs: 1 });
+  const l = new HL.Link(new DEMO.FakePort(d)); await l.start(); await HL.hello(l);
+  const sent = []; const req0 = l.request.bind(l); l.request = (type, body, o) => { if (type === HL.CMD.action) sent.push(Array.from(body)); return req0(type, body, o); };
+  const Hh = { table: null, st: null, hits: null, view: { a: 0, b: 1 }, status: [], redraws: 0, menus: [], answer: null, dropKey: -1, sel: -1, fit: null, plans: [] };
+  const refetch = async () => { Hh.st = HL.parseState(await l.request(HL.CMD.state)); Hh.table = await HL.fetchTable(l, { edit: true }); Hh.hits = await HL.fetchHits(l); };
+  await refetch(); Hh.view.a = 0; Hh.view.b = Hh.st.bufLen;
+  let clock = 0; const timers = []; const now = () => clock;
+  const setTimer = (f, ms) => { const id = { f, at: clock + ms }; timers.push(id); return id; }, clearTimer = id => { const i = timers.indexOf(id); if (i >= 0) timers.splice(i, 1); };
+  const fire = () => { for (const t of timers.splice(0)) if (t.at <= clock) t.f(); else timers.push(t); };
+  let editOk = true;
+  const ed = new ED.Editor({ link: () => l, view: Hh.view, now, setTimer, clearTimer, gesture: { holdMs: 60, dblMs: 200 },
+    ctx: () => ({ table: Hh.table, st: Hh.st, hits: Hh.hits, sampleAt: null, editOk, tapAllowMs: 40 }),
+    cb: { redraw: () => Hh.redraws++, status: (m, k) => Hh.status.push(m), select: t => { Hh.sel = t; }, refetch,
+      setView: (a, b) => { Hh.view.a = Math.round(a); Hh.view.b = Math.round(b); }, zoomView: (f, at) => { const s = (Hh.view.b - Hh.view.a) * f; Hh.view.a = Math.round(at - (at - Hh.view.a) * f); Hh.view.b = Hh.view.a + Math.round(s); },
+      fitEntry: t => { Hh.fit = t; }, menu: (items, x, y, t) => Hh.menus.push({ items, t }), choose: async plan => { Hh.plans.push(plan); return Hh.answer || plan.def; }, dropTarget: () => Hh.dropKey } });
+  const W = 600, HH = 290, px = p => p / Hh.st.bufLen * W;
+  const L = ed.layout(W, HH);
+  check('layout: wave / a 44 px handle row / the strip', L.edit && L.wave[1] === 200 && L.handles[0] === 200 && L.handles[1] === 244 && L.strip[0] === 244 && ed.zoneAt(100, L) === 'wave' && ed.zoneAt(220, L) === 'handles' && ed.zoneAt(260, L) === 'strip');
+  const P = (kind, id, x, y, extra = {}) => ed.pointer(kind, Object.assign({ id, x, y, w: W, h: HH, t: clock, cx: x, cy: y }, extra));
+  const settle = async () => { for (let i = 0; i < 50 && (ed.busy || ed.pending); i++) { await ed.pending; ed.pending = null; } };
+  /* select by a tap on a handle: an audition of that slice */
+  const hx5 = px(5 * SL);
+  check('tagAt: the handle row finds boundary 5', ed.tagAt(hx5 + 8, 220, W, HH).h.kind === 'grid' && ed.tagAt(hx5 + 8, 220, W, HH).h.t === 5 && ed.tagAt(hx5 + 30, 220, W, HH).h.t === 7 && ed.tagAt(hx5 + 8, 100, W, HH).t === 5 && ed.tagAt(hx5 + 8, 100, W, HH).h === null);
+  sent.length = 0; P('down', 1, hx5 + 3, 220); clock += 30; P('up', 1, hx5 + 3, 220);
+  check('tap a handle: selected, the whole slice auditioned once', ed.selT === 5 && Hh.sel === 5 && sent.filter(b => b[0] === 27).length === 1 && HL.u32(Uint8Array.from(sent[0]), 1) === 5 * SL && HL.u16(Uint8Array.from(sent[0]), 5) === SL / 48);
+  /* drag boundary 5 by −15 px = −4800 samples (no onset within 12 ms): local at every move, ≤ 1 audition per 100 ms, SET_BOUNDARY on release */
+  clock += 200; sent.length = 0; Hh.redraws = 0;   /* the tap's audition opened the window; let it pass */
+  P('down', 1, hx5, 220); clock += 10;
+  for (let i = 1; i <= 20; i++) { P('move', 1, hx5 - i * 0.75, 220); clock += 2; fire(); }
+  check('the handle follows the finger locally before anything is sent', ed.drag && ed.drag.kind === 'handle' && ed.drag.pos === 5 * SL - 4800 && Hh.redraws >= 5 && sent.filter(b => b[0] === 16).length === 0);
+  const previews = sent.filter(b => b[0] === 27).length;
+  check('auditions on the move: rate-limited to the 100 ms window (40 ms of moves → 1 sent, the rest held)', previews === 1 && ed.gate.held && ed.gate.held.start === 5 * SL - 4800);
+  P('up', 1, hx5 - 15, 220); await settle();
+  const t1 = Hh.table;
+  check('release: the whole slice auditioned from the new start, SET_BOUNDARY(5) committed, the table refetched, orange', sent.some(b => b[0] === 27 && HL.u32(Uint8Array.from(b), 1) === 5 * SL - 4800 && HL.u16(Uint8Array.from(b), 5) === (SL + 4800) / 48) && sent.some(b => b[0] === 16 && b[1] === 5) && t1.entries[5].start === 5 * SL - 4800 && t1.entries[4].len === SL - 4800 && (t1.entries[5].flags & HL.EDIT.orange) && ed.drag === null && ed.stats.commits === 1);
+  check('history: "boundary 5 −100 ms" keyed by the reply\'s gen', ed.history.list()[0].label === 'boundary 5 −100 ms' && ed.history.list()[0].gen === Hh.st.tableGen);
+  clock += 200; fire(); check('the trailing audition timer finds nothing held after the release', ed.gate.held === null);
+  /* the second finger turns the magnets off mid-drag */
+  const hx8 = px(8 * SL); sent.length = 0;
+  P('down', 1, hx8, 220); clock += 10; P('move', 1, hx8 + 15, 220); clock += 10;   /* +4800: past the slop, no onset within 12 ms */
+  check('past the magnets: raw', ed.drag.pos === 8 * SL + 4800 && ed.drag.by === null);
+  P('move', 1, hx8 + 1.5, 220);   /* +480 samples: within 576 of the onset at 8 SL → snapped back to it */
+  check('snap: within ±12 ms of an onset the handle sits on it', ed.drag.pos === 8 * SL && ed.drag.by === 'onset');
+  P('down', 2, 300, 100); P('move', 1, hx8 + 1.5, 220);
+  check('a second finger: the magnets are off, the position is raw', ed.snapOff && ed.drag.pos === 8 * SL + 480 && ed.drag.by === null);
+  P('up', 2, 300, 100); P('cancel', 1, hx8 + 1.5, 220); await settle();
+  check('a cancelled drag commits nothing, the magnets come back', !sent.some(b => b[0] === 16) && !ed.snapOff && Hh.table.entries[8].start === 8 * SL);
+  /* copy slice 6 out as a marker (ADD_ENTRY of its span), then the marker's start and end handles */
+  const r0 = await ed.copyOut(6); await settle();
+  const m0 = r0.newIdx;
+  check('copy out: an orange marker over slice 6\'s span, labelled', Hh.table.entries[m0].start === Hh.table.entries[6].start && Hh.table.entries[m0].len === Hh.table.entries[6].len && Hh.table.entries[m0].flags === HL.EDIT.orange && ed.history.list()[0].label === `marker ${m0} from 6`);
+  ed.select(m0);
+  const hs = ed.handles(); const endH = hs.find(h => h.kind === 'end');
+  check('the selected marker has an end handle at its right edge', endH && endH.t === m0 && endH.pos === ED.endOf(Hh.table.entries[m0]));
+  clock += 200; sent.length = 0; const ex = px(endH.pos);
+  P('down', 1, ex, 220); clock += 10; P('move', 1, ex + 20, 220); clock += 10; P('move', 1, ex + 25, 220);
+  check('dragging the end: the preview plays the last 250 ms up to the new end (flags from-end)', sent.some(b => b[0] === 27 && (b[7] & HL.EDIT.fromEnd)) && ed.drag.h.kind === 'end');
+  clock += 10; P('up', 1, ex + 25, 220); await settle();
+  const grown = Hh.table.entries[m0];
+  check('release: SET_ENTRY with the start fixed and the end moved (+25 px = +8000; no onset within 12 ms), "end N +… ms"', sent.some(b => b[0] === 17 && b[1] === m0) && grown.start === Hh.table.entries[6].start && ED.endOf(grown) === 7 * SL + 8000 && /^end \d+ \+/.test(ed.history.list()[0].label));
+  /* press-and-hold the end handle without moving: a loop audition until the lift */
+  clock += 200; sent.length = 0; const ex2 = px(ED.endOf(grown));
+  P('down', 1, ex2, 220); clock += 100; fire();
+  check('hold an end handle: AUDITION(from-end | loop) of the tail', ed.looping && sent.some(b => b[0] === 27 && b[7] === (HL.EDIT.fromEnd | HL.EDIT.loop)));
+  P('up', 1, ex2, 220);
+  check('lift: RELEASE, no edit', !ed.looping && sent.some(b => b[0] === 28) && !sent.some(b => b[0] === 17) && ed.stats.releases === 1);
+  /* a tap inside the marker splits it at the (snapped) point; the grid never splits */
+  sent.length = 0; const mid = px(grown.start + grown.len / 2);
+  P('down', 1, mid, 100); clock += 30; P('up', 1, mid, 100); await settle();
+  const m1 = Hh.table.entries.length - 1;
+  check('tap in a marker: SPLIT with the gen, the right half is a new orange marker, "split N → M"', sent.some(b => b[0] === 19 && b[1] === m0 && b.length === 7) && Hh.table.entries[m1].start === ED.endOf(Hh.table.entries[m0]) && Hh.table.entries[m1].flags === HL.EDIT.orange && ed.history.list()[0].label === `split ${m0} → ${m1}`);
+  sent.length = 0; const gx = px(2 * SL + SL / 2);
+  P('down', 1, gx, 100); clock += 30; P('up', 1, gx, 100); await settle();
+  check('tap in a grid slice: selected, nothing sent but its audition', ed.selT === 2 && !sent.some(b => b[0] === 19) && sent.filter(b => b[0] === 27).length === 0);
+  /* double-tap the right half's handle merges it with the adjacent left half */
+  sent.length = 0; ed.select(m1); const sx = px(Hh.table.entries[m1].start);
+  P('down', 1, sx, 220); clock += 20; P('up', 1, sx, 220); clock += 50; P('down', 1, sx, 220); clock += 20; P('up', 1, sx, 220); await settle();
+  check('double-tap a marker handle: MERGE (adjacent), the other half a tombstone, "merge A into B"', sent.some(b => b[0] === 20 && b[1] === m1) && ED.isTomb(Hh.table.entries[m0]) && Hh.table.entries[m1].start === Hh.table.entries[6].start && ed.history.list()[0].label === `merge ${m0} into ${m1}`);
+  check('merge is refused by the page when nothing is adjacent', ed.merge(m1) === null && /adjacent|nothing/.test(Hh.status[Hh.status.length - 1]) && !sent.filter(b => b[0] === 20).slice(1).length);
+  /* the long-press menu */
+  Hh.menus.length = 0; const sx2 = px(Hh.table.entries[m1].start);
+  P('down', 1, sx2 + 2, 220); clock += 100; fire();
+  check('long-press a marker handle: the menu (audition · promote · copy · delete; no merge — nothing adjacent)', Hh.menus.length === 1 && Hh.menus[0].t === m1 && Hh.menus[0].items.map(i => i.id).join() === 'audition,promote,copy,delete');
+  P('up', 1, sx2 + 2, 220); await settle();
+  check('the lift after a hold is neither a tap nor a split', Hh.table.entries.length === m1 + 1);
+  Hh.menus.length = 0; P('down', 1, gx, 100); clock += 100; fire(); P('up', 1, gx, 100);
+  check('long-press a grid slice: copy out only', Hh.menus.length === 1 && Hh.menus[0].items.map(i => i.id).join() === 'audition,copy');
+  /* promote: the marker's start onto the nearest grid boundary */
+  const r2 = await ed.copyOut(9); await settle(); const m2 = r2.newIdx; ed.select(m2);
+  check('copy out reuses the tombstone\'s slot', m2 === m0);
+  await ed.typed('start', String(9 * SL + 1000)); await settle();
+  check('typed start (samples): SET_ENTRY, the end kept', Hh.table.entries[m2].start === 9 * SL + 1000 && ED.endOf(Hh.table.entries[m2]) === 10 * SL);
+  ed.unit = 'ms'; await ed.typed('end', String((10 * SL + 2400) / 48)); await settle();
+  check('typed end in ms: the start kept, the end moved', Hh.table.entries[m2].start === 9 * SL + 1000 && ED.endOf(Hh.table.entries[m2]) === 10 * SL + 2400 && ed.fieldValues().endS === '1300 ms' && ed.fieldValues().lenS === '154 ms');
+  ed.unit = 'samples';
+  await ed.promote(m2); await settle();
+  check('promote: SET_BOUNDARY(9) to the marker\'s start, orange', sent.some(b => b[0] === 25 && b[1] === m2 && b[2] === 9) && Hh.table.entries[9].start === 9 * SL + 1000 && (Hh.table.entries[9].flags & HL.EDIT.orange));
+  check('typed garbage: nothing sent, a status line', await ed.typed('start', 'zzz') === false && /unreadable/.test(Hh.status[Hh.status.length - 1]));
+  /* delete from the menu: keys on it re-point; the tombstone has no handle and is not drawn */
+  await ed.setKey(5, m2); await settle();
+  check('SET_KEY from the editor', Hh.st.keySlice[5] === m2 && ed.history.list()[0].label === `F1 → ${m2}`);
+  const del = ed.menuItems(m2).find(i => i.id === 'delete'); await del.run(); await settle();
+  check('delete = TOMBSTONE with the gen: key 5 back to its span, no handle for it', ED.isTomb(Hh.table.entries[m2]) && Hh.st.keySlice[5] === ED.spanSlice(5, 32) && !ed.handles().some(h => h.t === m2) && sent.some(b => b[0] === 21 && b[1] === m2 && b.length === 3));
+  /* a stale gen: the module moved on behind the page; the page refetches and retries once */
+  const r3 = await ed.copyOut(12); await settle(); const m3 = r3.newIdx;
+  d.bumpGen(); sent.length = 0; Hh.status.length = 0;
+  const rs = await ed.tombstone(m3); await settle();
+  check('stale: BAD_STATE → refetch → retried with the fresh gen → OK, said so', rs && rs.ok && ed.stats.retried === 1 && sent.filter(b => b[0] === 21).length === 2 && Hh.status.some(s => /stale/.test(s)) && /after a refetch/.test(Hh.status[Hh.status.length - 1]) && ED.isTomb(Hh.table.entries[m3]));
+  /* a take in flight: refused, explained, the handle reverts */
+  const r4 = await ed.copyOut(13); await settle(); const m4 = r4.newIdx; ed.select(m4);
+  d.rec = { state: 1, key: 2, t: Date.now(), pos: 0 }; sent.length = 0; Hh.status.length = 0;
+  const sx4 = px(Hh.table.entries[m4].start);
+  P('down', 1, sx4, 220); clock += 10; P('move', 1, sx4 + 15, 220); clock += 10; P('up', 1, sx4 + 15, 220); await settle();
+  check('a take in flight: SET_ENTRY refused (BAD_STATE), the reason names the take, the handle reverts, no history', /take is in flight \(armed\)/.test(Hh.status[Hh.status.length - 1]) && Hh.table.entries[m4].start === 13 * SL && ed.drag === null && !/^start/.test(ed.history.list()[0].label) && ed.stats.refused === 1);
+  d.rec = { state: 0, key: -1, t: 0, pos: 0 }; await refetch();
+  /* keys: drag a marker's span onto a key cell, cell-to-cell swaps, the red rule, copy to a second key */
+  Hh.dropKey = 5; sent.length = 0; const mx4 = px(Hh.table.entries[m4].start + 2000);
+  P('down', 1, mx4, 100); clock += 10; P('move', 1, mx4 + 30, 120); P('move', 1, mx4 + 60, 140);
+  check('dragging a slice from the wave: a ghost to the key cells, no pan', ed.drag && ed.drag.kind === 'toKey' && ed.drag.t === m4 && Hh.view.a === 0);
+  P('up', 1, mx4 + 60, 140); await settle();
+  check('dropped on an unoccupied key: SET_KEY(F1, marker)', Hh.st.keySlice[5] === m4 && sent.some(b => b[0] === 22 && b[1] === 5 && b[2] === m4));
+  Hh.plans.length = 0; Hh.answer = null; await ed.dropOnKey({ key: 7 }, 3); await settle();
+  check('cell 7 (its recording) onto key 3 (its recording, alone): red, default swap → SWAP_KEYS, both recordings keep a key', Hh.plans.length === 1 && Hh.plans[0].red && Hh.plans[0].def === 'swap' && Hh.st.keySlice[3] === 33 && Hh.st.keySlice[7] === 32 && Hh.table.entries[33].key === 3 && Hh.table.entries[32].key === 7);
+  Hh.answer = 'cancel'; const before = Array.from(Hh.st.keySlice).join(); sent.length = 0; await ed.dropOnKey({ t: m4 }, 3); await settle();
+  check('cancel leaves everything', Array.from(Hh.st.keySlice).join() === before && !sent.some(b => b[0] === 22 || b[0] === 23));
+  Hh.answer = 'replace'; await ed.dropOnKey({ t: m4 }, 3); await settle();
+  check('replace: SET_KEY on the recording\'s key (the choice was red — the user said so)', Hh.st.keySlice[3] === m4 && Hh.table.entries[33].key === 3);
+  Hh.answer = null; await ed.dropOnKey({ key: 5 }, 6); await settle();
+  check('cell onto an empty cell: SWAP_KEYS', Hh.st.keySlice[6] === m4 && Hh.st.keySlice[5] === ED.spanSlice(6, 32));
+  await ed.setKey(8, m4); await settle();
+  check('copy to another key: many keys on one entry', Hh.st.keySlice[8] === m4 && Hh.st.keySlice[6] === m4 && Hh.st.keySlice[3] === m4);
+  const nf = await ed.keysFollowGrid(); await settle();
+  check('keys follow the grid: every key off its span goes back (the recorded ones too — the design\'s span map), one SET_KEY each', nf === 6 && Array.from(Hh.st.keySlice).every((t, k) => t === ED.spanSlice(k, 32)) && ed.history.list()[0].label === 'keys follow the grid');
+  /* the onset histogram preview matches FROM_ONSETS; nudge; tap mark with the option's allowance; undo on this firmware */
+  const bars2 = ED.onsetBars(Hh.hits, Hh.table), prev = ED.onsetAccept(bars2, 210, 35 * 48, Hh.st.bufLen);
+  const ro = await ed.fromOnsets(210); await settle();
+  check('FROM_ONSETS(210, 35 ms): the preview\'s count is the module\'s, grey markers made, labelled', ro.ok && ro.count === prev.count && prev.count >= 6 && Hh.table.entries.filter((e, i) => i >= Hh.table.nSlices && ED.isLive(e) && !ED.isOrange(e) && e.key < 0 && e.start < Hh.st.bufLen).length === ro.count && ed.history.list()[0].label === `onsets ≥ 82 % → ${ro.count}`);
+  const b5 = Hh.table.entries[5].start; await ed.nudge(5, HL.EDIT.grid); await settle();
+  check('nudge all +5 ms (grid)', Hh.table.entries[5].start === b5 + 240 && ed.history.list()[0].label === 'nudge grid +5 ms');
+  d.srcPos = () => 8 * SL + 1000; sent.length = 0; const rt = await ed.tapMark(); await settle();
+  check('the Chop pad: TAP_MARK(60, 40 ms from the option), gen unchecked, an orange marker, "tap → marker N"', rt.ok && sent.some(b => b[0] === 29 && b[1] === 60 && b[2] === 40 && b.length === 3) && Hh.table.entries[rt.newIdx].flags === HL.EDIT.orange && ed.history.list()[0].label === `tap → marker ${rt.newIdx}`);
+  Hh.status.length = 0; const ru = await ed.undo(); await settle();
+  check('undo on a firmware without package 6: BAD_ARGS, said, nothing else', ru.status === 2 && /BAD_ARGS/.test(Hh.status[Hh.status.length - 1]));
+  check('one edit at a time: a second commit while one is in flight is turned away', (() => { const p1 = ed.copyOut(14); const p2 = ed.copyOut(15); return p2.then(r => r === null && /one edit at a time/.test(Hh.status[Hh.status.length - 1])).then(async ok => { await p1; return ok; }); })() instanceof Promise);
+  await settle(); await refetch();
+  check('…and the first one landed', Hh.table.entries.some(e => ED.isLive(e) && e.start === Hh.table.entries[14].start && e.len === Hh.table.entries[14].len && ED.isOrange(e)));
+  /* history from the tail: a change the page did not make gets the module's label */
+  d.recordKey(9, 0.2, 1); await refetch(); ed.noteState(Hh.st);
+  check('a take on the module: "changed on the module" from tableGen', ed.history.list()[0].label === 'changed on the module' && ed.history.undoDepth === 0);
+  /* the strip: pan, vertical drag = zoom, pinch, double-tap = fit; the wheel */
+  Hh.view.a = 0; Hh.view.b = Hh.st.bufLen; const span0 = Hh.st.bufLen;
+  P('down', 1, 300, 260); clock += 10; P('move', 1, 330, 262); P('up', 1, 330, 262);
+  check('strip drag = pan (the view slides the other way, clamped by the page)', Hh.view.a === -Math.round(30 / 600 * span0) && Hh.view.b - Hh.view.a === span0);
+  Hh.view.a = 0; Hh.view.b = span0; P('down', 1, 300, 260); clock += 10; P('move', 1, 302, 300); P('up', 1, 302, 300);
+  check('strip vertical drag (down) = zoom in around the finger', Hh.view.b - Hh.view.a < span0 * 0.8 && Hh.view.a > 0);
+  Hh.view.a = 0; Hh.view.b = span0; P('down', 1, 300, 260); P('down', 2, 400, 260); P('move', 2, 420, 260); P('move', 2, 500, 260); P('up', 2, 500, 260); P('up', 1, 300, 260);
+  check('pinch = zoom', Hh.view.b - Hh.view.a < span0);
+  ed.select(4); Hh.fit = null; P('down', 1, 100, 260); clock += 20; P('up', 1, 100, 260); clock += 50; P('down', 1, 100, 260); clock += 20; P('up', 1, 100, 260);
+  check('strip double-tap = fit the selected slice', Hh.fit === 4);
+  Hh.view.a = 0; Hh.view.b = span0; ed.wheel(300, W, -100); check('wheel up = zoom in', Hh.view.b - Hh.view.a < span0);
+  /* an older firmware: the wave alone, drag = pan, tap = select, no split, no handles */
+  editOk = false; const L0 = ed.layout(W, 180); ed.select(-1);
+  check('noedit layout: no handle row, the whole canvas pans', !L0.edit && L0.wave[1] === 180 && L0.handles[0] === L0.handles[1] && L0.strip[0] === L0.strip[1] && ed.zoneAt(170, L0) === 'wave' && ed.zoneAt(20, L0) === 'wave');
+  sent.length = 0; Hh.view.a = 0; Hh.view.b = span0; const mx = px(Hh.table.entries[m1].start + 1000);
+  P('down', 1, mx, 90, { h: 180 }); clock += 10; P('move', 1, mx + 30, 90, { h: 180 }); P('up', 1, mx + 30, 90, { h: 180 });
+  check('noedit: a drag on the wave pans, no drag-to-key', Hh.view.a < 0 && !ed.drag);
+  Hh.view.a = 0; Hh.view.b = span0; P('down', 1, mx, 90, { h: 180 }); clock += 20; P('up', 1, mx, 90, { h: 180 }); await settle();
+  check('noedit: a tap inside a marker selects, never splits', ed.selT === m1 && !sent.some(b => b[0] === 19));
+  check('noedit: no handles are offered from the wave', ed.tagAt(px(5 * SL), 170, W, 180).h === null);
+  await l.close();
+}
+
 /* ── the Android path: Google's Web Serial polyfill (vendored, unmodified) and the install manifest ── */
 {
   const here = new URL('.', import.meta.url);
