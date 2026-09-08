@@ -2,14 +2,16 @@
 
 `index.html` is the instrument's face in a browser: the live bar, per-slice
 waveforms you can select and punch into steps, an output scope, a **Controls
-panel that always says what B1/B2/B3 and the six knobs do right now**, the
-module's Options, and its manual. It speaks **HostLink over Web Serial** to
+panel that always says what B1/B2/B3 and the six knobs do right now**, a
+**four-channel Scope tab** (out L/R, in L/R, zoom, trigger, ≤ 30 frames/s),
+the module's Options, and its manual. It speaks **HostLink over Web Serial** to
 the module's front USB-C — the same protocol Hermetic's `/program` uses —
 plus the firmware's `StateExt` (commands 0x60–0x66, v0.7.0+; the v0.8.0
 state tail for locks, native BPM and bars; the CLOCK package's jitter,
 multiplier-zone and clock-flags tail; the sample-mode tail — record state,
 buffer bookkeeping, key table — and the `GET_WAVE` / `GET_TABLE` /
-`GET_HITS` reads behind the **Kit** tab when the firmware sends them). No
+`GET_HITS` reads behind the **Kit** tab when the firmware sends them; the
+SCOPE package's four-channel `0x62` body behind the **Scope** tab). No
 dependencies, three static files (plus the vendored Android polyfill), phone-friendly.
 
 | file | what |
@@ -71,7 +73,10 @@ recorded (arm a key and the fake take runs armed → taking → pending →
 committed by itself; the looper count drifts up); `?demo=old` sends a
 pre-v0.8.0 state body, `?demo=short` the 167-byte CLOCK body (no flags)
 and `?demo=v099` the 176-byte body (no sample-mode tail) so you can see
-the fallbacks. `#kit` / `#opts` / `#man` open a tab directly.
+the fallbacks; **`?demo=scope`** opens the Scope tab (`noin` leaves J1/J2
+silent, `body512` announces the protocol's default `max_body` so a frame
+takes two requests). `#kit` / `#scope` / `#opts` / `#man` open a tab
+directly.
 
 ## What is on the page
 
@@ -132,6 +137,19 @@ the fallbacks. `#kit` / `#opts` / `#man` open a tab directly.
   shows once per `setSeq`. The **Play** tab's strip and slice view
   use the same table boundaries instead of assuming `i · step`, and carry
   the onset ticks.
+- **Scope tab** (SCOPE package, firmware with `scope2`): the four channels
+  — out L, out R, in L (J1), in R (J2) — at full rate from the firmware's
+  rings, one snapshot per frame so they are sample-aligned, each in its own
+  colour over a ten-division time grid with a ms/div readout. Channel
+  buttons (the inputs show themselves while they carry a signal; click to
+  pin), **Time** ×1…×16 (every sample for 5 ms, one in sixteen for 80 ms),
+  **Gain** ×1…×8 with a clip pill, **Trigger** (the most recent rising zero
+  crossing of the first shown channel, ±3 % hysteresis — default on, the
+  marker at the left edge), **Peak** decimation (each point the largest
+  sample of its group, so hats survive a long window), **Afterglow** (the
+  previous frames dimmer), **Freeze**. Pills: achieved frames/s · requests
+  per frame · KB/s · last round trip, and `n = 253, ×4 → 21 ms ·
+  triggered`. Old firmware without `scope2` gets its mono trace here.
 - **Options tab:** every enum field of the module's Options block, labels
   and names straight from the descriptor, grouped Sound / Brain & gates /
   Clock / Analysis (anything new lands in "Other"). A change reads the live
@@ -151,8 +169,13 @@ the fallbacks. `#kit` / `#opts` / `#man` open a tab directly.
 - **One request in flight, two queues.** Anything the user does (buttons,
   punches, loads, option writes) goes out `urgent` and is pumped before any
   queued poll. Polls are keyed, so a slow link never piles them up.
-- **Cadence:** state at 10 Hz; scope at 5 Hz and only while its canvas is
-  on screen; envelope only when `matGen` changes; the slice table when the
+- **Cadence:** state at 10 Hz; the Play tab's scope at 5 Hz and only while
+  its canvas is on screen; **the Scope tab** asks for the next frame the
+  moment the last one lands, floored at 33 ms (≤ 30 frames/s), and eases
+  the state poll to 4 Hz meanwhile — one 1022-byte request per frame on
+  the firmware's `max_body` of 1024 (two requests of two channels, the
+  second pinned to the first's ring position, on a 512-byte module);
+  envelope only when `matGen` changes; the slice table when the
   state's (matGen, nTable, freePos, bufLen, key table) signature changes —
   a take, a clear, a re-slice; the onset table when `matGen` changes;
   live blob only on demand. **Waveform windows** (`GET_WAVE`, ≤ 480 bytes
@@ -180,6 +203,7 @@ COBS, the HELLO frame both ways — plus every recorded exchange frame and
 the golden descriptor), parses synthetic `GET_STATE` bodies of every length
 the firmware has shipped (148 / 156 / 164 / 167 / 170 / 176 / 177 / 194 /
 218 / 219 bytes) plus `GET_WAVE`, `GET_TABLE` and `GET_HITS` bodies, and
+parses the SCOPE request / reply and plans frames at 512 / 1024 / 2048,
 runs the real `Link` over the fake module: priority ordering, coalescing,
 status errors, envelope fetch, the clock flags on a fake clock, a `GET_LIVE
 → BLOB` option round-trip, the five-label Grammar with Camp at index 4,
@@ -187,8 +211,10 @@ and — on a 64-slice kit with three recordings — the chunked table (39 +
 28), the onset table, raw and decimated waveform windows with the clamp at
 `freePos`, and ACTION 9–13: arm → taking → pending → committed, a second
 arm refused, clear re-pointing the keys, Key Plays landing in the Options
-byte, looper undo / clear. Pass `--golden <path>` if the SDK lives
-elsewhere.
+byte, looper undo / clear — and the scope: the empty body unchanged, a
+four-channel frame, trigger, peak, at-pos re-reads, the two-request plan,
+every BAD_ARGS and clamp. 161 checks. Pass `--golden <path>` if the SDK
+lives elsewhere.
 
 ## The GET_STATE body
 
@@ -239,6 +265,29 @@ set the playing material came from (empty for a loose file or a take).
 0x66 GET_HITS   ← [u8 first]  → u8 status, u8 nTotal, u8 first, u32 pos[…] (≤127)
 ```
 
+## The scope (0x62)
+
+```
+0x62 SCOPE      ← (empty)  → u8 status, u16 256, i8 x[256]: (out L + out R) / 2, one in four,
+                             the newest 21 ms — the pre-SCOPE reply, unchanged
+                ← u8 chanMask (b0 out L · b1 out R · b2 in L · b3 in R), u8 decim (1..16),
+                  u16 n, u8 flags (b0 trigger · b1 peak · b2 at + u32 pos)
+                → u8 status, u8 chanMask, u8 decim, u16 n (as clamped: ≤ 512, ≤ (max_body − 10) /
+                  channels, n·decim ≤ 3840), u8 flags (b0 triggered · b1 pos honoured), u32 pos
+                  (absolute sample count of the window start), then n × i8 per channel in mask order
+```
+
+Four int8 rings of 4096 samples at full rate under one write index; every
+channel of a reply comes from one snapshot, so a frame is sample-aligned.
+`trigger` starts the window on the most recent rising zero crossing of the
+first selected channel that leaves `n·decim` samples after it (Schmitt, ±4
+of 127); `peak` makes each point the largest-magnitude sample of its
+group; `at` + `pos` starts the window at a previous reply's `pos` (a second
+request of the same frame, for modules whose `max_body` cannot hold every
+channel). BAD_ARGS for chanMask 0 / > 0x0f, decim 0 / > 16, n 0. The
+descriptor's `audiothurgist` object says `"scope2":1`. Details:
+`docs/packages/scope.md`.
+
 `GET_WAVE` reads the material buffer directly on the control thread,
 bounded by `freePos` (a take in flight is not exposed until it is
 committed); with `step > 1` each output byte is the largest-magnitude
@@ -273,7 +322,8 @@ number of bells, B2 rings the next change, Brain knobs unused).
 | option edits             | `0x12/0x13/0x14 BLOB_*` to `live` | audition; save a preset to keep it           |
 | bar / playhead / tails   | `0x60 GET_STATE`                  | 10 Hz; tails parsed by length                |
 | waveform                 | `0x61 GET_ENV`                    | refetched when the material changes          |
-| scope                    | `0x62 SCOPE`                      | 5 Hz while visible; 256 samples ×4 decimated |
+| scope (Play tab)         | `0x62 SCOPE` (empty body)         | 5 Hz while visible; 256 samples ×4 decimated |
+| scope (Scope tab)        | `0x62 SCOPE` (body, `scope2`)     | ≤ 30 frames/s; 4 channels × 253 samples per request at max_body 1024; trigger, peak, at-pos |
 | buttons, punch, scrub    | `0x63 ACTION`                     | 0 dice · 1 reslice · 2 mute · 3 punch · 4 flow · 5 scrub · 6 load · 7 clear locks · 8 page · 9 rec arm(key) · 10 rec clear(key) · 11 key plays(0/1) · 12 looper undo · 13 looper clear |
 | kit waveform             | `0x64 GET_WAVE`                   | on demand, ≤ 3/s, cached windows            |
 | slice table              | `0x65 GET_TABLE`                  | when the state's table signature changes    |

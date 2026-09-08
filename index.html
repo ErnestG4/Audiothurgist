@@ -280,8 +280,8 @@ let scopeShown = false, scope2Ok = false;
 /* ───────────── Notice / tabs ───────────── */
 function notice(msg) { const n = $('notice'); n.style.display = msg ? 'block' : 'none'; n.textContent = msg || ''; }
 const TABS = { tab_play: 'play', tab_kit: 'kit', tab_scope: 'scope', tab_opts: 'opts', tab_man: 'man' };
-function showTab(t) { for (const k in TABS) { $(k).classList.toggle('on', k === t); $(TABS[k]).classList.toggle('show', k === t); } kitShown = t === 'tab_kit'; scopeShown = t === 'tab_scope'; if (scopeShown) { scopeKick(); invalidate(D.bigscope); } }
-for (const t in TABS) $(t).onclick = () => { showTab(t); history.replaceState(null, '', '#' + TABS[t]); if (kitShown) invalidate(D.kit | D.kitwave); };
+function showTab(t) { for (const k in TABS) { $(k).classList.toggle('on', k === t); $(TABS[k]).classList.toggle('show', k === t); } kitShown = t === 'tab_kit'; scopeShown = t === 'tab_scope'; if (scopeShown) scopeKick(); }
+for (const t in TABS) $(t).onclick = () => { showTab(t); history.replaceState(null, '', '#' + TABS[t]); if (kitShown) invalidate(D.kit | D.kitwave); if (scopeShown) invalidate(D.bigscope); };
 { const t = Object.keys(TABS).find(k => '#' + TABS[k] === location.hash); if (t) showTab(t); }
 
 /* ───────────── Rendering: dirty flags + one rAF ─────────────
