@@ -2297,6 +2297,249 @@ int main()
         CHECK(m.start == 0 && m.len == 300, "a limit under kRecMin: what ApplyEdit will refuse, nothing worse (%d +%d)", m.start, m.len);
     }
 
+    /* ── EDIT-UNDO package (docs/packages/slice-edit-undo.md): the inverse-op journal ── */
+    SECTION("EDIT-UNDO: every op undone restores the table byte for byte (redo re-applies); steps; the ring; audio; what ends the history");
+    {
+        static bb::UndoJournal journal;
+        static float big3[kLen + 48000];
+        memcpy(big3, gMat, sizeof gMat);
+        for(int i = kLen; i < kLen + 48000; i++) big3[i] = 0.5f * sinf(6.2831853f * 1000.f * (float)(i - kLen) / kSr);   // a "recording": 1 kHz
+        int on16[16]; for(int k = 0; k < 16; k++) on16[k] = k * kStep;
+        // the whole table state an undo must bring back
+        struct Snap
+        {
+            int nTable, nSlices; bb::Slice s[bb::Engine::kMaxTable]; uint8_t fl[bb::Engine::kMaxTable]; int8_t key[bb::Engine::kMaxTable];
+            uint8_t cls[bb::Engine::kMaxTable]; float sal[bb::Engine::kMaxTable], dens[bb::Engine::kMaxTable]; uint8_t bands[bb::Engine::kMaxTable];
+            bool hit[bb::Engine::kMaxTable]; bb::EntryMeta rm[bb::Engine::kMaxTable]; int8_t ks[bb::Engine::kKeys]; uint64_t ov; uint8_t gen;
+        };
+        auto Take = [](const bb::Engine& g) {
+            Snap p; memset(&p, 0, sizeof p);
+            p.nTable = g.nTable; p.nSlices = g.nSlices; p.ov = g.ovOrange; p.gen = g.tableGen;
+            for(int t = 0; t < bb::Engine::kMaxTable; t++)
+            {
+                p.fl[t] = g.tableFlags[t];
+                if(t >= g.nTable) continue;
+                p.s[t] = g.slices[t]; p.key[t] = g.tableKey[t]; p.cls[t] = g.stepClass[t]; p.sal[t] = g.sliceSal[t]; p.dens[t] = g.sliceDens[t];
+                p.bands[t] = g.stepBands[t]; p.hit[t] = g.stepHit[t];
+                if(t >= g.nSlices) p.rm[t] = g.recMeta[t];
+            }
+            memcpy(p.ks, g.keySlice, sizeof p.ks);
+            return p;
+        };
+        auto Same = [](const Snap& a, const Snap& b, const char** why) {
+            *why = "";
+            if(a.nTable != b.nTable) { *why = "nTable"; return false; }
+            if(a.nSlices != b.nSlices) { *why = "nSlices"; return false; }
+            if(a.ov != b.ov) { *why = "ovOrange"; return false; }
+            if(memcmp(a.ks, b.ks, sizeof a.ks)) { *why = "keySlice"; return false; }
+            if(memcmp(a.fl, b.fl, sizeof a.fl)) { *why = "tableFlags"; return false; }
+            for(int t = 0; t < a.nTable; t++)
+            {
+                if(a.s[t].start != b.s[t].start || a.s[t].len != b.s[t].len) { *why = "slices"; return false; }
+                if(a.key[t] != b.key[t]) { *why = "tableKey"; return false; }
+                if(a.cls[t] != b.cls[t] || a.sal[t] != b.sal[t] || a.dens[t] != b.dens[t] || a.bands[t] != b.bands[t]) { *why = "class/sal/dens/bands"; return false; }
+                if(a.hit[t] != b.hit[t]) { *why = "stepHit"; return false; }
+                if(t >= a.nSlices && (a.rm[t].cls != b.rm[t].cls || a.rm[t].sal != b.rm[t].sal || a.rm[t].dens != b.rm[t].dens || a.rm[t].hit != b.rm[t].hit)) { *why = "recMeta"; return false; }
+            }
+            return true;
+        };
+        auto setup = [&]() {
+            e = bb::Engine(); e.Init(0x1234); e.patternMode = 0; e.patternKnob = 1.f;
+            e.SetMaterial(big3, kLen, kSr, on16, 16, gCls, 0, nullptr, kLen + 48000);
+            e.SetBpm(0.f); e.RegenPattern(); e.muted = true;
+            e.CommitSlice(3, kLen, 12000, 1, 1.f, 0.01f, true);   // key 3 owns entry 16
+            e.SetUndoJournal(&journal);
+        };
+        auto Undo = [](uint8_t gen = 0) { EditReq r; r.op = EditOp::Undo; r.gen = gen; return r; };
+        auto Redo = []() { EditReq r; r.op = EditOp::Redo; return r; };
+        auto Key = [](int key, int t) { EditReq r; r.op = EditOp::SetKey; r.key = key; r.t = t; return r; };
+        auto Swap = [](int a, int b) { EditReq r; r.op = EditOp::SwapKeys; r.a = a; r.b = b; return r; };
+        auto Split = [](int t, int pos) { EditReq r; r.op = EditOp::Split; r.t = t; r.start = pos; return r; };
+        auto Prom = [](int t, int i) { EditReq r; r.op = EditOp::Promote; r.t = t; r.i = i; return r; };
+        auto Meta = [](EditReq r, uint8_t cls, float sal, float dens, bool hit) { r.meta = {cls, sal, dens, hit}; r.flags |= EditReq::kMeta; return r; };
+
+        setup();
+        CHECK(e.UndoDepth() == 0 && e.RedoDepth() == 0 && e.ApplyEdit(Undo()) == EditStatus::BadArgs && e.ApplyEdit(Redo()) == EditStatus::BadArgs,
+              "an empty journal: depths 0, Undo / Redo BadArgs");
+        const Snap origin = Take(e);
+        // one op at a time, cumulatively: apply → undo = before, redo = after; the depths follow
+        struct Step { const char* name; EditReq r; };
+        const Step steps[] = {
+            {"SET_BOUNDARY(5, 27000) with meta", Meta(Bnd(5, 27000), 0, 0.9f, 0.02f, true)},
+            {"ADD(key 5, slice 7's span, orange, meta)", Meta(Add(5, 7 * kStep, 3000), 2, 0.7f, 0.05f, true)},
+            {"SET_ENTRY(17, 42100, 4000)", Ent(17, 7 * kStep + 100, 4000)},
+            {"SPLIT(17, 44100) with meta", Meta(Split(17, 7 * kStep + 100 + 2000), 1, 0.4f, 0.03f, false)},
+            {"SET_KEY(6, 18)", Key(6, 18)},
+            {"SET_KEY(7, 2) — a grid slice", Key(7, 2)},
+            {"SWAP_KEYS(3, 9) — the recording's owner trades", Swap(3, 9)},
+            {"MERGE(18) swallows the adjacent 17", One(EditOp::Merge, 18)},
+            {"NUDGE_ALL(+1000, grid)", Nudge(1000, 0)},
+            {"NUDGE_ALL(−500000, grid) — every boundary clamps", Nudge(-500000, 0)},
+            {"NUDGE_ALL(+700000, grid)", Nudge(700000, 0)},
+            {"NUDGE_ALL(+200, markers)", Nudge(200, 1)},
+            {"PROMOTE(18, 1) — after the +700000 nudge only boundary 1 can reach 42100", Prom(18, 1)},
+            {"ADD(no key, 60000, 6000, grey, no meta) reuses slot 17", Add(-1, 60000, 6000, 0)},
+            {"TOMBSTONE(18) with key 6 on it", One(EditOp::Tombstone, 18)},
+            {"TOMBSTONE(16) — the recording, keys 9 on it", One(EditOp::Tombstone, 16)},
+            {"SET_ENTRY(17, 100, 480)", Ent(17, 100, 480)},
+        };
+        const int nSteps = (int)(sizeof steps / sizeof steps[0]);
+        int okSteps = 0;
+        for(int k = 0; k < nSteps; k++)
+        {
+            const Snap before = Take(e);
+            const EditStatus st = e.ApplyEdit(steps[k].r);
+            if(st != EditStatus::Ok) { printf("  (step %d '%s' refused: %d)\n", k, steps[k].name, (int)st); continue; }
+            okSteps++;
+            const Snap after = Take(e);
+            const int du = e.UndoDepth();
+            const EditStatus su = e.ApplyEdit(Undo());
+            const Snap back = Take(e);
+            const char* why = "";
+            const bool same = Same(before, back, &why);
+            CHECK(su == EditStatus::Ok && same && back.gen != after.gen && e.UndoDepth() == du - 1 && e.RedoDepth() == 1,
+                  "%s: undo restores the table (%s), gen moved, depths %d/%d", steps[k].name, why, e.UndoDepth(), e.RedoDepth());
+            const EditStatus sr = e.ApplyEdit(Redo());
+            const Snap again = Take(e);
+            const bool same2 = Same(after, again, &why);
+            CHECK(sr == EditStatus::Ok && same2 && e.UndoDepth() == du && e.RedoDepth() == 0,
+                  "%s: redo re-applies it (%s), depths %d/%d", steps[k].name, why, e.UndoDepth(), e.RedoDepth());
+        }
+        CHECK(okSteps == nSteps && e.UndoDepth() == nSteps, "all %d steps applied; undo depth %d", nSteps, e.UndoDepth());
+        const Snap final1 = Take(e);
+        // the whole history back, then forward again
+        {
+            int n = 0; while(e.ApplyEdit(Undo()) == EditStatus::Ok) n++;
+            const char* why = "";
+            CHECK(n == nSteps && Same(origin, Take(e), &why) && e.UndoDepth() == 0 && e.RedoDepth() == nSteps, "undo-all: %d steps back to the origin (%s), redo depth %d", n, why, e.RedoDepth());
+            int m = 0; while(e.ApplyEdit(Redo()) == EditStatus::Ok) m++;
+            CHECK(m == nSteps && Same(final1, Take(e), &why) && e.RedoDepth() == 0, "redo-all: %d steps forward to the end (%s)", m, why);
+        }
+        // a new forward op clears the redo half; a stale gen on Undo is refused with nothing done
+        {
+            e.ApplyEdit(Undo()); e.ApplyEdit(Undo());
+            CHECK(e.RedoDepth() == 2, "two undone: redo depth 2");
+            const uint8_t g = e.tableGen;
+            CHECK(e.ApplyEdit(Undo((uint8_t)(g + 1))) == EditStatus::Stale && e.tableGen == g && e.RedoDepth() == 2, "a stale gen on UNDO: Stale, nothing moved");
+            CHECK(e.ApplyEdit(Key(0, 1)) == EditStatus::Ok && e.RedoDepth() == 0 && e.ApplyEdit(Redo()) == EditStatus::BadArgs, "a new op clears the redo half; Redo → BadArgs");
+        }
+        // a step of several records (the shell's FROM_ONSETS: a tombstone, then adds joined with kJoin) undoes as one
+        {
+            setup();
+            e.ApplyEdit(Add(-1, 6000, 6000, 0));                       // a grey marker, 17
+            const Snap before = Take(e);
+            const int d0 = e.UndoDepth();
+            EditReq t = One(EditOp::Tombstone, 17);
+            EditReq a1 = Add(-1, 12000, 6000, 0); a1.flags |= EditReq::kJoin;
+            EditReq a2 = Add(-1, 18000, 6000, 0); a2.flags |= EditReq::kJoin;
+            EditReq a3 = Add(-1, 24000, 6000, 0); a3.flags |= EditReq::kJoin;
+            CHECK(e.ApplyEdit(t) == EditStatus::Ok && e.ApplyEdit(a1) == EditStatus::Ok && e.ApplyEdit(a2) == EditStatus::Ok && e.ApplyEdit(a3) == EditStatus::Ok,
+                  "the four applies land");
+            CHECK(e.UndoDepth() == d0 + 1 && journal.count == d0 + 4, "…as ONE step (depth %d, %d records)", e.UndoDepth(), journal.count);
+            const Snap after = Take(e);
+            const char* why = "";
+            CHECK(e.ApplyEdit(Undo()) == EditStatus::Ok && Same(before, Take(e), &why) && e.UndoDepth() == d0 && e.RedoDepth() == 1, "one Undo takes the whole step back (%s)", why);
+            CHECK(e.ApplyEdit(Redo()) == EditStatus::Ok && Same(after, Take(e), &why) && e.RedoDepth() == 0, "one Redo brings it all back (%s)", why);
+        }
+        // 100 random ops, then undo-all restores the origin and redo-all the end
+        {
+            setup();
+            const Snap o = Take(e);
+            uint32_t rng = 0xC0FFEE; auto R = [&](int n) { rng = rng * 1664525u + 1013904223u; return (int)((rng >> 8) % (uint32_t)(n > 0 ? n : 1)); };
+            int ok = 0, tried = 0, refused = 0, kinds[12] = {};
+            for(int k = 0; k < 100; k++)
+            {
+                EditReq r; const int which = R(11); tried++;
+                const int mk = e.nTable > e.nSlices ? e.nSlices + R(e.nTable - e.nSlices) : e.nSlices;   // some marker index
+                switch(which)
+                {
+                    case 0: { const int i = 1 + R(e.nSlices - 1); r = Bnd(i, e.slices[i].start + R(6000) - 3000); break; }
+                    case 1: { const int len = 480 + R(5000); r = Ent(mk, R(e.freePos - len), len); break; }
+                    case 2: { const int len = 480 + R(8000); r = Add(R(3) ? R(24) : -1, R(e.freePos - len), len, (uint8_t)R(2)); if(R(2)) r = Meta(r, (uint8_t)R(4), 0.5f, 0.01f, R(2) != 0); break; }
+                    case 3: r = Split(mk, e.slices[mk].start + e.slices[mk].len / 2); break;
+                    case 4: r = One(EditOp::Merge, mk); break;
+                    case 5: r = One(EditOp::Tombstone, mk); break;
+                    case 6: r = Key(R(24), R(e.nTable)); break;
+                    case 7: r = Swap(R(24), R(24)); break;
+                    case 8: r = Nudge(R(4000) - 2000, R(2)); break;
+                    case 9: { const int i = 1 + R(e.nSlices - 1); r = Prom(mk, i); break; }
+                    default: { const int i = 1 + R(e.nSlices - 1); r = Meta(Bnd(i, e.slices[i].start + R(400) - 200), (uint8_t)R(4), 0.3f, 0.02f, true); break; }
+                }
+                if(e.ApplyEdit(r) == EditStatus::Ok) { ok++; kinds[which]++; } else refused++;
+            }
+            const Snap end = Take(e);
+            const int expect = ok < bb::UndoJournal::kDepth ? ok : bb::UndoJournal::kDepth;
+            CHECK(ok >= 40 && e.UndoDepth() == expect, "%d of %d random ops landed (%d refused; kinds %d %d %d %d %d %d %d %d %d %d %d), undo depth %d", ok, tried, refused,
+                  kinds[0], kinds[1], kinds[2], kinds[3], kinds[4], kinds[5], kinds[6], kinds[7], kinds[8], kinds[9], kinds[10], e.UndoDepth());
+            int n = 0; while(e.ApplyEdit(Undo()) == EditStatus::Ok) n++;
+            const char* why = "";
+            if(ok <= bb::UndoJournal::kDepth)
+                CHECK(n == ok && Same(o, Take(e), &why), "undo-all (%d) restores the origin exactly (%s)", n, why);
+            else
+                CHECK(n == bb::UndoJournal::kDepth, "undo-all: the ring held the last %d (%d)", bb::UndoJournal::kDepth, n);
+            int m = 0; while(e.ApplyEdit(Redo()) == EditStatus::Ok) m++;
+            CHECK(m == n && Same(end, Take(e), &why), "redo-all (%d) restores the end exactly (%s)", m, why);
+        }
+        // the ring: 70 ops keep the last 64; the 65th undo is refused; the table is where op 6 left it
+        {
+            setup();
+            Snap after6 = Take(e);
+            for(int k = 0; k < 70; k++)
+            {
+                CHECK(e.ApplyEdit(Bnd(5, 30000 + 10 * (k + 1))) == EditStatus::Ok, "op %d", k);
+                if(k == 5) after6 = Take(e);
+            }
+            CHECK(e.UndoDepth() == 64 && journal.count == 64, "70 ops: the ring holds 64 (%d)", e.UndoDepth());
+            int n = 0; while(e.ApplyEdit(Undo()) == EditStatus::Ok) n++;
+            const char* why = "";
+            CHECK(n == 64 && Same(after6, Take(e), &why) && e.UndoDepth() == 0 && e.RedoDepth() == 64, "64 undos, the 65th refused; the table is where op 6 left it (%s)", why);
+            n = 0; while(e.ApplyEdit(Redo()) == EditStatus::Ok) n++;
+            CHECK(n == 64 && e.slices[5].start == 30000 + 700, "64 redos back to op 70 (%d)", e.slices[5].start);
+        }
+        // audio: a voice sounding through an undo keeps its bounds; the next call plays the restored region
+        {
+            setup(); e.muted = true;
+            float out[24];
+            auto renderN = [&](std::vector<float>& y, int nSamp) { for(int i = 0; i < nSamp; i += 24) { e.Process(out, 24); y.insert(y.end(), out, out + 24); } };
+            e.ApplyEdit(Bnd(5, 27000));
+            std::vector<float> y;
+            e.CallSlice(5, 1.f, false, false, false);          // opens with 3000 samples of slice 4's tone
+            renderN(y, 1200);
+            CHECK(e.ApplyEdit(Undo()) == EditStatus::Ok && e.slices[5].start == 30000 && e.slices[4].len == 6000, "undo mid-voice: the grid is back");
+            renderN(y, 4800);
+            CHECK(SliceOfFreq(MeasureFreq(&y[300], 2400), Rms(&y[300], 2400)) == 4 && SliceOfFreq(MeasureFreq(&y[3300], 2400), Rms(&y[3300], 2400)) == 5,
+                  "the voice fired before the undo still plays the edited region: slice 4's tone, then 5's (%.0f / %.0f Hz)", MeasureFreq(&y[300], 2400), MeasureFreq(&y[3300], 2400));
+            std::vector<float> z;
+            e.CallSlice(5, 1.f, false, false, false);
+            renderN(z, 2400);
+            CHECK(SliceOfFreq(MeasureFreq(&z[300], 2000), Rms(&z[300], 2000)) == 5, "the next call plays slice 5 from its restored start (%.0f Hz)", MeasureFreq(&z[300], 2000));
+        }
+        // what ends the history: SetMaterial (any count, the same planes — the compaction moves indices), a take, a clear
+        {
+            setup();
+            e.ApplyEdit(Bnd(5, 27000)); e.ApplyEdit(Add(-1, 6000, 6000, EditReq::kOrange));
+            CHECK(e.UndoDepth() == 2, "two steps");
+            e.SetMaterial(big3, kLen, kSr, on16, 16, gCls, 32, nullptr, kLen + 48000);
+            CHECK(e.UndoDepth() == 0 && e.ApplyEdit(Undo()) == EditStatus::BadArgs && e.nSlices == 32, "SetMaterial to 32: the journal is cleared, Undo refused");
+            e.ApplyEdit(Bnd(5, 15100));
+            e.SetMaterial(big3, kLen, kSr, on16, 16, gCls, 32, nullptr, kLen + 48000);
+            CHECK(e.UndoDepth() == 0 && e.slices[5].start == 15100, "the same planes and count: the edit survives through the overlay, the history does not (cleared, by choice)");
+            setup();
+            e.ApplyEdit(Bnd(5, 27000));
+            const uint8_t g1 = e.tableGen;
+            CHECK(e.CommitSlice(8, kLen + 12000, 6000, 2, 1.f, 0.01f, true) == 17 && e.tableGen != g1, "a take commits past the journal");
+            CHECK(e.UndoDepth() == 0 && e.RedoDepth() == 0, "…the journal is stale: depth 0");
+            CHECK(e.ApplyEdit(Undo()) == EditStatus::BadArgs && e.slices[5].start == 27000, "…Undo refused, nothing moved");
+            CHECK(e.ApplyEdit(Key(0, 17)) == EditStatus::Ok && e.UndoDepth() == 1, "…the next op restarts the history at 1");
+            e.ClearKey(8);
+            CHECK(e.UndoDepth() == 0, "a Clear (control thread, past the journal) ends it too");
+            // no journal at all: nothing recorded, Undo refused, the op itself unchanged
+            e.SetUndoJournal(nullptr);
+            CHECK(e.ApplyEdit(Bnd(5, 28000)) == EditStatus::Ok && e.UndoDepth() == 0 && e.ApplyEdit(Undo()) == EditStatus::BadArgs, "without a journal: the op lands, depth 0, Undo BadArgs");
+        }
+        CHECK(sizeof(bb::UndoRec) == 440 && sizeof(bb::UndoJournal) == 65 * 440 + 16, "record 440 B, journal %zu B", sizeof(bb::UndoJournal));
+    }
+
     printf("\n%d passed, %d failed\n", gPass, gFail);
     return gFail ? 1 : 0;
 }

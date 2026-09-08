@@ -268,15 +268,25 @@ inline EditStatus Engine::EdSplit(const EditReq& r, int& idx)
     return EditStatus::Ok;
 }
 
-inline EditStatus Engine::EdMerge(int t)
+// The marker Merge(t) swallows: the live one whose span ends at t's start,
+// else the previous live one by index; −1 when there is none (or t is no
+// live marker). Safe on any t: the journal asks before the op validates.
+inline int Engine::MergeTarget(int t) const
 {
-    if(t < nSlices || t >= nTable) return EditStatus::NotMarker;
-    if(tableFlags[t] & kFlagTomb) return EditStatus::Tomb;
+    if(t < nSlices || t >= nTable || (tableFlags[t] & kFlagTomb)) return -1;
     int u = -1;
     for(int v = nSlices; v < nTable && u < 0; v++)   // the marker whose span ends at t's start
         if(v != t && !(tableFlags[v] & kFlagTomb) && slices[v].start + slices[v].len == slices[t].start) u = v;
     for(int v = t - 1; v >= nSlices && u < 0; v--)   // else the previous live marker
         if(!(tableFlags[v] & kFlagTomb)) u = v;
+    return u;
+}
+
+inline EditStatus Engine::EdMerge(int t)
+{
+    if(t < nSlices || t >= nTable) return EditStatus::NotMarker;
+    if(tableFlags[t] & kFlagTomb) return EditStatus::Tomb;
+    const int u = MergeTarget(t);
     if(u < 0) return EditStatus::BadArgs;
     const int a = slices[u].start < slices[t].start ? slices[u].start : slices[t].start;
     const int eu = slices[u].start + slices[u].len, et = slices[t].start + slices[t].len;
@@ -403,12 +413,18 @@ inline EditStatus Engine::EdNudge(int delta, int which)
  * bb::AnalyseEntry on the span first); ops marked — ignore it. The entry a
  * geometry op touches becomes orange. `gen` ≠ 0 must equal tableGen, else
  * Stale. On Ok the table generation bumps and *newIdx (AddEntry, Split)
- * is the new entry's index. */
+ * is the new entry's index.
+ *
+ * EDIT-UNDO: Undo / Redo (no fields) walk the journal one step; every other
+ * op is captured before it runs and journaled on success — as its own step,
+ * or joined to the previous one with flags kJoin. */
 inline EditStatus Engine::ApplyEdit(const EditReq& r, int* newIdx)
 {
     if(newIdx) *newIdx = -1;
     if(!buf || nSlices < 1 || bufLen < 1) return EditStatus::NoMaterial;
     if(r.gen != 0 && r.gen != tableGen) return EditStatus::Stale;
+    if(r.op == EditOp::Undo || r.op == EditOp::Redo) return UndoStep(r.op == EditOp::Redo);
+    const bool journal = UndoBegin(r);
     EditStatus st  = EditStatus::BadOp;
     int        who = -1;   // the entry that takes the meta and the orange
     int        idx = -1;
@@ -447,6 +463,7 @@ inline EditStatus Engine::ApplyEdit(const EditReq& r, int* newIdx)
     if(r.op == EditOp::SetBoundary || r.op == EditOp::Promote || (r.op == EditOp::NudgeAll && r.b == 0)) SaveOverlay();
     if(newIdx) *newIdx = idx;
     BumpGen();
+    if(journal) UndoCommit(!(r.flags & EditReq::kJoin));
     return EditStatus::Ok;
 }
 

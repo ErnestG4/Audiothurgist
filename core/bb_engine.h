@@ -278,6 +278,7 @@ struct Voice
  * (bb::AnalyseEntry, bb_sample.h) and posts, the audio thread applies at
  * block start. Field use per op is the table in Engine::ApplyEdit. */
 struct EntryMeta { uint8_t cls; float sal, dens; bool hit; };
+struct UndoEntry; struct UndoRec; struct UndoJournal;   /* EDIT-UNDO: bb_undo.h, at the foot */
 
 enum class EditOp : uint8_t
 {
@@ -291,7 +292,9 @@ enum class EditOp : uint8_t
     SetKey,        // key → entry t (grid or marker)
     SwapKeys,      // keys a and b trade entries
     NudgeAll,      // every grid boundary (b = 0) or marker start (b = 1) by `a` samples
-    Promote        // SetBoundary(i, marker t's start)
+    Promote,       // SetBoundary(i, marker t's start)
+    Undo,          // EDIT-UNDO: one step back through the journal (no fields)
+    Redo           // EDIT-UNDO: one step forward
 };
 enum class EditStatus : uint8_t
 {
@@ -309,6 +312,7 @@ struct EditReq
 {
     static constexpr uint8_t kOrange = 1u;       // ADD: the entry is user-placed (flag b0)
     static constexpr uint8_t kMeta   = 1u << 7;  // `meta` is filled (AnalyseEntry ran)
+    static constexpr uint8_t kJoin   = 1u << 6;  // EDIT-UNDO: this op joins the previous one's undo step (FROM_ONSETS' applies)
     EditOp    op    = EditOp::None;
     uint8_t   gen   = 0;    // 0 = unchecked; else must equal Engine::tableGen
     uint8_t   flags = 0;
@@ -1002,6 +1006,7 @@ struct Engine
         if(newPlanes) looper.Clear();
         else if(samePlanes) looper.RemapSlices(map, oldTable);   /* EDIT: keyless events follow the compaction */
         BumpGen();   /* EDIT: indices moved; a page holding the old gen must refetch */
+        UndoClear(); /* EDIT-UNDO: the records name indices the compaction moved — the history ends here */
     }
 
     // ── Voice role (M3): the rack plays slices ────────────────────────
@@ -1513,6 +1518,26 @@ struct Engine
     EditStatus EdSetKey(int key, int t);
     EditStatus EdSwapKeys(int a, int b);
     EditStatus EdNudge(int delta, int which);
+    int        MergeTarget(int t) const;                               // the marker Merge(t) swallows, else −1
+    /* ── EDIT-UNDO (docs/packages/slice-edit-undo.md; bodies in core/bb_undo.h) ──
+     * The journal is the shell's (SDRAM, NOLOAD): the engine holds a pointer
+     * and nothing else grows here. ApplyEdit captures what an op will touch
+     * before it runs and commits the record on success; EditOp::Undo / Redo
+     * walk the ring. Without a journal (nullptr) nothing changes: no record,
+     * Undo / Redo → BadArgs, the depths 0. */
+    UndoJournal* undo = nullptr;
+    void       SetUndoJournal(UndoJournal* j);                         // clears it; any thread before audio runs
+    void       UndoClear();                                            // SetMaterial: the history ends
+    int        UndoDepth() const;                                      // steps back available (0 when stale / none)
+    int        RedoDepth() const;
+    bool       UndoBegin(const EditReq& r);                            // AUDIO, inside ApplyEdit
+    void       UndoCommit(bool head);
+    EditStatus UndoStep(bool redo);
+    void       UndoCaptureEntry(UndoEntry& e, int t) const;
+    void       UndoRestoreEntry(const UndoEntry& e);
+    void       UndoCaptureEntries(UndoRec& r, const int* idx, int n) const;
+    void       UndoCaptureStarts(UndoRec& r, int first, int n) const;
+    bool       UndoSwap(UndoRec& r);
     /* ── EDIT end ──────────────────────────────────────────────────────── */
 
     // Mono render (the pre-SAMPLE signature): the L plane into `out`.
@@ -1849,3 +1874,4 @@ struct Engine
 } // namespace bb
 
 #include "bb_edit.h"   /* EDIT: the ApplyEdit / overlay / key-table bodies */
+#include "bb_undo.h"   /* EDIT-UNDO: the journal and the Undo / Redo bodies */
