@@ -65,8 +65,9 @@ static Manual manual =
             "record that pot's motion as a loop that replays until you hold "
             "and nudge it again (a green pip at 6 o'clock marks a locked pot; "
             "*Clear locks* in the web app removes them all). **B2** tap: dice "
-            "(a new arrangement of the same slices); hold: *flow*, a new bar "
-            "every loop until released. **B3** tap: reslice (new cell tree); "
+            "(a new arrangement of the same slices; in Play: undo the last "
+            "overdub); hold: *flow*, a new bar every loop until released. "
+            "**B3** tap: reslice (new cell tree; in Play: clear the loop); "
             "hold: load the highlighted file. **B2 + B3 held 2 s**: Settings "
             "(brightness, preset save/load); B2 or B3 leaves. B1 also shows "
             "the clock: white per pulse, green when locked.")
@@ -99,6 +100,11 @@ static Manual manual =
             "permutations — deterministic, B2 rings the next change. "
             "**Play** has no pattern of its own: the bar is what you play "
             "into it from the keyboard or the web page, looped; B3 clears it. "
+            "With **Quantize** Off (the default) it is a free looper — every "
+            "hit replays at the exact moment you played it, held notes with "
+            "their length, overdubbing pass after pass; 8ths snaps hits to "
+            "the nearest 8th, 16ths writes the bar step by step as before. "
+            "**B2** tap undoes the last pass's overdub, **B3** tap clears. "
             "**Pads** is the instrument with no looper: hits sound as you "
             "play them, nothing is written, keeping the beat is yours.")
         .Section("options", "Options, one line each",
@@ -116,7 +122,9 @@ static Manual manual =
             "— slice and step at the material's own swing. **Onsets** — the "
             "onset detector behind the bar guess and hit gates. **Jacks** — "
             "Brain (class gates out) or Voice (two v/oct + gate, hit trigger "
-            "and velocity out); Follow grammar switches with Play.")
+            "and velocity out); Follow grammar switches with Play. "
+            "**Quantize** — Play's looper: Off (as played), 16ths (punch the "
+            "bar), 8ths.")
         .Section("cards", "Cards and loading",
             "FAT32 microSD, WAVs in the root, 1–4 bar breaks are ideal "
             "(longer files trim to their first four bars; levels normalise on "

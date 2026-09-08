@@ -362,6 +362,14 @@ static Sel gJacks;       /* 16 */
 static const char* kKeyPlaysDisp = "{\"kind\":\"enum\",\"labels\":[\"One-shot (the slice)\",\"Held (read on until the gate falls)\"]}";
 static Sel gKeyPlays;    /* 17 SAMPLE: Voice map keys play their slice, or read on while the gate is held */
 /* SAMPLE end */
+/* LOOPER (docs/packages/sample-looper.md): Play's memory. Off / 8ths = the
+ * unquantized looper (events at their own sample; 8ths snaps at record time);
+ * 16ths = the punch-into-steps bar exactly as before. Bytes 18..20 belong to
+ * the record phase (Sampling, Record Source, Record). */
+static const char* kQuantizeDisp = "{\"kind\":\"enum\",\"labels\":[\"Off (as played)\",\"16ths (punch the bar)\",\"8ths\"]}";
+static Sel gQuantize;    /* 21 LOOPER: audio reads .sel */
+static volatile bool gPendUndo = false;   /* B2 tap in Play → engine.looper.UndoLast() on the audio thread */
+/* LOOPER end */
 static volatile uint8_t gJackMapCur = 0xFFu;   /* applied map: 0 Brain, 1 Voice */
 static volatile int     gHitCd  = 0;           /* Voice map: J7 hit trigger countdown (audio) */
 static volatile float   gHitVel = 0.f;         /* Voice map: J8 velocity volts */
@@ -373,7 +381,7 @@ static volatile float   gHitVel = 0.f;         /* Voice map: J8 velocity volts *
  * fans them out to the plain structs above and raises their dirty flags. */
 struct Options : Serializable
 {
-    static constexpr size_t kBytes = 18u;   /* SAMPLE: 17 = Key Plays */
+    static constexpr size_t kBytes = 22u;   /* SAMPLE: 17 = Key Plays · LOOPER: 21 = Quantize (18..20: record phase) */
     size_t SerializedSize() const override { return kBytes; }
     void   Serialize(uint8_t* o) const override
     {
@@ -383,6 +391,7 @@ struct Options : Serializable
         o[10] = gFades.sel; o[11] = gTail.sel; o[12] = gSwaps.sel; o[13] = gDejaVu.sel;
         o[14] = gSwing.sel; o[15] = gOnsetDet.sel; o[16] = gJacks.sel;
         o[17] = gKeyPlays.sel;   /* SAMPLE */
+        /* LOOPER */ o[18] = o[19] = o[20] = 0u; o[21] = gQuantize.sel; /* LOOPER end */
     }
     static void Put(Sel& s, uint8_t v, uint8_t max)
     {
@@ -403,9 +412,10 @@ struct Options : Serializable
         Put(gSwaps, in[12], 1);    Put(gDejaVu, in[13], 2);  Put(gSwing, in[14], 1);
         Put(gOnsetDet, in[15], 1); Put(gJacks, in[16], 2);
         Put(gKeyPlays, in[17], 1);   /* SAMPLE */
+        /* LOOPER */ Put(gQuantize, in[21], 2); /* LOOPER end */
         return true;
     }
-    uint32_t SchemaHash() const override { return 0x4F505434u; /* 'OPT4' (SAMPLE: 18 bytes) */ }
+    uint32_t SchemaHash() const override { return 0x4F505436u; /* 'OPT6' (LOOPER: 22 bytes) */ }
     bool     Describe(hostlink::ComponentWriter& w) const override
     {
         using hostlink::FieldType;
@@ -428,6 +438,7 @@ struct Options : Serializable
         ok &=     w.Field("onsets",       "Onsets",      15, FieldType::Enum, 0.f, kOnsetDetDisp,  2u);
         ok &=     w.Field("jacks",        "Jacks",       16, FieldType::Enum, 0.f, kJacksDisp,     3u);
         ok &=     w.Field("key.plays",    "Key Plays",   17, FieldType::Enum, 0.f, kKeyPlaysDisp,  2u);   /* SAMPLE */
+        /* LOOPER */ ok &= w.Field("quantize", "Quantize", 21, FieldType::Enum, 0.f, kQuantizeDisp, 3u); /* LOOPER end */
         return ok;
     }
 };
@@ -701,6 +712,10 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  /*in*/,
     engine.fadeMode = gFades.sel;   /* 0 Fixed, 1 Adaptive (keyframe density) */
     engine.tailMode = gTail.sel;    /* 0 Gate, 1 Loop forward, 2 Ping-pong   */
     /* PLAY */
+    /* LOOPER */
+    engine.looperQuant = gQuantize.sel;   /* 0 Off, 1 16ths (punch), 2 8ths */
+    if(gPendUndo) { engine.looper.UndoLast(); gPendUndo = false; }
+    /* LOOPER end */
 
     if(gPendReslice) { engine.Reslice();   gPendReslice = false; }
     if(gPendReroll)  { engine.RerollFill(); gPendReroll  = false; }
@@ -1226,6 +1241,8 @@ static void OnPoll(uint32_t /*t_ms*/)
     if(b2.FallingEdge())
     {
         if(gFlowing) { gFlowing = false; engine.flowRegen = false; }
+        /* LOOPER: in Play a tap undoes the last pass's overdub (dice means nothing there) */
+        else if(gGrammar.mode == 5) { gPendUndo = true; }
         else         { gPendReroll = true; }
     }
 
@@ -1433,6 +1450,7 @@ static void ServiceLoad()
  *                     u16 pollGapUs, u16 audioUs, u16 jumps, u16 regens (diag),
  *                     u16 lockMask, f32 nativeBpm, u8 gridBars, u8 barsOpt (v0.8.0)
  *                     u16 jitterUs, u8 multZone, u8 clkFlags, u16 jitterRmsUs (CLOCK, 164..169)
+ *                     … u8 jackMap (175), u8 looperEvents (176, LOOPER)
  *   0x63 ACTION ops 7 clear locks · 8 page(u8 0/1)
  *   0x61 GET_ENV    ← u8 first, u8 count(≤30) → u8 status, u8 first, u8 n,
  *                     then n × (8 × {u8 min, u8 max})
@@ -1466,7 +1484,6 @@ static void ServiceLoad()
 static volatile uint8_t gRecState = 0;        /* WEB: owned by RECORD after merge */
 static volatile uint8_t gRecKey   = 255u;     /* WEB: owned by RECORD after merge */
 static volatile uint8_t gInLevel  = 0;        /* WEB: owned by RECORD after merge (audio writes) */
-static volatile uint8_t gLooperEvents = 0;    /* WEB: owned by LOOPER after merge; state tail byte 176 */
 /* WEB → RECORD: ACTION 9 / 10. -1 = nothing requested; the consumer clears
  * the flag after acting on it (the same path as the panel's record gestures). */
 static volatile int8_t  gWebRecArm   = -1;    /* WEB → RECORD: arm a take into this key */
@@ -1536,7 +1553,7 @@ struct StateExt : hostlink::IHostlinkExtension
                  * record state (RECORD's globals, else derived from the engine), the buffer
                  * bookkeeping the Kit tab draws, and the key table so the page can tell an
                  * empty key (a break region) from a recorded one without another request. */
-                w.U8(gLooperEvents);                                          /* 176 */
+                w.U8((uint8_t)(engine.looper.n > 255 ? 255 : engine.looper.n));   /* 176: loop events (LOOPER) */
                 {
                     uint8_t rs = gRecState, rk = gRecKey;
                     if(rs == 0u && (engine.recArmed || engine.recPending))
