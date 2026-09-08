@@ -13,12 +13,13 @@ multiplier-zone and clock-flags tail; the sample-mode tail — record state,
 buffer bookkeeping, key table — and the `GET_WAVE` / `GET_TABLE` /
 `GET_HITS` reads behind the **Kit** tab when the firmware sends them; the
 SCOPE package's ten-channel `0x62` body behind the **Scope** tab). No
-dependencies, three static files (plus the vendored Android polyfill), phone-friendly.
+dependencies, four static files (plus the vendored Android polyfill), phone-friendly.
 
 | file | what |
 |---|---|
 | `index.html` | the page (UI, polling, rendering) |
 | `hostlink.js` | HostLink framing, the priority link, StateExt parsers, descriptor helpers — shared with the self-test |
+| `edit.js` | the Kit tab's slice editor without its DOM: snap magnets, handles and hit-testing, clamps, the gesture recogniser, the key-drop rule, the history labels, and the `Editor` that turns gestures into ACTION ops — shared with the self-test |
 | `demo.js` | a fake module behind a fake serial port, for the Demo button and the self-test |
 | `selftest.mjs` | node: golden-vector check + synthetic frames + an end-to-end run over the fake module |
 
@@ -69,9 +70,10 @@ drives itself from `demo.js`, a fake module that answers real HostLink
 frames. `?demo=brain,ext,grids,locks` starts it on the Brain page, locked to
 a clock at ×2, in Grids, with two motion locks; `?demo=ext,pending` leaves a
 ×4 switch waiting for its beat; `?demo=camp` starts in Camp; **`?demo=kit`**
-opens the Kit tab on a swung 32-slice break with three keys already
+opens the Kit tab — the slice editor — on a swung 32-slice break with three keys already
 recorded (arm a key and the fake take runs armed → taking → pending →
-committed by itself; the looper count drifts up); `?demo=old` sends a
+committed by itself; the looper count drifts up; every edit op, the audition
+voice and the tap mark answer as the firmware would); `?demo=old` sends a
 pre-v0.8.0 state body, `?demo=short` the 167-byte CLOCK body (no flags)
 and `?demo=v099` the 176-byte body (no sample-mode tail), `?demo=nosets`
 the 219-byte body (no sets tail) and `?demo=noedit` a firmware without
@@ -119,17 +121,12 @@ directly.
   from C. An **empty key** shows the span of the break it plays (`slices
   2–4`, from the state's key table); a **recorded key** shows its take's
   length, class colour, whether it opens on a hit, and its salience /
-  keyframe density (from `GET_TABLE`). Each cell has **●** (arm a take into
+  keyframe density (from `GET_TABLE`); a key on a **marker** — a span of the
+  break placed by hand — says `marker 36`. Each cell has **●** (arm a take into
   that key, ACTION 9 — the next gate on the panel's record path starts it)
   and **✕** (clear the recording, ACTION 10); the armed / taking / pending
   key pulses from the state's record byte, with the **input meter** beside
-  it. Below, the selected key's **waveform** from `GET_WAVE` windows — drag
-  to pan, wheel or − / + to zoom, *fit* / *all*, an L / R / L+R plane
-  picker on stereo material — with the slice boundaries from the table
-  (white for the grid, yellow for recordings; **swung boundaries are the
-  table's, so they land where the slices really open**) and blue onset
-  ticks from `GET_HITS`. The **Key plays** toggle is Options → Key Plays
-  (ACTION 11: one-shot or held until the gate falls). A **buffer** bar
+  it. A **buffer** bar
   shows the break, the recordings and the free room out of `bufCap`, and
   the **looper** card shows the event count from state byte 176 with
   **Undo** (12) and **Clear** (13). The **set** card saves the playing
@@ -140,6 +137,46 @@ directly.
   shows once per `setSeq`. The **Play** tab's strip and slice view
   use the same table boundaries instead of assuming `i · step`, and carry
   the onset ticks.
+- **The editor** (EDIT-UI, firmware with `"edit": 1` — without it the Kit
+  tab is the view-only one above, `?demo=noedit`): the waveform below the
+  keys is the **Sample Drum surface**. Its top band is the material from
+  `GET_WAVE` windows with every edge of the table drawn over it — grid
+  boundaries white, recordings yellow, markers grey until touched and
+  **orange** once you placed or moved them (the table's flags byte), blue
+  onset ticks, a green playhead from `srcPos`. Under it a 44 px row of
+  **lollipop handles**, one per grid boundary and marker start, and a square
+  at the selected marker's end; under that a **strip** with the whole buffer
+  and the view's window (drag = pan, drag up / down or pinch or wheel = zoom,
+  double-tap = fit the selection). Tap inside a marker to **split** it there
+  (snapped to an onset within 12 ms; a grid slice only selects — the grid
+  never changes count); drag a handle to **move** a grid boundary (linked,
+  64 samples from its neighbours, clamped before sending) or a marker's
+  start or end — it **plays from the new point as you drag** (≤ 10 auditions
+  a second) and the whole slice once you let go; a second finger or Shift
+  turns the magnets off, and *0-snap grid / markers* add a zero-crossing
+  magnet (±2 ms) from the cached windows; double-tap a marker's handle to
+  **merge** it with the one ending where it starts; long-press a handle or a
+  slice for **delete** (a tombstone — the audio stays), **copy as a marker**,
+  **promote** (the nearest grid boundary snaps to the marker) or an
+  audition; hold a marker's end handle still to **loop its tail**. The row
+  under the handles shows the selection's start and end in samples · ms ·
+  bar:beat:16th, typed values commit. **Keys:** tap a cell to hear it and
+  select it (cell and handle pulse together); drag a cell onto another to
+  **swap** (a *swap / replace / cancel* prompt when the target is taken —
+  **red**, swap by default, when a recording would lose its only key);
+  long-press a cell, then drop it on or tap another, to **copy** the entry
+  there (many keys may play one entry); drag a slice up from the waveform
+  onto a cell to assign it. The **Edit** panel has the big **Chop** pad
+  (tap while the break plays: the module timestamps from its playhead,
+  backs off Options → *Tap Allowance*, snaps to an onset), the **onset
+  histogram** (bars = each onset's strength, drag the line, *Make markers*
+  = one `FROM_ONSETS`), **nudge all** ± N ms for the grid or the markers,
+  **keys follow the grid**, and the **history** — the page's labels for
+  what it did, keyed by the table's generation, with Undo / Redo wired to
+  ACTION 30 / 31 and live once the firmware reports an undo depth. Every op
+  carries the page's `tableGen`; a stale one is refetched and retried once,
+  a take or a set op in flight is named, and a refusal reverts the handle.
+  Details and the gesture table: `docs/packages/slice-edit-ui.md`.
 - **Scope tab** (SCOPE package, firmware with `scope2`): ten channels on
   one sample clock from the firmware's rings — out L, out R, in L (J1), in R
   (J2) at 48 kHz, and the six jacks J3–J8 DC-coupled at ±5 V, one sample per
@@ -229,8 +266,19 @@ byte, looper undo / clear — and the scope: the empty body unchanged, a
 four-channel frame, trigger, peak, at-pos re-reads, the two-request plan,
 every BAD_ARGS and clamp of both body forms, the jacks (a cv-only frame,
 a mixed frame aligned, the gates preset triggered on J6, an 8 s LFO
-detaching the audio, all ten channels pinned). 186 checks. Pass
-`--golden <path>` if the SDK lives elsewhere.
+detaching the audio, all ten channels pinned) — and every slice-editing op
+over the fake module with its gen, tombstones, keys, FROM_ONSETS, the
+audition window, TAP_MARK and an older firmware. Then **the editor**: its
+pure helpers (magnets, clamps, handles, positions, labels, the drop rule,
+the histogram preview, the audition window, the gesture recogniser) and the
+`Editor` driven against the fake with synthetic pointer events (a drag
+auditions ≤ 10/s and commits SET_BOUNDARY / SET_ENTRY on release; split,
+merge, delete, promote, copy, keys, nudge, onsets, the Chop pad; a stale gen
+refetched and retried; a take in flight refused and named); and **the page
+itself, headless** — `index.html`'s inline script under a DOM stub in `vm`,
+connected to the fake through `?demo=kit`, driven through its canvases,
+cells, menu and panel, then `?demo=noedit`'s view-only fallback. 377
+checks. Pass `--golden <path>` if the SDK lives elsewhere.
 
 ## The GET_STATE body
 
@@ -393,7 +441,8 @@ number of bells, B2 rings the next change, Brain knobs unused).
 | scope (Play tab)         | `0x62 SCOPE` (empty body)         | 5 Hz while visible; 256 samples ×4 decimated |
 | scope (Scope tab)        | `0x62 SCOPE` (body, `scope2`)     | ≤ 30 frames/s; audio 4 × 253 or out L + 3 jacks × 252 per request at max_body 1024; trigger, peak, at-pos, the jacks' own decimation |
 | buttons, punch, scrub    | `0x63 ACTION`                     | 0 dice · 1 reslice · 2 mute · 3 punch · 4 flow · 5 scrub · 6 load · 7 clear locks · 8 page · 9 rec arm(key) · 10 rec clear(key) · 11 key plays(0/1) · 12 looper undo · 13 looper clear · 14 save set · 15 load set |
-| slice editing            | `0x63 ACTION` 16–29 (`"edit"`)    | the table ops with a gen, the audition voice, the tap mark — the table above |
+| slice editing            | `0x63 ACTION` 16–29 (`"edit"`)    | the table ops with a gen, the audition voice, the tap mark — the table above; the Kit tab's editor drives them (`edit.js`) |
+| undo / redo              | `0x63 ACTION` 30 / 31             | wired; disabled until the tail's `undoDepth` is non-zero (EDIT-UNDO) |
 | kit waveform             | `0x64 GET_WAVE`                   | on demand, ≤ 3/s, cached windows            |
 | slice table              | `0x65 GET_TABLE`                  | when the state's table signature changes    |
 | onset ticks              | `0x66 GET_HITS`                   | when `matGen` changes                        |
