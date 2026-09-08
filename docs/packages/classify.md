@@ -286,3 +286,16 @@ Options section (eight sections, none added). Options schema untouched
 - **The silence rule** is shared and untouched; a lens-4-only "no hit, no
   rise → silent" would change what swaps, gates and the ring do on decay
   steps — a behaviour change beyond a label, left for a decision.
+
+## Addendum 2026-09-08: refitting the anchors on the whole corpus
+
+Asked whether the anchors should come from more than the 147-file training
+sample, the fit was repeated on every corpus file outside the measurement
+sets (971 files, 19,713 hit steps) with `adapt_fit.py`. Hit-step accuracy,
+shipped anchors → whole-corpus anchors: IDMT 83.3 → 82.2 %, canon 45
+79.5 → 78.5 %, sample 200 75.8 → 75.2 %; no-hit steps moved the same way.
+On the training set itself the weighted nearest-anchor rule reaches 76.8 %
+and a 5-fold LDA on the same 18 features 76.4 % — the supervised ceiling of
+these features under the ADTOF truth. More breaks do not help: the fit is
+saturated, and the remaining error is the features and the truth's own
+noise (ADTOF snare precision 72 %). The 147-file anchors stay.
