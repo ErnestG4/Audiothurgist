@@ -5,7 +5,8 @@
  * request Link with a priority queue and round-trip measurement, the
  * standard commands the page needs (HELLO, GET_DESCRIPTOR, GET_LIVE, live
  * BLOB writes) and the firmware's StateExt parsers (0x60–0x66: state, envelope,
- * scope, actions, the sample-mode wave / table / hits reads, and the set save / load).
+ * scope — the old mono reply and the four-channel SCOPE body —, actions, the
+ * sample-mode wave / table / hits reads, and the set save / load).
  *
  * Plain script in the browser (globals via window.HL); CommonJS in node so
  * selftest.mjs can pin it to the SDK's golden vectors. No dependencies.
@@ -318,6 +319,62 @@ async function fetchEnv(link, n) {
 }
 const parseScope = b => Int8Array.from(b.subarray(3, 3 + u16(b, 1)));
 
+/* ───────────── SCOPE (0x62 with a body; descriptor "scope2":1) ─────────────
+ * Four channels — out L · out R · in L (J1) · in R (J2) — at full rate in
+ * the firmware's rings (4096 samples, the oldest 256 never read). Request:
+ * u8 chanMask, u8 decim 1..16, u16 n, u8 flags (trig · peak · at + u32 pos).
+ * Reply: u8 status, u8 chanMask, u8 decim, u16 n (as clamped), u8 flags
+ * (triggered · pos honoured), u32 pos, then n × i8 per channel in mask
+ * order. An empty body is the old reply (parseScope). */
+const SCOPE_CH = ['out L', 'out R', 'in L', 'in R'];
+const SCOPE = { trig: 1, peak: 2, at: 4, triggered: 1, atHonoured: 2, ring: 4096, usable: 3840, slack: 480, maxN: 512, maxDecim: 16, hdr: 10, reqMin: 5 };
+function scopeReq(mask, decim, n, flags = 0, pos = null) {
+  const b = new Uint8Array(pos == null ? 5 : 9); const dv = new DataView(b.buffer);
+  b[0] = mask & 0x0f; b[1] = decim; dv.setUint16(2, n, true); b[4] = (flags & ~SCOPE.at) | (pos == null ? 0 : SCOPE.at);
+  if (pos != null) dv.setUint32(5, pos >>> 0, true);
+  return b;
+}
+function parseScope2(b) {
+  if (!b || b.length < SCOPE.hdr) return null;
+  const mask = b[1], decim = b[2], n = u16(b, 3), flags = b[5], pos = u32(b, 6), ch = {}; let at = SCOPE.hdr;
+  for (let c = 0; c < 4; c++) if (mask & (1 << c)) { ch[c] = Int8Array.from(b.subarray(at, at + n)); at += n; }
+  return { mask, decim, n, flags, pos, triggered: !!(flags & SCOPE.triggered), atHonoured: !!(flags & SCOPE.atHonoured), ch };
+}
+/* The requests of one frame for this link's max_body: the whole mask in one
+ * request when that leaves ≥ minN samples per channel (or all it could ever
+ * give), else the mask split over as few requests as hold the largest n —
+ * the later requests are pinned to the first one's pos so the channels stay
+ * sample-aligned. n is also held to the ring (n · decim ≤ 3840). */
+function scopePlan(maxBody, mask, decim, nWant = SCOPE.maxN, minN = 200) {
+  const chans = []; for (let c = 0; c < 4; c++) if (mask & (1 << c)) chans.push(c);
+  if (!chans.length) return { n: 0, masks: [] };
+  const cap = Math.max(1, Math.min(SCOPE.maxN, nWant, Math.floor(SCOPE.usable / decim))), room = Math.max(1, maxBody - SCOPE.hdr);
+  const one = Math.min(cap, Math.floor(room / chans.length));
+  if (one >= Math.min(minN, cap)) return { n: one, masks: [mask] };
+  /* split: the later requests must still find the first one's window in the ring, so leave
+   * SCOPE.slack samples (10 ms) of the usable span for the link's round trips */
+  const capS = Math.max(1, Math.min(cap, Math.floor((SCOPE.usable - SCOPE.slack) / decim)));
+  const per = Math.max(1, Math.floor(room / Math.min(minN, capS))), n = Math.min(capS, Math.floor(room / per)), masks = [];
+  for (let i = 0; i < chans.length; i += per) masks.push(chans.slice(i, i + per).reduce((m, c) => m | (1 << c), 0));
+  return { n, masks };
+}
+/* One frame over the plan: the first request carries the trigger, the rest
+ * ask for its pos; a later request the ring could no longer honour tears the
+ * frame (an error — the caller just takes the next one). Resolves
+ * { n, decim, pos, triggered, ch: {c: Int8Array}, reqs, bytes }. */
+async function fetchScopeFrame(link, plan, decim, flags = 0, opts = {}) {
+  const out = { n: plan.n, decim, pos: 0, triggered: false, ch: {}, reqs: plan.masks.length, bytes: 0 }; let pos = null;
+  for (const m of plan.masks) {
+    const b = await link.request(CMD.scope, scopeReq(m, decim, out.n, flags, pos), Object.assign({ key: 'scope' + m }, opts));
+    const f = parseScope2(b); if (!f) throw new Error('short scope reply');
+    out.bytes += b.length;
+    if (pos == null) { pos = f.pos; out.pos = f.pos; out.triggered = f.triggered; out.n = f.n; }
+    else if (!f.atHonoured || f.pos !== pos || f.n !== out.n) throw new Error('scope frame torn');
+    Object.assign(out.ch, f.ch);
+  }
+  return out;
+}
+
 /* ───────────── descriptor helpers ───────────── */
 /* Every field-bearing component's fields, flattened with their component. */
 function allFields(desc) {
@@ -351,7 +408,7 @@ function manualInfo(desc) {
 
 const api = { PROTO, CMD, ACT, REC, NOTE_NAMES, keyName, STATUS, statusName, crc32, cobsEncode, cobsDecode, buildFrame, FrameParser, Link,
   u16, u32, f32, readStr, hello, getDescriptor, getLive, setLive, concat,
-  STATE_MIN, ZONE_MULT, parseState, fetchEnv, parseScope, allFields, findField, fieldLabels, pagerInfo, optionsInfo, manualInfo,
+  STATE_MIN, ZONE_MULT, parseState, fetchEnv, parseScope, SCOPE, SCOPE_CH, scopeReq, parseScope2, scopePlan, fetchScopeFrame, allFields, findField, fieldLabels, pagerInfo, optionsInfo, manualInfo,
   TABLE_ENTRY, TABLE_CHUNK, fetchWave, parseWave, fetchTable, parseTableChunk, fetchHits, parseHitsChunk,
   SET_STATE, SET_RESULT, setNameOk, setLabelName, nameBytes, saveSet, loadSet };
 if (typeof module === 'object' && module.exports) module.exports = api; else root.HL = api;
