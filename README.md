@@ -94,7 +94,12 @@ the fallbacks. `#kit` / `#opts` / `#man` open a tab directly.
   (ACTION 11: one-shot or held until the gate falls). A **buffer** bar
   shows the break, the recordings and the free room out of `bufCap`, and
   the **looper** card shows the event count from state byte 176 with
-  **Undo** (12) and **Clear** (13). The **Play** tab's strip and slice view
+  **Undo** (12) and **Clear** (13). The **set** card saves the playing
+  material — the break with its recordings, the table, keys, options and
+  the loop — as `sets/<name>.wav` + `.json` (ACTION 14, the name as the
+  body) and loads one back (15); the buttons follow the state tail's
+  `setState`, the progress bar the save's `setProgress`, and each result
+  shows once per `setSeq`. The **Play** tab's strip and slice view
   use the same table boundaries instead of assuming `i · step`, and carry
   the onset ticks.
 - **Options tab:** every enum field of the module's Options block, labels
@@ -175,6 +180,8 @@ u8 recState u8 recKey u32 freePos u32 bufCap u8 stereo u8 inLevel (177..188, SAM
 u8 nTable u32 bufLen                                              (189..193, SAMPLE)
 i8 keySlice[24]                                                   (194..217, SAMPLE)
 u8 keyPlays                                                       (218, SAMPLE)
+u8 setState u8 setProgress u8 setResult u8 setSeq                 (219..222, SETS)
+char setName[32]                                                  (223..254, SETS)
 ```
 
 `recState`: 0 idle · 1 armed (waiting for the gate) · 2 taking · 3 pending
@@ -184,7 +191,12 @@ flight (255 none). `freePos` is the end of used material — the break
 `inLevel` is the peak of the last input block. `nTable` counts grid +
 recorded entries; `keySlice[k]` is the table entry key `k` plays (past
 `nSlices` = a recording). `keyPlays` mirrors Options → Key Plays so the
-Kit toggle follows the panel.
+Kit toggle follows the panel. `setState` is the set op in flight (0 idle ·
+1 saving · 2 loading) with `setProgress` 0..255 for a save; `setResult`
+is the last op's outcome (0 ok · 1 no card · 2 card full · 3 write failed
+· 4 bad name · 5 not found · 6 busy · 7 bad file) and `setSeq` bumps when
+one finishes, so the page reports each result once; `setName` names the
+set the playing material came from (empty for a loose file or a take).
 
 ## The sample-mode commands (0x64–0x66)
 

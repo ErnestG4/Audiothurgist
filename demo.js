@@ -1,8 +1,8 @@
 /* demo.js — a fake Audiothurgist on a fake serial port.
  *
  * Answers HostLink frames exactly as the firmware would (same framing, same
- * StateExt layouts including the v0.8.0, CLOCK and SAMPLE tails — 219 bytes
- * with the record state and key table, or shorter on request — a descriptor in
+ * StateExt layouts including the v0.8.0, CLOCK, SAMPLE and SETS tails — 255 bytes
+ * with the record state, key table and set status, or shorter on request — a descriptor in
  * the SDK's shape with the Options block, pager help and the manual), so
  * the page can be exercised without hardware — open index.html?demo — and
  * so selftest.mjs can drive the real Link end to end. The port exposes
@@ -34,7 +34,9 @@ const OPTION_FIELDS = [
   ['onsets', 'Onsets', ['Spectral flux', 'Log-filtered flux (Böck 2012)']],
   ['key.plays', 'Key Plays', ['One-shot (the slice)', 'Held (read on until the gate falls)']],
 ];
-const FILES = ['amen_170.wav', 'apache_120.wav', 'funky_drummer_100.wav', 'think_110.wav'];
+/* The card's list as the firmware labels it: loose WAVs, then the sets of sets/ as "<name> [set]". */
+const FILES = ['amen_170.wav', 'apache_120.wav', 'funky_drummer_100.wav', 'think_110.wav', 'amen_kit [set]'];
+const SET_NAME_RE = /^[A-Za-z0-9_-]{1,31}$/;
 const KNOBS = [
   [['chop', 'Chop', '**Chop character** — the journey from verbatim (full right) to rolls, bursts and reverb (full left). In Camp: the number of bells (rounds → 4 → 8 → 16).'],
    ['tempo', 'Tempo', '**Tempo**, 70–180 BPM, varispeed like vinyl. Snaps to the break\'s own tempo within ±2 BPM. While following an external clock it becomes a ÷4…×4 multiplier.'],
@@ -93,7 +95,7 @@ function buildDescriptor() {
       { id: 'out_l', name: 'Audio Out L', sig: 'audioOut', help: 'Audio out, left.' },
       { id: 'out_r', name: 'Audio Out R', sig: 'audioOut', help: 'Audio out, right.' },
     ],
-    audiothurgist: { ext: 1, state: 96, env: 97, scope: 98, action: 99, wave: 100, table: 101, hits: 102 },
+    audiothurgist: { ext: 1, state: 96, env: 97, scope: 98, action: 99, wave: 100, table: 101, hits: 102, sets: 1 },
     manual: {
       preamble: '**Audiothurgist chops breaks to a grid and rearranges them** with one knob that travels from *the record, verbatim* to rolls, bursts, and reverb rubble. Patterns hold until you ask for new ones. (Demo descriptor — the module\'s own text replaces this.)',
       sections: [
@@ -108,7 +110,7 @@ function buildDescriptor() {
 
 class FakeDevice {
   constructor(opts = {}) {
-    this.opts = Object.assign({ tail: 219, bpm: 120, nSlices: 32, latencyMs: 8, swing: false, kit: false }, opts);
+    this.opts = Object.assign({ tail: 255, bpm: 120, nSlices: 32, latencyMs: 8, swing: false, kit: false }, opts);
     this.live = new Uint8Array(LIVE_SIZE); this.live.fill(0x80, OFF.pager, OFF.pager + 48);
     this.desc = new TextEncoder().encode(JSON.stringify(buildDescriptor()));
     this.muted = false; this.flowing = false; this.brain = false; this.ext = false; this.locked = false;
@@ -126,9 +128,40 @@ class FakeDevice {
     this.buf = new Float32Array(BUF_CAP); this.bufLen = 0; this.freePos = 0;
     this.table = []; this.keySlice = new Int8Array(KEYS); this.hits = [];
     this.rec = { state: 0, key: -1, t: 0, pos: 0 }; this.inLevel = 0; this.looperEvents = 0;
+    /* SETS: the card's sets (name → a snapshot of everything a set carries) and the op in flight,
+     * driven by time on each state poll: pending → saving / loading for 600 ms → done (seq bumps). */
+    this.sets = new Map(); this.set = { state: 0, progress: 0, result: 0, seq: 0, name: '', t: 0, pending: null };
     this.newMaterial();
-    if (this.opts.kit) { this.recordKey(3, 0.35, 0); this.recordKey(7, 0.9, 1); this.recordKey(14, 1.6, 2); this.looperEvents = 3; }
+    if (this.opts.kit) { this.recordKey(3, 0.35, 0); this.recordKey(7, 0.9, 1); this.recordKey(14, 1.6, 2); this.looperEvents = 3; this.sets.set('amen_kit', this.snapshot()); }
     this.blob = null;
+  }
+  /* SETS: what sets/<name>.wav + .json would hold. */
+  snapshot() {
+    return { nSlices: this.nSlices, bufLen: this.bufLen, freePos: this.freePos, table: this.table.map(e => Object.assign({}, e)),
+      keySlice: Int8Array.from(this.keySlice), hits: this.hits.slice(), looperEvents: this.looperEvents, options: Uint8Array.from(this.options),
+      buf: this.buf.slice(0, this.freePos), src: Int8Array.from(this.src), stepClass: Uint8Array.from(this.stepClass), env: Uint8Array.from(this.env) };
+  }
+  restore(sn) {
+    this.opts.nSlices = sn.nSlices; this.bufLen = sn.bufLen; this.freePos = sn.freePos; this.table = sn.table.map(e => Object.assign({}, e));
+    this.keySlice.set(sn.keySlice); this.hits = sn.hits.slice(); this.looperEvents = sn.looperEvents; this.options.set(sn.options);
+    this.buf.fill(0); this.buf.set(sn.buf); this.src.set(sn.src); this.stepClass.set(sn.stepClass); this.env.set(sn.env);
+    this.rec = { state: 0, key: -1, t: 0, pos: 0 }; this.matGen = (this.matGen + 1) & 0xff;
+  }
+  setTick() {
+    const s = this.set, now = Date.now();
+    if (!s.state && s.pending) { s.state = s.pending.op === 14 ? 1 : 2; s.progress = 0; s.t = now; }
+    if (!s.state) return;
+    const el = now - s.t; s.progress = Math.min(255, Math.round(el / 600 * 255));
+    if (el < 600) return;
+    const { op, name } = s.pending; s.pending = null; s.state = 0; s.progress = 0;
+    if (op === 14) {
+      if (name === 'nocard') s.result = 1; else if (name === 'full') s.result = 2;
+      else { this.sets.set(name, this.snapshot()); s.result = 0; s.name = name; const lab = name + ' [set]'; if (!FILES.includes(lab)) { FILES.push(lab); this.desc = new TextEncoder().encode(JSON.stringify(buildDescriptor())); } this.file = FILES.indexOf(lab); this.live[OFF.sample] = this.file; }
+    } else {
+      const sn = this.sets.get(name);
+      if (!sn) s.result = 5; else { this.restore(sn); s.result = 0; s.name = name; const i = FILES.indexOf(name + ' [set]'); this.file = i >= 0 ? i : 255; if (i >= 0) this.live[OFF.sample] = i; }
+    }
+    s.seq = (s.seq + 1) & 0xff;
   }
   get nSlices() { return this.opts.nSlices; }
   get options() { return this.live.subarray(OFF.options, OFF.options + N_OPTIONS); }
@@ -230,6 +263,7 @@ class FakeDevice {
         if (this.live[OFF.sample] !== this.file) { this.file = this.live[OFF.sample]; this.newMaterial(); }
         U8(0); break; }
       case CMD.state: {
+        if (this.opts.tail >= 223) this.setTick();   /* SETS: the op finishes before the body is built, as the firmware's main loop does */
         if (this.callT > 0 && --this.callT === 0) this.callFlash = 255;
         const flags = (this.muted ? 1 : 0) | (this.ext ? 2 : 0) | (this.locked ? 4 : 0) | (this.flowing ? 8 : 0) | (this.brain ? 16 : 0);
         U8(0); U8(this.nSlices); U8(this.curStep()); U8(flags); U8(this.matGen); U8(this.options[5]); U8(this.options[0]); U8(this.file);
@@ -250,6 +284,8 @@ class FakeDevice {
         }
         if (tail >= 218) for (let k = 0; k < KEYS; k++) U8(this.keySlice[k]);
         if (tail >= 219) U8(this.options[16]);                             /* 218 Key Plays */
+        if (tail >= 223) { const s = this.set; U8(s.state); U8(s.progress); U8(s.result); U8(s.seq); }   /* 219.. SETS */
+        if (tail >= 255) { const s = this.set; for (let i = 0; i < 32; i++) U8(i < s.name.length ? s.name.charCodeAt(i) : 0); }
         break; }
       case CMD.wave: {
         if (body.length < 7) { U8(2); break; }
@@ -290,7 +326,7 @@ class FakeDevice {
           case 3: if (a < this.nSlices && b < this.nSlices) { this.src[a] = b; this.callFlash = a; this.callT = 4; } break;
           case 4: this.flowing = !!a; break;
           case 5: this.histDepth = Math.min(this.histN - 1, a); break;
-          case 6: if (a < FILES.length) { this.file = a; this.live[OFF.sample] = a; this.newMaterial(); } break;
+          case 6: if (a < FILES.length) { this.file = a; this.live[OFF.sample] = a; const sn = this.sets.get(FILES[a].endsWith(' [set]') ? FILES[a].slice(0, -6) : ''); if (sn) { this.restore(sn); this.set.name = FILES[a].slice(0, -6); } else { this.newMaterial(); this.set.name = ''; } } break;
           case 7: this.lockMask = 0; break;
           case 8: this.brain = !!a; break;
           case 9:  if (body.length < 2 || a >= KEYS) ok = false; else if (this.rec.state) { U8(3); return Uint8Array.from(w); } else this.rec = { state: 1, key: a, t: Date.now(), pos: 0 }; break;
@@ -298,6 +334,11 @@ class FakeDevice {
           case 11: if (body.length < 2 || a > 1) ok = false; else this.options[16] = a; break;
           case 12: this.looperEvents = Math.max(0, this.looperEvents - 1); break;
           case 13: this.looperEvents = 0; break;
+          case 14: case 15: {   /* SETS: the name is the rest of the body; the work is asynchronous */
+            const name = new TextDecoder('ascii').decode(body.subarray(1));
+            if (!SET_NAME_RE.test(name)) { ok = false; break; }
+            if (this.set.state || this.set.pending || (op === 14 && this.rec.state)) { U8(3); return Uint8Array.from(w); }
+            this.set.pending = { op, name }; break; }
           default: ok = false;
         }
         U8(ok ? 0 : 2); break; }
