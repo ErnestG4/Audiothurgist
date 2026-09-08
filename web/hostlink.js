@@ -5,7 +5,8 @@
  * request Link with a priority queue and round-trip measurement, the
  * standard commands the page needs (HELLO, GET_DESCRIPTOR, GET_LIVE, live
  * BLOB writes) and the firmware's StateExt parsers (0x60–0x66: state, envelope,
- * scope, actions, the sample-mode wave / table / hits reads, and the set save / load).
+ * scope — the old mono reply and the four-channel SCOPE body —, actions, the
+ * sample-mode wave / table / hits reads, and the set save / load).
  *
  * Plain script in the browser (globals via window.HL); CommonJS in node so
  * selftest.mjs can pin it to the SDK's golden vectors. No dependencies.
@@ -318,6 +319,97 @@ async function fetchEnv(link, n) {
 }
 const parseScope = b => Int8Array.from(b.subarray(3, 3 + u16(b, 1)));
 
+/* ───────────── SCOPE (0x62 with a body; descriptor "scope2": 1 audio, 2 + cv) ─────────────
+ * Ten channels on one sample clock in the firmware's rings: four audio at
+ * 48 kHz — out L · out R · in L (J1) · in R (J2), 64 K samples — and six CV
+ * jacks J3..J8 DC-coupled at ±5 V = ±127, one sample per audio block (2 kHz,
+ * 16 K samples). Request: u8 chanMask, u8 decim 1..16, u16 n, u8 flags
+ * (trig · peak · at + u32 pos · ext + u8 maskHi (J3..J8), u8 cvDecim 1..64,
+ * i8 trigLevel, u8 trigSrc). Reply: u8 status, u8 chanMask, u8 decim, u16 n
+ * (as clamped), u8 flags (triggered · pos honoured · ext header · detached),
+ * u32 pos (on the audio clock, wrapping at 24·2^26; the cv start is pos / 24),
+ * [u8 maskHi, u8 cvDecim, u8 cvDiv, u8 trigSrc], then n × i8 per audio channel
+ * in mask order, then per cv jack in bit order. An empty body is the old
+ * reply (parseScope). */
+const SCOPE_CH = ['out L', 'out R', 'in L', 'in R', 'J3', 'J4', 'J5', 'J6', 'J7', 'J8'];
+/* The jacks' roles under each map (state byte 175: 0 Brain, 1 Voice) and which of them are inputs. */
+const SCOPE_JACK_ROLE = [['clock in', 'v/oct in', 'gate in', 'kick gate out', 'snare gate out', 'hat gate out'],
+                         ['clock in', 'slice v/oct in', 'style v/oct in', 'gate in', 'hit trigger out', 'velocity out']];
+const SCOPE_JACK_IN = [[true, true, true, false, false, false], [true, true, true, true, false, false]];
+const SCOPE = { trig: 1, peak: 2, at: 4, ext: 8, triggered: 1, atHonoured: 2, extReply: 4, detached: 8,
+  ring: 65536, usable: 65280, cvRing: 16384, cvUsable: 16368, cvDiv: 24, wrap: 1610612736, cvWrap: 67108864,
+  slack: 480, maxN: 512, maxDecim: 16, cvMaxDecim: 64, hdr: 10, hdrExt: 4, reqMin: 5, reqPos: 9, reqExt: 13,
+  cvPerVolt: 25.4, trigAuto: 0, trigSet: 0x80, trigNone: 255, hyst: 4 };
+const scopeVolts = code => code / SCOPE.cvPerVolt;
+const scopeCvCode = volts => Math.max(-127, Math.min(127, Math.round(volts * SCOPE.cvPerVolt)));
+const scopeAge = (now, p, wrap = SCOPE.wrap) => now >= p ? now - p : now + (wrap - p);
+/* ext: { maskHi, cvDecim, level, trig } — trig 0 = the first selected channel (audio before cv), or SCOPE.trigSet | 0..9. */
+function scopeReq(mask, decim, n, flags = 0, pos = null, ext = null) {
+  const withExt = !!ext, len = withExt ? SCOPE.reqExt : pos == null ? SCOPE.reqMin : SCOPE.reqPos;
+  const b = new Uint8Array(len); const dv = new DataView(b.buffer);
+  b[0] = mask & 0x0f; b[1] = decim; dv.setUint16(2, n, true);
+  b[4] = (flags & ~(SCOPE.at | SCOPE.ext)) | (pos == null ? 0 : SCOPE.at) | (withExt ? SCOPE.ext : 0);
+  if (len >= SCOPE.reqPos) dv.setUint32(5, (pos == null ? 0 : pos) >>> 0, true);
+  if (withExt) { b[9] = (ext.maskHi || 0) & 0x3f; b[10] = ext.cvDecim || 1; b[11] = (ext.level || 0) & 0xff; b[12] = ext.trig || 0; }
+  return b;
+}
+function parseScope2(b) {
+  if (!b || b.length < SCOPE.hdr) return null;
+  const mask = b[1], decim = b[2], n = u16(b, 3), flags = b[5], pos = u32(b, 6), ch = {};
+  const f = { mask, decim, n, flags, pos, triggered: !!(flags & SCOPE.triggered), atHonoured: !!(flags & SCOPE.atHonoured),
+    ext: !!(flags & SCOPE.extReply), detached: !!(flags & SCOPE.detached), maskHi: 0, cvDecim: 1, cvDiv: SCOPE.cvDiv, trigSrc: SCOPE.trigNone, ch };
+  let at = SCOPE.hdr;
+  if (f.ext) { if (b.length < SCOPE.hdr + SCOPE.hdrExt) return null; f.maskHi = b[10]; f.cvDecim = b[11]; f.cvDiv = b[12] || SCOPE.cvDiv; f.trigSrc = b[13]; at += SCOPE.hdrExt; }
+  for (let c = 0; c < 4; c++) if (mask & (1 << c)) { ch[c] = Int8Array.from(b.subarray(at, at + n)); at += n; }
+  for (let c = 0; c < 6; c++) if (f.maskHi & (1 << c)) { ch[4 + c] = Int8Array.from(b.subarray(at, at + n)); at += n; }
+  return f;
+}
+/* The requests of one frame for this link's max_body: every selected channel
+ * (audio mask + cv maskHi) in one request when that leaves ≥ minN samples per
+ * channel (or all it could ever give), else the channels split over as few
+ * requests as hold the largest n — the later requests are pinned to the first
+ * one's pos so the tiers stay time-aligned. n is held to each tier's ring
+ * (n · decim ≤ 65280 audio, n · cvDecim ≤ 16368 cv). Returns { n, reqs:
+ * [{ mask, maskHi }], ext, masks } (masks: the audio masks, for old callers). */
+function scopePlan(maskOrMaxBody, maskArg, decimArg, nWant = SCOPE.maxN, minN = 200, maskHi = 0, cvDecim = 1) {
+  const maxBody = maskOrMaxBody, mask = maskArg & 0x0f, decim = decimArg; maskHi &= 0x3f;
+  const chans = []; for (let c = 0; c < 4; c++) if (mask & (1 << c)) chans.push(c); for (let c = 0; c < 6; c++) if (maskHi & (1 << c)) chans.push(4 + c);
+  const ext = maskHi !== 0, hdr = SCOPE.hdr + (ext ? SCOPE.hdrExt : 0);
+  const toReq = list => ({ mask: list.filter(c => c < 4).reduce((m, c) => m | (1 << c), 0), maskHi: list.filter(c => c >= 4).reduce((m, c) => m | (1 << (c - 4)), 0) });
+  const done = (n, groups) => { const reqs = groups.map(toReq); return { n, reqs, ext, masks: reqs.map(r => r.mask) }; };
+  if (!chans.length) return done(0, []);
+  let cap = Math.min(SCOPE.maxN, nWant); if (mask) cap = Math.min(cap, Math.floor(SCOPE.usable / decim)); if (maskHi) cap = Math.min(cap, Math.floor(SCOPE.cvUsable / cvDecim)); cap = Math.max(1, cap);
+  const room = Math.max(1, maxBody - hdr);
+  const one = Math.min(cap, Math.floor(room / chans.length));
+  if (one >= Math.min(minN, cap)) return done(one, [chans]);
+  /* split: the later requests must still find the first one's window in the ring, so leave
+   * SCOPE.slack audio samples (10 ms) of the usable span for the link's round trips */
+  let capS = Math.min(cap, Math.floor((SCOPE.usable - SCOPE.slack) / decim)); if (maskHi) capS = Math.min(capS, Math.floor((SCOPE.cvUsable - Math.ceil(SCOPE.slack / SCOPE.cvDiv)) / cvDecim)); capS = Math.max(1, capS);
+  const perMax = Math.max(1, Math.floor(room / Math.min(minN, capS))), nReqs = Math.ceil(chans.length / perMax), per = Math.ceil(chans.length / nReqs);
+  const n = Math.min(capS, Math.floor(room / per)), groups = [];
+  for (let i = 0; i < chans.length; i += per) groups.push(chans.slice(i, i + per));
+  return done(n, groups);
+}
+/* One frame over the plan: the first request carries the trigger, the rest
+ * ask for its pos; a later request the ring could no longer honour tears the
+ * frame (an error — the caller just takes the next one). `ext` = { cvDecim,
+ * level, trig } is sent when the plan has cv channels (or when given).
+ * Resolves { n, decim, cvDecim, cvDiv, pos, triggered, detached, trigSrc,
+ * ch: {c: Int8Array} (0..3 audio, 4..9 J3..J8), reqs, bytes }. */
+async function fetchScopeFrame(link, plan, decim, flags = 0, opts = {}, ext = null) {
+  const out = { n: plan.n, decim, cvDecim: ext ? (ext.cvDecim || 1) : 1, cvDiv: SCOPE.cvDiv, pos: 0, triggered: false, detached: false, trigSrc: SCOPE.trigNone, ch: {}, reqs: plan.reqs.length, bytes: 0 }; let pos = null;
+  for (const r of plan.reqs) {
+    const e = (plan.ext || ext) ? { maskHi: r.maskHi, cvDecim: ext ? (ext.cvDecim || 1) : 1, level: ext ? (ext.level || 0) : 0, trig: ext ? (ext.trig || 0) : 0 } : null;
+    const b = await link.request(CMD.scope, scopeReq(r.mask, decim, out.n, flags, pos, e), Object.assign({ key: 'scope' + r.mask + ':' + r.maskHi }, opts));
+    const f = parseScope2(b); if (!f) throw new Error('short scope reply');
+    out.bytes += b.length;
+    if (pos == null) { pos = f.pos; out.pos = f.pos; out.triggered = f.triggered; out.detached = f.detached; out.n = f.n; out.cvDecim = f.cvDecim; out.cvDiv = f.cvDiv; out.trigSrc = f.trigSrc; }
+    else if (!f.atHonoured || f.pos !== pos || f.n !== out.n) throw new Error('scope frame torn');
+    Object.assign(out.ch, f.ch);
+  }
+  return out;
+}
+
 /* ───────────── descriptor helpers ───────────── */
 /* Every field-bearing component's fields, flattened with their component. */
 function allFields(desc) {
@@ -351,7 +443,7 @@ function manualInfo(desc) {
 
 const api = { PROTO, CMD, ACT, REC, NOTE_NAMES, keyName, STATUS, statusName, crc32, cobsEncode, cobsDecode, buildFrame, FrameParser, Link,
   u16, u32, f32, readStr, hello, getDescriptor, getLive, setLive, concat,
-  STATE_MIN, ZONE_MULT, parseState, fetchEnv, parseScope, allFields, findField, fieldLabels, pagerInfo, optionsInfo, manualInfo,
+  STATE_MIN, ZONE_MULT, parseState, fetchEnv, parseScope, SCOPE, SCOPE_CH, SCOPE_JACK_ROLE, SCOPE_JACK_IN, scopeVolts, scopeCvCode, scopeAge, scopeReq, parseScope2, scopePlan, fetchScopeFrame, allFields, findField, fieldLabels, pagerInfo, optionsInfo, manualInfo,
   TABLE_ENTRY, TABLE_CHUNK, fetchWave, parseWave, fetchTable, parseTableChunk, fetchHits, parseHitsChunk,
   SET_STATE, SET_RESULT, setNameOk, setLabelName, nameBytes, saveSet, loadSet };
 if (typeof module === 'object' && module.exports) module.exports = api; else root.HL = api;

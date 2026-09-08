@@ -16,10 +16,14 @@
 # 6. sets_check     — SETS package: set naming, the engine → set → engine
 #                     round trip (table, keys, looper, identical audio),
 #                     PlanSet's refusals, Looper::Adopt (ASan/UBSan).
-# 7. bars_check     — builds; with WAVs on the command line, prints the bar/
+# 7. scope_check    — SCOPE package: request parsing and clamps, the trigger
+#                     (crossing, hysteresis, ring age), channel alignment,
+#                     plain / peak decimation, at-pos frames, the old-mode
+#                     reply (ASan/UBSan).
+# 8. bars_check     — builds; with WAVs on the command line, prints the bar/
 #                     tempo estimate per file (tests/bars_corpus.sh validates
 #                     against the corpus truth set).
-# 8. classify_check — smoke run of the five classifier lenses on any WAVs
+# 9. classify_check — smoke run of the five classifier lenses on any WAVs
 #                     given on the command line (prints, no assertions).
 # 9. classify_bench — builds; tests/classify_bench.sh measures every lens
 #                     against ground truth (CLASSIFY package).
@@ -55,6 +59,9 @@ $CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $I
 echo; echo "== sets_check (ASan/UBSan) =="
 $CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/sets_check.cpp -o "$OUT/sc" || fail=1
 "$OUT/sc" || fail=1
+echo; echo "== scope_check (ASan/UBSan) =="
+$CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/scope_check.cpp -o "$OUT/scope" || fail=1
+"$OUT/scope" || fail=1
 echo; echo "== bars_check (build; corpus run: tests/bars_corpus.sh) =="
 $CXX -O2 -std=gnu++17 $INC tests/bars_check.cpp -o "$OUT/bc" || fail=1
 echo; echo "== classify_bench (build; truth run: tests/classify_bench.sh) =="

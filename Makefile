@@ -41,6 +41,13 @@ ifeq ($(BOARD),v2)
 C_DEFS += -DALCHEMY_BOARD_V2
 C_DEFS += -DALCHEMY_LOCK_INLINE_RAM_LIMIT=0 -DBB_SCRATCH_EXTERNAL   # DTCM relief (review M7)
 endif
+# SCOPE: HostLink max_body 512 → 1024 (protocol §1 allows up to 2048; hosts read
+# it from HELLO, which itself always fits 512, and never ask for more than they
+# can take). A four-channel 0x62 frame is header + 4 × n bytes: 125 samples per
+# channel at 512, 253 at 1024 — one request per scope frame instead of two.
+# The SDK sizes its CDC rings and frame buffers from this, all in DTCM (.bss):
+# 1024 costs ~6 KB there, 2048 would cost ~18 KB and leave the stack ~17 KB.
+C_DEFS += -DALCHEMY_HOSTLINK_MAX_BODY=1024
 
 APP_TYPE = BOOT_SRAM
 # Local linker adds .axi_bss in AXI SRAM — upstream's SRAM linker leaves it
