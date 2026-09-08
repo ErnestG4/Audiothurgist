@@ -98,9 +98,11 @@ map** (Options → Jacks, or automatically with Play/Pads): J4 slice · J5 style
 `web/` is a single-page WebSerial instrument view: the bar ring and loop
 strip, per-slice waveform envelopes, an oscilloscope, every button and
 knob function for the current page and grammar, locks, options, presets,
-the manual, a diagnostics line, and a **Kit** tab: the 24 keys, each
+the manual, a diagnostics line, a **Kit** tab: the 24 keys, each
 recording's waveform with onsets and boundaries, record/clear per key, the
-looper's events, and set save/load. Serve it from a secure context:
+looper's events, and set save/load — and a **Scope** tab: out L/R and
+in L/R at full rate in four colours, time zoom, gain, trigger, peak
+decimation, afterglow, at up to 30 frames/s (`docs/packages/scope.md`). Serve it from a secure context:
 
 ```sh
 cd web && python3 -m http.server 8080     # then http://localhost:8080 in Chrome/Edge
@@ -133,7 +135,8 @@ tests/run.sh                         # host test suite (needs g++, ASan)
 
 The pure engine lives in `core/` (no hardware, no allocation); the Alchemy
 Lab shell is `src/audiothurgist.cpp`; `tests/` holds a grammar-hash gate,
-an engine suite and a clock suite under ASan/UBSan, plus corpus tools.
+an engine suite, a clock suite and a scope suite under ASan/UBSan, plus
+corpus tools.
 
 ## Documents
 
