@@ -190,6 +190,27 @@ struct Looper
     }
     // The playhead jumped (new material, barPhase reset): forget the frontier.
     void ResetPlayhead() { frontier = -1.; }
+    /* EDIT: table indices moved (a compaction at SetMaterial, a merge, a
+     * delete). A KEYLESS event (Brain map, web: key < 0) is bound to its
+     * table index, so it follows the map: map[slice] is its new index, −1
+     * drops the event (order kept, O(n)). Keyed events resolve through the
+     * key table at fire time and are untouched, as are indices ≥ nMap. */
+    void RemapSlices(const int8_t* map, int nMap)
+    {
+        int w = 0;
+        for(int i = 0; i < n; i++)
+        {
+            Event e = ev[i];
+            if(e.key < 0 && e.slice >= 0 && e.slice < nMap)
+            {
+                const int8_t m = map[e.slice];
+                if(m < 0) continue;
+                e.slice = m;
+            }
+            ev[w++] = e;
+        }
+        n = w;
+    }
 
     // AUDIO, once per block BEFORE the events are fired: the span the
     // playhead crosses in this block, [start, start + span), reconciled with

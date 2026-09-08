@@ -117,4 +117,19 @@ inline void AnalyseRegion(const float* x, int start, int len, float sr, int mode
     dens = d[0];
 }
 
+// EDIT (docs/packages/slice-edit-core.md): AnalyseRegion over a span of the
+// engine's L plane, packed as the EntryMeta an EditReq carries (set
+// EditReq::kMeta in `flags` after this). CONTROL thread, before the post;
+// yields as AnalyseRegion does. The span must lie in [0, freePos) — the
+// audio thread never writes there (it records past freePos) — else the
+// meta is the silent default (class 3, no salience, no density, no hit).
+inline void AnalyseEntry(const Engine& e, int start, int len, EntryMeta& m, int mode = 0, float refRms = 0.f)
+{
+    m = {3, 0.f, 0.f, false};
+    if(!e.buf || start < 0 || len < 1 || start > e.freePos || len > e.freePos - start) return;
+    bool hit = false;
+    AnalyseRegion(e.buf, start, len, e.sr, mode, m.cls, m.sal, m.dens, hit, refRms);
+    m.hit = hit;
+}
+
 } // namespace bb
