@@ -152,6 +152,20 @@ struct Looper
         dirty = false;
         NextGen();
     }
+    /* SETS: take another looper's events wholesale — one memcpy, so the
+     * audio thread can adopt a list the control thread built with Add/Seal
+     * (a set load), and the control thread can snapshot the live list
+     * (a set save) without racing Insert's memmove. The receiver's window
+     * (frontier) and held mask start over; quant/divisions are kept. */
+    void Adopt(const Looper& src)
+    {
+        n = src.n > kMax ? kMax : src.n;
+        memcpy(ev, src.ev, (size_t)n * sizeof(Event));
+        gen      = src.gen;
+        dirty    = src.dirty;
+        heldMask = 0;
+        frontier = -1.;
+    }
 
     // AUDIO or CONTROL. Remove the newest generation. false = empty.
     bool UndoLast()

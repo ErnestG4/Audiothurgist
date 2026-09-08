@@ -156,7 +156,13 @@ static Manual manual =
             "(longer files trim to their first four bars; levels normalise on "
             "load). Turn **Sample** (P5) to highlight a file, hold **B3** to "
             "load it — or pick it from the Sample dropdown here. New material "
-            "opens at its own tempo until P2 moves.");
+            "opens at its own tempo until P2 moves. **Sets** — a break with "
+            "its recorded keys, the Options and Play's loop — live in "
+            "`sets/` as `<name>.wav` + `<name>.json`, listed as “name [set]” "
+            "and loaded the same way; the browser's Kit tab saves and loads "
+            "them by name. Every preset save also writes `presets/<slot>.json`; "
+            "a slot the flash no longer honours after a firmware update comes "
+            "back from it at boot.");
 
 void DescribeManual(hostlink::Host& host)
 {
@@ -183,8 +189,10 @@ void DescribeManual(hostlink::Host& host)
           .SeeAlso(k_chop);
     k_pitch.Help("**Pitch**, ±12 semitones. Onsets stay on the grid; "
                  "the kit retunes.");
-    k_sample.Help("**Sample** — highlight a file on the card; hold **B3** to "
-                  "load it. The browser dropdown loads directly.")
+    k_sample.Help("**Sample** — highlight a file on the card (sets show as "
+                  "“name [set]”); hold **B3** to load it. The browser dropdown "
+                  "loads directly. While a set saves, this ring fills with the "
+                  "progress; while one loads, a dot sweeps it.")
             .SeeAlso(jk1);
     k_vol.Help("**Volume**, with the reverb tail riding the cluster zone.");
 

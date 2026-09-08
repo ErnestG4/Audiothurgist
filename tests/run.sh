@@ -13,10 +13,13 @@
 #                     markers → cues → onsets, stereo conditioning, the loop
 #                     take copier, the load pipeline on a synthetic take, the
 #                     loader's two planes (ASan/UBSan).
-# 6. bars_check     — builds; with WAVs on the command line, prints the bar/
+# 6. sets_check     — SETS package: set naming, the engine → set → engine
+#                     round trip (table, keys, looper, identical audio),
+#                     PlanSet's refusals, Looper::Adopt (ASan/UBSan).
+# 7. bars_check     — builds; with WAVs on the command line, prints the bar/
 #                     tempo estimate per file (tests/bars_corpus.sh validates
 #                     against the corpus truth set).
-# 7. classify_check — smoke run of the four classifier lenses on any WAVs
+# 8. classify_check — smoke run of the four classifier lenses on any WAVs
 #                     given on the command line (prints, no assertions).
 set -u
 cd "$(dirname "$0")/.."
@@ -47,6 +50,9 @@ $CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $I
 echo; echo "== record_check (ASan/UBSan) =="
 $CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/record_check.cpp -o "$OUT/rc" || fail=1
 "$OUT/rc" "$OUT" || fail=1
+echo; echo "== sets_check (ASan/UBSan) =="
+$CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/sets_check.cpp -o "$OUT/sc" || fail=1
+"$OUT/sc" || fail=1
 echo; echo "== bars_check (build; corpus run: tests/bars_corpus.sh) =="
 $CXX -O2 -std=gnu++17 $INC tests/bars_check.cpp -o "$OUT/bc" || fail=1
 

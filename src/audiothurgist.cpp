@@ -63,6 +63,8 @@
 #include "bb_clockmath.h" /* CLOCK: ClockMap, PhaseGuard, MultZone, JitterMeter (pure, host-tested) */
 #include "bb_sample.h"   /* SAMPLE: TrimRegion, AnalyseRegion (a key take, control thread) */
 #include "bb_record.h"   /* RECORD: record input, kit map, take length, markers → cues, TakeRecorder */
+#include "bb_sets.h"     /* SETS: set naming, engine ↔ SetInfo, the load plan (docs/packages/sample-sets.md) */
+#include <new>           /* SETS: placement-new for the NOLOAD SDRAM objects */
 
 using namespace alchemy;
 
@@ -494,6 +496,39 @@ static volatile float   gRecPeak     = 0.f;     /* audio → render: the record 
 static float            gRecMix[kScratch];      /* the mono record mix (audio thread) */
 static float            gOutR[kScratch];        /* the engine's R render (audio thread) */
 /* ── end RECORD ────────────────────────────────────────────────────────── */
+/* ── SETS ── sets on the card (docs/packages/sample-sets.md): sets/<name>.wav
+ * + sets/<name>.json, and presets/<slot>.json backups. Control thread only,
+ * under SdCard::BusyGuard; every long file loop yields to the clock and, every
+ * 40 ms, to the whole control loop (KeepClock), so the panel, the LEDs and
+ * HostLink stay alive through a 5 MB write. DMA law: the FIL and the WAV
+ * staging in .axi_bss, the JSON text in SDRAM, all 32-byte aligned. ─────── */
+ALCHEMY_SDMMC_BSS alignas(32) static FIL     gSetFil;                 /* the writer's file (the loader has its own) */
+ALCHEMY_SDMMC_BSS alignas(32) static uint8_t gSetStage[16384];       /* WAV staging; the writer applies the DMA pad */
+alignas(32) static char    ALCHEMY_SDRAM_BSS gSetJson[bb::kSetJsonMax];          /* one f_write / f_read of the whole text */
+alignas(8)  static uint8_t ALCHEMY_SDRAM_BSS gSetInfoMem[sizeof(bb::SetInfo)];   /* NOLOAD: placement-new'd at boot (NSDMI) */
+alignas(8)  static uint8_t ALCHEMY_SDRAM_BSS gSetLooperMem[sizeof(bb::Looper)];
+static bb::SetInfo*  gSet       = nullptr;   /* the set being saved / loaded */
+static bb::Looper*   gSetLooper = nullptr;   /* looper staging, audio ↔ control, whole copies (Looper::Adopt) */
+static bb::SetPlan   ALCHEMY_SDRAM_BSS gSetPlan;   /* trivially constructible; PlanSet clears it */
+static volatile uint8_t gSetState      = 0;      /* 0 idle · 1 saving · 2 loading (state tail 219) */
+static volatile uint8_t gSetProgress   = 0;      /* 0..255 of the current op (220) */
+static volatile uint8_t gSetResult     = 0;      /* last op: 0 ok · 1 no card · 2 card full · 3 write failed · 4 bad name · 5 not found · 6 busy · 7 bad file (221) */
+static volatile uint8_t gSetSeq        = 0;      /* bumps when an op finishes (222) */
+static char             gSetCurName[bb::kSetMaxName] = {};   /* the set the material came from; "" = a loose file / a take (223..254) */
+static char             gSetReqName[bb::kSetMaxName] = {};   /* ACTION 14 / 15's name */
+static volatile uint8_t gSetReq        = 0;      /* 1 save · 2 load — serviced by the main loop */
+static volatile bool    gSetSnapReq    = false;  /* control → audio: copy engine.looper into *gSetLooper */
+static volatile bool    gSetPendLooper = false;  /* control → audio: adopt *gSetLooper at the apply */
+static bool             gSetPendCommit = false;  /* after the apply: CommitSetRecordings */
+static bool             gSetFull       = false;  /* the sink saw a short write (card full) */
+static float            gSetErrT       = 0.f;    /* B-LED red flash, frames */
+static uint32_t         gSetTotal = 0, gSetDone = 0;   /* the save's byte count */
+static uint32_t         gSetTickMs     = 0;
+static bool             gInTick        = false;  /* KeepClock re-entrancy guard */
+static uint32_t         gPresetSeq[Presets::kNumSlots] = {};   /* preset backup: flash sequence last seen per slot (0 = empty) */
+static uint32_t         gPresetPollMs  = 0;
+static PresetName*      gPresetName    = nullptr;
+/* ── end SETS ──────────────────────────────────────────────────────────── */
 /* ── CLOCK ── control-thread clock state; the math is core/bb_clockmath.h ── */
 static volatile float gClkFlash = 0.f;   /* B1 white flash per detected pulse */
 static volatile float gClkMult  = 1.f;   /* APPLIED multiplier (telemetry mirror of gMap.mult) */
@@ -756,6 +791,8 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
         /* GATES end */
         memcpy(engine.sliceDens, gPendDens, sizeof gPendDens);     /* PLAY */
         engine.SyncRecordedMeta();   /* SAMPLE: the copies above are grid-wide; recorded entries keep their own */
+        /* SETS: a set's looper, right after SetMaterial emptied the loop (one 4 KB memcpy) */
+        if(gSetPendLooper) { engine.looper.Adopt(*gSetLooper); gSetPendLooper = false; }
         memcpy(gEnv, gPendEnv, sizeof gEnv);
         gMatGen = (uint8_t)(gMatGen + 1u);
         gNeedNativeTempo = true;
@@ -773,6 +810,8 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
     engine.looperQuant = gQuantize.sel;   /* 0 Off, 1 16ths (punch), 2 8ths */
     if(gPendUndo) { engine.looper.UndoLast(); gPendUndo = false; }
     /* LOOPER end */
+    /* SETS: a save's looper snapshot, taken between two blocks */
+    if(gSetSnapReq) { gSetLooper->Adopt(engine.looper); gSetSnapReq = false; }
 
     if(gPendReslice) { engine.Reslice();   gPendReslice = false; }
     if(gPendReroll)  { engine.RerollFill(); gPendReroll  = false; }
@@ -1418,6 +1457,21 @@ static void KeepClock()
     gSnap[wi].map     = gMap;
     __asm__ volatile("dmb" ::: "memory");
     gSnapIdx = wi;
+    /* SETS: through a set save / load the whole control loop keeps running —
+     * panel, LEDs, HostLink — at 25 Hz. Never re-entered from inside itself
+     * (a preset save inside Tick yields here too; a load request raised in
+     * there waits for the main loop as always). */
+    if(gSetState && !gInTick)
+    {
+        const uint32_t now = daisy::System::GetNow();
+        if((uint32_t)(now - gSetTickMs) >= 40u)
+        {
+            gSetTickMs = now;
+            gInTick    = true;
+            loop.Tick();
+            gInTick    = false;
+        }
+    }
 }
 
 /* ── render ─────────────────────────────────────────────────────────── */
@@ -1524,10 +1578,51 @@ static void OnRender(uint32_t /*t_ms*/)
         }
     }
     /* RECORD end */
+    /* SETS: a set save fills P5's ring with its progress, a load sweeps a dot
+     * round it (B3 in the set colour meanwhile); a refused or failed op
+     * blinks the three buttons red for a second and a half. */
+    if(gSetState)
+    {
+        hw.leds.ClearRing(P_SPACE);
+        if(gSetState == 1u)
+            DrawLevelArc(hw.leds, P_SPACE, kAlchemyLabArcGeometry, (float)gSetProgress / 255.f, {0.5f, 0.99f}, kSpaceCol, kSpaceCol, kDimHi);
+        else
+        {
+            static uint8_t s_dot = 0;
+            s_dot = (uint8_t)((s_dot + 1u) % 16u);
+            hw.leds.SetRingByOffset(P_SPACE, s_dot, kDimHi);
+            hw.leds.SetRingByOffset(P_SPACE, (uint8_t)((s_dot + 15u) % 16u), kSpaceCol);
+        }
+        hw.leds.SetButtonPair(kButtonB3, kSpaceCol);
+    }
+    if(gSetErrT > 0.f)
+    {
+        gSetErrT -= 1.f;
+        if((((int)gSetErrT) / 6) & 1)
+        {
+            const Rgb r{255, 8, 0};
+            hw.leds.SetButtonPair(kButtonB1, r); hw.leds.SetButtonPair(kButtonB2, r); hw.leds.SetButtonPair(kButtonB3, r);
+        }
+    }
+    /* SETS end */
     gDiagPhase = 6;
 }
 
 /* ── SD: scan + load (main-loop only, off the audio thread) ─────────── */
+static void SortFiles(int from, int to)
+{
+    for(int i = from + 1; i < to; i++)
+        for(int j = i; j > from && strcasecmp(gFiles[j - 1], gFiles[j]) > 0; j--)
+        {
+            char tmp[128];
+            memcpy(tmp, gFiles[j - 1], 128);
+            memcpy(gFiles[j - 1], gFiles[j], 128);
+            memcpy(gFiles[j], tmp, 128);
+        }
+}
+/* The loose WAVs of the root, sorted; then SETS: the WAVs of sets/, sorted,
+ * as the entries "sets/<name>.wav" (the label shows "<name> [set]"; the
+ * load path takes the JSON beside them). */
 static void ScanSD()
 {
     gNumFiles = 0;
@@ -1542,14 +1637,24 @@ static void ScanSD()
         gNumFiles++;
     }
     f_closedir(&gDir);
-    for(int i = 1; i < gNumFiles; i++)
-        for(int j = i; j > 0 && strcasecmp(gFiles[j - 1], gFiles[j]) > 0; j--)
+    SortFiles(0, gNumFiles);
+    /* SETS */
+    const int nRoot = gNumFiles;
+    if(f_opendir(&gDir, "0:/sets") == FR_OK)
+    {
+        while(gNumFiles < kMaxFiles && f_readdir(&gDir, &gFno) == FR_OK && gFno.fname[0])
         {
-            char tmp[128];
-            memcpy(tmp, gFiles[j - 1], 128);
-            memcpy(gFiles[j - 1], gFiles[j], 128);
-            memcpy(gFiles[j], tmp, 128);
+            if(gFno.fattrib & AM_DIR) continue;
+            const char* dot = strrchr(gFno.fname, '.');
+            if(!dot || strcasecmp(dot, ".wav") != 0 || strlen(gFno.fname) > 120) continue;
+            strcpy(gFiles[gNumFiles], "sets/");
+            strcat(gFiles[gNumFiles], gFno.fname);
+            gNumFiles++;
         }
+        f_closedir(&gDir);
+        SortFiles(nRoot, gNumFiles);
+    }
+    /* SETS end */
 }
 
 /* RECORD: the load pipeline's tail, shared by a card load and a loop take.
@@ -1591,6 +1696,7 @@ static void PrepareMaterial(int len, int* cues, int nCues, bool stereo, int know
     gPendLen    = len;
     gPendStereo = stereo;
     gLoadFlash  = 1.f;
+    gSetCurName[0] = 0;     /* SETS: a loose file or a take, not a set */
     gApply      = true;     /* audio thread swaps + SetMaterial */
 }
 
@@ -1652,6 +1758,355 @@ static void ServiceRecord()
     }
 }
 
+/* ── SETS ── save / load a set, the preset backups (docs/packages/sample-sets.md).
+ * Everything here runs on the control thread from the main loop, under a
+ * BusyGuard, off the audio thread; the sink yields (KeepClock runs the whole
+ * control loop every 40 ms while a set op is on). ──────────────────────── */
+static void SetFinish(uint8_t result)
+{
+    gSetResult   = result;
+    if(result) gSetErrT = 36.f;   /* OnRender: B1/B2/B3 blink red */
+    gSetState    = 0;
+    gSetProgress = 0;
+    gSetSeq      = (uint8_t)(gSetSeq + 1u);
+}
+/* f_write as a bbwav::Sink — the whole adapter, plus progress and the yield.
+ * A short write with FR_OK is FatFs's "disk full". */
+static bool SdSink(void* ctx, const void* p, size_t n)
+{
+    UINT          bw = 0;
+    const FRESULT fr = f_write((FIL*)ctx, p, (UINT)n, &bw);
+    if(fr != FR_OK) { if(fr == FR_DISK_ERR || fr == FR_NOT_READY) sd.OnIoError(); return false; }
+    if(bw != n) { gSetFull = true; return false; }
+    gSetDone += (uint32_t)n;
+    if(gSetTotal)
+    {
+        const uint32_t pr = (uint32_t)(((uint64_t)gSetDone * 255u) / gSetTotal);
+        gSetProgress = (uint8_t)(pr > 255u ? 255u : pr);
+    }
+    bb::Yield();
+    return true;
+}
+static bool CardReady() { return sd.EnsureMounted(daisy::System::GetNow()); }
+static bool SetDirsOk()   /* FR_EXIST is success */
+{
+    const FRESULT a = f_mkdir("0:/sets");
+    const FRESULT b = f_mkdir("0:/presets");
+    return (a == FR_OK || a == FR_EXIST) && (b == FR_OK || b == FR_EXIST);
+}
+/* A set saved this session joins the list at the END, so every index a host
+ * or a preset already holds stays valid; the next boot sorts it in. The
+ * browser's dropdown (rendered at boot) learns it at the next connect. */
+static int AddSetEntry(const char* name)
+{
+    char entry[64];
+    if(!bb::SetEntry(name, entry, sizeof entry)) return -1;
+    int i = bb::FindEntry(&gFiles[0][0], sizeof gFiles[0], gNumFiles, entry);
+    if(i >= 0) return i;
+    if(gNumFiles >= kMaxFiles) return -1;
+    strncpy(gFiles[gNumFiles], entry, 127);
+    gFiles[gNumFiles][127] = 0;
+    i = gNumFiles++;
+    k_sample.Selector((uint8_t)(gNumFiles > 255 ? 255 : gNumFiles));
+    return i;
+}
+/* The looper snapshot: the audio thread copies its list into *gSetLooper
+ * between two blocks (Insert's memmove must not be read half-way). */
+static void SnapshotLooper()
+{
+    gSetSnapReq = true;
+    for(int i = 0; i < 4000 && gSetSnapReq; i++) bb::Yield();   /* one block (0.5 ms) normally; bounded */
+    gSetSnapReq = false;
+}
+/* Save the playing material as sets/<name>: the WAV first (PCM16, both
+ * planes when the material is stereo, cues = the table's starts), then the
+ * JSON; a failed WAV leaves nothing, a failed JSON leaves the WAV (a plain
+ * break is still a valid load). Reports through gSetResult / the LEDs. */
+static void SaveSet(const char* name)
+{
+    if(gSetState) { SetFinish(6); return; }
+    if(!bb::SetNameOk(name)) { SetFinish(4); return; }
+    if(gKeyTake || gTakeActive || engine.recArmed || engine.recPending || gApply || gReapply || gLoadReq || engine.bufLen <= 0 || !engine.buf)
+    { SetFinish(6); return; }
+    if(!CardReady()) { SetFinish(1); return; }
+    SdCard::BusyGuard busy(sd);
+    gSetState = 1; gSetProgress = 0; gSetFull = false;
+    if(!SetDirsOk()) { SetFinish(3); return; }
+    SnapshotLooper();
+    bb::SetInfo& s = *gSet;
+    new(&s) bb::SetInfo();
+    bb::SetFromEngine(engine, *gSetLooper, s, engine.bufR != nullptr, (int)kSr);
+    strncpy(s.name, name, sizeof s.name - 1);
+    s.bars     = gGridBars;
+    s.bpm      = engine.NativeBpm();
+    s.nOptions = (int)Options::kBytes;
+    gOptions.Serialize(s.options);
+    if(s.len <= 0 || s.nSlices <= 0) { SetFinish(6); return; }
+    /* room: the WAV's exact size + the JSON's ceiling against FatFs's cached free count (unknown → try) */
+    bbwav::WriteSpec spec;
+    spec.left = engine.buf; spec.right = s.stereo ? engine.bufR : nullptr; spec.len = s.len; spec.sr = (uint32_t)kSr;
+    spec.cues = gSetPlan.onsets; spec.nCues = s.nSlices;
+    const uint32_t need = bbwav::FileSize(spec) + (uint32_t)bb::kSetJsonMax;
+    uint32_t totalKib = 0, freeKib = 0; bool freeValid = false;
+    if(sd.VolumeKib(totalKib, freeKib, freeValid) && freeValid && (uint64_t)freeKib * 1024u < (uint64_t)need + 65536u)
+    { SetFinish(2); return; }
+    char wav[64], json[64], lock[64];
+    bb::SetPaths(name, wav, json, sizeof wav);
+    bb::SetLockPath(name, lock, sizeof lock);
+    sd.Lock(lock);
+    gSetTotal = need - (uint32_t)bb::kSetJsonMax; gSetDone = 0;
+    bool wavOk = f_open(&gSetFil, wav, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK;
+    if(wavOk)
+    {
+        wavOk = bb::SetWriter::Wav(bbwav::Sink{&SdSink, &gSetFil}, s, engine.buf, engine.bufR, gSetStage, sizeof gSetStage);
+        wavOk = (f_close(&gSetFil) == FR_OK) && wavOk;
+        if(!wavOk) f_unlink(wav);
+    }
+    bool jsonOk = false;
+    if(wavOk)
+    {
+        gSetTotal = 0;
+        jsonOk = f_open(&gSetFil, json, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK;
+        if(jsonOk)
+        {
+            jsonOk = bb::SetWriter::Json(bbwav::Sink{&SdSink, &gSetFil}, s, gSetJson, sizeof gSetJson);
+            jsonOk = (f_close(&gSetFil) == FR_OK) && jsonOk;
+            if(!jsonOk) f_unlink(json);
+        }
+    }
+    sd.Unlock(lock);
+    if(!wavOk || !jsonOk) { SetFinish(gSetFull ? 2 : 3); return; }
+    gCurFile = AddSetEntry(name);
+    strncpy(gSetCurName, name, sizeof gSetCurName - 1); gSetCurName[sizeof gSetCurName - 1] = 0;
+    SetFinish(0);
+}
+/* A set from the card into the load buffer: the WAV whole (no 17 s cap — a
+ * set carries its recordings past the break, and the loader's DMA path is
+ * the same), then the JSON: options (through Options::Deserialize, the
+ * blob-write path, so the dirty flags fire — minus the re-slice ones, the
+ * set's table IS that re-slice), the grid as SetMaterial rebuilds it from
+ * its count, swing and hit onsets, classes and salience from the file, the
+ * recorded entries after the swap (ServiceSets), the looper adopted by the
+ * audio thread at the swap. No conditioning: a set was saved conditioned and
+ * its positions are the buffer's. Returns 1 staged, 0 no JSON beside the
+ * WAV (the caller takes the plain path), -1 failed and reported. */
+static int LoadSet(const char* name, int fileIdx)
+{
+    char wav[64], json[64];
+    if(!bb::SetPaths(name, wav, json, sizeof wav)) { SetFinish(4); return -1; }
+    if(!CardReady()) { SetFinish(1); return -1; }
+    SdCard::BusyGuard busy(sd);
+    if(f_stat(wav, &gFno) != FR_OK) { SetFinish(5); return -1; }
+    if(f_stat(json, &gFno) != FR_OK) return 0;
+    gSetState = 2; gSetProgress = 0;
+    if(f_open(&gSetFil, json, FA_READ) != FR_OK) { SetFinish(7); return -1; }
+    const uint32_t sz = (uint32_t)f_size(&gSetFil);
+    UINT       br = 0;
+    const bool rd = sz > 0 && sz < sizeof gSetJson && f_read(&gSetFil, gSetJson, (UINT)sz, &br) == FR_OK && br == sz;
+    f_close(&gSetFil);
+    bb::Yield();
+    if(!rd || !bb::SetReader::Json(gSetJson, sz, *gSet) || gSet->sr != (int)kSr) { SetFinish(7); return -1; }
+    /* options first: the set's grid was cut under them */
+    uint8_t opt[Options::kBytes];
+    gOptions.Serialize(opt);
+    bb::MergeOptions(*gSet, opt, opt, (int)Options::kBytes);
+    opt[20] = 0;   /* Record: a load never arms a take */
+    gOptions.Deserialize(opt);
+    gBars.dirty = false; gSwing.dirty = false; gOnsetDet.dirty = false; gSampling.dirty = false; gClass.dirty = false;
+    const bool wantR = gSampling.sel == bb::kSampStereo && gSet->stereo;
+    bool gotR = false;
+    int  cues[kMaxOnsets], nCues = 0, err = 0;
+    const int len = bbwav::Load(wav, gStage, kStageMax, gLoad, kBufMax, kSr, kMaxSec, cues, &nCues, kMaxOnsets, &err,
+                                wantR ? gLoadR : nullptr, wantR ? gStageR : nullptr, &gotR);
+    if(len <= 0 || len < gSet->len) { SetFinish(7); return -1; }   /* unreadable, or cut short of what the JSON describes */
+    if(!bb::PlanSet(*gSet, gSetPlan)) { SetFinish(7); return -1; }
+    const bb::SetPlan& p = gSetPlan;
+    /* stage what PrepareMaterial stages, minus the conditioning */
+    const int nsl = p.nGrid;
+    gDet.mode  = gOnsetDet.sel;
+    gCondBars  = gSet->bars;
+    gPendCues  = true;   /* Options → Onsets does not replace the set's hits */
+    gPendN     = p.nOnsets;
+    memcpy(gPendOnsets, p.onsets, sizeof(int) * (size_t)p.nOnsets);
+    gGridBars  = gSet->bars > 0 ? gSet->bars : (nsl / 16 > 0 ? nsl / 16 : 1);
+    gPendSwing = p.swing;
+    ClassifySteps(gLoad, p.material, gPendClass, gClass.mode, gPendSal, nsl, gPendBands);   /* the band masks are not in the file */
+    for(int i = 0; i < nsl; i++) { gPendClass[i] = p.cls[i]; gPendSal[i] = p.sal[i]; }       /* the file's classes and salience win */
+    ComputeDensity(gLoad, p.material, gPendDens, nsl);
+    ComputeEnvelope(gLoad, p.material, gPendEnv, nsl);
+    gPendLen    = p.material;
+    gPendHint   = nsl;
+    gPendStereo = gotR;
+    gSetPendLooper = false;
+    const int nEv = bb::LooperFromSet(*gSet, *gSetLooper);
+    gSetLooper->divisions = nsl;
+    gSetPendLooper = nEv > 0;          /* the audio thread adopts it right after SetMaterial (which empties the loop) */
+    gSetPendCommit = p.nRec > 0;       /* CommitSlice needs the new planes: after the swap */
+    gCurFile = fileIdx;
+    strncpy(gSetCurName, name, sizeof gSetCurName - 1); gSetCurName[sizeof gSetCurName - 1] = 0;
+    gLoadFlash = 1.f;
+    gApply     = true;
+    SetFinish(0);
+    return 1;
+}
+/* presets/<slot>.json holds the SLOT's bytes (not the live state — a host
+ * may import into a slot other than the playing one), found through the
+ * managed order: pager · locks · sample · options · settings · name. */
+static bool ReadSlotComponent(uint8_t slot, const Serializable* which, uint8_t* dst, size_t cap)
+{
+    uint32_t off = 0;
+    for(uint8_t i = 0; i < presets.NumManaged(); i++)
+    {
+        const Serializable* c = presets.ManagedAt(i);
+        if(!c) return false;
+        const size_t n = c->SerializedSize();
+        if(c == which)
+        {
+            if(n > cap || n > 0xFFFFu) return false;
+            return presets.ReadSlotBytes(slot, off, dst, (uint16_t)n, nullptr, nullptr) == (int32_t)n;
+        }
+        off += (uint32_t)n;
+    }
+    return false;
+}
+static bool WritePresetBackup(uint8_t slot)
+{
+    if(!CardReady()) return false;
+    SdCard::BusyGuard busy(sd);
+    if(!SetDirsOk()) return false;
+    static bb::PresetInfo p;   /* ~250 B: keep it off the stack */
+    new(&p) bb::PresetInfo();
+    p.slot = slot;
+    uint8_t b[Pager::kMaxPages * kNumPots * sizeof(float)];
+    if(ReadSlotComponent(slot, &pager, b, sizeof b))
+    {
+        p.nPages = pager.NumPages() < bb::kSetMaxPages ? pager.NumPages() : bb::kSetMaxPages;
+        for(int pg = 0; pg < p.nPages; pg++)
+            for(int k = 0; k < bb::kSetPots && k < kNumPots; k++)
+                memcpy(&p.pager[pg][k], b + ((size_t)pg * kNumPots + (size_t)k) * sizeof(float), sizeof(float));
+    }
+    if(ReadSlotComponent(slot, &gOptions, b, sizeof b)) { p.nOptions = (int)Options::kBytes; memcpy(p.options, b, Options::kBytes); }
+    if(gNumFiles > 0 && ReadSlotComponent(slot, &gSample, b, sizeof b) && b[0] < gNumFiles)
+    { strncpy(p.sample, gFiles[b[0]], sizeof p.sample - 1); }
+    if(gPresetName && ReadSlotComponent(slot, gPresetName, b, sizeof b))
+    { memcpy(p.name, b, PresetName::kCapacity < sizeof p.name ? PresetName::kCapacity : sizeof p.name); p.name[sizeof p.name - 1] = 0; }
+    char path[40];
+    if(!bb::PresetPath(slot, path, sizeof path)) return false;
+    gSetTotal = 0;
+    bool ok = f_open(&gSetFil, path, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK;
+    if(ok)
+    {
+        ok = bb::PresetBackup::Write(bbwav::Sink{&SdSink, &gSetFil}, p, gSetJson, sizeof gSetJson);
+        ok = (f_close(&gSetFil) == FR_OK) && ok;
+        if(!ok) f_unlink(path);
+    }
+    return ok;
+}
+/* Every preset save — the Settings gesture, a host PRESET_SAVE, an import —
+ * moves the slot's flash sequence; the poll (4 Hz, two header reads per
+ * slot) sees it and writes the backup. A slot erased loses its backup too,
+ * or the next boot would resurrect it. */
+static void ServicePresetBackup()
+{
+    const uint32_t now = daisy::System::GetNow();
+    if((uint32_t)(now - gPresetPollMs) < 250u) return;
+    gPresetPollMs = now;
+    for(uint8_t s = 0; s < Presets::kNumSlots; s++)
+    {
+        const Presets::SlotInfo in  = presets.InfoFor(s);
+        const uint32_t          seq = in.valid ? in.seq + 1u : 0u;
+        if(seq == gPresetSeq[s]) continue;
+        const bool wasValid = gPresetSeq[s] != 0u;
+        gPresetSeq[s] = seq;
+        if(seq) { if(in.schema_match) WritePresetBackup(s); }
+        else if(wasValid)
+        {
+            char path[40];
+            if(bb::PresetPath(s, path, sizeof path) && CardReady()) { SdCard::BusyGuard busy(sd); f_unlink(path); }
+        }
+    }
+}
+static void PrimePresetSeq()
+{
+    for(uint8_t s = 0; s < Presets::kNumSlots; s++)
+    {
+        const Presets::SlotInfo in = presets.InfoFor(s);
+        gPresetSeq[s] = in.valid ? in.seq + 1u : 0u;
+    }
+}
+/* Boot: a slot the flash no longer honours — empty, or its schema hash moved
+ * with the managed set ("presets re-init on OPT bumps") — whose backup is on
+ * the card comes back: options + pager + sample + name → live → Save(slot),
+ * valid again under the new schema. Runs before StartAudio; the caller
+ * re-loads slot 0 afterwards so the live state is the boot preset's. */
+static void ApplyPresetBackup(const bb::PresetInfo& p)
+{
+    uint8_t opt[Options::kBytes];
+    gOptions.Serialize(opt);
+    for(int i = 0; i < p.nOptions && i < (int)Options::kBytes; i++) opt[i] = p.options[i];
+    opt[20] = 0;   /* Record: never armed by a restore */
+    gOptions.Deserialize(opt);
+    if(p.nPages > 0)
+    {
+        uint8_t pb[Pager::kMaxPages * kNumPots * sizeof(float)];
+        pager.Serialize(pb);
+        for(int pg = 0; pg < p.nPages && pg < pager.NumPages(); pg++)
+            for(int k = 0; k < bb::kSetPots && k < kNumPots; k++)
+                memcpy(pb + ((size_t)pg * kNumPots + (size_t)k) * sizeof(float), &p.pager[pg][k], sizeof(float));
+        pager.Deserialize(pb);
+    }
+    if(gNumFiles > 0 && p.sample[0])
+    {
+        const int i = bb::FindEntry(&gFiles[0][0], sizeof gFiles[0], gNumFiles, p.sample);
+        if(i >= 0 && i < 256) { const uint8_t b = (uint8_t)i; gSample.Deserialize(&b); }
+    }
+    if(gPresetName) gPresetName->Set(p.name);
+}
+static int RestorePresetBackups()
+{
+    if(!CardReady()) return 0;
+    int restored = 0;
+    for(int s = (int)Presets::kNumSlots - 1; s >= 0; s--)
+    {
+        if(presets.HasValid((uint8_t)s)) continue;
+        char path[40];
+        if(!bb::PresetPath(s, path, sizeof path)) continue;
+        SdCard::BusyGuard busy(sd);
+        if(f_open(&gSetFil, path, FA_READ) != FR_OK) continue;
+        const uint32_t sz = (uint32_t)f_size(&gSetFil);
+        UINT       br = 0;
+        const bool rd = sz > 0 && sz < sizeof gSetJson && f_read(&gSetFil, gSetJson, (UINT)sz, &br) == FR_OK && br == sz;
+        f_close(&gSetFil);
+        static bb::PresetInfo p;
+        if(!rd || !bb::PresetBackup::Read(gSetJson, sz, p)) continue;
+        ApplyPresetBackup(p);
+        if(presets.Save((uint8_t)s)) restored++;
+    }
+    return restored;
+}
+/* Main loop: the recordings of a loaded set once the audio thread has the
+ * planes, ACTION 14 / 15, the preset backups. */
+static void ServiceSets()
+{
+    if(gSetPendCommit && !gApply)
+    {
+        gSetPendCommit = false;
+        bb::CommitSetRecordings(engine, *gSet, gSetPlan, [](int start, int len) {
+            uint8_t cls = 3; float sal = 0.f, dens = 0.f; bool hit = false;
+            bb::AnalyseRegion(engine.buf, start, len, kSr, gClass.mode, cls, sal, dens, hit);
+            return dens; });
+    }
+    if(gSetReq && !gLoadReq && !gApply && !gReapply && !gTakeActive && !gSetState)
+    {
+        const uint8_t req = gSetReq;
+        gSetReq = 0;
+        if(req == 1u) SaveSet(gSetReqName);
+        else { gLoadIdx = -1; gLoadReq = true; }   /* by name: ServiceLoad resolves it */
+    }
+    ServicePresetBackup();
+}
+/* ── end SETS ──────────────────────────────────────────────────────────── */
+
 /* Runs between control ticks; does the heavy SD read → condition → classify
  * into gLoad, then hands off to the audio thread via gApply. */
 static void ServiceLoad()
@@ -1660,9 +2115,23 @@ static void ServiceLoad()
     if(!gLoadReq || gApply || gReapply || gTakeActive /* RECORD: the loop take owns gLoad */) return;   /* review L1 */
     gLoadReq = false;
 
+    /* SETS: the entry — from the list, or ACTION 15's name (gLoadIdx = -1) */
+    char entry[128];
+    int  idx = gLoadIdx;
+    if(idx >= 0 && idx < gNumFiles) { strncpy(entry, gFiles[idx], 127); entry[127] = 0; }
+    else if(idx < 0 && bb::SetEntry(gSetReqName, entry, sizeof entry)) idx = bb::FindEntry(&gFiles[0][0], sizeof gFiles[0], gNumFiles, entry);
+    else return;
+    char stem[bb::kSetMaxName];
+    if(bb::SetStem(entry, stem, sizeof stem))
+    {
+        const int r = LoadSet(stem, idx);
+        if(r != 0) return;   /* staged, or failed and reported; 0 = a WAV without a JSON: the plain path */
+    }
+    /* SETS end */
+
     char path[140];
     path[0] = '0'; path[1] = ':'; path[2] = '/';
-    strncpy(path + 3, gFiles[gLoadIdx], 136);
+    strncpy(path + 3, entry, 136);
     path[139] = 0;
 
     /* RECORD: at most kLoadSec (17 s) of the 25 s plane, so a take into a key
@@ -1673,9 +2142,9 @@ static void ServiceLoad()
     int len = bbwav::Load(path, gStage, kStageMax, gLoad, kLoadMax, kSr,
                           kLoadSec, cues, &nCues, kMaxOnsets, &err,
                           wantR ? gLoadR : nullptr, wantR ? gStageR : nullptr, &gotR);
-    if(len <= 0) return;   /* leave current material playing on failure */
+    if(len <= 0) { if(gLoadIdx < 0) SetFinish(7); return; }   /* leave current material playing on failure; SETS: a by-name miss is reported */
 
-    gCurFile = gLoadIdx;
+    gCurFile = idx;
     PrepareMaterial(len, cues, nCues, gotR, 0);   /* RECORD: the shared tail */
 }
 
@@ -1716,11 +2185,13 @@ static void ServiceLoad()
  *                     (13 bytes; ≤39 per reply — chunk with first/count; count from length)
  *   0x66 GET_HITS   ← [u8 first] → u8 status, u8 nTotal, u8 first, u32 pos[…] (≤127 per reply)
  *   0x63 ACTION     9 rec arm(u8 key) · 10 rec clear(u8 key) · 11 key plays(u8 0/1) ·
- *                   12 looper undo · 13 looper clear
+ *                   12 looper undo · 13 looper clear ·
+ *                   SETS: 14 save set(name bytes) · 15 load set(name bytes)
  *   state tail      176 u8 looperEvents (LOOPER) · 177 u8 recState · 178 u8 recKey ·
  *                   179 u32 freePos · 183 u32 bufCap · 187 u8 stereo · 188 u8 inLevel ·
- *                   189 u8 nTable · 190 u32 bufLen · 194 i8 keySlice[24] · 218 u8 keyPlays
- *                   (ends at 219) */
+ *                   189 u8 nTable · 190 u32 bufLen · 194 i8 keySlice[24] · 218 u8 keyPlays ·
+ *                   SETS: 219 u8 setState · 220 u8 setProgress · 221 u8 setResult ·
+ *                   222 u8 setSeq · 223 char setName[32] (ends at 255) */
 /* WEB → RECORD: ACTION 9 / 10. -1 = nothing requested; the consumer clears
  * the flag after acting on it (the same path as the panel's record gestures). */
 static volatile int8_t  gWebRecArm   = -1;    /* WEB → RECORD: arm a take into this key */
@@ -1737,7 +2208,8 @@ struct StateExt : hostlink::IHostlinkExtension
     const char* DescriptorRootJson() const override
     {
         /* WEB: wave/table/hits (0x64..0x66) advertised so the page can feature-detect the Kit tab. */
-        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102}";
+        /* SETS: "sets":1 = ACTION 14 / 15 and the 219.. state tail. */
+        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102,\"sets\":1}";
     }
     /* WEB: one float → i8 (±127), saturating. */
     static int8_t ToI8(float v)
@@ -1800,6 +2272,12 @@ struct StateExt : hostlink::IHostlinkExtension
                 w.U8((uint8_t)engine.nTable); w.U32((uint32_t)engine.bufLen); /* 189, 190 */
                 w.Bytes((const uint8_t*)engine.keySlice, (size_t)bb::Engine::kKeys);   /* 194..217 */
                 w.U8(gKeyPlays.sel);                                          /* 218: Options → Key Plays */
+                /* SETS tail (219..254): u8 setState (0 idle · 1 saving · 2 loading) · u8 progress 0..255 ·
+                 * u8 result of the last op (0 ok · 1 no card · 2 card full · 3 write failed · 4 bad name ·
+                 * 5 not found · 6 busy · 7 bad file) · u8 seq (bumps per finished op) · char name[32] of
+                 * the set the material came from (NUL-padded; empty = a loose file or a take). */
+                w.U8(gSetState); w.U8(gSetProgress); w.U8(gSetResult); w.U8(gSetSeq);
+                w.Bytes((const uint8_t*)gSetCurName, sizeof gSetCurName);
                 return;
             }
             case 0x61u:
@@ -1876,6 +2354,23 @@ struct StateExt : hostlink::IHostlinkExtension
                         break;
                     case 12: gWebLooperUndo  = true; break;   /* WEB → LOOPER */
                     case 13: gWebLooperClear = true; break;   /* WEB → LOOPER */
+                    /* SETS: 14 save set(name bytes) · 15 load set(name bytes) — the name is the
+                     * rest of the body (1..31 of [A-Za-z0-9_-]); the main loop does the work,
+                     * the state tail (219..) reports it. BAD_STATE while an op runs or a load waits. */
+                    case 14:
+                    case 15:
+                    {
+                        const size_t n = (size_t)f.len - 1u;
+                        if(n < 1u || n > (size_t)bb::kSetNameMax) { w.U8(2u); return; }
+                        char nm[bb::kSetMaxName];
+                        memcpy(nm, f.body + 1, n); nm[n] = 0;
+                        if(!bb::SetNameOk(nm)) { w.U8(2u); return; }
+                        if(gSetState || gSetReq || gLoadReq || gApply || gReapply || gTakeActive || (op == 14u && (gKeyTake || engine.recArmed || engine.recPending)))
+                        { w.U8(3u); return; }
+                        memcpy(gSetReqName, nm, n + 1u);
+                        gSetReq = op == 14u ? 1u : 2u;
+                        break;
+                    }
                     default: w.U8(2u); return;   /* BAD_ARGS */
                 }
                 w.U8(0u);
@@ -1974,6 +2469,12 @@ int main()
     hw.j8.EnableCvOutput();   /* hat gate   */
     sd.Init();
     sd.EnsureMounted(0);
+    /* SETS: NOLOAD placements — the writer's FIL zeroed as the SDK does its
+     * FATFS; the SDRAM objects constructed in place (their NSDMI would
+     * otherwise run before SDRAM is up). */
+    memset(&gSetFil, 0, sizeof gSetFil);
+    gSet       = new(gSetInfoMem) bb::SetInfo();
+    gSetLooper = new(gSetLooperMem) bb::Looper();
 
     gVerb.Init(kSr);
     gVerb.SetFeedback(0.87f);
@@ -1998,7 +2499,9 @@ int main()
         {
             if(i) *w++ = ',';
             *w++ = '"';
-            for(const char* p = gFiles[i]; *p && w < end - 2; p++)
+            char lab[128];
+            bb::SetLabel(gFiles[i], lab, sizeof lab);   /* SETS: "sets/amen.wav" shows as "amen [set]" */
+            for(const char* p = lab; *p && w < end - 2; p++)
             {
                 if(*p == '"' || *p == '\\') *w++ = '\\';
                 *w++ = *p;
@@ -2095,7 +2598,7 @@ int main()
     if(gNumFiles > 0) presets.Manage(gSample);
     presets.Manage(gOptions);        /* classifier, clock PPQN, voice, gates, grammar */
     presets.Manage(settings);
-    presets.UseNames();              /* renameable preset names, from the browser */
+    gPresetName = &presets.UseNames();   /* renameable preset names, from the browser; SETS: into the backups */
 
     loop.Use(pager).Use(locks).Use(settings).Use(perform).Use(brain).Use(host)
         .OnPoll(OnPoll).OnFrame(OnFrame).OnRender(OnRender);
@@ -2103,6 +2606,11 @@ int main()
     presets.SetYield([](void*) { KeepClock(); }, nullptr);   /* QSPI erase/program: keep the clock alive */
     presets.Init();
     presets.BootLoad();   /* HostLink starts here: descriptor + panel USB up */
+    /* SETS: slots the flash no longer honours (a schema bump, an erase) come
+     * back from presets/<slot>.json; slot 0 is re-loaded so the live state is
+     * the boot preset's whatever was restored. */
+    if(RestorePresetBackups() > 0 && presets.HasValid(0)) presets.Load(0);
+    PrimePresetSeq();
 
     hw.StartAudio(AudioCb);
 
@@ -2229,6 +2737,7 @@ int main()
         if(gRecord.dirty) { gRecord.dirty = false; if(gRecord.sel == 0 && gTakeActive && gTake.running) gTake.Stop(); }
         ServiceRecord();
         /* RECORD end */
+        ServiceSets();   /* SETS: a loaded set's recordings, ACTION 14 / 15, the preset backups */
         ServiceLoad();
     }
 }
