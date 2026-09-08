@@ -322,3 +322,14 @@ costing stability or performance → the firmware journal; 3 Autosave
 against the button map; 7 held — resolution: **ACTION ops with an optional
 trailing `u8 gen` (0 = unchecked)**, sent for split / merge / delete, not
 for drags; a dedicated command only if the op space gets crowded.
+
+**Decision 6 checked against the button map (2026-09-08):** B1 is the SDK
+Pager's *Cycle* binding (page flip on release) and, through the 300 ms
+`HoldButton` proxy, ParamLock's record button; B2 tap = dice / looper undo
+in Play, hold = flow; B3 tap = reslice / record gestures, hold = load;
+B2+B3 2 s = Settings. **B1 hold + B3 tap is free** and workable: the shell
+calls `pager.ConsumeButton()` when B3 falls while B1 is held, which poisons
+B1's pending release so no page flip follows (`framework/src/surface/
+pager.cpp:88-113`); ParamLock only arms on a pot move, so a still B1 hold
+does not start a lock. Inside the Edit page B1 tap leaves, and the Pager's
+own page state is untouched (Edit is a shell mode over the current page).
