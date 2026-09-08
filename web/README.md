@@ -10,7 +10,7 @@ state tail for locks, native BPM and bars; the CLOCK package's jitter,
 multiplier-zone and clock-flags tail; the sample-mode tail — record state,
 buffer bookkeeping, key table — and the `GET_WAVE` / `GET_TABLE` /
 `GET_HITS` reads behind the **Kit** tab when the firmware sends them). No
-dependencies, three static files, phone-friendly.
+dependencies, three static files (plus the vendored Android polyfill), phone-friendly.
 
 | file | what |
 |---|---|
@@ -21,15 +21,45 @@ dependencies, three static files, phone-friendly.
 
 ## Running it
 
-Web Serial needs a **secure context** and a Chromium browser (Chrome, Edge,
-Opera). `file://` will not work. Either:
+The page needs a **secure context** (`https://`, or `http://localhost`;
+`file://` will not do) and a Chromium browser. On the desktop it speaks
+**Web Serial** (Chrome, Edge, Opera). On **Chrome for Android** — which has
+WebUSB but no Web Serial — it loads Google's
+[web-serial-polyfill](vendor/web-serial-polyfill/) and talks to the
+module's CDC interface over WebUSB; a USB OTG cable from the phone or
+tablet to the module's front USB-C is all it takes, and the module pill
+says `· WebUSB`. iOS and iPadOS browsers have neither API. Either:
 
 - **Locally:** `cd web && python3 -m http.server 8080` → http://localhost:8080
-- **Hosted:** publish `web/` on Codeberg Pages (a `pages` branch, or a repo
-  named `pages`) → https://combust.codeberg.page/Audiothurgist/
+- **Hosted:** `./web/publish-pages.sh` rebuilds the `pages` branch from
+  `web/`; `git push -f origin pages` publishes it on Codeberg Pages →
+  https://combust.codeberg.page/Audiothurgist/ (https, so the phone works
+  too). Chrome's menu offers **Add to Home screen** / **Install app** —
+  the manifest and the small network-first service worker (`sw.js`) make
+  it a proper installable app with the ring icon.
+- **A phone against a page served from the PC** (before Pages, or for
+  development): a plain `http://<pc-ip>:8080` is not a secure context and
+  the phone hides its USB APIs. Two ways round it: `adb reverse tcp:8080
+  tcp:8080` makes the phone's own `localhost:8080` reach the PC's server
+  (localhost is always secure), or in Chrome on the phone set
+  `chrome://flags/#unsafely-treat-insecure-origin-as-secure` to
+  `http://<pc-ip>:8080`.
 
 Close the `/program` tab first — one page holds the serial port at a time.
 Press **Connect**, pick the Alchemy Lab (0483:5740), and the bar starts moving.
+If the page cannot reach a USB API it says exactly why (not secure, iOS,
+no WebUSB) under the header instead of failing silently.
+
+**Play Store, later:** with the page on https and the manifest + service
+worker in place, [Bubblewrap](https://github.com/GoogleChromeLabs/bubblewrap)
+wraps it as a Trusted Web Activity (`bubblewrap init --manifest
+https://combust.codeberg.page/Audiothurgist/manifest.webmanifest`) — it is
+still Chrome underneath, so the WebUSB path is what runs. One catch: the
+full-screen (no URL bar) verification needs
+`/.well-known/assetlinks.json` at the **origin root**, which on Codeberg
+Pages means a repo named `pages` (served at `combust.codeberg.page/`), not
+the `pages` branch of this repo (served under `/Audiothurgist/`). Without
+it the TWA works but keeps Chrome's bar.
 
 **No module to hand?** Press **Demo** (or open `index.html?demo`) — the page
 drives itself from `demo.js`, a fake module that answers real HostLink

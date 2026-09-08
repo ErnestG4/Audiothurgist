@@ -106,6 +106,14 @@ looper's events, and set save/load. Serve it from a secure context:
 cd web && python3 -m http.server 8080     # then http://localhost:8080 in Chrome/Edge
 ```
 
+or publish it: `./web/publish-pages.sh && git push -f origin pages` →
+https://combust.codeberg.page/Audiothurgist/. **Phones and tablets:** on
+Chrome for Android the page uses Google's Web Serial polyfill over WebUSB
+(vendored, Apache-2.0), so an OTG cable to the module's front USB-C is
+enough; Chrome's *Install app* puts it on the home screen. iOS has no
+USB API in the browser. Details, and how to test a phone against a page
+served from the PC, in `web/README.md`.
+
 Close `/program` first (one page holds the port). Press **Demo** to try it
 without the module. `node web/selftest.mjs` checks the protocol against
 the SDK's golden vectors.

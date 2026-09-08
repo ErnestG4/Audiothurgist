@@ -33,6 +33,14 @@ Sibling checkouts referenced by the Makefile (`../alchemy-sdk`,
 `../DaisySP/DaisySP-LGPL`); see their own licenses. `reverbsc` is from
 DaisySP-LGPL.
 
+## Google web-serial-polyfill
+
+`web/vendor/web-serial-polyfill/serial.js` is version 1.0.15 of Google's
+Web Serial API polyfill on top of WebUSB, copied unmodified from the npm
+package (Apache-2.0; the license travels with it). The web app loads it
+only on browsers with WebUSB and no Web Serial — Chrome for Android — so a
+phone or tablet can drive the module over a USB OTG cable.
+
 ## Mutable Instruments Grids
 
 `core/bb_grids_map.h` carries the Grids drum map and node tables verbatim
