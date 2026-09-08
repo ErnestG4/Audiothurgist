@@ -491,8 +491,12 @@ class Editor {
   redo() { return this.commit('redo', {}, () => HL.editRedo(this.d.link()), 0, null, true); }
   /* every key back to its span slice, one SET_KEY at a time (only the ones that moved) */
   async keysFollowGrid() {
-    const c = this.d.ctx(); if (!c.table || !c.st || !c.st.keySlice) return 0; let n = 0;
-    for (let k = 0; k < K.keys; k++) { const want = spanSlice(k, c.table.nSlices); if (this.d.ctx().st.keySlice[k] !== want) { const r = await this.commit('key', { key: k, t: want }, g => HL.editSetKey(this.d.link(), k, want, g), this.gen(), null, true); if (r && r.ok) n++; else break; } }
+    let n = 0;
+    for (let k = 0; k < K.keys; k++) {
+      const c = this.d.ctx(); if (!c.table || !c.st || !c.st.keySlice || !this.d.link()) break;   /* re-read each time: a disconnect or new material ends it */
+      const want = spanSlice(k, c.table.nSlices); if (c.st.keySlice[k] === want) continue;
+      const r = await this.commit('key', { key: k, t: want }, g => HL.editSetKey(this.d.link(), k, want, g), this.gen(), null, true); if (r && r.ok) n++; else break;
+    }
     if (n) this.history.push(this.history.gen, histLabel('follow'));
     return n;
   }
