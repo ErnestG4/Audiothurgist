@@ -1,5 +1,13 @@
 # PERSIST package — sets and preset backups on the card (2026-09-07, branch `pkg2/persist`)
 
+> **Shipped.** The FatFs half — the shell's to-do list in §5 — landed as the
+> SETS package: [sample-sets.md](sample-sets.md). Schema additions made
+> there (still `"audiothurgist":1`, all optional on read): `material` (the
+> break's length; `len` is the whole WAV, recordings included), `swing`, a
+> slice `key` of **−1 for grid entries** (recorded ones carry 0..23), a
+> looper event's `slice`; `kSetMaxSlices` is 96 (the engine's whole table)
+> and `kSetJsonMax` 32 KiB (a worst-case set is 28.5 KB).
+
 Phase E of [the sample-mode plan](../sample-mode-plan.md) §4, the pure half.
 Ernest: "JSON is cheap, a 20 s WAV is cheap." A **set** is
 `sets/<name>.wav` (the material buffer, mono or stereo) + `sets/<name>.json`

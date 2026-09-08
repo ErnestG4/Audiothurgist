@@ -13,34 +13,37 @@
 // fields, strict on the `audiothurgist` version, bounded by the buffer.
 // PresetBackup: the same pair for presets/<slot>.json.
 //
-// No allocation, no exceptions, no STL: fixed arrays sized for the engine
-// (64 slices), the looper (kSetMaxLooper events) and the Options block
-// (kSetMaxOptions bytes — 17 today, room for growth).
+// No allocation, no exceptions, no STL: fixed arrays sized for the engine's
+// whole table (kSetMaxSlices = Engine::kMaxTable: 64 grid + 32 recorded), the
+// looper (kSetMaxLooper events) and the Options block (kSetMaxOptions bytes —
+// 22 today, room for growth). The shell's side: core/bb_sets.h and
+// docs/packages/sample-sets.md.
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
+#include <new>
 #include "bb_json.h"
 #include "bb_wavwrite.h"
 
 namespace bb {
 
 constexpr int kSetSchema      = 1;     // "audiothurgist": 1
-constexpr int kSetMaxSlices   = 64;    // = Engine::kMaxSlices
+constexpr int kSetMaxSlices   = 96;    // = Engine::kMaxTable (64 grid + 32 recorded) /* SETS */
 constexpr int kSetMaxLooper   = 256;
 constexpr int kSetMaxOptions  = 32;
 constexpr int kSetMaxName     = 32;    // set / slice / preset names (incl. NUL)
 constexpr int kSetMaxFile     = 64;    // preset backup's sample filename
 constexpr int kSetMaxPages    = 4;     // pager pages backed up
 constexpr int kSetPots        = 6;     // pots per page
-// JSON buffer the shell should lend: a full 64-slice / 256-event set
-// emits under 20 KB; the reader takes any length.
-constexpr size_t kSetJsonMax  = 24576;
+// JSON buffer the shell should lend: a full 96-entry / 256-event set emits
+// under 28 KB (persist_check prints the figure); the reader takes any length.
+constexpr size_t kSetJsonMax  = 32768;   /* SETS: was 24 KiB for 64 slices */
 
 struct SetSlice
 {
     int     start = 0;      // frames into the buffer
     int     len   = 0;      // frames
-    uint8_t key   = 0;      // pad / key index the slice answers to
+    int8_t  key   = -1;     // Voice key 0..23 of a RECORDED entry; -1 = a grid slice /* SETS */
     uint8_t cls   = 0;      // class: 0 kick 1 snare 2 hat 3 other
     float   sal   = 0.f;    // salience 0..1
     bool    hit   = false;  // begins with a detected onset
@@ -49,10 +52,11 @@ struct SetSlice
 
 struct SetLoopEvent
 {
-    float   phase = 0.f;    // position in the loop, bars (unquantized)
-    uint8_t key   = 0;
-    uint8_t style = 0;
+    float   phase = 0.f;    // position in the loop, 0..1 of the bar (unquantized)
+    int8_t  key   = -1;     // Voice key 0..23, or -1: a keyless call (Brain map, web) /* SETS */
+    uint8_t style = 0;      // bb::Looper style bits (kWire)
     float   vel   = 0.f;
+    int8_t  slice = -1;     // table entry called — the replay target of a keyless event /* SETS */
 };
 
 struct SetInfo
@@ -60,7 +64,9 @@ struct SetInfo
     char    name[kSetMaxName] = {};
     int     sr       = 48000;
     bool    stereo   = false;
-    int     len      = 0;                   // frames per plane
+    int     len      = 0;                   // frames per plane in the WAV (material + recordings = Engine::freePos)
+    int     material = 0;                   // the break's length (Engine::bufLen); 0 = len /* SETS */
+    float   swing    = 0.5f;                // the grid's 16th swing (Engine::swing; 0.5 straight) /* SETS */
     int     bars     = 0;
     float   bpm      = 0.f;
     int     nSlices  = 0;
@@ -154,6 +160,8 @@ struct SetWriter
         o.KeyInt("sr", s.sr);
         o.KeyInt("stereo", s.stereo ? 1 : 0);
         o.KeyInt("len", s.len);
+        o.KeyInt("material", s.material > 0 ? s.material : s.len);   /* SETS */
+        o.KeyFloat("swing", s.swing);                                  /* SETS */
         o.KeyInt("bars", s.bars);
         o.KeyFloat("bpm", s.bpm);
         o.Key("slices"); o.BeginArray();
@@ -181,6 +189,7 @@ struct SetWriter
             o.KeyInt("key", e.key);
             o.KeyInt("style", e.style);
             o.KeyFloat("vel", e.vel);
+            o.KeyInt("slice", e.slice);   /* SETS */
             o.EndObject();
         }
         o.EndArray();
@@ -208,7 +217,7 @@ struct SetReader
     // and dropped (nSlices etc. report what was kept).
     static bool Json(const char* text, size_t n, SetInfo& out)
     {
-        out = SetInfo();
+        new(&out) SetInfo();   /* SETS: reset in place — a SetInfo temporary is ~9 KB of stack (DTCM on the module) */
         JsonIn in(text, n);
         if(!in.BeginObject()) return false;
         bool sawVersion = false;
@@ -221,6 +230,8 @@ struct SetReader
             else if(!strcmp(key, "sr"))     { if(!in.Int(out.sr)) return false; }
             else if(!strcmp(key, "stereo")) { bool b; if(!in.Bool(b)) return false; out.stereo = b; }
             else if(!strcmp(key, "len"))    { if(!in.Int(out.len)) return false; }
+            else if(!strcmp(key, "material")) { if(!in.Int(out.material)) return false; }   /* SETS */
+            else if(!strcmp(key, "swing"))  { if(!in.Float(out.swing)) return false; }      /* SETS */
             else if(!strcmp(key, "bars"))   { if(!in.Int(out.bars)) return false; }
             else if(!strcmp(key, "bpm"))    { if(!in.Float(out.bpm)) return false; }
             else if(!strcmp(key, "slices")) { if(!Slices(in, out)) return false; }
@@ -231,6 +242,7 @@ struct SetReader
         if(!in.ok) return false;
         if(!sawVersion || version != kSetSchema) return false;
         if(out.sr <= 0 || out.len < 0) return false;
+        if(out.material <= 0 || out.material > out.len) out.material = out.len;   /* SETS: absent / bogus → the whole file */
         return true;
     }
 
@@ -248,7 +260,7 @@ struct SetReader
                 int v;
                 if(!strcmp(key, "start"))     { if(!in.Int(sl.start)) return false; }
                 else if(!strcmp(key, "len")) { if(!in.Int(sl.len)) return false; }
-                else if(!strcmp(key, "key")) { if(!in.Int(v)) return false; sl.key = (uint8_t)v; }
+                else if(!strcmp(key, "key")) { if(!in.Int(v)) return false; sl.key = (int8_t)(v < -1 || v > 127 ? -1 : v); }   /* SETS */
                 else if(!strcmp(key, "cls")) { if(!in.Int(v)) return false; sl.cls = (uint8_t)v; }
                 else if(!strcmp(key, "sal")) { if(!in.Float(sl.sal)) return false; }
                 else if(!strcmp(key, "hit")) { bool b; if(!in.Bool(b)) return false; sl.hit = b; }
@@ -272,9 +284,10 @@ struct SetReader
             {
                 int v;
                 if(!strcmp(key, "phase"))       { if(!in.Float(e.phase)) return false; }
-                else if(!strcmp(key, "key"))   { if(!in.Int(v)) return false; e.key = (uint8_t)v; }
+                else if(!strcmp(key, "key"))   { if(!in.Int(v)) return false; e.key = (int8_t)(v < -1 || v > 127 ? -1 : v); }     /* SETS */
                 else if(!strcmp(key, "style")) { if(!in.Int(v)) return false; e.style = (uint8_t)v; }
                 else if(!strcmp(key, "vel"))   { if(!in.Float(e.vel)) return false; }
+                else if(!strcmp(key, "slice")) { if(!in.Int(v)) return false; e.slice = (int8_t)(v < -1 || v > 127 ? -1 : v); }   /* SETS */
                 else if(!in.Skip()) return false;
             }
             if(!in.ok) return false;
@@ -318,7 +331,7 @@ struct PresetBackup
     // Same tolerance rules as SetReader::Json.
     static bool Read(const char* text, size_t n, PresetInfo& out)
     {
-        out = PresetInfo();
+        new(&out) PresetInfo();
         JsonIn in(text, n);
         if(!in.BeginObject()) return false;
         bool sawVersion = false;

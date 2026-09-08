@@ -331,14 +331,14 @@ static bb::SetInfo MakeSet()
 {
     bb::SetInfo s;
     strcpy(s.name, "amen \"v2\"");
-    s.sr = 48000; s.stereo = true; s.len = kLen; s.bars = 2; s.bpm = 136.25f;
+    s.sr = 48000; s.stereo = true; s.len = kLen; s.material = kLen - 100; s.swing = 0.62f; s.bars = 2; s.bpm = 136.25f;   /* SETS: material + swing */
     s.nSlices = 5;
     const char* names[5] = {"kick", "snare", "hat", "", "ride/crash"};
     for(int i = 0; i < 5; i++)
     {
         s.slices[i].start = kCues[i];
         s.slices[i].len   = (i < 4 ? kCues[i + 1] : kLen) - kCues[i];
-        s.slices[i].key   = (uint8_t)(i * 3);
+        s.slices[i].key   = (int8_t)(i == 0 ? -1 : i * 3);   /* SETS: -1 = a grid slice */
         s.slices[i].cls   = (uint8_t)(i % 4);
         s.slices[i].sal   = 0.1f * (i + 1);
         s.slices[i].hit   = (i % 2) == 0;
@@ -347,7 +347,7 @@ static bb::SetInfo MakeSet()
     s.nOptions = 17;
     for(int i = 0; i < 17; i++) s.options[i] = (uint8_t)(i * 15);
     s.nLooper = 3;
-    for(int i = 0; i < 3; i++) { s.looper[i] = {0.125f * (i + 1) + 0.333333f, (uint8_t)(i + 1), (uint8_t)(7 - i), 0.5f + 0.1f * i}; }
+    for(int i = 0; i < 3; i++) { s.looper[i] = {0.125f * (i + 1) + 0.333333f, (int8_t)(i == 2 ? -1 : i + 1), (uint8_t)(7 - i), 0.5f + 0.1f * i, (int8_t)(i == 2 ? 33 : -1)}; }   /* SETS: a keyless event carries its slice */
     return s;
 }
 
@@ -355,6 +355,8 @@ static void CheckSame(const bb::SetInfo& a, const bb::SetInfo& b, const char* wh
 {
     CHECK(!strcmp(a.name, b.name) && a.sr == b.sr && a.stereo == b.stereo && a.len == b.len && a.bars == b.bars && fabsf(a.bpm - b.bpm) < 1e-4f,
           "%s: header (name '%s' vs '%s', bpm %g vs %g)", what, a.name, b.name, a.bpm, b.bpm);
+    CHECK((a.material > 0 ? a.material : a.len) == (b.material > 0 ? b.material : b.len) && fabsf(a.swing - b.swing) < 1e-5f,
+          "%s: material %d vs %d, swing %g vs %g", what, a.material, b.material, a.swing, b.swing);   /* SETS */
     CHECK(a.nSlices == b.nSlices, "%s: nSlices %d vs %d", what, a.nSlices, b.nSlices);
     for(int i = 0; i < a.nSlices && i < b.nSlices; i++)
     {
@@ -367,7 +369,7 @@ static void CheckSame(const bb::SetInfo& a, const bb::SetInfo& b, const char* wh
     for(int i = 0; i < a.nLooper && i < b.nLooper; i++)
     {
         const bb::SetLoopEvent &x = a.looper[i], &y = b.looper[i];
-        CHECK(fabsf(x.phase - y.phase) < 1e-5f && x.key == y.key && x.style == y.style && fabsf(x.vel - y.vel) < 1e-5f, "%s: looper %d", what, i);
+        CHECK(fabsf(x.phase - y.phase) < 1e-5f && x.key == y.key && x.style == y.style && fabsf(x.vel - y.vel) < 1e-5f && x.slice == y.slice, "%s: looper %d", what, i);   /* SETS: slice too */
     }
 }
 
@@ -441,7 +443,7 @@ static void TestSet()
         bb::SetInfo full = s;
         full.nSlices = bb::kSetMaxSlices; full.nLooper = bb::kSetMaxLooper; full.nOptions = bb::kSetMaxOptions;
         for(int i = 0; i < full.nSlices; i++) { full.slices[i] = s.slices[i % 5]; strcpy(full.slices[i].name, "a thirty-one character name...."); full.slices[i].start = 1000000 + i; full.slices[i].len = 1000000; full.slices[i].sal = 0.123456f; }
-        for(int i = 0; i < full.nLooper; i++) { full.looper[i] = {123.456789f, 255, 255, 0.987654f}; }
+        for(int i = 0; i < full.nLooper; i++) { full.looper[i] = {123.456789f, 23, 127, 0.987654f, 95}; }   /* SETS: int8 keys and slices */
         CHECK(bb::SetWriter::Json(full, json, sizeof json, &n), "worst-case set fits kSetJsonMax (%zu of %zu)", n, sizeof json);
         printf("  worst-case set JSON: %zu bytes\n", n);
         bb::SetInfo t;

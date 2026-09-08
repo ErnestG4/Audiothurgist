@@ -56,6 +56,8 @@ function stateBody(len) {
   if (len >= 194) { b[177] = 2; b[178] = 7; dv.setUint32(179, 250000, true); dv.setUint32(183, 480000, true); b[187] = 1; b[188] = 180; b[189] = 35; dv.setUint32(190, 192000, true); }
   if (len >= 218) { for (let k = 0; k < 24; k++) b[194 + k] = k === 7 ? 34 : Math.floor(k * 32 / 24); }
   if (len >= 219) b[218] = 1;                                             /* Key Plays = Held */
+  if (len >= 223) { b[219] = 1; b[220] = 128; b[221] = 2; b[222] = 9; }   /* SETS: saving, 50 %, last result card full, seq 9 */
+  if (len >= 255) { const nm = 'Amen_kit-2'; for (let i = 0; i < nm.length; i++) b[223 + i] = nm.charCodeAt(i); }
   return b;
 }
 {
@@ -87,6 +89,15 @@ function stateBody(len) {
   const s8 = HL.parseState(stateBody(218));
   check('state 218: key table', s8.keySlice && s8.keySlice.length === 24 && s8.keySlice[7] === 34 && s8.keySlice[23] === 30 && s8.keySlice[0] === 0 && s8.keyPlays === undefined);
   check('state 219: key plays', HL.parseState(stateBody(219)).keyPlays === 1);
+  /* SETS tail: 219..222 the op, 223..254 the name. */
+  const s9 = HL.parseState(stateBody(219)); check('state 219: no sets tail', s9.setState === undefined && s9.setName === undefined);
+  const s10 = HL.parseState(stateBody(223));
+  check('state 223: set op tail', s10.setState === 1 && HL.SET_STATE[s10.setState] === 'saving' && s10.setProgress === 128 && s10.setResult === 2 && HL.SET_RESULT[s10.setResult] === 'card full' && s10.setSeq === 9 && s10.setName === undefined);
+  const s11 = HL.parseState(stateBody(255)); check('state 255: set name', s11.setName === 'Amen_kit-2');
+  { const b = stateBody(255); b[223] = 0; check('state 255: empty name', HL.parseState(b).setName === ''); }
+  check('set names', HL.setNameOk('amen') && HL.setNameOk('Amen_170-v2') && HL.setNameOk('a'.repeat(31)) && !HL.setNameOk('') && !HL.setNameOk('a'.repeat(32)) && !HL.setNameOk('a b') && !HL.setNameOk('a/b') && !HL.setNameOk('a.wav') && !HL.setNameOk(null));
+  check('set labels', HL.setLabelName('amen [set]') === 'amen' && HL.setLabelName('AMEN_170.WAV') === null && HL.setLabelName('a b [set]') === null && HL.setLabelName('sets/amen.wav') === null);
+  check('name bytes', HL.nameBytes('ab').length === 2 && HL.nameBytes('ab')[0] === 97 && HL.ACT.saveSet === 14 && HL.ACT.loadSet === 15);
   { const b = stateBody(218); b[178] = 255; check('recKey 255 → -1', HL.parseState(b).recKey === -1); }
   /* GET_WAVE / GET_TABLE / GET_HITS bodies. */
   const wv = HL.parseWave(Uint8Array.of(0, 0x10, 0x27, 0, 0, 3, 0, 4, 0x7f, 0x81, 0));
@@ -155,13 +166,13 @@ await link.start();
   bytes[opts.comp.off + gf.off] = 4; await HL.setLive(link, info, bytes);
   const stc = HL.parseState(await link.request(HL.CMD.state)); check('Camp selectable: state grammar 4 labelled Camp', stc.grammar === 4 && gl[stc.grammar] === 'Camp');
   check('rtt measured', link.stats.rtt > 0 && link.stats.reqs > 10);
-  check('demo 170-byte body carries no sample tail', st.recState === undefined && st.keySlice === undefined);
+  check('demo 170-byte body carries no sample tail', st.recState === undefined && st.keySlice === undefined && st.setState === undefined);
   await link.close();
 }
 
 /* ── 4. The Kit: table / wave / hits and the record + looper actions over a 64-slice kit demo ── */
 {
-  const kit = new DEMO.FakeDevice({ tail: 219, kit: true, nSlices: 64, latencyMs: 2, swing: true });
+  const kit = new DEMO.FakeDevice({ tail: 219, kit: true, nSlices: 64, latencyMs: 2, swing: true });   /* 219: the pre-SETS body */
   const kl = new HL.Link(new DEMO.FakePort(kit)); await kl.start();
   const info = await HL.hello(kl); const desc = await HL.getDescriptor(kl, info);
   check('kit demo advertises wave/table/hits', desc.audiothurgist.wave === 100 && desc.audiothurgist.table === 101 && desc.audiothurgist.hits === 102);
@@ -217,7 +228,57 @@ await link.start();
   check('looper undo', HL.parseState(await kl.request(HL.CMD.state)).looperEvents === 2);
   await kl.request(HL.CMD.action, Uint8Array.of(HL.ACT.looperClear), { urgent: true });
   check('looper clear', HL.parseState(await kl.request(HL.CMD.state)).looperEvents === 0);
+  check('kit demo 219-byte body carries no sets tail', HL.parseState(await kl.request(HL.CMD.state)).setState === undefined);
   await kl.close();
+}
+
+/* ── 5. Sets over the demo (the 255-byte body): save, refusals, load, not found ── */
+{
+  const d = new DEMO.FakeDevice({ tail: 255, kit: true, nSlices: 64, latencyMs: 2, swing: true });
+  const l = new HL.Link(new DEMO.FakePort(d)); await l.start();
+  const info = await HL.hello(l); const desc = await HL.getDescriptor(l, info);
+  check('demo advertises sets', desc.audiothurgist.sets === 1);
+  const labs = HL.fieldLabels(desc, 'sample.idx');
+  check('sample list carries the set label', labs.includes('amen_kit [set]') && labs.map(HL.setLabelName).filter(Boolean).join() === 'amen_kit');
+  /* an op starts on the first state poll after its request and finishes 600 ms later: poll, rewind, poll */
+  const finish = async () => { await l.request(HL.CMD.state); d.set.t -= 2000; return HL.parseState(await l.request(HL.CMD.state)); };
+  const s0 = HL.parseState(await l.request(HL.CMD.state));
+  check('sets tail idle', s0.setState === 0 && s0.setProgress === 0 && s0.setResult === 0 && s0.setSeq === 0 && s0.setName === '');
+  { let bad = null; try { await HL.saveSet(l, 'a b'); } catch (e) { bad = e; } check('saveSet refuses a bad name locally', bad && /bad set name/.test(bad.message)); }
+  { let bad = null; try { await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.saveSet, 0x61, 0x20), { urgent: true }); } catch (e) { bad = e; } check('ACTION 14 with a bad name → BAD_ARGS', bad && /BAD_ARGS/.test(bad.message)); }
+  { let bad = null; try { await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.saveSet), { urgent: true }); } catch (e) { bad = e; } check('ACTION 14 with no name → BAD_ARGS', bad && /BAD_ARGS/.test(bad.message)); }
+  /* save: accepted at once, then the state shows saving with progress, then done with the seq bumped */
+  await HL.saveSet(l, 'kit_1');
+  const s1 = HL.parseState(await l.request(HL.CMD.state));
+  check('save accepted: state saving', s1.setState === 1 && HL.SET_STATE[s1.setState] === 'saving' && s1.setSeq === 0);
+  { let bad = null; try { await HL.loadSet(l, 'kit_1'); } catch (e) { bad = e; } check('an op while saving → BAD_STATE', bad && /BAD_STATE/.test(bad.message)); }
+  d.set.t -= 300; const s2 = HL.parseState(await l.request(HL.CMD.state));
+  check('save progresses', s2.setState === 1 && s2.setProgress > 100 && s2.setProgress < 255);
+  d.set.t -= 1000; const s3 = HL.parseState(await l.request(HL.CMD.state));
+  check('save done: idle, ok, seq bumped, the material is the set', s3.setState === 0 && s3.setResult === 0 && s3.setSeq === 1 && s3.setName === 'kit_1' && d.sets.has('kit_1'));
+  check('the saved set joined the list at the end', HL.fieldLabels(await HL.getDescriptor(l, await HL.hello(l)), 'sample.idx').slice(-1)[0] === 'kit_1 [set]' && s3.file === labs.length);
+  /* change the kit, then load the set back: the table and keys return */
+  await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.recClear, 3), { urgent: true });
+  const s4 = HL.parseState(await l.request(HL.CMD.state)); check('kit changed', s4.nTable === 66 && s4.keySlice[3] === 8);
+  await HL.loadSet(l, 'kit_1');
+  const s5 = await finish();
+  check('load done: table and keys back, material generation moved', s5.setState === 0 && s5.setResult === 0 && s5.setSeq === 2 && s5.setName === 'kit_1' && s5.nTable === 67 && s5.keySlice[3] === 64 && s5.matGen !== s4.matGen);
+  /* a set that is not on the card: accepted, then reported */
+  await HL.loadSet(l, 'nope');
+  const s6 = await finish();
+  check('load of a missing set → result not found', s6.setState === 0 && s6.setResult === 5 && HL.SET_RESULT[s6.setResult] === 'not found' && s6.setSeq === 3 && s6.setName === 'kit_1');
+  /* the card's refusals: full, no card (the demo keys them on the name) */
+  await HL.saveSet(l, 'full');
+  check('card full reported', (await finish()).setResult === 2);
+  await HL.saveSet(l, 'nocard');
+  check('no card reported', (await finish()).setResult === 1);
+  /* a save while a take runs is refused */
+  await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.recArm, 2), { urgent: true });
+  { let bad = null; try { await HL.saveSet(l, 'kit_2'); } catch (e) { bad = e; } check('save while a take runs → BAD_STATE', bad && /BAD_STATE/.test(bad.message)); }
+  /* ACTION 6 on a set entry loads the set (the firmware routes list entries under sets/ to LoadSet) */
+  await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.load, labs.indexOf('amen_kit [set]')), { urgent: true });
+  const s7 = HL.parseState(await l.request(HL.CMD.state)); check('list entry of a set loads it', s7.setName === 'amen_kit' && s7.file === labs.indexOf('amen_kit [set]'));
+  await l.close();
 }
 
 console.log(`${fail ? 'FAIL' : 'OK'}: ${pass} passed, ${fail} failed`);

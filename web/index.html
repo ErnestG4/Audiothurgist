@@ -182,6 +182,17 @@
     <div class="row"><b id="l_count" style="font-size:20px">—</b><span id="l_label" style="color:var(--mute)">events on the bar</span><button id="l_undo" class="mini" title="undo the last looper event (ACTION 12)">Undo</button><button id="l_clear" class="mini" title="clear every looper event (ACTION 13)">Clear</button></div>
     <p style="font-size:12px;color:var(--mute);margin:8px 0 0">Loop-record writes performance events onto the bar; the count comes from the state (byte 176). Undo and Clear take the same path as the panel gestures.</p>
   </section>
+  <section class="wide">
+    <h2>Set — the break, its recorded keys, the options and the loop, on the card <span id="s_status" class="pill">—</span></h2>
+    <div class="row">
+      <label class="ctl" style="min-width:0;flex-direction:row;align-items:center;gap:6px">Name<input id="s_name" list="s_list" maxlength="31" pattern="[A-Za-z0-9_-]{1,31}" placeholder="letters, digits, _ -" spellcheck="false" style="background:#1f1f24;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font:inherit;width:180px"><datalist id="s_list"></datalist></label>
+      <button id="s_save" class="mini" title="write sets/&lt;name&gt;.wav + sets/&lt;name&gt;.json (ACTION 14) — the material with its recordings, the table, keys, options and looper events">💾 Save set</button>
+      <button id="s_load" class="mini" title="load sets/&lt;name&gt; (ACTION 15): the WAV, then the table, keys, options and loop from its JSON">📂 Load set</button>
+      <div class="bar meter" id="s_barbox" title="progress of the save" style="opacity:.45"><i id="s_bar" style="width:0"></i></div>
+      <span id="s_cur" style="color:var(--mute);font-size:12px"></span>
+    </div>
+    <p style="font-size:12px;color:var(--mute);margin:8px 0 0">A set is <code>sets/&lt;name&gt;.wav</code> (PCM16, both planes when the material is stereo, the slice starts as cue points) beside <code>sets/&lt;name&gt;.json</code>. Sets also appear in the Sample list as “name [set]” and load from P5 + B3 like any file; a set saved just now joins that list at the next connect. Saving refuses while a take runs; the panel flashes the buttons red when the card is missing or full.</p>
+  </section>
 </main>
 
 <main id="opts">
@@ -202,7 +213,7 @@
 <script src="demo.js"></script>
 <script>
 'use strict';
-const { CMD, ACT, REC, ZONE_MULT, keyName, Link, hello, getDescriptor, getLive, setLive, parseState, fetchEnv, parseScope, fetchWave, fetchTable, fetchHits, fieldLabels, pagerInfo, optionsInfo, manualInfo } = HL;
+const { CMD, ACT, REC, ZONE_MULT, keyName, Link, hello, getDescriptor, getLive, setLive, parseState, fetchEnv, parseScope, fetchWave, fetchTable, fetchHits, fieldLabels, pagerInfo, optionsInfo, manualInfo, SET_STATE, SET_RESULT, setNameOk, setLabelName, saveSet, loadSet } = HL;
 const $ = id => document.getElementById(id);
 const COL = ['#eb4614', '#28c878', '#e6c828', '#3c78e6'];
 const CLS_NAME = ['kick', 'snare', 'hat', 'other'];
@@ -217,6 +228,8 @@ let demoDevice = null;
 /* Kit: the slice table (grid + recorded entries, real boundaries), the onset
  * table, the selected key, the waveform view and its window cache. */
 let table = null, tableSig = '', hits = null, hitsGen = -1, selKey = 0, kitOk = false, kitShown = false;
+/* Sets: advertised by the descriptor ("sets":1); the last op's sequence the page has shown, and the op it asked for. */
+let setsOk = false, setSeqShown = -1, setAsked = null;
 const view = { a: 0, b: 1 };
 const wave = { cache: new Map(), queue: [], planSig: '', plane: 0, step: 1 };
 const WAVE_N = 480, WAVE_MS = 334;   /* ≤ 3 waveform windows per second */
@@ -541,9 +554,36 @@ function drawKit() {
   }
   const le = st.looperEvents; setText('l_count', le == null ? '—' : String(le)); setText('l_label', le == null ? 'needs LOOPER firmware (state byte 176)' : (le === 1 ? 'event on the bar' : 'events on the bar'));
   $('l_undo').disabled = !le; $('l_clear').disabled = !le;
+  drawSet();
   setPill('kit_status', !st.keySlice ? 'needs sample-mode firmware' : table ? `${table.nTable - table.nSlices} recorded · ${24 - (table.nTable - table.nSlices)} on the break` : 'reading the table…', st.keySlice ? 'ok' : 'warn');
   $('wv_plane').hidden = !st.stereo;
 }
+/* The set section: the op in flight (with the save's progress), the result of the last one
+ * (once per sequence number), the name the material came from. */
+function drawSet() {
+  const busy = !!(st.setState), name = $('s_name').value.trim();
+  $('s_save').disabled = !setsOk || busy || !setNameOk(name) || (st.recState || 0) !== 0; $('s_load').disabled = !setsOk || busy || !setNameOk(name);
+  $('s_name').disabled = !setsOk;
+  $('s_bar').style.width = busy && st.setState === 1 ? Math.round((st.setProgress || 0) / 2.55) + '%' : (busy ? '100%' : '0'); $('s_barbox').style.opacity = busy ? 1 : 0.45;
+  setText('s_cur', st.setName ? `material: set “${st.setName}”` : (st.file === 255 ? 'material: a take / the synth break' : 'material: a loose file'));
+  if (!setsOk) { setPill('s_status', st.setState == null ? 'needs sets firmware (state byte 219)' : '—', 'warn'); return; }
+  if (busy) { setPill('s_status', `${SET_STATE[st.setState] || 'busy'}${setAsked ? ' ' + setAsked.name : ''}${st.setState === 1 ? ' ' + Math.round(st.setProgress / 2.55) + '%' : '…'}`, 'warn'); return; }
+  if (st.setSeq != null && st.setSeq !== setSeqShown) {
+    setSeqShown = st.setSeq; const r = st.setResult || 0, what = setAsked ? `${setAsked.op === ACT.saveSet ? 'saved' : 'loaded'} ${setAsked.name}` : 'set';
+    setPill('s_status', r ? `${what}: ${SET_RESULT[r] || ('error ' + r)}` : what, r ? 'warn' : 'ok');
+    if (!r && setAsked && setAsked.op === ACT.saveSet) { const lab = setAsked.name + ' [set]'; if (!labels.sample.includes(lab)) { labels.sample.push(lab); fillSetList(); ctlSig = ''; invalidate(D.text | D.controls); } }
+    setAsked = null;
+  } else if (setSeqShown < 0) setPill('s_status', 'ready', '');
+}
+function fillSetList() { $('s_list').innerHTML = labels.sample.map(setLabelName).filter(Boolean).map(n => `<option value="${esc(n)}">`).join(''); }
+async function setOp(op) {
+  const name = $('s_name').value.trim(); if (!link || !setNameOk(name)) return;
+  setAsked = { op, name }; setPill('s_status', (op === ACT.saveSet ? 'saving ' : 'loading ') + name + '…', 'warn');
+  try { await (op === ACT.saveSet ? saveSet : loadSet)(link, name); poll.tState = 0; }
+  catch (e) { setAsked = null; setPill('s_status', (op === ACT.saveSet ? 'save' : 'load') + ' refused: ' + e.message, 'warn'); }
+}
+$('s_save').onclick = () => setOp(ACT.saveSet); $('s_load').onclick = () => setOp(ACT.loadSet);
+$('s_name').addEventListener('input', () => { if (st) drawSet(); });
 function drawKitWave() {
   const c = $('kitwave'), [g, w, h] = ctx(c); g.clearRect(0, 0, w, h);
   if (!kitOk || !st || !st.freePos) { g.fillStyle = '#5e5c55'; g.font = '12px system-ui'; g.textAlign = 'center'; g.fillText(st && !st.keySlice ? 'this firmware sends no sample-mode state tail' : 'connect to read the material', w / 2, h / 2); setText('wv_title', 'Waveform'); return; }
@@ -680,6 +720,7 @@ function buildManual() {
 function setDisconnected() {
   stopPolling(); link = null; info = null; desc = null; live = null; st = null; env = null; envGen = -1; scope = null; demoDevice = null; ctlSig = '';
   table = null; tableSig = ''; hits = null; hitsGen = -1; kitOk = false; wave.cache.clear(); wave.queue.length = 0; wave.planSig = ''; keyCells.forEach(c => { c.sig = ''; });
+  setsOk = false; setSeqShown = -1; setAsked = null; setPill('s_status', '—', ''); $('s_save').disabled = $('s_load').disabled = true;
   $('connect').textContent = 'Connect'; $('demo').disabled = false; setPill('modpill', 'not connected', ''); setPill('linkpill', 'link: —', ''); setPill('kit_status', '—', '');
   invalidate(D.kit | D.kitwave);
 }
@@ -697,6 +738,8 @@ async function connectPort(port, isDemo) {
     if (desc && desc.error) notice('The module reports a descriptor build error: ' + desc.error);
     else if (!desc || !desc.audiothurgist) notice('Connected, but this firmware does not advertise the Audiothurgist state extension (0x60). Flash v0.7.0+ for the live view.');
     kitOk = !!(desc && desc.audiothurgist && desc.audiothurgist.table);   /* GET_TABLE / GET_WAVE / GET_HITS advertised */
+    setsOk = !!(desc && desc.audiothurgist && desc.audiothurgist.sets);    /* ACTION 14 / 15 + the 219.. tail */
+    fillSetList();
     setPill('kit_status', kitOk ? 'reading…' : 'this firmware has no sample-mode commands (0x64–0x66)', kitOk ? '' : 'warn');
     buildManual();
     if (opts) { try { live = await getLive(link, info); } catch (e) { notice('Options unreadable: ' + e.message); } }
@@ -710,16 +753,17 @@ async function connect() {
   try { const port = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x0483 }] }); await connectPort(port, false); }
   catch (e) { if (e.name !== 'NotFoundError') notice('Connect failed: ' + e.message); }
 }
-/* ?demo[=brain,ext,pending,grids,euclid,camp,locks,kit,swing,old,short,v099]
+/* ?demo[=brain,ext,pending,grids,euclid,camp,locks,kit,swing,old,short,v099,nosets]
  * — the fake module, optionally started on the Brain page, following a
  * clock (with a multiplier switch left pending), in a grammar, with locks,
  * with three keys recorded and a swung grid (kit: opens the Kit tab), with
- * a pre-v0.8.0 state body (no tails), the 167-byte CLOCK body (no flags) or
- * the 176-byte v0.9.9 body (no sample-mode tail). */
+ * a pre-v0.8.0 state body (no tails), the 167-byte CLOCK body (no flags),
+ * the 176-byte v0.9.9 body (no sample-mode tail) or the 219-byte sample body
+ * (no sets tail). */
 async function connectDemo(flags = '') {
   if (link) return; notice('');
   const f = new Set(flags.split(',').filter(Boolean));
-  demoDevice = new DEMO.FakeDevice({ tail: f.has('old') ? 148 : f.has('short') ? 167 : f.has('v099') ? 176 : 219, latencyMs: 6, kit: f.has('kit'), swing: f.has('kit') || f.has('swing') });
+  demoDevice = new DEMO.FakeDevice({ tail: f.has('old') ? 148 : f.has('short') ? 167 : f.has('v099') ? 176 : f.has('nosets') ? 219 : 255, latencyMs: 6, kit: f.has('kit'), swing: f.has('kit') || f.has('swing') });
   const d = demoDevice;
   if (f.has('kit')) { showTab('tab_kit'); setInterval(() => { if (demoDevice === d && d.looperEvents < 16 && Math.random() < 0.5) d.looperEvents++; }, 3000); }
   if (f.has('brain')) d.brain = true;

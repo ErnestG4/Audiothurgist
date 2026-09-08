@@ -5,7 +5,7 @@
  * request Link with a priority queue and round-trip measurement, the
  * standard commands the page needs (HELLO, GET_DESCRIPTOR, GET_LIVE, live
  * BLOB writes) and the firmware's StateExt parsers (0x60–0x66: state, envelope,
- * scope, actions, and the sample-mode wave / table / hits reads).
+ * scope, actions, the sample-mode wave / table / hits reads, and the set save / load).
  *
  * Plain script in the browser (globals via window.HL); CommonJS in node so
  * selftest.mjs can pin it to the SDK's golden vectors. No dependencies.
@@ -20,7 +20,17 @@ const CMD = {
   state: 0x60, env: 0x61, scope: 0x62, action: 0x63, wave: 0x64, table: 0x65, hits: 0x66,
 };
 const ACT = { dice: 0, reslice: 1, mute: 2, punch: 3, flow: 4, scrub: 5, load: 6, clearLocks: 7, page: 8,
-  recArm: 9, recClear: 10, keyPlays: 11, looperUndo: 12, looperClear: 13 };
+  recArm: 9, recClear: 10, keyPlays: 11, looperUndo: 12, looperClear: 13, saveSet: 14, loadSet: 15 };
+/* SETS (state tail 219..254): a set is sets/<name>.wav + sets/<name>.json on the card. The op's
+ * state, its progress, the result of the last op and a sequence that bumps when one finishes;
+ * then the name of the set the material came from. A name is 1..31 of [A-Za-z0-9_-]. */
+const SET_STATE = ['idle', 'saving', 'loading'];
+const SET_RESULT = ['ok', 'no card', 'card full', 'write failed', 'bad name', 'not found', 'busy', 'bad file'];
+const SET_NAME_RE = /^[A-Za-z0-9_-]{1,31}$/;
+const setNameOk = n => typeof n === 'string' && SET_NAME_RE.test(n);
+/* "amen [set]" → "amen"; null for a loose file's label. */
+const setLabelName = l => (typeof l === 'string' && /^[A-Za-z0-9_-]{1,31} \[set\]$/.test(l)) ? l.slice(0, -6) : null;
+const nameBytes = n => Array.from(n, c => c.charCodeAt(0) & 0x7f);
 /* Record state (state tail byte 177) and the 24 Voice-map keys, two octaves from C. */
 const REC = ['idle', 'armed', 'taking', 'pending'];
 const NOTE_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
@@ -243,6 +253,8 @@ function parseState(b) {
   }
   if (b.length >= 218) st.keySlice = Int8Array.from(b.subarray(194, 218));   // table entry each key plays
   if (b.length >= 219) st.keyPlays = b[218];                                  // Options → Key Plays (0 one-shot, 1 held)
+  if (b.length >= 223) { st.setState = b[219]; st.setProgress = b[220]; st.setResult = b[221]; st.setSeq = b[222]; }   // SETS
+  if (b.length >= 255) { let n = 223; while (n < 255 && b[n]) n++; st.setName = new TextDecoder('ascii').decode(b.subarray(223, n)); }
   return st;
 }
 /* GET_WAVE: one window of the material buffer — n ≤ 480 output bytes, each
@@ -289,6 +301,11 @@ async function fetchHits(link, opts = {}) {
   const out = new Uint32Array(parts.reduce((s, p) => s + p.length, 0)); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
   return out;
 }
+/* SETS: ACTION 14 / 15 carry the name as the rest of the body. The device answers at once
+ * (BAD_ARGS for a bad name, BAD_STATE while an op runs or a load waits); the work happens
+ * in its main loop and the state tail (setState / setProgress / setResult / setSeq) tells. */
+function saveSet(link, name) { if (!setNameOk(name)) return Promise.reject(new Error('bad set name')); return link.request(CMD.action, Uint8Array.of(ACT.saveSet, ...nameBytes(name)), { urgent: true }); }
+function loadSet(link, name) { if (!setNameOk(name)) return Promise.reject(new Error('bad set name')); return link.request(CMD.action, Uint8Array.of(ACT.loadSet, ...nameBytes(name)), { urgent: true }); }
 /* GET_ENV: fetch nSlices × 16 envelope bytes in ≤30-slice chunks. */
 async function fetchEnv(link, n) {
   const out = new Uint8Array(64 * 16);
@@ -335,6 +352,7 @@ function manualInfo(desc) {
 const api = { PROTO, CMD, ACT, REC, NOTE_NAMES, keyName, STATUS, statusName, crc32, cobsEncode, cobsDecode, buildFrame, FrameParser, Link,
   u16, u32, f32, readStr, hello, getDescriptor, getLive, setLive, concat,
   STATE_MIN, ZONE_MULT, parseState, fetchEnv, parseScope, allFields, findField, fieldLabels, pagerInfo, optionsInfo, manualInfo,
-  TABLE_ENTRY, TABLE_CHUNK, fetchWave, parseWave, fetchTable, parseTableChunk, fetchHits, parseHitsChunk };
+  TABLE_ENTRY, TABLE_CHUNK, fetchWave, parseWave, fetchTable, parseTableChunk, fetchHits, parseHitsChunk,
+  SET_STATE, SET_RESULT, setNameOk, setLabelName, nameBytes, saveSet, loadSet };
 if (typeof module === 'object' && module.exports) module.exports = api; else root.HL = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
