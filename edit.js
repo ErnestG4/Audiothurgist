@@ -138,15 +138,15 @@ function histLabel(op, a = {}) {
     case 'boundary': return `boundary ${a.i} ${fmtDelta(a.d)}`;
     case 'start': return `start ${a.t} ${fmtDelta(a.d)}`;
     case 'end': return `end ${a.t} ${fmtDelta(a.d)}`;
-    case 'split': return `split ${a.t}` + (a.newIdx >= 0 ? ` → ${a.newIdx}` : '');
+    case 'split': return `split ${a.t}` + (a.newIdx != null && a.newIdx >= 0 ? ` → ${a.newIdx}` : '');
     case 'merge': return `merge ${a.u} into ${a.t}`;
     case 'delete': return `delete ${a.t}`;
-    case 'copy': return `marker ${a.newIdx} from ${a.from}`;
+    case 'copy': return a.newIdx == null ? `copy ${a.from} as a marker` : `marker ${a.newIdx} from ${a.from}`;
     case 'key': return `${kn(a.key)} → ${a.t}`;
     case 'swap': return `${kn(a.a)} ↔ ${kn(a.b)}`;
     case 'nudge': return `nudge ${a.which === HL.EDIT.grid ? 'grid' : 'markers'} ${fmtDelta(a.ms * MS)}`;
-    case 'onsets': return `onsets ≥ ${Math.round(a.thresh / 2.55)} % → ${a.count}`;
-    case 'tap': return `tap → marker ${a.newIdx}`;
+    case 'onsets': return `onsets ≥ ${Math.round(a.thresh / 2.55)} % → ${a.count == null ? '…' : a.count}`;
+    case 'tap': return a.newIdx == null ? 'tap' : `tap → marker ${a.newIdx}`;
     case 'promote': return `promote ${a.t} → boundary ${a.i}`;
     case 'follow': return 'keys follow the grid';
     case 'undo': return 'undo'; case 'redo': return 'redo';
@@ -217,7 +217,7 @@ class RateGate {
 class Gesture {
   constructor(o = {}) { this.o = Object.assign({ slop: K.tapPx, dblMs: K.dblMs, holdMs: K.holdMs }, o); this.p = null; this.q = null; this.lastTap = null; }
   down(id, x, y, t, tag = null) {
-    if (this.p && this.p.id !== id) { this.q = { id, x, y }; this.p.pinch0 = null; return [{ type: 'second', id, x, y, tag: this.p.tag }]; }
+    if (this.p && this.p.id !== id) { this.q = { id, x, y }; this.p.pinch0 = null; this.p.multi = true; return [{ type: 'second', id, x, y, tag: this.p.tag }]; }
     this.p = { id, x, y, x0: x, y0: y, t0: t, tag, drag: false, held: false, moved: false };
     return [{ type: 'press', id, x, y, tag }];
   }
@@ -242,7 +242,7 @@ class Gesture {
     if (p.id !== id) return [];
     const out = []; this.p = null; this.q = null;
     if (p.drag) out.push({ type: 'dragend', id, x, y, dx: x - p.x0, dy: y - p.y0, tag: p.tag });
-    else if (!p.held) {
+    else if (!p.held && !p.multi) {
       const lt = this.lastTap, dbl = lt && t - lt.t <= this.o.dblMs && Math.abs(lt.x - p.x0) <= this.o.slop * 2 && Math.abs(lt.y - p.y0) <= this.o.slop * 2 && sameTag(lt.tag, p.tag);
       if (dbl) { this.lastTap = null; out.push({ type: 'dbltap', id, x: p.x0, y: p.y0, tag: p.tag }); }
       else { this.lastTap = { t, x: p.x0, y: p.y0, tag: p.tag }; out.push({ type: 'tap', id, x: p.x0, y: p.y0, tag: p.tag }); }
@@ -255,7 +255,7 @@ class Gesture {
   tick(t) { const p = this.p; if (!p || p.drag || p.held || this.q || t - p.t0 < this.o.holdMs) return []; p.held = true; return [{ type: 'hold', id: p.id, x: p.x0, y: p.y0, tag: p.tag }]; }
   get active() { return !!this.p; }
 }
-function sameTag(a, b) { if (a === b) return true; if (!a || !b) return false; return a.zone === b.zone && a.t === b.t && (a.h ? a.h.kind : null) === (b.h ? b.h.kind : null) && (a.h ? a.h.t : null) === (b.h ? b.h.t : null); }
+function sameTag(a, b) { if (a === b) return true; if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false; return a.zone === b.zone && a.t === b.t && (a.h ? a.h.kind : null) === (b.h ? b.h.kind : null) && (a.h ? a.h.t : null) === (b.h ? b.h.t : null); }
 
 /* ───────────── the Editor ─────────────
  * deps: { link(): Link (null when disconnected), ctx(): { table, st, hits, sampleAt, editOk, tapAllowMs }, view: { a, b }
@@ -275,7 +275,7 @@ class Editor {
   /* ── layout: the wave, the handle row, the pan / zoom strip (an old firmware: the wave alone, drag = pan) ── */
   layout(w, h) {
     this.size = { w, h }; const c = this.d.ctx();
-    if (!c.editOk) return { wave: [0, h], handles: [h, h], strip: [0, h], edit: false };
+    if (!c.editOk) return { wave: [0, h], handles: [h, h], strip: [h, h], edit: false };   /* an old firmware: the wave alone; a drag anywhere pans */
     const hw = Math.max(40, h - K.handlePx - K.stripPx); return { wave: [0, hw], handles: [hw, hw + K.handlePx], strip: [hw + K.handlePx, h], edit: true };
   }
   zoneAt(y, L) { return L.edit && y >= L.handles[0] && y < L.handles[1] ? 'handles' : y >= L.strip[0] ? 'strip' : 'wave'; }
@@ -328,7 +328,7 @@ class Editor {
         if (dr.kind === 'handle') this._dragTo(e.x);
         else if (dr.kind === 'toKey') { dr.x = e.x; dr.y = e.y; dr.cx = e.cx; dr.cy = e.cy; this.cb.redraw(); }
         else if (dr.kind === 'pan') { const d = e.dx / e.w * (dr.b - dr.a); this.cb.setView(dr.a - d, dr.b - d); }
-        else if (dr.kind === 'zoom') { const f = Math.pow(2, -e.dy / 80); const span = (dr.b - dr.a) / f; const at = dr.at, fa = (at - dr.a) / (dr.b - dr.a); this.cb.setView(at - fa * span, at - fa * span + span); }
+        else if (dr.kind === 'zoom') { const f = Math.pow(2, e.dy / 80);   /* down = closer */ const span = (dr.b - dr.a) / f; const at = dr.at, fa = (at - dr.a) / (dr.b - dr.a); this.cb.setView(at - fa * span, at - fa * span + span); }
         break; }
       case 'pinch': if (!this.drag || this.drag.kind !== 'handle') this.cb.zoomView(1 / Math.max(0.2, Math.min(5, e.scale)), this.pOf(e.cx, e.w)); break;
       case 'dragend': {
@@ -421,19 +421,21 @@ class Editor {
   auditionEntry(t) { const tb = this.d.ctx().table; if (!tb || t < 0) return; const e = tb.entries[t]; if (isLive(e)) this.auditionNow(e.start, Math.max(1, e.len / MS), 0); }
   _loopStart(h) { this.looping = true; this.stats.loops = (this.stats.loops || 0) + 1; this.auditionNow(h.pos, K.previewMs, HL.EDIT.fromEnd | HL.EDIT.loop); this.cb.status('looping the tail — lift to stop', ''); }
   _loopStop() { this.looping = false; const l = this.d.link(); if (l) { this.stats.releases++; HL.release(l).catch(() => {}); } this.cb.status('', ''); }
-  /* ── the commit pipeline: one edit in flight; on success a refetch; BAD_STATE explained, a stale gen refetched and retried once ── */
-  async commit(op, args, fn, gen = 0, stillValid = null) {
+  /* ── the commit pipeline: one edit in flight; on success a refetch; on BAD_STATE a refetch first, then the reason
+   * (a take, a set op, or — the gen moved — stale: retried once with the fresh gen when the target still stands) ── */
+  commit(op, args, fn, gen = 0, stillValid = null) { const p = this._commit(op, args, fn, gen, stillValid); this.pending = p; return p; }
+  async _commit(op, args, fn, gen, stillValid) {
     const l = this.d.link(); if (!l) return null;
     if (this.busy) { this.cb.status('one edit at a time — ' + this.busy + ' is still going', 'warn'); return null; }
     const label = histLabel(op, args); this.busy = label; this.cb.status(label + '…', '');
     try {
-      let r = await fn(gen), retried = false;
-      if (!r.ok && r.status === 3 && gen) {
-        const why = this.whyBadState(gen);
-        if (why === 'stale') {
-          this.cb.status('stale: the table changed under you — refetching', 'warn');
-          await this.cb.refetch(); const c = this.d.ctx();
-          if (!stillValid || stillValid()) { this.stats.retried++; retried = true; r = await fn(c.st ? c.st.tableGen : 0); }
+      let r = await fn(gen), retried = false, why = '';
+      if (!r.ok && r.status === 3) {
+        await this.cb.refetch(); why = this.whyBadState(gen);
+        if (why === 'stale' && (!stillValid || stillValid())) {
+          this.cb.status('stale: the table changed under you — refetched, retrying', 'warn');
+          this.stats.retried++; retried = true; r = await fn(this.gen());
+          if (!r.ok && r.status === 3) why = this.whyBadState(this.gen());
         }
       }
       if (r.ok) {
@@ -442,7 +444,8 @@ class Editor {
         await this.cb.refetch(); this.local = null; this.cb.redraw();
       } else {
         this.stats.refused++; this.local = null;
-        const why = r.status === 3 ? this.whyBadState(gen) : r.status === 2 ? 'refused (BAD_ARGS): the module rejected the span, index or key' : HL.statusName(r.status);
+        if (r.status === 3 && why === 'stale') why = 'stale: the table changed under you — refetched; the target is gone, try again';
+        else if (r.status !== 3) why = r.status === 2 ? 'refused (BAD_ARGS): the module rejected the span, index or key' : HL.statusName(r.status);
         this.lastErr = why; this.cb.status(label + ' — ' + why, 'warn'); this.cb.redraw();
       }
       return r;
