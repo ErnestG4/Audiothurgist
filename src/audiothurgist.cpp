@@ -142,20 +142,37 @@ static float          gPendDens[bb::Engine::kMaxSlices];   /* keyframe density p
  * Per-slice envelope (8 min/max pairs, u8 with 128 = 0) computed at load on
  * the control thread. gMatGen bumps on every material swap so the page
  * knows when to refetch the envelope.
- * SCOPE: four int8 rings — out L, out R, in L (J1), in R (J2) — of
- * bb::kScopeRing samples each (16 KB, SDRAM: the audio thread already
- * streams takes into SDRAM, and DTCM is the scarce one), written at full
- * rate by AudioCb under ONE write index so the channels stay sample-aligned;
- * 0x62 snapshots the index once and reads every channel from it. "in" is
- * what the record path sees with Record Source = Inputs (the codec's J1/J2
- * buffers, before the Sampling mix); with Record Source = Output the record
- * path sees out L/R, which the scope shows anyway. */
+ * SCOPE: two ring tiers in SDRAM (the audio thread already streams takes
+ * into SDRAM, and DTCM is the scarce one), both written by AudioCb under
+ * ONE sample clock so every channel is time-aligned:
+ *   audio  4 × 64 K int8 at 48 kHz (256 KB, 1.37 s) — out L, out R, in L (J1),
+ *          in R (J2). "in" is what the record path sees with Record Source =
+ *          Inputs (the codec's J1/J2 buffers, before the Sampling mix); with
+ *          Record Source = Output it sees out L/R, which the scope shows anyway.
+ *   cv     6 × 16 K int8 (96 KB, 8.2 s), one sample per audio block = 2 kHz —
+ *          J3..J8 DC-coupled at ±5 V = ±127, read straight from ADC1's DMA
+ *          buffer (hw.seed.adc.GetPtr), not through CvJack::Volts(): that goes
+ *          through a one-pole AnalogControl updated at the 1 kHz control poll.
+ *          The scan of all twelve ADC channels (6 pots, 6 CVs; 16-bit, 32×
+ *          oversampling, 8.5 + 8.5 cycles at 12.3 MHz) completes every ≈ 0.53
+ *          ms, so a 0.5 ms block reads each value once, a few twice. Volts as
+ *          CvInput::Volts(): (zero − raw) · VDDA / 65535 / 0.165 with the
+ *          calibration record's zero code and VDDA (design 32768 / 3.30).
+ *          A jack in output mode reads back what its DAC drives (±50 mV).
+ * gScopeW is the audio sample count, published once per block, wrapping at
+ * bb::kScopeWrap (a multiple of the block and both rings). 0x62 snapshots it
+ * once and reads every channel from it (core/bb_scope.h). */
 static constexpr int kEnvPts = 8;
 static uint8_t ALCHEMY_SDRAM_BSS gEnv[bb::Engine::kMaxSlices][kEnvPts][2];
 static uint8_t ALCHEMY_SDRAM_BSS gPendEnv[bb::Engine::kMaxSlices][kEnvPts][2];
 static volatile uint8_t  gMatGen  = 0;
-static int8_t ALCHEMY_SDRAM_BSS gScopeRing[bb::kScopeChans][bb::kScopeRing];   /* SCOPE */
-static volatile uint32_t gScopeW  = 0;                                          /* SCOPE: absolute sample count, wraps */
+static int8_t ALCHEMY_SDRAM_BSS gScopeRing[bb::kScopeChans][bb::kScopeRing];       /* SCOPE: audio tier */
+static int8_t ALCHEMY_SDRAM_BSS gScopeCv[bb::kScopeCvChans][bb::kScopeCvRing];     /* SCOPE: cv tier */
+static volatile uint32_t gScopeW  = 0;                                              /* SCOPE: audio sample count, wraps at kScopeWrap */
+static const volatile uint16_t* gScopeCvPtr[bb::kScopeCvChans] = {};                /* SCOPE: ADC1 DMA slots of J3..J8 (set before audio starts) */
+static uint16_t gScopeCvZero[bb::kScopeCvChans] = { 32768u, 32768u, 32768u, 32768u, 32768u, 32768u };
+static float    gScopeCvScale = bb::ScopeCvScale(bb::kScopeCvVdda);
+static_assert(bb::kScopeCvDiv == (int)kEngineBlockSamples, "SCOPE: the cv tier stores one sample per audio block");
 
 /* Jack descriptors (browser labels; HYBRID/BRAIN map fills in at M3). */
 Jack jk1 ("audio_l", "Audio In L",  JackSig::AudioIn);
@@ -957,9 +974,14 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
     }
 
     const float v = gVol, send = gVerbSend;
-    const uint32_t scopeW = gScopeW;   /* SCOPE: one index for all four rings; published once, after the block */
+    const uint32_t scopeW = gScopeW;   /* SCOPE: one clock for every ring; published once, after the block */
     const float* const scopeInL = in[kCodecInChJ1];
     const float* const scopeInR = in[kCodecInChJ2];
+    {   /* SCOPE: the cv tier — six raw ADC reads, converted, one slot per block */
+        const int cs = bb::ScopeCvSlot(bb::ScopeCvPos(scopeW));
+        for(int c = 0; c < bb::kScopeCvChans; c++)
+            gScopeCv[c][cs] = gScopeCvPtr[c] ? bb::ScopeCvCode(*gScopeCvPtr[c], gScopeCvZero[c], gScopeCvScale) : 0;
+    }
     for(int i = 0; i < n; i++)
     {
         const float dl = gMono[i], dr = gOutR[i];   /* RECORD: stereo-aware mix; mono material has dr == dl */
@@ -971,14 +993,15 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
         if(r > 1.f) r = 1.f; else if(r < -1.f) r = -1.f;
         out[0][i] = l;
         out[1][i] = r;
-        /* SCOPE: full-rate int8 of out L, out R, in L, in R — four stores per sample */
+        /* SCOPE: full-rate int8 of out L, out R, in L, in R — four stores per sample (scopeW + i never
+         * crosses the wrap inside a block: kScopeWrap is a multiple of the block) */
         const int ss = bb::ScopeSlot(scopeW + (uint32_t)i);
         gScopeRing[0][ss] = bb::ScopeI8(l);
         gScopeRing[1][ss] = bb::ScopeI8(r);
         gScopeRing[2][ss] = bb::ScopeI8(scopeInL[i]);
         gScopeRing[3][ss] = bb::ScopeI8(scopeInR[i]);
     }
-    gScopeW = scopeW + (uint32_t)n;
+    gScopeW = bb::ScopeAdd(scopeW, (uint32_t)n);
     /* RECORD: feed the takes — the engine's (into a key, past the material)
      * and the shell's (the loop, into the other buffer); both return at once
      * when idle. Record Source: J1/J2, or what just left J9/J10 (the
@@ -2193,18 +2216,30 @@ static void ServiceLoad()
  *                     ×4 decimated, the newest 21 ms — the pre-SCOPE reply, kept for old pages
  *                   ← u8 chanMask (b0 out L · b1 out R · b2 in L · b3 in R), u8 decim (1..16),
  *                     u16 n (samples per channel; clamped to 512, to what fits max_body beside
- *                     the header, and to the ring: n·decim ≤ 3840), u8 flags (b0 trigger: start
- *                     the window on the most recent rising zero crossing of the FIRST selected
- *                     channel that leaves n·decim samples after it, hysteresis ±4 · b1 peak:
- *                     each sample = the max-magnitude one of its decim group, else the first ·
- *                     b2 at: + u32 pos — start there instead (a second request of the same
- *                     frame: the channels of one frame can be split over requests and stay
- *                     sample-aligned))
- *                   → u8 status, u8 chanMask, u8 decim, u16 n, u8 flags (b0 triggered ·
- *                     b1 pos honoured), u32 pos (ring position of the window start: absolute
- *                     sample count, so consecutive frames tell apart), then n × i8 per selected
- *                     channel in mask order. BAD_ARGS: chanMask 0 or > 0x0f, decim 0 / > 16,
- *                     n 0, a short body. Capability "scope2":1 in the descriptor (core/bb_scope.h).
+ *                     the header, and to each tier's ring at its decimation), u8 flags (b0 trigger:
+ *                     start the window on the most recent rising crossing of the trigger level on
+ *                     the trigger channel — the first selected, audio before cv, unless the ext
+ *                     body names one — that leaves every selected tier's span after it, Schmitt
+ *                     hysteresis ±4 · b1 peak: each sample = the max-magnitude one of its decim
+ *                     group, else the first · b2 at: + u32 pos — start there instead (a second
+ *                     request of the same frame: the channels of one frame can be split over
+ *                     requests and stay sample-aligned) · b3 ext: the body continues after u32
+ *                     pos (present, read only with b2) with u8 maskHi (b0..b5 = J3..J8, the six
+ *                     CV jacks DC-coupled at ±5 V = ±127, one sample per audio block = 2 kHz),
+ *                     u8 cvDecim (1..64, on the cv ring), i8 trigLevel (0 for audio, 25 ≈ 1 V
+ *                     for a gate), u8 trigSrc (0 = first selected · 0x80 | 0..3 an audio channel
+ *                     · 0x80 | 4..9 = J3..J8; need not be selected))
+ *                   → u8 status, u8 chanMask, u8 decim, u16 n, u8 flags (b0 triggered · b1 pos
+ *                     honoured · b2 ext header follows · b3 detached: one tier could not hold the
+ *                     window's start — an audio ring of 1.4 s under a cv window that starts
+ *                     seconds ago — and shows its newest window), u32 pos (the window start on
+ *                     the audio sample clock, wrapping at 1 610 612 736 = 24·2^26; the cv start is
+ *                     pos / 24), [ext: u8 maskHi, u8 cvDecim, u8 cvDiv (24), u8 trigSrc (the
+ *                     channel the trigger ran on, 255 none)], then n × i8 per selected audio
+ *                     channel in mask order, then per selected cv jack J3..J8. BAD_ARGS: no
+ *                     channel, mask bits past the channels, decim 0 / > 16, cvDecim 0 / > 64,
+ *                     n 0, a bad trigSrc, a short body. Descriptor: "scope2":2 (1 = the audio
+ *                     body without ext). core/bb_scope.h has the rules; docs/packages/scope.md.
  *   0x63 ACTION     ← u8 op [,args]: 0 dice · 1 reslice · 2 mute toggle ·
  *                     3 punch(u8 step, u8 slice) · 4 flow(u8 on) ·
  *                     5 scrub(u8 depth) · 6 load(u8 fileIdx)      → u8 status */
@@ -2250,8 +2285,9 @@ struct StateExt : hostlink::IHostlinkExtension
     {
         /* WEB: wave/table/hits (0x64..0x66) advertised so the page can feature-detect the Kit tab. */
         /* SETS: "sets":1 = ACTION 14 / 15 and the 219.. state tail. */
-        /* SCOPE: "scope2":1 = the four-channel 0x62 body (chanMask / decim / n / flags) beside the empty-body reply. */
-        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102,\"sets\":1,\"scope2\":1}";
+        /* SCOPE: "scope2":2 = the 0x62 body (chanMask / decim / n / flags) beside the empty-body reply, with the
+         * ext form (J3..J8 as CV channels, cvDecim, trigger level and source); 1 was the audio-only body. */
+        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102,\"sets\":1,\"scope2\":2}";
     }
     /* WEB: one float → i8 (±127), saturating. */
     static int8_t ToI8(float v)
@@ -2333,10 +2369,10 @@ struct StateExt : hostlink::IHostlinkExtension
                 w.Bytes(&gEnv[first][0][0], (size_t)n * kEnvPts * 2u);
                 return;
             }
-            /* SCOPE: one snapshot of the write index serves every channel (sample-aligned);
-             * the pure routines in core/bb_scope.h do the window, trigger and decimation.
-             * Worst case: one pass over 3840 samples for the trigger plus 4 × 512 × 16 ring
-             * reads for a peak-decimated frame — well under a millisecond from SDRAM. */
+            /* SCOPE: one snapshot of the sample clock serves every channel of both tiers (time-aligned);
+             * the pure routines in core/bb_scope.h do the window, trigger and decimation. Worst case:
+             * a backward trigger walk over the usable ring (65 K samples in silence ≈ 0.3 ms) plus
+             * ≤ 10 × 512 × 64 ring reads for a peak-decimated frame — comparable to GET_WAVE. */
             case 0x62u:
             {
                 const uint32_t wpos = gScopeW;
@@ -2349,14 +2385,29 @@ struct StateExt : hostlink::IHostlinkExtension
                 }
                 bb::ScopeReq q;
                 if(!bb::ScopeParse(f.body, (int)f.len, (int)hostlink::kMaxBody, q)) { w.U8(2u); return; }   /* BAD_ARGS */
-                uint8_t fl = 0u;
-                const uint32_t start = bb::ScopeWindow(gScopeRing[bb::ScopeFirstChan(q.mask)], wpos, (int)q.n * (int)q.decim, q, fl);
-                w.U8(0u); w.U8(q.mask); w.U8(q.decim); w.U16(q.n); w.U8(fl); w.U32(start);
+                const int8_t* A[bb::kScopeChans]   = { gScopeRing[0], gScopeRing[1], gScopeRing[2], gScopeRing[3] };
+                const int8_t* C[bb::kScopeCvChans] = { gScopeCv[0], gScopeCv[1], gScopeCv[2], gScopeCv[3], gScopeCv[4], gScopeCv[5] };
+                const bb::ScopeWin win = bb::ScopeWindow(A, C, wpos, q);
+                const bool ext = (q.flags & bb::kScopeExt) != 0u;
+                w.U8(0u); w.U8(q.mask); w.U8(q.decim); w.U16(q.n); w.U8((uint8_t)(win.flags | (ext ? bb::kScopeExtReply : 0u))); w.U32(win.pos);
+                if(ext)
+                {
+                    const int ts = bb::ScopeTrigSource(q);
+                    w.U8(q.maskHi); w.U8(q.cvDecim); w.U8((uint8_t)bb::kScopeCvDiv);
+                    w.U8((uint8_t)(((q.flags & bb::kScopeTrig) && !(q.flags & bb::kScopeAt) && ts >= 0) ? ts : bb::kScopeTrigNone));
+                }
+                const bool peak = (q.flags & bb::kScopePeak) != 0u;
+                int8_t buf[bb::kScopeMaxN];
                 for(int c = 0; c < bb::kScopeChans; c++)
                 {
                     if(!(q.mask & (1u << c))) continue;
-                    int8_t buf[bb::kScopeMaxN];
-                    bb::ScopeExtract(gScopeRing[c], start, q.n, q.decim, (q.flags & bb::kScopePeak) != 0u, buf);
+                    bb::ScopeExtract(gScopeRing[c], bb::kScopeRing, bb::kScopeWrap, win.pos, q.n, q.decim, peak, buf);
+                    w.Bytes((const uint8_t*)buf, (size_t)q.n);
+                }
+                for(int c = 0; c < bb::kScopeCvChans; c++)
+                {
+                    if(!(q.maskHi & (1u << c))) continue;
+                    bb::ScopeExtract(gScopeCv[c], bb::kScopeCvRing, bb::kScopeCvWrap, win.cvPos, q.n, q.cvDecim, peak, buf);
                     w.Bytes((const uint8_t*)buf, (size_t)q.n);
                 }
                 return;
@@ -2525,6 +2576,20 @@ int main()
     if(gTicksPerUs == 0u) gTicksPerUs = 1u;
     gLastTick   = daisy::System::GetTick();
     locks.Init();                                   /* SDRAM arena is NOLOAD */
+    /* SCOPE: the cv tier reads ADC1's DMA slots for J3..J8 straight from the audio callback; the
+     * volts transform takes the calibration record's zero codes and VDDA (the same window
+     * AlchemyLabV2::Init applies), or the design values 32768 / 3.30 without a record. */
+    {
+        const V2Calibration& cal = hw.Calibration();
+        float vdda = cal.vdda_at_cal;
+        if(!(vdda >= 3.0f && vdda <= 3.6f)) vdda = bb::kScopeCvVdda;
+        gScopeCvScale = bb::ScopeCvScale(vdda);
+        for(int c = 0; c < bb::kScopeCvChans; c++)
+        {
+            gScopeCvPtr[c]  = hw.seed.adc.GetPtr((uint8_t)(kCvAdcOffset + c));
+            gScopeCvZero[c] = hw.IsCalibrated() && cal.jack[c].adc_zero_code != 0u ? cal.jack[c].adc_zero_code : 32768u;
+        }
+    }
     memset(&gBarScratchMem, 0, sizeof gBarScratchMem);
     bb::bardetail::gBarScratch = &gBarScratchMem;
     hw.j6.EnableCvOutput();   /* kick gate  */
