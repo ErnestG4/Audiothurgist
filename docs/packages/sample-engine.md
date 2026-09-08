@@ -58,7 +58,7 @@ both, but never concurrently with itself.
 | Call | Thread | Contract |
 |---|---|---|
 | `int KeySlice(int key) const` | either | The table entry key 0..23 plays (clamped both ways; always valid while `nTable > 0`). |
-| `bool SetKeySlice(int key, int slice)` | control | Point a key at any table entry. false = out of range. Reset by `SetMaterial`. |
+| `bool SetKeySlice(int key, int slice)` | control (one byte) | Point a key at any live table entry. false = out of range or a tombstone. New material resets the map; a re-apply of the same planes keeps it (EDIT-CORE). The audio-thread form is `ApplyEdit(SetKey)`. |
 | `void CallSlice(int idx, float rateMul, bool rev, bool punch, bool ratchet, float lenMul = 1.f, bool held = false, int key = -1)` | audio | The old call plus the rule. `held = false`: today's behaviour, byte-identical. `held = true`: the voice reads from the slice's start to **`ReadEnd(idx)`** — the material's end (`bufLen`) for a grid slice, its own end for a recorded one — with no zoom, no tail, no staccato; tagged `Voice::held`, `Voice::key = key`. Reversed and held reads back to the material's (or recording's) start. `idx` is clamped to `nTable - 1`, so a recorded entry can be called and punched. A ratcheted held call's double is held too. |
 | `void ReleaseKey(int key)` | audio | Every held voice tagged `key` fades out with the normal choke geometry (5 ms fixed, or the slice's adaptive release; a reversed voice flips forward first, value-continuous). One-shot voices are untouched; an unknown key is a no-op. |
 | `int ReadEnd(int idx) const` | either | A voice's read limit for table entry `idx` (above). No fade ever reads past it — a choke at the last grid slice must not play the first recording's attack. |
@@ -118,11 +118,24 @@ int rs, rl; if(engine.RecStop(rs, rl) > 0)
 
 ## Invariants
 
-1. `0 ≤ bufLen ≤ freePos ≤ bufCap`; every table entry lies in
-   `[0, freePos)`; grid entries in `[0, bufLen)`.
-2. `nSlices ≤ nTable ≤ kMaxTable`; entries `[nSlices, nTable)` each own a
-   distinct key (`tableKey`), and `keySlice[tableKey[t]] == t`.
-3. `keySlice[k]` is a valid table index for every `k` while `nTable > 0`.
+*Revised by EDIT-CORE (2026-09-08, [slice-edit-core.md](slice-edit-core.md)):
+entries past the grid are now **markers** — recordings, or spans of the
+break placed by the user — and may be tombstones; several keys may point
+at one entry; the same planes keep everything the user built.*
+
+1. `0 ≤ bufLen ≤ freePos ≤ bufCap`; every live table entry lies in
+   `[0, freePos)`; grid entries tile `[0, bufLen)` exactly, each at least
+   64 samples (`Engine::kGridMin`). A tombstone (`tableFlags & kFlagTomb`)
+   has `len == 0` and no key; its `start` is meaningless.
+2. `nSlices ≤ nTable ≤ kMaxTable`. A recorded entry `t ≥ nSlices` has
+   `tableKey[t]` = the key that recorded it (or −1 after Clear); no two
+   live entries share a `tableKey`; a marker placed by an edit has
+   `tableKey −1`. `keySlice[tableKey[t]] == t` holds right after the take
+   commits and after a re-apply, but a later `SetKey` / `SwapKeys` may
+   point that key elsewhere — `tableKey` is provenance (the red-warning
+   test), not the key map.
+3. `keySlice[k]` is a valid, live (non-tombstone) table index for every
+   `k` while `nTable > 0`; any number of keys may share an entry.
 4. Grid behaviour with no recordings is **byte-identical** to the
    pre-SAMPLE engine: the four PLAY goldens and the SAMPLE golden
    (`786e423d477968a2`: calls, chokes, a steal, adaptive fades, zoom, a
@@ -134,10 +147,21 @@ int rs, rl; if(engine.RecStop(rs, rl) > 0)
    control thread writes a region only between `RecStop` and
    `CommitSlice`/`RecDiscard`, when no table entry points into it and the
    take is stopped.
-7. `SetMaterial` on the same planes keeps recordings past the new
-   material (Options → Bars / Swing / Onsets / Classifier re-applies keep
-   the kit); a load into the other buffer starts over. Phase E's loader
-   should reload a set's table through `CommitSlice` after `SetMaterial`.
+7. `SetMaterial` on the same planes keeps every live entry past the grid
+   that still lies inside the used region — recordings past the material
+   **and markers inside the break** — unless it is a recording the new
+   material grew over (it began past the old `bufLen` and inside the new);
+   tombstones are compacted away and the looper's keyless events follow
+   the move. Keys follow their entries; a key on a grid slice keeps it when
+   `nSlices` holds, else takes the span default. User-moved grid boundaries
+   come back through the overlay when planes, length and count hold
+   (Options → Bars / Swing / Onsets / Sampling / Classifier re-applies keep
+   the kit and the edits). A load into the other buffer starts over. The
+   set loader reloads a set's table through `CommitSlice` after
+   `SetMaterial`, then `SetGridBoundaries` / `SetKeyTable`.
+8. `tableGen` (u8, never 0) moves on every table change — an edit, a
+   commit, a Clear, a `SetMaterial` — so a page holding an old generation
+   is refused (`EditStatus::Stale`) and refetches.
 
 ## Shell hooks landed (`/* SAMPLE */` fences in `src/audiothurgist.cpp`)
 
