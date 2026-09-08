@@ -419,6 +419,13 @@ static Sel gRecSrc;      /* 19 RECORD: what a take hears */
 static const char* kRecordDisp   = "{\"kind\":\"enum\",\"labels\":[\"Off\",\"Arm (B3 tap or J6 starts a loop take)\"]}";
 static Sel gRecord;      /* 20 RECORD: loop record into the break; disarms after one take */
 /* RECORD end */
+/* EDIT-AUDITION (docs/packages/slice-edit-proto.md): the reaction allowance a
+ * tap-while-playing mark is pulled back by (ACTION 29 carries the page's
+ * value; the panel's lazy chop, package 7, reads this option). */
+static const char* kTapAllowDisp = "{\"kind\":\"enum\",\"labels\":[\"0 ms\",\"20 ms\",\"40 ms\",\"60 ms\",\"80 ms\"]}";
+static Sel gTapAllow = {2};    /* 22 EDIT: Tap Allowance, 40 ms */
+static constexpr uint8_t kTapAllowMs[5] = {0u, 20u, 40u, 60u, 80u};
+/* EDIT end */
 static volatile uint8_t gJackMapCur = 0xFFu;   /* applied map: 0 Brain, 1 Voice */
 static volatile int     gHitCd  = 0;           /* Voice map: J7 hit trigger countdown (audio) */
 static volatile float   gHitVel = 0.f;         /* Voice map: J8 velocity volts */
@@ -430,7 +437,7 @@ static volatile float   gHitVel = 0.f;         /* Voice map: J8 velocity volts *
  * fans them out to the plain structs above and raises their dirty flags. */
 struct Options : Serializable
 {
-    static constexpr size_t kBytes = 22u;   /* SAMPLE: 17 Key Plays · RECORD: 18 Sampling, 19 Record Source, 20 Record · LOOPER: 21 Quantize */
+    static constexpr size_t kBytes = 23u;   /* SAMPLE: 17 Key Plays · RECORD: 18 Sampling, 19 Record Source, 20 Record · LOOPER: 21 Quantize · EDIT: 22 Tap Allowance */
     size_t SerializedSize() const override { return kBytes; }
     void   Serialize(uint8_t* o) const override
     {
@@ -442,6 +449,7 @@ struct Options : Serializable
         o[17] = gKeyPlays.sel;   /* SAMPLE */
         o[18] = gSampling.sel; o[19] = gRecSrc.sel; o[20] = gRecord.sel;   /* RECORD */
         o[21] = gQuantize.sel;                                              /* LOOPER */
+        o[22] = gTapAllow.sel;                                              /* EDIT */
     }
     static void Put(Sel& s, uint8_t v, uint8_t max)
     {
@@ -464,9 +472,10 @@ struct Options : Serializable
         Put(gKeyPlays, in[17], 1);   /* SAMPLE */
         Put(gSampling, in[18], 1); Put(gRecSrc, in[19], 1); Put(gRecord, in[20], 1);   /* RECORD */
         Put(gQuantize, in[21], 2);                                                    /* LOOPER */
+        Put(gTapAllow, in[22], 4);                                                    /* EDIT */
         return true;
     }
-    uint32_t SchemaHash() const override { return 0x4F505436u; /* 'OPT6' (22 bytes) */ }
+    uint32_t SchemaHash() const override { return 0x4F505437u; /* 'OPT7' (23 bytes) */ }
     bool     Describe(hostlink::ComponentWriter& w) const override
     {
         using hostlink::FieldType;
@@ -495,6 +504,7 @@ struct Options : Serializable
         ok &=     w.Field("record",       "Record",      20, FieldType::Enum, 0.f, kRecordDisp,    2u);
         /* RECORD end */
         /* LOOPER */ ok &= w.Field("quantize", "Quantize", 21, FieldType::Enum, 0.f, kQuantizeDisp, 3u); /* LOOPER end */
+        /* EDIT */   ok &= w.Field("tap.allow", "Tap Allowance", 22, FieldType::Enum, 0.f, kTapAllowDisp, 5u); /* EDIT end */
         return ok;
     }
 };
@@ -521,6 +531,52 @@ static volatile float   gRecPeak     = 0.f;     /* audio → render: the record 
 static float            gRecMix[kScratch];      /* the mono record mix (audio thread) */
 static float            gOutR[kScratch];        /* the engine's R render (audio thread) */
 /* ── end RECORD ────────────────────────────────────────────────────────── */
+/* ── EDIT (docs/packages/slice-edit-proto.md): the edit mailbox, the audition
+ * request and the audio thread's position snapshot. ─────────────────────
+ * One request slot, control → audio: the ACTION handler fills gEditReq
+ * (after bb::AnalyseEntry when the op wants metadata), publishes it behind a
+ * barrier and raises gEditPend; the audio thread applies it at block start
+ * (engine.ApplyEdit, before Process) and answers through gEditStatus /
+ * gEditIdx, clearing gEditPend. The handler waits for the clear by the
+ * clock (≤ 4 ms; a block is 0.5 ms), yielding to KeepClock, and answers
+ * BAD_STATE on a timeout. Edits are refused outright while a take is in
+ * flight (the tail's recState ≠ 0 — the replacement take's commit is the
+ * one control-thread write of a live entry left, see slice-edit-core.md),
+ * while a set op runs or waits, and while a material swap is pending. */
+static bb::EditReq        gEditReq;                /* the slot: written before gEditPend rises (dmb) */
+static volatile bool      gEditPend   = false;     /* control → audio: apply it; audio clears = the ack */
+static volatile uint8_t   gEditStatus = 0;         /* audio → control: the EditStatus of the last apply */
+static volatile int       gEditIdx    = -1;        /* audio → control: the new entry (ADD / SPLIT), else −1 */
+static volatile uint32_t  gSrcPos     = 0;         /* audio → control: engine.SrcPos() once per block (state tail 258) */
+/* EDIT-AUDITION: ACTION 27 / 28 → engine.CallRegion / ReleaseRegion. At
+ * most one request is held and at most ten go out a second: a request that
+ * lands inside the 100 ms window replaces the held one and goes out when
+ * the window ends (OnPoll), so a drag's LAST position always sounds. */
+static volatile bool      gAudReq   = false;       /* control → audio: call the region below */
+static volatile int       gAudStart = 0, gAudLen = 0;
+static volatile uint8_t   gAudFlags = 0;
+static volatile bool      gAudRel   = false;       /* control → audio: ReleaseRegion (before any call) */
+static bool               gAudHeld  = false;       /* control: a request waits for the rate window */
+static int                gAudHeldStart = 0, gAudHeldLen = 0;
+static uint8_t            gAudHeldFlags = 0;
+static uint32_t           gAudLastMs = 0;          /* control: when the last request went out (ms) */
+static constexpr uint32_t kAudMinMs  = 100u;
+static constexpr int      kEditMsToSamp = (int)(kSr / 1000.f);   /* 48: the shell's ms → samples */
+static void PostAudition(int start, int len, uint8_t flags)
+{
+    gAudStart = start; gAudLen = len; gAudFlags = flags;
+    __asm__ volatile("dmb" ::: "memory");
+    gAudReq    = true;
+    gAudLastMs = daisy::System::GetNow();
+}
+static void ServiceAudition()   /* OnPoll: the held request goes out when the window ends */
+{
+    if(!gAudHeld) return;
+    if((uint32_t)(daisy::System::GetNow() - gAudLastMs) < kAudMinMs) return;
+    gAudHeld = false;
+    PostAudition(gAudHeldStart, gAudHeldLen, gAudHeldFlags);
+}
+/* ── end EDIT ──────────────────────────────────────────────────────────── */
 /* ── SETS ── sets on the card (docs/packages/sample-sets.md): sets/<name>.wav
  * + sets/<name>.json, and presets/<slot>.json backups. Control thread only,
  * under SdCard::BusyGuard; every long file loop yields to the clock and, every
@@ -854,6 +910,21 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
     if(gRelKey >= 0) { engine.ReleaseKey(gRelKey); gRelKey = -1; }   /* the fall preceded the rise: release first (review M3) */
     if(gCallReq)     { engine.CallSlice(gCallIdx, gCallMul, gCallRev, gCallPunch, gCallRat, gCallLen, gCallHeld, gCallKey); gCallReq = false; }
     /* SAMPLE end */
+    /* EDIT: one edit per block, before Process; clearing the flag is the ack */
+    if(gEditPend)
+    {
+        __asm__ volatile("dmb" ::: "memory");
+        int idx = -1;
+        const bb::EditReq req = gEditReq;
+        gEditStatus = (uint8_t)engine.ApplyEdit(req, &idx);
+        gEditIdx    = idx;
+        __asm__ volatile("dmb" ::: "memory");
+        gEditPend   = false;
+    }
+    /* EDIT-AUDITION: the release precedes the call it belongs to */
+    if(gAudRel) { engine.ReleaseRegion(); gAudRel = false; }
+    if(gAudReq) { engine.CallRegion(gAudStart, gAudLen, 1.f, gAudFlags); gAudReq = false; }
+    /* EDIT end */
 
     int n = (int)size;
     if(n > kScratch) n = kScratch;
@@ -914,6 +985,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
     /* ── end CLOCK ─────────────────────────────────────────────────────── */
 
     engine.Process(gMono, gOutR, n);   /* RECORD: both planes (mono material copies L to R) */
+    gSrcPos = (uint32_t)engine.SrcPos();   /* EDIT: the youngest voice's material position, for the tail and TAP_MARK */
 
     /* per-class trigger bitmask → ARM gate countdowns (sample-accurate).
      * The CV writes themselves happen in OnPoll, never here: J3–J6 are
@@ -1082,6 +1154,7 @@ static void OnFrame()
 static void OnPoll(uint32_t /*t_ms*/)
 {
     gDiagPhase = 1;
+    ServiceAudition();   /* EDIT-AUDITION: a rate-limited audition waiting for its window */
     if(gNeedNativeTempo)
     {
         gNeedNativeTempo = false;
@@ -2271,7 +2344,28 @@ static void ServiceLoad()
  *                   179 u32 freePos · 183 u32 bufCap · 187 u8 stereo · 188 u8 inLevel ·
  *                   189 u8 nTable · 190 u32 bufLen · 194 i8 keySlice[24] · 218 u8 keyPlays ·
  *                   SETS: 219 u8 setState · 220 u8 setProgress · 221 u8 setResult ·
- *                   222 u8 setSeq · 223 char setName[32] (ends at 255) */
+ *                   222 u8 setSeq · 223 char setName[32] (ends at 255) ·
+ *                   EDIT: 255 u8 tableGen · 256 u8 undoDepth (0 until EDIT-UNDO) · 257 u8 selSlice
+ *                   (255 until EDIT-PANEL) · 258 u32 srcPos (the youngest voice's material position,
+ *                   snapshotted by the audio thread once per block) — ends at 262
+ *   EDIT (docs/packages/slice-edit-proto.md; capability "edit":1; every body may carry a
+ *   trailing u8 gen, 0 = unchecked, else it must equal tableGen or the op is BAD_STATE):
+ *   0x63 ACTION     16 SET_BOUNDARY(u8 i, u32 pos) · 17 SET_ENTRY(u8 t, u32 start, u32 len) ·
+ *                   18 ADD_ENTRY(u8 key | 255 none, u32 start, u32 len, u8 flags b0 orange) ·
+ *                   19 SPLIT(u8 t, u32 pos) · 20 MERGE(u8 t) · 21 TOMBSTONE(u8 t) ·
+ *                   22 SET_KEY(u8 key, u8 t) · 23 SWAP_KEYS(u8 a, u8 b) · 24 NUDGE_ALL(i16 ms, u8 which
+ *                   0 grid / 1 markers) · 25 PROMOTE(u8 t, u8 i) · 26 FROM_ONSETS(u8 thresh, u16 minGapMs:
+ *                   grey markers inside the break go, one grey marker per onset whose slice salience ×255
+ *                   ≥ thresh, ≥ minGap apart, each to the next such onset) · 27 AUDITION(u32 start,
+ *                   u16 lenMs, u8 flags b0 from-end: start is the END, play the last lenMs up to it ·
+ *                   b1 loop until RELEASE; ≤ 10/s, a later one replaces) · 28 RELEASE · 29 TAP_MARK
+ *                   (u8 snapMs, u8 allowMs: srcPos at receipt − allow, snapped to an onset within ±snap,
+ *                   to the next onset or 250 ms, orange)
+ *                   → u8 status (0 OK · 2 BAD_ARGS · 3 BAD_STATE: a stale gen, a take in flight, a set
+ *                   op, a swap pending, the table full, no material), then on success u8 tableGen, then
+ *                   for 18 / 19 / 29 u8 newIdx, for 26 u8 count. 27 / 28 answer u8 status alone.
+ *   0x65 GET_TABLE  ← [u8 first, u8 count, u8 form] — form 1 = entries carry a trailing u8 flags
+ *                   (b0 orange · b1 tombstone), 14 bytes each; absent / 0 = the 13-byte form. */
 /* WEB → RECORD: ACTION 9 / 10. -1 = nothing requested; the consumer clears
  * the flag after acting on it (the same path as the panel's record gestures). */
 static volatile int8_t  gWebRecArm   = -1;    /* WEB → RECORD: arm a take into this key */
@@ -2280,6 +2374,185 @@ static volatile int8_t  gWebRecClear = -1;    /* WEB → RECORD: clear this key'
 static volatile bool    gWebLooperUndo  = false;   /* WEB → LOOPER */
 static volatile bool    gWebLooperClear = false;   /* WEB → LOOPER */
 /* WEB */
+
+/* ── EDIT: the ACTION 16..29 handler's helpers (control thread) ─────────── */
+/* The fields after the op byte, little-endian; Gen() is the byte after them. */
+struct EditBody
+{
+    const uint8_t* p; int n, at;
+    uint8_t  U8()  { return p[at++]; }
+    uint16_t U16() { uint16_t v = (uint16_t)(p[at] | (p[at + 1] << 8)); at += 2; return v; }
+    uint32_t U32() { uint32_t v = (uint32_t)p[at] | ((uint32_t)p[at + 1] << 8) | ((uint32_t)p[at + 2] << 16) | ((uint32_t)p[at + 3] << 24); at += 4; return v; }
+    uint8_t  Gen() const { return at < n ? p[at] : 0u; }
+};
+static const uint8_t kEditNeed[14] = {5u, 9u, 10u, 5u, 1u, 1u, 2u, 2u, 3u, 2u, 3u, 7u, 0u, 2u};   /* field bytes of ops 16..29 */
+/* HostLink status for an EditStatus: Ok → 0; a refusal of the arguments → BAD_ARGS; a refusal of the
+ * moment (stale gen, no room, no material) → BAD_STATE. */
+static uint8_t EditToStatus(bb::EditStatus s)
+{
+    switch(s)
+    {
+        case bb::EditStatus::Ok: return 0u;
+        case bb::EditStatus::Stale: case bb::EditStatus::NoMaterial: case bb::EditStatus::Full: return 3u;
+        default: return 2u;
+    }
+}
+/* Nothing may be edited while a take is in flight (the tail's recState ≠ 0), a set op runs or waits,
+ * a material swap is pending, or a request is still in the slot. */
+static bool EditBusy()
+{
+    const bool rec = gKeyTake || gTakeActive || gKeyArm || gRecord.sel == 1 || engine.recArmed || engine.recPending;
+    return rec || gSetState || gSetReq || gLoadReq || gApply || gReapply || gEditPend;
+}
+/* Post one request and wait for the audio thread's answer — by the clock, not by iterations, yielding
+ * to KeepClock. A timeout (the audio thread never ran: 4 ms is eight blocks) reads as NoMaterial. */
+static bb::EditStatus PostEdit(const bb::EditReq& r, int* idx)
+{
+    if(idx) *idx = -1;
+    gEditReq = r;
+    __asm__ volatile("dmb" ::: "memory");
+    gEditPend = true;
+    const uint32_t t0 = TickNow();
+    while(gEditPend && (TickNow() - t0) < 4000u * gTicksPerUs) bb::Yield();
+    if(gEditPend) { gEditPend = false; return bb::EditStatus::NoMaterial; }
+    __asm__ volatile("dmb" ::: "memory");
+    if(idx) *idx = gEditIdx;
+    return (bb::EditStatus)gEditStatus;
+}
+/* The strength of an onset, 0..255: the onset table carries positions only, so it is the salience of
+ * the grid slice the onset falls in (gSal, the shell's live copy). */
+static uint8_t OnsetStrength(int p)
+{
+    for(int k = 0; k < engine.nSlices; k++)
+    {
+        const int a = engine.slices[k].start, l = engine.slices[k].len;
+        if(p >= a && p < a + l) { float s = gSal[k]; if(s < 0.f) s = 0.f; if(s > 1.f) s = 1.f; return (uint8_t)(s * 255.f + 0.5f); }
+    }
+    return 0u;
+}
+/* AnalyseEntry for a new marker's span, on this thread (yields as it goes), packed into the request. */
+static void EditMeta(bb::EditReq& r)
+{
+    bb::AnalyseEntry(engine, r.start, r.len, r.meta, gClass.mode);
+    r.flags |= bb::EditReq::kMeta;
+}
+/* ACTION 16..29. Writes the whole reply. */
+static void HandleEdit(uint8_t op, const hostlink::ParsedFrame& f, hostlink::FrameWriter& w)
+{
+    using bb::EditOp; using bb::EditReq; using bb::EditStatus;
+    const int need = kEditNeed[op - 16u];
+    if((int)f.len < 1 + need) { w.U8(2u); return; }   /* BAD_ARGS */
+    EditBody b = {f.body, (int)f.len, 1};
+    /* the audition voice: no table, no gen — only the rate window and the material */
+    if(op == 27u || op == 28u)
+    {
+        if(!engine.buf || engine.freePos < 1) { w.U8(3u); return; }
+        if(op == 28u) { gAudHeld = false; gAudRel = true; w.U8(0u); return; }
+        const int start = (int)b.U32(); const int len = (int)b.U16() * kEditMsToSamp; const uint8_t flags = b.U8();
+        if(start < 0 || start > engine.freePos || len < bb::Engine::kGridMin || (flags & ~(bb::Engine::kRegionFromEnd | bb::Engine::kRegionLoop))) { w.U8(2u); return; }
+        if((uint32_t)(daisy::System::GetNow() - gAudLastMs) >= kAudMinMs) { gAudHeld = false; PostAudition(start, len, flags); }
+        else { gAudHeldStart = start; gAudHeldLen = len; gAudHeldFlags = flags; gAudHeld = true; }
+        w.U8(0u); return;
+    }
+    if(EditBusy()) { w.U8(3u); return; }   /* BAD_STATE */
+    EditReq r;
+    int  third = -1;   /* the reply's third byte: newIdx / count, or none */
+    bool withThird = false;
+    switch(op)
+    {
+        case 16: r.op = EditOp::SetBoundary; r.i = b.U8(); r.start = (int)b.U32(); break;
+        case 17: r.op = EditOp::SetEntry; r.t = b.U8(); r.start = (int)b.U32(); r.len = (int)b.U32(); break;
+        case 18:
+        {
+            const uint8_t key = b.U8();
+            r.op = EditOp::AddEntry; r.key = key < bb::Engine::kKeys ? key : -1; r.start = (int)b.U32(); r.len = (int)b.U32();
+            r.flags = b.U8() & EditReq::kOrange; withThird = true;
+            break;
+        }
+        case 19: r.op = EditOp::Split; r.t = b.U8(); r.start = (int)b.U32(); withThird = true; break;
+        case 20: r.op = EditOp::Merge; r.t = b.U8(); break;
+        case 21: r.op = EditOp::Tombstone; r.t = b.U8(); break;
+        case 22: r.op = EditOp::SetKey; r.key = b.U8(); r.t = b.U8(); break;
+        case 23: r.op = EditOp::SwapKeys; r.a = b.U8(); r.b = b.U8(); break;
+        case 24: { const int16_t ms = (int16_t)b.U16(); r.op = EditOp::NudgeAll; r.a = (int)ms * kEditMsToSamp; r.b = b.U8(); break; }
+        case 25: r.op = EditOp::Promote; r.t = b.U8(); r.i = b.U8(); break;
+        case 26:
+        {
+            /* FROM_ONSETS: one op, several applies — the grey markers inside the break go first (a
+             * recording, an orange marker and anything past the break stay), then one grey marker per
+             * accepted onset, each spanning to the next accepted one (the last to the break's end),
+             * analysed on this thread. The gen is checked by the first apply only. */
+            const uint8_t thresh = b.U8(); const int minGap = (int)b.U16() * kEditMsToSamp;
+            uint8_t gen = b.Gen();
+            if(engine.nSlices < 1 || engine.bufLen < 1) { w.U8(3u); return; }
+            EditStatus st = EditStatus::Ok;
+            for(int t = engine.nSlices; t < engine.nTable && st == EditStatus::Ok; t++)
+            {
+                const uint8_t fl = engine.TableFlags(t);
+                if((fl & (bb::Engine::kFlagTomb | bb::Engine::kFlagOrange)) || engine.tableKey[t] >= 0 || engine.slices[t].start >= engine.bufLen) continue;
+                EditReq d; d.op = EditOp::Tombstone; d.t = t; d.gen = gen;
+                st = PostEdit(d, nullptr);
+                if(st == EditStatus::Ok) gen = 0u;
+                bb::Yield();
+            }
+            if(st != EditStatus::Ok) { w.U8(EditToStatus(st)); return; }
+            int acc[kMaxOnsets]; int na = 0, last = -1;
+            const int n = gPendN < 0 ? 0 : (gPendN > kMaxOnsets ? kMaxOnsets : gPendN);
+            for(int i = 0; i < n; i++)
+            {
+                const int p = gPendOnsets[i];
+                if(p < 0 || p >= engine.bufLen || OnsetStrength(p) < thresh) continue;
+                if(last >= 0 && p - last < minGap) continue;
+                acc[na++] = p; last = p;
+            }
+            int count = 0;
+            for(int j = 0; j < na; j++)
+            {
+                const int end = j + 1 < na ? acc[j + 1] : engine.bufLen;
+                if(end - acc[j] < bb::Engine::kRecMin) continue;
+                EditReq a; a.op = EditOp::AddEntry; a.key = -1; a.start = acc[j]; a.len = end - acc[j]; a.flags = 0u; a.gen = gen;
+                EditMeta(a);
+                int idx = -1;
+                st = PostEdit(a, &idx);
+                if(st != EditStatus::Ok) break;
+                gen = 0u; count++;
+                bb::Yield();
+            }
+            if(st != EditStatus::Ok && !(st == EditStatus::Full && count > 0)) { w.U8(EditToStatus(st)); return; }
+            w.U8(0u); w.U8(engine.tableGen); w.U8((uint8_t)count);
+            return;
+        }
+        case 29:
+        {
+            /* TAP_MARK: the audio thread's position snapshot at receipt, the rule in core/bb_edit.h */
+            const int snap = (int)b.U8() * kEditMsToSamp, allow = (int)b.U8() * kEditMsToSamp;
+            const bb::TapMark m = bb::TapMarkAt((int)gSrcPos, allow, snap, gPendOnsets, gPendN < 0 ? 0 : (gPendN > kMaxOnsets ? kMaxOnsets : gPendN),
+                                                engine.freePos, 250 * kEditMsToSamp, bb::Engine::kRecMin);
+            r.op = EditOp::AddEntry; r.key = -1; r.start = m.start; r.len = m.len; r.flags = EditReq::kOrange; withThird = true;
+            break;
+        }
+        default: w.U8(2u); return;
+    }
+    r.gen = b.Gen();
+    if(r.op == EditOp::AddEntry || r.op == EditOp::Split)
+    {
+        /* the new span's class / salience / density / hit, on this thread; a bad span gets the silent
+         * default and ApplyEdit's own refusal */
+        if(r.op == EditOp::AddEntry) EditMeta(r);
+        else if(r.t >= engine.nSlices && r.t < engine.nTable)
+        {
+            const int end = engine.slices[r.t].start + engine.slices[r.t].len;
+            if(end > r.start) { EditReq m = r; m.start = r.start; m.len = end - r.start; EditMeta(m); r.meta = m.meta; r.flags |= EditReq::kMeta; }
+        }
+    }
+    const EditStatus st = PostEdit(r, &third);
+    const uint8_t status = EditToStatus(st);
+    w.U8(status);
+    if(status != 0u) return;
+    w.U8(engine.tableGen);
+    if(withThird) w.U8((uint8_t)(third < 0 ? 255 : third));
+}
+/* ── end EDIT helpers ──────────────────────────────────────────────────── */
 
 struct StateExt : hostlink::IHostlinkExtension
 {
@@ -2291,7 +2564,8 @@ struct StateExt : hostlink::IHostlinkExtension
         /* SETS: "sets":1 = ACTION 14 / 15 and the 219.. state tail. */
         /* SCOPE: "scope2":2 = the 0x62 body (chanMask / decim / n / flags) beside the empty-body reply, with the
          * ext form (J3..J8 as CV channels, cvDecim, trigger level and source); 1 was the audio-only body. */
-        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102,\"sets\":1,\"scope2\":2}";
+        /* EDIT: "edit":1 = ACTION 16..29, the 255.. state tail, GET_TABLE's flags form. */
+        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102,\"sets\":1,\"scope2\":2,\"edit\":1}";
     }
     /* WEB: one float → i8 (±127), saturating. */
     static int8_t ToI8(float v)
@@ -2360,6 +2634,9 @@ struct StateExt : hostlink::IHostlinkExtension
                  * the set the material came from (NUL-padded; empty = a loose file or a take). */
                 w.U8(gSetState); w.U8(gSetProgress); w.U8(gSetResult); w.U8(gSetSeq);
                 w.Bytes((const uint8_t*)gSetCurName, sizeof gSetCurName);
+                /* EDIT tail (255..261): u8 tableGen · u8 undoDepth (0 until EDIT-UNDO) · u8 selSlice (255 until
+                 * EDIT-PANEL) · u32 srcPos (the audio thread's snapshot: the youngest voice's material position). */
+                w.U8(engine.tableGen); w.U8(0u); w.U8(255u); w.U32(gSrcPos);
                 return;
             }
             case 0x61u:
@@ -2489,6 +2766,9 @@ struct StateExt : hostlink::IHostlinkExtension
                         gSetReq = op == 14u ? 1u : 2u;
                         break;
                     }
+                    /* EDIT: 16..29 — the table ops, the audition voice, the tap mark (HandleEdit writes the reply) */
+                    case 16: case 17: case 18: case 19: case 20: case 21: case 22: case 23: case 24: case 25: case 26: case 27: case 28: case 29:
+                        HandleEdit(op, f, w); return;
                     default: w.U8(2u); return;   /* BAD_ARGS */
                 }
                 w.U8(0u);
@@ -2528,12 +2808,14 @@ struct StateExt : hostlink::IHostlinkExtension
                 }
                 return;
             }
-            /* WEB: 0x65 GET_TABLE — every table entry, grid then recorded, 13 bytes each. */
+            /* WEB: 0x65 GET_TABLE — every table entry, grid then recorded, 13 bytes each;
+             * EDIT: a third request byte (form 1) appends u8 flags (b0 orange · b1 tombstone) → 14. */
             case 0x65u:
             {
                 const int nt = engine.nTable;
                 int first = f.len >= 1 ? f.body[0] : 0;
                 int count = f.len >= 2 ? f.body[1] : 39;
+                const bool wide = f.len >= 3 && f.body[2] != 0u;   /* EDIT */
                 if(first > nt) { w.U8(2u); return; }   /* BAD_ARGS (first == nt → empty reply) */
                 if(count > 39) count = 39;
                 if(first + count > nt) count = nt - first;
@@ -2549,6 +2831,7 @@ struct StateExt : hostlink::IHostlinkExtension
                     /* sliceDens is keyframes per sample; the adaptive fade spans 0.02 (sparse) .. 0.2 (dense) */
                     float d = engine.sliceDens[t] * 5.f; if(d < 0.f) d = 0.f; if(d > 1.f) d = 1.f;
                     w.U8((uint8_t)(d * 255.f + 0.5f));
+                    if(wide) w.U8(engine.TableFlags(t));   /* EDIT */
                 }
                 return;
             }
