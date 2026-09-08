@@ -76,9 +76,10 @@ committed by itself; the looper count drifts up; every edit op, the audition
 voice and the tap mark answer as the firmware would); `?demo=old` sends a
 pre-v0.8.0 state body, `?demo=short` the 167-byte CLOCK body (no flags)
 and `?demo=v099` the 176-byte body (no sample-mode tail), `?demo=nosets`
-the 219-byte body (no sets tail) and `?demo=noedit` a firmware without
+the 219-byte body (no sets tail), `?demo=noedit` a firmware without
 slice editing (no `"edit"` capability, the 255-byte body, the 13-byte
-table) so you can see the fallbacks; **`?demo=scope`** opens the Scope tab (`cv` / `gates`
+table) and `?demo=noundo` one without the undo journal (the 262-byte body)
+so you can see the fallbacks; **`?demo=scope`** opens the Scope tab (`cv` / `gates`
 press that preset, `noin` leaves J1/J2 silent, `body512` announces the
 protocol's default `max_body` so a frame takes two requests). `#kit` / `#scope` / `#opts` / `#man` open a tab
 directly.
@@ -172,8 +173,9 @@ directly.
   histogram** (bars = each onset's strength, drag the line, *Make markers*
   = one `FROM_ONSETS`), **nudge all** ± N ms for the grid or the markers,
   **keys follow the grid**, and the **history** — the page's labels for
-  what it did, keyed by the table's generation, with Undo / Redo wired to
-  ACTION 30 / 31 and live once the firmware reports an undo depth. Every op
+  what it did, keyed by the table's generation, with Undo / Redo driving
+  the module's journal (ACTION 30 / 31, 64 steps; the undone entries are
+  struck through, the depths come from the tail). Every op
   carries the page's `tableGen`; a stale one is refetched and retried once,
   a take or a set op in flight is named, and a refusal reverts the handle.
   Details and the gesture table: `docs/packages/slice-edit-ui.md`.
@@ -277,7 +279,7 @@ merge, delete, promote, copy, keys, nudge, onsets, the Chop pad; a stale gen
 refetched and retried; a take in flight refused and named); and **the page
 itself, headless** — `index.html`'s inline script under a DOM stub in `vm`,
 connected to the fake through `?demo=kit`, driven through its canvases,
-cells, menu and panel, then `?demo=noedit`'s view-only fallback. 377
+cells, menu and panel, then `?demo=noedit`'s view-only fallback. 430
 checks. Pass `--golden <path>` if the SDK lives elsewhere.
 
 ## The GET_STATE body
@@ -304,6 +306,7 @@ u8 setState u8 setProgress u8 setResult u8 setSeq                 (219..222, SET
 char setName[32]                                                  (223..254, SETS)
 u8 tableGen u8 undoDepth u8 selSlice                              (255..257, EDIT)
 u32 srcPos                                                        (258..261, EDIT)
+u8 redoDepth                                                      (262, EDIT-UNDO)
 ```
 
 `recState`: 0 idle · 1 armed (waiting for the gate) · 2 taking · 3 pending
@@ -322,8 +325,10 @@ set the playing material came from (empty for a loose file or a take).
 `tableGen` (EDIT, capability `"edit": 1`) is the slice table's generation
 — never 0, bumped by every edit, take, clear, re-slice and set load; the
 page carries it back as an op's trailing `gen` and joins it to the Kit
-tab's refetch signature. `undoDepth` is 0 until EDIT-UNDO, `selSlice` 255
-(none) until EDIT-PANEL. `srcPos` is the material position of the youngest
+tab's refetch signature. `undoDepth` / `redoDepth` (EDIT-UNDO) are the
+module's journal depths in steps — Undo / Redo enable from them, and a
+262-byte body (no `redoDepth`) is a firmware without the journal;
+`selSlice` is 255 (none) until EDIT-PANEL. `srcPos` is the material position of the youngest
 sounding voice (else the current step's source), snapshotted by the audio
 thread once per block — the Chop pad's display, and what a TAP_MARK is
 timestamped from.
@@ -369,6 +374,8 @@ per op (`editBoundary(link, i, pos, gen)` …) resolving
 27 AUDITION      u32 start, u16 lenMs, u8 flags (b0 from-end · b1 loop)   the scratch voice, ≤ 10/s
 28 RELEASE       —                             ends the audition (5 ms fade)
 29 TAP_MARK      u8 snapMs, u8 allowMs         an orange marker at srcPos − allow, onset-snapped   → newIdx
+30 UNDO_EDIT     —                             one journal step back (64 deep; a take / load / new material ends the history)
+31 REDO_EDIT     —                             one step forward (a new edit clears the redo half)
 ```
 
 ## The scope (0x62)
@@ -442,7 +449,7 @@ number of bells, B2 rings the next change, Brain knobs unused).
 | scope (Scope tab)        | `0x62 SCOPE` (body, `scope2`)     | ≤ 30 frames/s; audio 4 × 253 or out L + 3 jacks × 252 per request at max_body 1024; trigger, peak, at-pos, the jacks' own decimation |
 | buttons, punch, scrub    | `0x63 ACTION`                     | 0 dice · 1 reslice · 2 mute · 3 punch · 4 flow · 5 scrub · 6 load · 7 clear locks · 8 page · 9 rec arm(key) · 10 rec clear(key) · 11 key plays(0/1) · 12 looper undo · 13 looper clear · 14 save set · 15 load set |
 | slice editing            | `0x63 ACTION` 16–29 (`"edit"`)    | the table ops with a gen, the audition voice, the tap mark — the table above; the Kit tab's editor drives them (`edit.js`) |
-| undo / redo              | `0x63 ACTION` 30 / 31             | wired; disabled until the tail's `undoDepth` is non-zero (EDIT-UNDO) |
+| undo / redo              | `0x63 ACTION` 30 / 31             | the module's journal (EDIT-UNDO); Undo enables from the tail's `undoDepth`, Redo from `redoDepth` |
 | kit waveform             | `0x64 GET_WAVE`                   | on demand, ≤ 3/s, cached windows            |
 | slice table              | `0x65 GET_TABLE`                  | when the state's table signature changes    |
 | onset ticks              | `0x66 GET_HITS`                   | when `matGen` changes                        |
