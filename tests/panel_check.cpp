@@ -133,13 +133,13 @@ int main()
     {
         NudgeBase b; b.nSlices = 16; b.freePos = 96000;
         /* slice 5 of a 6000-sample grid, neighbours at the computed places */
-        b.t = 5; b.start = 30000; b.end = 36000; b.prevStart = 24000; b.nextEnd = 42000;
+        b.t = 5; SetSpan(b, 30000, 36000); b.prevStart = 24000; b.nextEnd = 42000;
         NudgePlan p = PlanNudge(b, 0, MsToSamples(10, kSr), kSr);
         CHECK(p.kind == NudgeKind::Boundary && p.i == 5 && p.start == 30480, "start +10 ms → SET_BOUNDARY(5, 30480) (got i %d pos %d)", p.i, p.start);
         CHECK(p.audStart == 30480 && p.audLen == 5520 && !p.fromEnd, "audition: the new start, the whole (short) slice (len %d)", p.audLen);
         p = PlanNudge(b, 0, MsToSamples(-50, kSr), kSr);
         CHECK(p.kind == NudgeKind::Boundary && p.start == 27600 && p.audLen == 8400, "start −50 ms: the audition is the whole 175 ms slice (len %d)", p.audLen);
-        { NudgeBase L = b; L.end = 60000; L.nextEnd = 66000; p = PlanNudge(L, 0, 0, kSr); CHECK(p.kind == NudgeKind::Boundary && p.audLen == 12000, "a long slice: the audition caps at 250 ms"); p = PlanNudge(L, 1, 0, kSr); CHECK(p.fromEnd && p.audStart == 60000 && p.audLen == 12000, "…from the end too"); }
+        { NudgeBase L = b; SetSpan(L, 30000, 60000); L.nextEnd = 66000; p = PlanNudge(L, 0, 0, kSr); CHECK(p.kind == NudgeKind::Boundary && p.audLen == 12000, "a long slice: the audition caps at 250 ms"); p = PlanNudge(L, 1, 0, kSr); CHECK(p.fromEnd && p.audStart == 60000 && p.audLen == 12000, "…from the end too"); }
         p = PlanNudge(b, 1, MsToSamples(20, kSr), kSr);
         CHECK(p.kind == NudgeKind::Boundary && p.i == 6 && p.start == 36960 && p.fromEnd && p.audStart == 36960 && p.audLen == 6960, "end +20 ms → SET_BOUNDARY(6, 36960), audition from the end");
         /* clamps against the neighbours: 64 each side */
@@ -148,44 +148,61 @@ int main()
         CHECK(p.kind == NudgeKind::Boundary && p.start == 29964, "a start move keeps the predecessor 64 (got %d)", p.start);
         p = PlanNudge(b, 0, MsToSamples(50, kSr), kSr);
         CHECK(p.start == 32400 && p.start <= b.end - kGridMin, "+50 ms inside the slice");
-        NudgeBase d = b; d.start = 35900;
+        NudgeBase d = b; SetSpan(d, 35900, 36000);
         p = PlanNudge(d, 0, MsToSamples(50, kSr), kSr);
         CHECK(p.kind == NudgeKind::Boundary && p.start == 36000 - 64, "a start move keeps the slice itself 64");
         NudgeBase e = b; e.nextEnd = 36000 + 100;
         p = PlanNudge(e, 1, MsToSamples(50, kSr), kSr);
         CHECK(p.kind == NudgeKind::Boundary && p.start == 36036, "an end move keeps the successor 64");
         /* the edges of the grid */
-        NudgeBase f = b; f.t = 0; f.start = 0; f.end = 6000; f.prevStart = 0;
+        NudgeBase f = b; f.t = 0; SetSpan(f, 0, 6000); f.prevStart = 0;
         CHECK(PlanNudge(f, 0, 100, kSr).kind == NudgeKind::Refused, "slice 0's start is the material's: refused");
         CHECK(PlanNudge(f, 1, 100, kSr).kind == NudgeKind::Boundary && PlanNudge(f, 1, 100, kSr).i == 1, "slice 0's end is boundary 1");
-        NudgeBase g = b; g.t = 15; g.start = 90000; g.end = 96000;
+        NudgeBase g = b; g.t = 15; SetSpan(g, 90000, 96000);
         CHECK(PlanNudge(g, 1, 100, kSr).kind == NudgeKind::Refused, "the last slice's end is the material's: refused");
         CHECK(PlanNudge(g, 0, 100, kSr).kind == NudgeKind::Boundary && PlanNudge(g, 0, 100, kSr).i == 15, "the last slice's start is boundary 15");
         NudgeBase h; h.t = -1;
         CHECK(PlanNudge(h, 0, 100, kSr).kind == NudgeKind::Refused, "no selection: refused");
-        NudgeBase tight = b; tight.prevStart = 30000 - 64; tight.end = 30000 + 64;
+        NudgeBase tight = b; tight.prevStart = 30000 - 64; SetSpan(tight, 30000, 30064);
         p = PlanNudge(tight, 0, 0, kSr);
         CHECK(p.kind == NudgeKind::Boundary && p.start == 30000, "a slice already at both minima can only stay");
-        NudgeBase imp = b; imp.prevStart = 30000; imp.end = 30000 + 64;
+        NudgeBase imp = b; imp.prevStart = 30000; SetSpan(imp, 30000, 30064);
         CHECK(PlanNudge(imp, 0, 0, kSr).kind == NudgeKind::Refused, "no legal position → refused, nothing posted");
         CHECK(PlanNudge(b, 0, 0, kSr).start == 30000 && PlanNudge(b, 1, 0, kSr).start == 36000, "centre = no change");
+        /* origin vs current: a landed start move does not shift the start pot's origin, and the end pot clamps against the NEW start */
+        NudgeBase L = b; SetSpan(L, 30000, 30000 + 3000); L.nextEnd = 39000;
+        p = PlanNudge(L, 0, MsToSamples(50, kSr), kSr);
+        CHECK(p.kind == NudgeKind::Boundary && p.start == 32400, "start +50 ms on a 3000-sample slice → 32400");
+        Landed(L, p, 0);
+        CHECK(L.start == 32400 && L.origStart == 30000 && L.end == 33000, "landed: current start follows, the origin stays");
+        p = PlanNudge(L, 0, MsToSamples(25, kSr), kSr);
+        CHECK(p.start == 31200, "the next start offset is still from the origin (not cumulative)");
+        p = PlanNudge(L, 1, MsToSamples(-50, kSr), kSr);
+        CHECK(p.kind == NudgeKind::Boundary && p.i == 6 && p.start == 32400 + kGridMin, "an end move clamps against the moved start, not the origin (got %d)", p.start);
+        Landed(L, p, 1);
+        CHECK(L.end == 32464 && L.origEnd == 33000, "landed end");
+        NudgeBase M; M.t = 17; M.nSlices = 16; M.freePos = 100000; SetSpan(M, 50000, 56000);
+        p = PlanNudge(M, 1, MsToSamples(-50, kSr), kSr); Landed(M, p, 1);
+        CHECK(M.start == 50000 && M.end == 53600, "a marker's landed end");
+        p = PlanNudge(M, 0, MsToSamples(50, kSr), kSr);
+        CHECK(p.kind == NudgeKind::Entry && p.start == 52400 && p.len == 1200, "a marker's start move against its moved end");
     }
 
     SECTION("nudge → request: markers");
     {
-        NudgeBase b; b.nSlices = 16; b.freePos = 100000; b.t = 17; b.start = 50000; b.end = 56000;
+        NudgeBase b; b.nSlices = 16; b.freePos = 100000; b.t = 17; SetSpan(b, 50000, 56000);
         NudgePlan p = PlanNudge(b, 0, MsToSamples(-10, kSr), kSr);
         CHECK(p.kind == NudgeKind::Entry && p.t == 17 && p.start == 49520 && p.len == 6480, "start −10 ms → SET_ENTRY(17, 49520, 6480)");
         CHECK(p.audStart == 49520 && p.audLen == 6480 && !p.fromEnd, "audition from the new start");
         p = PlanNudge(b, 1, MsToSamples(30, kSr), kSr);
         CHECK(p.kind == NudgeKind::Entry && p.start == 50000 && p.len == 7440 && p.fromEnd && p.audStart == 57440, "end +30 ms, audition up to the new end");
-        NudgeBase c = b; c.start = 1000;
+        NudgeBase c = b; SetSpan(c, 1000, 56000);
         p = PlanNudge(c, 0, MsToSamples(-50, kSr), kSr);
         CHECK(p.kind == NudgeKind::Entry && p.start == 0 && p.len == 56000, "a marker's start clamps at 0");
-        NudgeBase d = b; d.end = 99000;
+        NudgeBase d = b; SetSpan(d, 50000, 99000);
         p = PlanNudge(d, 1, MsToSamples(50, kSr), kSr);
         CHECK(p.kind == NudgeKind::Entry && p.start + p.len == 100000, "a marker's end clamps at freePos");
-        NudgeBase e = b; e.end = b.start + 600;
+        NudgeBase e = b; SetSpan(e, 50000, 50600);
         p = PlanNudge(e, 0, MsToSamples(50, kSr), kSr);
         CHECK(p.kind == NudgeKind::Entry && p.len == kRecMin && p.start == e.end - kRecMin, "a start move keeps kRecMin");
         p = PlanNudge(e, 1, MsToSamples(-50, kSr), kSr);

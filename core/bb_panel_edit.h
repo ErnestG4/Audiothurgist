@@ -187,7 +187,8 @@ struct NudgeBase
 {
     int t         = -1;   // the selected entry
     int nSlices   = 0;
-    int start     = 0, end = 0;          // the entry's span at arm time
+    int origStart = 0, origEnd = 0;      // the span when the pots were armed: the offsets' origin
+    int start     = 0, end = 0;          // the span now (Landed() follows each posted nudge): the clamps' truth
     int prevStart = 0;    // grid: slice t−1's start (a start move keeps it ≥ kGridMin behind)
     int nextEnd   = 0;    // grid: slice t+1's end (an end move keeps it ≥ kGridMin ahead)
     int freePos   = 0;    // markers: the buffer's used extent
@@ -217,7 +218,7 @@ inline NudgePlan PlanNudge(const NudgeBase& b, int which, int offSamples, int sr
             if(b.t == 0) return p;
             const int lo = b.prevStart + kGridMin, hi = b.end - kGridMin;
             if(lo > hi) return p;
-            p.kind = NudgeKind::Boundary; p.i = b.t; p.start = ClampInt(b.start + offSamples, lo, hi);
+            p.kind = NudgeKind::Boundary; p.i = b.t; p.start = ClampInt(b.origStart + offSamples, lo, hi);
             const int len = b.end - p.start;
             p.audStart = p.start; p.audLen = len < aud ? len : aud; p.fromEnd = false;
         }
@@ -226,7 +227,7 @@ inline NudgePlan PlanNudge(const NudgeBase& b, int which, int offSamples, int sr
             if(b.t + 1 >= b.nSlices) return p;
             const int lo = b.start + kGridMin, hi = b.nextEnd - kGridMin;
             if(lo > hi) return p;
-            p.kind = NudgeKind::Boundary; p.i = b.t + 1; p.start = ClampInt(b.end + offSamples, lo, hi);
+            p.kind = NudgeKind::Boundary; p.i = b.t + 1; p.start = ClampInt(b.origEnd + offSamples, lo, hi);
             const int len = p.start - b.start;
             p.audStart = p.start; p.audLen = len < aud ? len : aud; p.fromEnd = true;
         }
@@ -234,8 +235,8 @@ inline NudgePlan PlanNudge(const NudgeBase& b, int which, int offSamples, int sr
     }
     /* marker: a free span, kRecMin long, inside [0, freePos) */
     int s = b.start, e = b.end;
-    if(which == 0) s = ClampInt(b.start + offSamples, 0, b.end - kRecMin);
-    else           e = ClampInt(b.end + offSamples, b.start + kRecMin, b.freePos);
+    if(which == 0) s = ClampInt(b.origStart + offSamples, 0, b.end - kRecMin);
+    else           e = ClampInt(b.origEnd + offSamples, b.start + kRecMin, b.freePos);
     if(s < 0 || e > b.freePos || e - s < kRecMin) return p;
     p.kind = NudgeKind::Entry; p.t = b.t; p.start = s; p.len = e - s;
     const int len = e - s;
@@ -243,6 +244,18 @@ inline NudgePlan PlanNudge(const NudgeBase& b, int which, int offSamples, int sr
     if(which == 0) { p.audStart = s; p.fromEnd = false; }
     else           { p.audStart = e; p.fromEnd = true; }
     return p;
+}
+
+/* A posted plan landed: the current span follows it; the origins stay. */
+inline void Landed(NudgeBase& b, const NudgePlan& p, int which)
+{
+    if(p.kind == NudgeKind::Boundary) { if(which == 0) b.start = p.start; else b.end = p.start; }
+    else if(p.kind == NudgeKind::Entry) { b.start = p.start; b.end = p.start + p.len; }
+}
+/* Arm: the span now is the origin. */
+inline void SetSpan(NudgeBase& b, int start, int end)
+{
+    b.origStart = b.start = start; b.origEnd = b.end = end;
 }
 
 /* ── The computed grid (Engine::SetMaterial's boundaries, for B2 hold =

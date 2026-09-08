@@ -65,6 +65,7 @@
 #include "bb_record.h"   /* RECORD: record input, kit map, take length, markers → cues, TakeRecorder */
 #include "bb_sets.h"     /* SETS: set naming, engine ↔ SetInfo, the load plan (docs/packages/sample-sets.md) */
 #include "bb_scope.h"    /* SCOPE: four-channel rings, trigger, decimation behind 0x62 (pure, host-tested) */
+#include "bb_panel_edit.h" /* EDIT-PANEL: the Edit page's walker, pickup, nudge plan, ring states (pure, host-tested) */
 #include <new>           /* SETS: placement-new for the NOLOAD SDRAM objects */
 
 using namespace alchemy;
@@ -1131,12 +1132,106 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
 }
 
 /* ── control frame ──────────────────────────────────────────────────── */
+/* ── EDIT-PANEL (docs/packages/slice-edit-panel.md): the module's own Edit
+ * page — a shell mode over the current Pager page (B1 held + B3 tap enters,
+ * B1 tap leaves and commits; the Pager's page is untouched). Control thread
+ * only: OnPoll reads the gestures and the pots, ServicePanel (the main loop)
+ * posts the edits through the EDIT mailbox (PostEdit — the ACTION handler's
+ * own wait) and the auditions through the audition request, OnRender paints
+ * the edit palette. P1 selects an entry (the walker over the live table),
+ * P2 / P3 nudge its start / end ±50 ms with a centred pickup, P4 is pitch as
+ * ever, P5 / P6 are untouched. While Edit is on, P1..P3 belong to the panel:
+ * OnFrame / OnPoll do not read k_chop / k_hist / k_tempo (nor the Brain
+ * page's first three), and on leave their stored values go back with catch
+ * re-armed, so nothing the page plays moves for an Edit gesture. ──────── */
+static bool     gEdit          = false;   /* the Edit page is on */
+static int      gSel           = -1;      /* the selected table entry, −1 none (state tail byte 257) */
+static int      gSelOrd        = -1;      /* its ordinal among the live entries (Reselect after a table change) */
+static bb::panel::Pickup    gNudgePick[2];   /* P2 (start), P3 (end) */
+static bb::panel::NudgeBase gNudgeBase;      /* the selection's span when the pots were armed */
+static bb::panel::RateGate  gNudgeGate[2];   /* ≥ 50 ms between posts, the last value wins */
+static int      gNudgeMs[2]    = {0, 0};  /* the pots' offsets now (the rings) */
+static int      gNudgeLast[2]  = {0, 0};  /* the last offset offered to the gate */
+static bool     gNudgeOffer[2] = {false, false};   /* OnPoll → ServicePanel: a new offset */
+static uint8_t  gPanelGen      = 0;       /* tableGen the base came from; a change elsewhere re-bases */
+static uint8_t  gPanelReq      = 0;       /* OnPoll → ServicePanel one-shots (below) */
+static uint32_t gPanelTapPos   = 0;       /* gSrcPos at the B3 press: the chop's moment */
+static float    gPanelSaved[3] = {0.f, 0.f, 0.f};   /* P1..P3 stored values at entry */
+static float    gP1Anchor      = 0.f;     /* P1 re-selects once it has travelled kP1Wake from here */
+static uint8_t  gPanelPage     = 0;       /* the Pager page Edit was entered on */
+static uint32_t gPanelFrame    = 0;       /* OnRender counter: the pulses */
+enum : uint8_t { kPanelNone = 0u, kPanelLeave = 1u, kPanelChop = 2u, kPanelUndo = 3u, kPanelRevert = 4u };
+static constexpr Rgb kEditCol   {235, 180,  40};   /* the edit palette: amber (the page's selection colour) */
+static constexpr Rgb kEditDim   { 70,  50,  10};   /* a step that plays the selection */
+static constexpr Rgb kEditSel   {255, 200,  60};   /* the selection's own segment */
+static constexpr Rgb kEditPulse {255, 255, 210};   /* …as it plays */
+static constexpr Rgb kEditHead  { 70,  70,  70};   /* the playhead elsewhere */
+static constexpr Rgb kUndoCol   { 60, 120, 235};   /* B2 with something to undo */
+static constexpr Rgb kNudgePos  { 40, 200, 120};   /* later (the pitch ring's +) */
+static constexpr Rgb kNudgeNeg  {235,  70,  20};   /* earlier (its −) */
+static constexpr Rgb kNudgeDimP { 10,  50,  30};   /* …before the pot has picked up */
+static constexpr Rgb kNudgeDimN { 60,  18,   5};
+/* EDIT-PANEL: B2 tap → EditOp::Undo (package 6) — the journal's depth lights B2; 0 until it lands. */
+static int     PanelUndoDepth() { return 0; }
+static uint8_t PanelSelByte()   { return (gEdit && gSel >= 0 && gSel < 255) ? (uint8_t)gSel : 255u; }
+/* The selection's span (and its neighbours') becomes the nudge origin; both pickups re-arm. */
+static void PanelArm()
+{
+    bb::panel::NudgeBase& b = gNudgeBase;
+    b = bb::panel::NudgeBase{};
+    b.t = gSel; b.nSlices = engine.nSlices; b.freePos = engine.freePos;
+    if(gSel >= 0 && gSel < engine.nTable)
+    {
+        const int st = engine.slices[gSel].start;
+        bb::panel::SetSpan(b, st, st + engine.slices[gSel].len);
+        if(gSel > 0 && gSel < engine.nSlices) b.prevStart = engine.slices[gSel - 1].start;
+        if(gSel + 1 < engine.nSlices) b.nextEnd = engine.slices[gSel + 1].start + engine.slices[gSel + 1].len;
+    }
+    gSelOrd = bb::panel::OrdinalOf(engine.tableFlags, engine.nTable, gSel);
+    bb::panel::ArmPickup(gNudgePick[0], hw.pots[P_TEMPO].Value());
+    bb::panel::ArmPickup(gNudgePick[1], hw.pots[P_HIST].Value());
+    gNudgeMs[0] = gNudgeMs[1] = 0; gNudgeLast[0] = gNudgeLast[1] = 0;
+    gNudgeOffer[0] = gNudgeOffer[1] = false;
+    gNudgeGate[0].pend = gNudgeGate[1].pend = false;
+    gPanelGen = engine.tableGen;
+}
+static void PanelSelect(int t)
+{
+    if(t >= engine.nTable || (t >= 0 && engine.IsTomb(t))) t = -1;
+    gSel = t;
+    PanelArm();
+}
+static void PanelEnter()
+{
+    gPanelPage = pager.Page();
+    for(uint8_t p = 0; p < 3u; p++) gPanelSaved[p] = pager.Value(p);
+    gEdit = true; gPanelReq = kPanelNone;
+    /* the first selection is what plays now; P1 takes over once it moves */
+    const int ns = engine.nSlices > 0 ? engine.nSlices : 1;
+    int cur = (int)(engine.barPhase * (double)ns); if(cur >= ns) cur = ns - 1; if(cur < 0) cur = 0;
+    const int src = engine.nSlices > 0 ? engine.stepSrc[cur] : -1;
+    PanelSelect(engine.nSlices > 0 ? (src >= 0 ? src : cur) : -1);
+    gP1Anchor = hw.pots[P_CHOP].Value();
+}
+static void PanelLeave()
+{
+    float ph[kNumPots];
+    for(uint8_t i = 0; i < kNumPots; i++) ph[i] = hw.pots[i].Value();
+    for(uint8_t p = 0; p < 3u; p++) pager.SetStored(gPanelPage, p, gPanelSaved[p], ph);   /* back where they were, catch armed */
+    gEdit = false; gSel = -1; gSelOrd = -1; gPanelReq = kPanelNone;
+}
+static void ServicePanel();   /* the main loop: after the EDIT helpers */
+/* ── end EDIT-PANEL state ──────────────────────────────────────────────── */
+
 static void OnFrame()
 {
     gDiagPhase = 3;
-    float pk = k_chop.Norm();
-    engine.patternKnob = pk;
-    gVerbSend = pk < 0.22f ? (0.22f - pk) / 0.22f * 0.75f : 0.f;
+    if(!gEdit)   /* EDIT-PANEL: P1 is the selector while Edit is on; the chop holds */
+    {
+        float pk = k_chop.Norm();
+        engine.patternKnob = pk;
+        gVerbSend = pk < 0.22f ? (0.22f - pk) / 0.22f * 0.75f : 0.f;
+    }
 
     /* Varispeed follows the musical clock via the OnPoll snapshot (ClockSnap);
      * engine.bpm is telemetry only now — SetBpm's integer-quantised
@@ -1158,6 +1253,7 @@ static void OnFrame()
 
     /* Brain page → language params; a change re-generates the pattern with
      * the SAME seeds (Grids/Euclid are deterministic from these). */
+    if(!gEdit)   /* EDIT-PANEL: the Brain page's P1..P3 hold too */
     {
         static float s_l[6] = {-1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
         const float  l[6]   = { b_x.Norm(), b_y.Norm(), b_kick.Norm(),
@@ -1170,7 +1266,7 @@ static void OnFrame()
         if(ch && gGrammar.mode >= 2 && !gPendReroll) gPendRegen = true;
     }
 
-    float p3 = k_hist.Norm();
+    const float p3 = gEdit ? gLastP3 : k_hist.Norm();   /* EDIT-PANEL: P3 is the end nudge while Edit is on */
     if(engine.histN > 1 && (p3 > gLastP3 + 0.02f || p3 < gLastP3 - 0.02f))
     {
         int cur = (engine.histHead - engine.histPos + bb::Engine::kHist)
@@ -1280,11 +1376,14 @@ static void OnPoll(uint32_t /*t_ms*/)
          * zone is a REQUEST: the map applies it at the next beat, below.
          * Note k_tempo.Norm() = stored + param-lock delta: a lock recorded on
          * P2 (B1 held ≥ 300 ms while turning) replays here — see the doc. */
+        if(!gEdit)   /* EDIT-PANEL: P2 is the start nudge while Edit is on; the zone holds */
+        {
         const float p = k_tempo.Norm();
         if(gP2ExtRef < 0.f) gP2ExtRef = p;
         if(!gP2ExtEng && (p > gP2ExtRef + 0.03f || p < gP2ExtRef - 0.03f))
             gP2ExtEng = true;
         if(gP2ExtEng) gZone.Update(p, daisy::System::GetNow());   /* ms, wraps at 2^32: dwell math stays wrap-safe */
+        }
     }
     else
     {
@@ -1292,7 +1391,7 @@ static void OnPoll(uint32_t /*t_ms*/)
          * fresh load keeps playing at its native tempo). Native detent. */
         float pv = k_tempo.Value();
         if(gP2Ref < -1e8f) gP2Ref = pv;
-        if(pv > gP2Ref + 1.f || pv < gP2Ref - 1.f)
+        if(!gEdit && (pv > gP2Ref + 1.f || pv < gP2Ref - 1.f))   /* EDIT-PANEL: P2 is the start nudge while Edit is on */
         {
             float nb = engine.NativeBpm();
             float b  = (pv > nb - 2.f && pv < nb + 2.f) ? nb : (float)((int)(pv + 0.5f));
@@ -1434,6 +1533,7 @@ static void OnPoll(uint32_t /*t_ms*/)
                      * a recorded key points at its take */
                     s_lastKey = n >= bb::Engine::kKeys ? bb::Engine::kKeys - 1 : n;
                     idx       = engine.KeySlice(s_lastKey);
+                    if(gEdit) PanelSelect(idx);   /* EDIT-PANEL: a note selects its key's entry */
                 }
                 if(idx >= 0)
                 {
@@ -1524,6 +1624,68 @@ static void OnPoll(uint32_t /*t_ms*/)
         return;
     }
 
+    /* EDIT-PANEL: B1 held + B3 tap enters the Edit page; inside it B1 tap
+     * leaves (and commits), B2 tap = undo / hold = revert the selection to
+     * the grid, B3 tap = a marker at the playhead (lazy chop; the PRESS is
+     * the moment) / hold = reslice as ever, and P1..P3 are read here. B1's
+     * release must not flip the page: pager.ConsumeButton() while it is
+     * held poisons the Pager's pending release (a claim with nothing held
+     * evaporates at the end of the frame), and ParamLock arms only on a pot
+     * move, so a still B1 starts no lock. The tap that enters is consumed
+     * here — it is never a reslice, a load or a record gesture — and the
+     * release of the B1 that entered does not leave. A page moved under
+     * Edit (the web app) leaves it. */
+    IButton& b1 = hw.buttons[kButtonB1];
+    static bool s_b3_loaded  = false;   /* B3's hold-load fired: its release is not a tap */
+    static bool s_editB1Down = false;   /* the B1 press that entered Edit */
+    static bool s_editB2Held = false, s_editB3Held = false;
+    if(!gEdit)
+    {
+        if(b1.Pressed() && b3.FallingEdge() && !s_b3_loaded)
+        {
+            pager.ConsumeButton();
+            if(gTakeActive || gKeyTake || !engine.buf || engine.nSlices < 1) gSetErrT = 36.f;   /* no Edit during a take, none with nothing loaded */
+            else { PanelEnter(); s_editB1Down = true; s_editB2Held = s_editB3Held = false; }
+            gDiagPhase = 2;
+            return;
+        }
+    }
+    else
+    {
+        if(b1.Pressed()) pager.ConsumeButton();
+        if(b1.FallingEdge()) { if(s_editB1Down) s_editB1Down = false; else gPanelReq = kPanelLeave; }
+        if(!b1.Pressed()) s_editB1Down = false;
+        if(pager.Page() != gPanelPage) gPanelReq = kPanelLeave;
+        if(b2.Pressed() && !s_editB2Held && b2.TimeHeldMs() > 400.f) { s_editB2Held = true; gPanelReq = kPanelRevert; }
+        if(b2.FallingEdge()) { if(!s_editB2Held) gPanelReq = kPanelUndo; s_editB2Held = false; }
+        if(b3.RisingEdge()) gPanelTapPos = gSrcPos;
+        if(b3.Pressed() && !s_editB3Held && b3.TimeHeldMs() > 400.f) { s_editB3Held = true; gPendReslice = true; }
+        if(b3.FallingEdge())
+        {
+            if(!s_editB3Held) { if(engine.muted) gSetErrT = 36.f; else gPanelReq = kPanelChop; }   /* the break must be playing */
+            s_editB3Held = false;
+        }
+        /* P1 selects once it has moved (a note's selection holds until then) */
+        const float p1 = hw.pots[P_CHOP].Value();
+        if(p1 > gP1Anchor + bb::panel::kP1Wake || p1 < gP1Anchor - bb::panel::kP1Wake)
+        {
+            gP1Anchor = p1;
+            const int t = bb::panel::SelectByPot(p1, engine.tableFlags, engine.nTable);
+            if(t != gSel) PanelSelect(t);
+        }
+        /* P2 / P3: inert until picked up at centre; then every new whole-ms offset is offered */
+        for(int w = 0; w < 2; w++)
+        {
+            const float v  = hw.pots[w ? P_HIST : P_TEMPO].Value();
+            const int   ms = bb::panel::OffsetMs(v);
+            gNudgeMs[w] = ms;
+            if(bb::panel::UpdatePickup(gNudgePick[w], v) && ms != gNudgeLast[w]) { gNudgeLast[w] = ms; gNudgeOffer[w] = true; }
+        }
+        gDiagPhase = 2;
+        return;
+    }
+    /* EDIT-PANEL end */
+
     /* B2: tap = refill (dice), hold = flow. */
     if(b2.Pressed() && !gFlowing && b2.TimeHeldMs() > 300.f)
     {
@@ -1545,7 +1707,6 @@ static void OnPoll(uint32_t /*t_ms*/)
      * multiplier) and stops itself on the bar; J6 edges during it are slice
      * MARKERS. Unclocked, B3 or J6 stops it. B3's tap (reslice) and hold
      * (load) are suppressed while armed; the arm drops after one take. */
-    static bool s_b3_loaded = false;
     if(gRecord.sel == 1 || gTakeActive)
     {
         const bool j6  = gJackMapCur == 1u && gClkEdge.JustRose(3u);
@@ -1678,6 +1839,18 @@ static void OnRender(uint32_t /*t_ms*/)
     }
     hw.leds.SetButtonPair(kButtonB2, gFlowing ? Rgb{20, 160, 60} : Rgb{6, 10, 6});
     hw.leds.SetButtonPair(kButtonB3, Rgb{12, 6, 2});
+    /* EDIT-PANEL: B1 amber = leave (the clock pulse still flashes through),
+     * B2 blue when there is something to undo, B3 the chop colour while the
+     * break plays (a chop lands only then). A take's red still wins. */
+    if(gEdit)
+    {
+        const float cf = gClkFlash;
+        auto c8 = [](float v) { return (uint8_t)(v > 255.f ? 255.f : (v < 0.f ? 0.f : v)); };
+        hw.leds.SetButtonPair(kButtonB1, Rgb{c8((float)kEditCol.r + 220.f * cf), c8((float)kEditCol.g + 220.f * cf), c8((float)kEditCol.b + 220.f * cf)});
+        hw.leds.SetButtonPair(kButtonB2, PanelUndoDepth() > 0 ? kUndoCol : Rgb{6, 8, 14});
+        const bool plays = engine.buf && engine.nSlices > 0 && !engine.muted;
+        hw.leds.SetButtonPair(kButtonB3, plays ? kChopCol : Rgb{14, 8, 2});
+    }
     /* RECORD: the three buttons red while armed (a key: J5 style 7; the
      * loop: Options → Record), full red while a take runs */
     const bool recArmed  = gKeyArm || gRecord.sel == 1 || gKeyTake || gTakeActive;
@@ -1732,6 +1905,56 @@ static void OnRender(uint32_t /*t_ms*/)
         }
     }
     /* RECORD end */
+    /* EDIT-PANEL: the edit palette. P1 = the bar ring of the selection's bar
+     * (its own segment amber, the steps that play it dim amber, a bright
+     * pulse as it plays, the rest of the bar dimmed); P2 / P3 = the nudge
+     * offset as a fan from centre, dim until the pot has picked up; the
+     * selected entry's key cells pulse on P5 (over the kit map). */
+    if(gEdit)
+    {
+        using namespace bb::panel;
+        gPanelFrame++;
+        const int b0 = BarBase(gSel, ns, cur);
+        const int flash = gCallFlashT > 0 ? gCallFlash : -1;
+        for(int i = 0; i < 16; i++)
+        {
+            const int s = b0 + i;
+            Rgb c;
+            if(s >= ns) c = kRest;
+            else
+            {
+                const int8_t src = engine.stepSrc[s];
+                switch(BarLed(s, gSel, src, cur, flash, ns))
+                {
+                    case kLedPulse:  c = kEditPulse; break;
+                    case kLedSel:    c = kEditSel; break;
+                    case kLedSelDim: c = kEditDim; break;
+                    case kLedHead:   c = kEditHead; break;
+                    default: c = src < 0 ? kRest : ClassColor(engine.stepClass[src]); c.r >>= 2; c.g >>= 2; c.b >>= 2; break;
+                }
+            }
+            hw.leds.SetRingByOffset(P_CHOP, (uint8_t)i, c);
+        }
+        for(int w = 0; w < 2; w++)
+        {
+            const uint8_t pot  = w ? P_HIST : P_TEMPO;
+            const bool    live = gNudgePick[w].caught && gSel >= 0;
+            hw.leds.ClearRing(pot);
+            FillDesc d;
+            d.mode = FillMode::Center; d.compose = FillCompose::Replace; d.pivot01 = 0.5f;
+            d.color = live ? kNudgePos : kNudgeDimP; d.neg_color = live ? kNudgeNeg : kNudgeDimN;
+            d.center_color = live ? kEditCol : Rgb{40, 30, 6};
+            DrawFill(hw.leds, pot, kAlchemyLabArcGeometry, gSel >= 0 ? RingValue(gNudgeMs[w]) : 0.f, d);
+        }
+        if(gSel >= 0)
+        {
+            const float pl = Pulse(gPanelFrame, 16u);
+            const Rgb c{(uint8_t)(40.f + 215.f * pl), (uint8_t)(30.f + 170.f * pl), (uint8_t)(6.f + 54.f * pl)};
+            for(int k = 0; k < bb::Engine::kKeys; k++)
+                if(engine.KeySlice(k) == gSel) hw.leds.SetRingByOffset(P_SPACE, (uint8_t)bb::KeyLed(k), c);
+        }
+    }
+    /* EDIT-PANEL end */
     /* SETS: a set save fills P5's ring with its progress, a load sweeps a dot
      * round it (B3 in the set colour meanwhile); a refused or failed op
      * blinks the three buttons red for a second and a half. */
@@ -2723,6 +2946,123 @@ static void HandleEdit(uint8_t op, const hostlink::ParsedFrame& f, hostlink::Fra
 }
 /* ── end EDIT helpers ──────────────────────────────────────────────────── */
 
+/* ── EDIT-PANEL: the main-loop half — what OnPoll asked for, posted through
+ * the EDIT mailbox (PostEdit waits for the audio thread's ack by the clock,
+ * yielding) and the audition request (the same 100 ms window as ACTION 27:
+ * a request inside it is held and goes out from OnPoll). Every refusal —
+ * busy (a take, a set op, a swap), a bad plan, the engine's own — blinks
+ * the buttons red as a set error does. ──────────────────────────────── */
+static void PanelAudition(int start, int len, uint8_t flags)
+{
+    if(!engine.buf || engine.freePos < 1 || len < bb::Engine::kGridMin) return;
+    if((uint32_t)(daisy::System::GetNow() - gAudLastMs) >= kAudMinMs) { gAudHeld = false; PostAudition(start, len, flags); }
+    else { gAudHeldStart = start; gAudHeldLen = len; gAudHeldFlags = flags; gAudHeld = true; }
+}
+static void ServicePanel()
+{
+    if(!gEdit) return;
+    using namespace bb::panel;
+    using bb::EditOp; using bb::EditReq; using bb::EditStatus;
+    /* the table moved under us (a page edit, a take, a load, a re-slice): the selection follows its ordinal, the pots re-base */
+    if(engine.tableGen != gPanelGen || (gSel >= 0 && (gSel >= engine.nTable || engine.IsTomb(gSel))))
+        PanelSelect(Reselect(gSel, gSelOrd, engine.tableFlags, engine.nTable));
+    bool refused = false;
+    const uint8_t req = gPanelReq; gPanelReq = kPanelNone;
+    switch(req)
+    {
+        case kPanelLeave:
+        {
+            /* commit: a held nudge goes out now, the audition ends, the pots go back */
+            for(int w = 0; w < 2; w++)
+            {
+                int off = 0;
+                if(gNudgeGate[w].pend && !EditBusy())
+                {
+                    gNudgeGate[w].pend = false; off = gNudgeGate[w].val;
+                    const NudgePlan pl = PlanNudge(gNudgeBase, w, MsToSamples(off, (int)kSr), (int)kSr);
+                    EditReq r;
+                    if(pl.kind == NudgeKind::Boundary) { r.op = EditOp::SetBoundary; r.i = pl.i; r.start = pl.start; }
+                    else if(pl.kind == NudgeKind::Entry) { r.op = EditOp::SetEntry; r.t = pl.t; r.start = pl.start; r.len = pl.len; }
+                    else continue;
+                    if(PostEdit(r, nullptr) != EditStatus::Ok) refused = true;
+                }
+            }
+            gAudHeld = false; gAudRel = true;
+            PanelLeave();
+            if(refused) gSetErrT = 36.f;
+            return;
+        }
+        case kPanelChop:
+        {
+            /* lazy chop: the position at the press minus the Tap Allowance option, snapped to an onset within 60 ms */
+            if(EditBusy() || !engine.buf || engine.nSlices < 1) { refused = true; break; }
+            const int n = gPendN < 0 ? 0 : (gPendN > kMaxOnsets ? kMaxOnsets : gPendN);
+            const bb::TapMark m = bb::TapMarkAt((int)gPanelTapPos, (int)kTapAllowMs[gTapAllow.sel] * kEditMsToSamp, 60 * kEditMsToSamp,
+                                                gPendOnsets, n, engine.freePos, 250 * kEditMsToSamp, bb::Engine::kRecMin);
+            EditReq r; r.op = EditOp::AddEntry; r.key = -1; r.start = m.start; r.len = m.len; r.flags = EditReq::kOrange;
+            EditMeta(r);
+            int idx = -1;
+            if(PostEdit(r, &idx) != EditStatus::Ok || idx < 0) { refused = true; break; }
+            PanelSelect(idx);
+            break;
+        }
+        case kPanelUndo:
+        {
+            /* EDIT-PANEL: B2 tap → EditOp::Undo (package 6) */
+            refused = true;
+            break;
+        }
+        case kPanelRevert:
+        {
+            if(gSel < 0 || EditBusy()) { refused = true; break; }
+            if(gSel < engine.nSlices)
+            {
+                /* a grid slice: its two boundaries back to the computed grid (only those that moved) */
+                const bool sw = Swung(engine.swing, engine.nSlices);
+                const int  g0 = GridStart(gSel, engine.bufLen, engine.nSlices, engine.swing, sw);
+                const int  g1 = GridStart(gSel + 1, engine.bufLen, engine.nSlices, engine.swing, sw);
+                const int  cs = engine.slices[gSel].start, ce = cs + engine.slices[gSel].len;
+                const int  mask = RevertMask(gSel, engine.nSlices, cs, ce, g0, g1);
+                if(mask & 1) { EditReq r; r.op = EditOp::SetBoundary; r.i = gSel; r.start = g0; if(PostEdit(r, nullptr) != EditStatus::Ok) refused = true; bb::Yield(); }
+                if(mask & 2) { EditReq r; r.op = EditOp::SetBoundary; r.i = gSel + 1; r.start = g1; if(PostEdit(r, nullptr) != EditStatus::Ok) refused = true; }
+                PanelArm();
+            }
+            else
+            {
+                /* a marker: the delete (a tombstone; its keys go back to their span slices); the selection moves on */
+                EditReq r; r.op = EditOp::Tombstone; r.t = gSel;
+                if(PostEdit(r, nullptr) != EditStatus::Ok) refused = true;
+                PanelSelect(Reselect(gSel, gSelOrd, engine.tableFlags, engine.nTable));
+            }
+            break;
+        }
+        default: break;
+    }
+    /* the nudges: a new offset is offered to its gate; a held one drains when the window ends */
+    const uint32_t now = NowUs();
+    for(int w = 0; w < 2; w++)
+    {
+        int  off = 0;
+        bool go  = false;
+        if(gNudgeOffer[w]) { gNudgeOffer[w] = false; go = Offer(gNudgeGate[w], gNudgeMs[w], now, &off); }
+        else go = Drain(gNudgeGate[w], now, &off);
+        if(!go) continue;
+        if(gSel < 0) continue;
+        if(EditBusy()) { refused = true; continue; }
+        const NudgePlan pl = PlanNudge(gNudgeBase, w, MsToSamples(off, (int)kSr), (int)kSr);
+        if(pl.kind == NudgeKind::Refused) { refused = true; continue; }
+        EditReq r;
+        if(pl.kind == NudgeKind::Boundary) { r.op = EditOp::SetBoundary; r.i = pl.i; r.start = pl.start; }
+        else                               { r.op = EditOp::SetEntry; r.t = pl.t; r.start = pl.start; r.len = pl.len; }
+        if(PostEdit(r, nullptr) != EditStatus::Ok) { refused = true; continue; }
+        Landed(gNudgeBase, pl, w);
+        gPanelGen = engine.tableGen;
+        PanelAudition(pl.audStart, pl.audLen, pl.fromEnd ? bb::Engine::kRegionFromEnd : 0u);   /* hear the move */
+    }
+    if(refused) gSetErrT = 36.f;
+}
+/* ── end EDIT-PANEL ────────────────────────────────────────────────────── */
+
 struct StateExt : hostlink::IHostlinkExtension
 {
     uint8_t FirstCmd() const override { return 0x60u; }
@@ -2803,9 +3143,9 @@ struct StateExt : hostlink::IHostlinkExtension
                  * the set the material came from (NUL-padded; empty = a loose file or a take). */
                 w.U8(gSetState); w.U8(gSetProgress); w.U8(gSetResult); w.U8(gSetSeq);
                 w.Bytes((const uint8_t*)gSetCurName, sizeof gSetCurName);
-                /* EDIT tail (255..261): u8 tableGen · u8 undoDepth (0 until EDIT-UNDO) · u8 selSlice (255 until
-                 * EDIT-PANEL) · u32 srcPos (the audio thread's snapshot: the youngest voice's material position). */
-                w.U8(engine.tableGen); w.U8(0u); w.U8(255u); w.U32(gSrcPos);
+                /* EDIT tail (255..261): u8 tableGen · u8 undoDepth (0 until EDIT-UNDO) · u8 selSlice (EDIT-PANEL:
+                 * the Edit page's selection, 255 = none / not in Edit) · u32 srcPos (the audio thread's snapshot: the youngest voice's material position). */
+                w.U8(engine.tableGen); w.U8(0u); w.U8(PanelSelByte()); w.U32(gSrcPos);
                 return;
             }
             case 0x61u:
@@ -3321,6 +3661,7 @@ int main()
         if(gRecord.dirty) { gRecord.dirty = false; if(gRecord.sel == 0 && gTakeActive && gTake.running) gTake.Stop(); }
         ServiceRecord();
         /* RECORD end */
+        ServicePanel();   /* EDIT-PANEL: the Edit page's posts (the mailbox waits here, never in OnPoll) */
         ServiceSets();   /* SETS: a loaded set's recordings, ACTION 14 / 15, the preset backups */
         ServiceLoad();
     }
