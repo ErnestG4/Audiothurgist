@@ -101,8 +101,10 @@ knob function for the current page and grammar, locks, options, presets,
 the manual, a diagnostics line, a **Kit** tab: the 24 keys, each
 recording's waveform with onsets and boundaries, record/clear per key, the
 looper's events, and set save/load — and a **Scope** tab: out L/R and
-in L/R at full rate in four colours, time zoom, gain, trigger, peak
-decimation, afterglow, at up to 30 frames/s (`docs/packages/scope.md`). Serve it from a secure context:
+in L/R at full rate plus the six jacks J3–J8 as DC-coupled CV traces
+(LFOs, sequences, gates — ours read back too), ten colours, time zoom per
+tier, gain, a trigger on any channel, peak decimation, afterglow, at up to
+30 frames/s (`docs/packages/scope.md`). Serve it from a secure context:
 
 ```sh
 cd web && python3 -m http.server 8080     # then http://localhost:8080 in Chrome/Edge
