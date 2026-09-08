@@ -176,16 +176,37 @@ inline int FindEntry(const char* files, size_t stride, int n, const char* entry)
 // The engine's table, keys and metadata, the break's length and swing, and
 // a looper snapshot (Looper::Adopt of the live one, taken on the audio
 // thread) → SetInfo. name / bars / bpm / options stay the caller's.
-inline void SetFromEngine(const Engine& e, const Looper& lp, SetInfo& s, bool stereo, int sr)
+//
+// EDIT-PERSIST: the table is written COMPACTED — tombstones are skipped, and
+// every index that refers to the table (the key map, a keyless looper
+// event's `slice`) is re-indexed to the file's order; a keyless event whose
+// entry is gone is dropped. `maxLen` (0 = freePos) bounds what the file may
+// describe: an entry past it is skipped like a tombstone (keys on it → the
+// default), and `len` is that bound — the set-JSON autosave passes the WAV's
+// length (a take since the save is not in the WAV), the loose-file sidecar
+// passes bufLen (the break only). Per-entry `flags` = the orange bit;
+// `grid` = nSlices; `keys` = keySlice through the map.
+inline void SetFromEngine(const Engine& e, const Looper& lp, SetInfo& s, bool stereo, int sr, int maxLen = 0)
 {
+    const int lim = (maxLen > 0 && maxLen < e.freePos) ? maxLen : e.freePos;
     s.sr       = sr;
     s.stereo   = stereo;
-    s.len      = e.freePos;
-    s.material = e.bufLen;
+    s.len      = lim;
+    s.material = e.bufLen < lim ? e.bufLen : lim;
     s.swing    = e.swing;
+    s.nGrid    = e.nSlices;
     s.nSlices  = 0;
+    int8_t map[Engine::kMaxTable];
+    for(int t = 0; t < Engine::kMaxTable; t++) map[t] = -1;
     for(int t = 0; t < e.nTable && s.nSlices < kSetMaxSlices; t++)
     {
+        if(t >= e.nSlices)
+        {
+            const bool live = !(e.tableFlags[t] & Engine::kFlagTomb) && e.slices[t].len > 0 && e.slices[t].start >= 0
+                              && e.slices[t].start <= lim && e.slices[t].len <= lim - e.slices[t].start;
+            if(!live) continue;
+        }
+        map[t] = (int8_t)s.nSlices;
         SetSlice& sl = s.slices[s.nSlices++];
         sl.start = e.slices[t].start;
         sl.len   = e.slices[t].len;
@@ -193,23 +214,32 @@ inline void SetFromEngine(const Engine& e, const Looper& lp, SetInfo& s, bool st
         sl.cls   = (uint8_t)(e.stepClass[t] & 3u);
         sl.sal   = setdetail::Clamp01(e.sliceSal[t]);
         sl.hit   = e.stepHit[t];
+        sl.flags = (uint8_t)(e.tableFlags[t] & Engine::kFlagOrange);
         sl.name[0] = 0;
+    }
+    s.hasKeys = true;
+    for(int k = 0; k < kSetKeys && k < Engine::kKeys; k++)
+    {
+        const int ks = e.KeySlice(k);
+        s.keys[k] = ks >= 0 && ks < Engine::kMaxTable ? map[ks] : (int8_t)-1;
     }
     s.nLooper = 0;
     for(int i = 0; i < lp.n && s.nLooper < kSetMaxLooper; i++)
     {
         const Looper::Event& ev = lp.ev[i];
-        SetLoopEvent&        o  = s.looper[s.nLooper++];
+        const int8_t         sl = (ev.slice >= 0 && ev.slice < Engine::kMaxTable) ? map[ev.slice] : (int8_t)-1;
+        if(ev.key < 0 && ev.slice >= 0 && sl < 0) continue;   /* a keyless event on an entry the file does not hold */
+        SetLoopEvent& o = s.looper[s.nLooper++];
         o.phase = (float)ev.phase;
         o.key   = ev.key;
         o.style = (uint8_t)(ev.style & Looper::kWire);
         o.vel   = ev.vel;
-        o.slice = ev.slice;
+        o.slice = sl;
     }
 }
 
-// What a set load hands SetMaterial, and the recorded entries that follow
-// it. Trivially constructible on purpose (it may live in a NOLOAD section).
+// What a set load hands SetMaterial, and the entries that follow it.
+// Trivially constructible on purpose (it may live in a NOLOAD section).
 struct SetPlan
 {
     int     nGrid;                     // grid entries = SetMaterial's nSlicesHint
@@ -220,43 +250,71 @@ struct SetPlan
     int     onsets[Engine::kMaxSlices];
     uint8_t cls[Engine::kMaxSlices];   // → SetMaterial's classes
     float   sal[Engine::kMaxSlices];   // → Engine::sliceSal before SetMaterial
-    int     nRec;                      // recorded entries, as indices into SetInfo::slices
+    int     nRec;                      // markers after the grid (recordings and in-break spans), as indices into SetInfo::slices
     int     rec[Engine::kMaxTable];
+    /* EDIT-PERSIST */
+    int     starts[Engine::kMaxSlices];    // the file's grid starts → Engine::SetGridBoundaries after SetMaterial
+    uint8_t gridFlags[Engine::kMaxSlices]; // the grid's orange bits, for the same call
+    bool    hasKeys;                       // the file carried a key map
+    int8_t  keys[Engine::kKeys];           // FILE indices (into SetInfo::slices), −1 = the default
 };
 
 // SetInfo → SetPlan. False (plan zeroed) when the set is malformed: no grid
-// entry, a grid entry outside [0, material) or out of order, more than
-// maxGrid of them, a recorded entry outside [material, len), shorter than
-// recMin, keyed outside 0..keys-1 or on a key already taken. Grid entries
-// are the leading key < 0 entries; everything after the first keyed entry
-// must be keyed.
+// entry, more than maxGrid of them, a grid that does not tile [0, material)
+// — starts[0] ≠ 0, not ascending by ≥ gridMin, or the last one < gridMin
+// before the material's end — a marker outside [0, len) or shorter than
+// recMin, a marker keyed outside −1..keys-1 or on a key already taken, or a
+// key-map index outside −1..nSlices-1.
+//
+// The grid is the file's `grid` count when it carries one; else (an old
+// file) the leading key −1 entries that start inside the material. What
+// follows are markers: recordings past the material, and — EDIT-PERSIST —
+// spans of the break itself, keyed or keyless, in any order.
 namespace setdetail {
-inline bool PlanSetInto(const SetInfo& s, SetPlan& p, int maxGrid, int recMin, int keys)
+inline bool PlanSetInto(const SetInfo& s, SetPlan& p, int maxGrid, int recMin, int keys, int gridMin)
 {
     const int material = (s.material > 0 && s.material <= s.len) ? s.material : s.len;
-    if(s.len <= 0 || material <= 0 || keys > 32) return false;
-    int i = 0;
-    for(; i < s.nSlices && s.slices[i].key < 0; i++)
+    if(s.len <= 0 || material <= 0 || keys > 32 || keys > Engine::kKeys) return false;
+    int nGrid = s.nGrid;
+    if(nGrid <= 0)
+    {
+        nGrid = 0;
+        while(nGrid < s.nSlices && s.slices[nGrid].key < 0 && s.slices[nGrid].start >= 0 && s.slices[nGrid].start < material) nGrid++;
+    }
+    if(nGrid < 1 || nGrid > maxGrid || nGrid > s.nSlices || nGrid > Engine::kMaxSlices) return false;
+    for(int i = 0; i < nGrid; i++)
     {
         const SetSlice& sl = s.slices[i];
-        if(i >= maxGrid) return false;
-        if(sl.start < 0 || sl.start >= material || (i > 0 && sl.start <= s.slices[i - 1].start)) return false;
-        p.cls[i] = (uint8_t)(sl.cls & 3u);
-        p.sal[i] = Clamp01(sl.sal);
+        if(sl.start < 0 || sl.start >= material) return false;
+        if(i == 0 ? sl.start != 0 : sl.start - s.slices[i - 1].start < gridMin) return false;
+        p.starts[i]    = sl.start;
+        p.gridFlags[i] = (uint8_t)(sl.flags & kSetFlagOrange);
+        p.cls[i]       = (uint8_t)(sl.cls & 3u);
+        p.sal[i]       = Clamp01(sl.sal);
         if(sl.hit) p.onsets[p.nOnsets++] = sl.start;
     }
-    p.nGrid = i;
-    if(p.nGrid < 1) return false;
+    if(material - s.slices[nGrid - 1].start < gridMin) return false;
+    p.nGrid = nGrid;
     uint32_t taken = 0;
-    for(; i < s.nSlices; i++)
+    for(int i = nGrid; i < s.nSlices; i++)
     {
         const SetSlice& sl = s.slices[i];
-        if(sl.key < 0 || sl.key >= keys) return false;
-        if(taken & (1u << sl.key)) return false;
-        if(sl.start < material || sl.len < recMin || sl.start > s.len || sl.len > s.len - sl.start) return false;   /* overflow-safe (review M1) */
-        if(p.nRec >= Engine::kMaxTable) return false;
-        taken |= 1u << sl.key;
+        if(sl.key >= keys) return false;
+        if(sl.key >= 0)
+        {
+            if(taken & (1u << sl.key)) return false;
+            taken |= 1u << sl.key;
+        }
+        if(sl.start < 0 || sl.len < recMin || sl.start > s.len || sl.len > s.len - sl.start) return false;   /* overflow-safe (review M1) */
+        if(nGrid + p.nRec >= Engine::kMaxTable) return false;
         p.rec[p.nRec++] = i;
+    }
+    p.hasKeys = s.hasKeys;
+    for(int k = 0; k < Engine::kKeys; k++)
+    {
+        const int v = k < kSetKeys ? s.keys[k] : -1;
+        if(v >= s.nSlices) return false;
+        p.keys[k] = (int8_t)(v < 0 ? -1 : v);
     }
     p.material = material;
     p.len      = s.len;
@@ -266,29 +324,50 @@ inline bool PlanSetInto(const SetInfo& s, SetPlan& p, int maxGrid, int recMin, i
 } // namespace setdetail
 
 inline bool PlanSet(const SetInfo& s, SetPlan& p, int maxGrid = Engine::kMaxSlices,
-                    int recMin = Engine::kRecMin, int keys = Engine::kKeys)
+                    int recMin = Engine::kRecMin, int keys = Engine::kKeys, int gridMin = Engine::kGridMin)
 {
     memset(&p, 0, sizeof p);
-    if(setdetail::PlanSetInto(s, p, maxGrid, recMin, keys)) return true;
+    if(setdetail::PlanSetInto(s, p, maxGrid, recMin, keys, gridMin)) return true;
     memset(&p, 0, sizeof p);
     return false;
 }
 
 // After SetMaterial(planes, plan.material, …, plan.onsets, plan.nOnsets,
-// plan.cls, plan.nGrid, …): publish the recorded entries through
-// CommitSlice, in file order. `dens(start, len)` gives each entry's keyframe
-// density (bb::AnalyseRegion on the plane — the JSON carries none; 0 = the
-// fixed fades). Returns the number committed (all of them: PlanSet already
-// checked every refusal CommitSlice knows).
+// plan.cls, plan.nGrid, …) — and, on the audio thread, SetGridBoundaries
+// (plan.starts, plan.nGrid, plan.gridFlags): publish the markers through
+// CommitEntry, in file order, with their keys and flags. `dens(start, len)`
+// gives each entry's keyframe density (bb::AnalyseRegion on the plane — the
+// JSON carries none; 0 = the fixed fades). Returns the number committed
+// (all of them: PlanSet already checked every refusal CommitEntry knows).
+//
+// EDIT-PERSIST: `liveKeys` (optional, Engine::kKeys wide) receives the
+// file's key map translated to LIVE indices for Engine::SetKeyTable: a key
+// on grid slice i → i when the engine's grid has the file's count (else the
+// default, −1); a key on marker j → the index CommitEntry gave it (−1 when
+// it was refused); −1 stays −1.
 template <typename DensFn>
-inline int CommitSetRecordings(Engine& e, const SetInfo& s, const SetPlan& p, DensFn dens)
+inline int CommitSetRecordings(Engine& e, const SetInfo& s, const SetPlan& p, DensFn dens, int8_t* liveKeys = nullptr)
 {
-    int done = 0;
+    int    done = 0;
+    int8_t live[Engine::kMaxTable];
+    for(int t = 0; t < Engine::kMaxTable; t++) live[t] = -1;
     for(int r = 0; r < p.nRec; r++)
     {
         const SetSlice& sl = s.slices[p.rec[r]];
         const float     d  = dens(sl.start, sl.len);
-        if(e.CommitSlice(sl.key, sl.start, sl.len, (uint8_t)(sl.cls & 3u), setdetail::Clamp01(sl.sal), d, sl.hit) >= 0) done++;
+        const int       t  = e.CommitEntry(sl.key, sl.start, sl.len, (uint8_t)(sl.cls & 3u), setdetail::Clamp01(sl.sal), d, sl.hit, sl.flags);
+        if(t >= 0) { done++; if(p.rec[r] < Engine::kMaxTable) live[p.rec[r]] = (int8_t)t; }
+    }
+    if(liveKeys)
+    {
+        const bool gridHolds = e.nSlices == p.nGrid;
+        for(int k = 0; k < Engine::kKeys; k++)
+        {
+            const int f = p.keys[k];
+            if(f < 0)             liveKeys[k] = -1;
+            else if(f < p.nGrid)  liveKeys[k] = (int8_t)(gridHolds ? f : -1);
+            else                  liveKeys[k] = f < Engine::kMaxTable ? live[f] : (int8_t)-1;
+        }
     }
     return done;
 }

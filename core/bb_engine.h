@@ -1270,6 +1270,39 @@ struct Engine
         BumpGen();
         return t;
     }
+    /* EDIT-PERSIST: the set loader's entry — CommitSlice generalised to a
+     * marker that may be keyless (key < 0 or ≥ kKeys: no owner, no key
+     * re-pointed; a take into a key later appends, it does not replace) and
+     * that carries its flags (kFlagOrange only — a tombstone is never
+     * committed). A keyed entry replaces the key's recording exactly as
+     * CommitSlice does. Same publication order: region, entry, flags, count,
+     * key. Returns the index, or -1. Does not touch a pending take. */
+    int CommitEntry(int key, int start, int len, uint8_t cls, float sal, float dens, bool hit, uint8_t flags)
+    {
+        if(!buf || len < kRecMin || start < 0 || start > bufCap || len > bufCap - start) return -1;
+        if(key >= kKeys) key = -1;
+        int t = key >= 0 ? RecordedEntry(key) : -1;
+        if(t < 0)
+        {
+            t = FreeSlot();
+            if(t < 0) return -1;
+        }
+        recMeta[t]    = {cls, sal, dens, hit};
+        slices[t]     = {start, len};
+        tableKey[t]   = (int8_t)key;
+        stepClass[t]  = cls;
+        sliceSal[t]   = sal;
+        sliceDens[t]  = dens;
+        stepHit[t]    = hit;
+        stepBands[t]  = 0;
+        loopState[t]  = 0;
+        tableFlags[t] = (uint8_t)(flags & kFlagOrange);
+        if(start + len > freePos) freePos = start + len;
+        if(t == nTable) nTable = t + 1;
+        if(key >= 0) keySlice[key] = (int8_t)t;
+        BumpGen();
+        return t;
+    }
     // CONTROL or AUDIO. Re-assert the recorded entries' metadata after the
     // shell has copied a whole per-slice array (stepClass, sliceSal,
     // sliceDens, stepBands) from a fresh classification of the grid — those
@@ -1366,7 +1399,7 @@ struct Engine
     int      ovN = 0, ovLen = 0;
 
     EditStatus ApplyEdit(const EditReq& r, int* newIdx = nullptr);   // AUDIO
-    bool       SetGridBoundaries(const int* starts, int n);            // AUDIO (or before audio runs)
+    bool       SetGridBoundaries(const int* starts, int n, const uint8_t* flags = nullptr);   // AUDIO (or before audio runs); flags: the file's orange bits (EDIT-PERSIST)
     bool       SetKeyTable(const int8_t* keys);                        // AUDIO (or before audio runs)
     uint8_t    TableFlags(int t) const { return t >= 0 && t < nTable ? tableFlags[t] : 0; }
     bool       IsTomb(int t) const { return t >= 0 && t < kMaxTable && (tableFlags[t] & kFlagTomb) != 0; }
