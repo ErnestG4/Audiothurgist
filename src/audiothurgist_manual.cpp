@@ -150,8 +150,7 @@ static Manual manual =
             "**Sampling**: Mono sums J1+J2; Stereo keeps J1 → L, J2 → R "
             "(loads, takes and playback in two planes). Loads keep 8 s of "
             "the 25 s buffer free for keys. While a take runs the buttons "
-            "are full red and P6 shows the input level.")
-        .Section("cards", "Cards and loading",
+            "are full red and P6 shows the input level. **Cards**: "
             "FAT32 microSD, WAVs in the root, 1–4 bar breaks are ideal "
             "(longer files trim to their first four bars; levels normalise on "
             "load). Turn **Sample** (P5) to highlight a file, hold **B3** to "
