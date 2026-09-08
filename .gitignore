@@ -7,3 +7,10 @@ build/
 *.map
 *.lst
 build.log
+# CLASSIFY: neural ground truth (tests/neural/README.md) — venvs, corpora, transcriptions
+tests/neural/.adt/
+tests/neural/.bt/
+tests/neural/ADTOF-pytorch/
+tests/neural/idmt/
+tests/neural/*.csv
+tests/neural/__pycache__/
