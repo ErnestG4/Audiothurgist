@@ -77,7 +77,25 @@
   .bar{position:relative;height:14px;border-radius:7px;background:#0a0a0c;overflow:hidden;border:1px solid var(--line)} .bar i{position:absolute;top:0;bottom:0;left:0}
   .meter{width:160px} .meter i{background:#9be0b0;transition:width .08s linear} .meter.hot i{background:#ff6a5a}
   .usage i.mat{background:#3c78e6} .usage i.rec{background:#28c878}
-  .wvbtns{display:flex;gap:4px;align-items:center;font-weight:400;text-transform:none;letter-spacing:0}
+  .wvbtns{display:flex;gap:4px;align-items:center;font-weight:400;text-transform:none;letter-spacing:0;flex-wrap:wrap}
+  /* Kit: the editor (EDIT-UI). Colour is state: the selected entry and its key cells pulse orange together; a drop
+   * target is dashed green, red when the drop would orphan a recording; a key armed for a copy is dashed orange. */
+  .key{touch-action:none;user-select:none;-webkit-user-select:none}
+  .key.pulse{animation:pulse 1.2s ease-in-out infinite;outline:2px solid var(--accent);outline-offset:-1px}
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(235,116,20,0)}50%{box-shadow:0 0 0 4px rgba(235,116,20,.45)}}
+  .key.drop{outline:2px dashed #9be0b0;outline-offset:-1px;background:#14201a} .key.drop.red{outline-color:#ff6a5a;background:#2a1414}
+  .key.arm{outline:2px dashed var(--accent);outline-offset:-1px}
+  #kitwave,#onsethist{touch-action:none}
+  .edmenu{position:absolute;z-index:5;background:#1f1f24;border:1px solid #3a3a42;border-radius:10px;padding:6px;display:flex;flex-direction:column;gap:4px;min-width:200px;box-shadow:0 6px 24px rgba(0,0,0,.5)}
+  .edmenu .t{font-size:12px;color:var(--mute);padding:2px 6px;max-width:260px} .edmenu.red .t{color:#ff6a5a} .edmenu button{text-align:left;min-height:44px} .edmenu button.danger{color:#ff6a5a}
+  .edghost{position:fixed;z-index:6;pointer-events:none;background:var(--accent);color:#111;font-size:12px;font-weight:600;padding:4px 8px;border-radius:6px;transform:translate(-50%,-160%);white-space:nowrap}
+  .edfield{font-size:12px;color:var(--mute);gap:6px 10px} .edfield input{width:104px;background:#1f1f24;color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 6px;font:inherit;font-size:13px;font-variant-numeric:tabular-nums;min-height:36px}
+  .edfield b{color:var(--ink);font-weight:600} .edfield label{display:inline-flex;align-items:center;gap:4px;min-height:36px} .edfield .by{color:var(--call)}
+  .chop{min-height:88px;min-width:150px;font-size:20px;font-weight:700;background:#2a1c10;border-color:#6b4a12;color:#ffcf80;touch-action:none;user-select:none;-webkit-user-select:none} .chop:active,.chop.hit{background:var(--accent);color:#111}
+  .hist{list-style:none;margin:6px 0 0;padding:0;font-size:12px;max-height:150px;overflow:auto;font-variant-numeric:tabular-nums} .hist li{display:flex;gap:8px;padding:3px 0;border-bottom:1px solid #1d1d21;color:var(--mute)} .hist li:first-child{color:var(--ink)} .hist li i{font-style:normal;color:var(--dim);min-width:40px}
+  .edpanel{display:grid;gap:12px} @media(min-width:900px){.edpanel{grid-template-columns:1fr 1fr 1fr}}
+  .edpanel h3{font-size:12px;color:var(--mute);margin:0 0 6px;text-transform:uppercase;letter-spacing:.1em}
+  .edpanel input[type=number]{width:64px;background:#1f1f24;color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px;font:inherit;min-height:36px}
   /* Scope */
   .sc-ch{display:inline-flex;align-items:center;gap:6px;padding:4px 9px;font-size:12px;color:var(--mute)} .sc-ch i{width:10px;height:10px;border-radius:2px;display:inline-block;opacity:.3;flex:none}
   .sc-ch.on{color:var(--ink);border-color:#3a3a42} .sc-ch.on i{opacity:1} .sc-ch.auto{border-style:dashed}
@@ -178,12 +196,53 @@
       <div class="bar meter" id="k_meterbox" title="input peak, last audio block"><i id="k_meter" style="width:0"></i></div>
     </div>
     <p id="kit_help" style="font-size:12px;color:var(--mute);margin:8px 0 0">Click a key to see its material below. An empty key plays its span of the break; a recorded key plays its take. ● arms a take into that key (the next gate on J6 / the panel gesture starts it); ✕ clears a recording. Class colours: kick, snare, hat, other.</p>
+    <p id="kit_help_edit" style="font-size:12px;color:var(--mute);margin:8px 0 0" hidden><b>Keys:</b> tap one to hear it and see it below · drag a key onto another to <b>swap</b> (a prompt when the target is taken; <span style="color:#ff6a5a">red</span> when a recording would lose its only key) · long-press a key, then drop or tap another, to <b>copy</b> it there (many keys may play one entry) · drag a slice up from the waveform onto a key to assign it. ● and ✕ as before.</p>
   </section>
   <section class="wide">
-    <h2><span id="wv_title">Waveform</span><span class="wvbtns"><button id="wv_fit" class="mini" title="fit the selected key's material">fit</button><button id="wv_all" class="mini" title="the whole buffer up to freePos">all</button><button id="wv_out" class="mini" title="zoom out (wheel on the waveform also zooms; drag pans)">−</button><button id="wv_in" class="mini" title="zoom in">+</button><select id="wv_plane" class="inline" title="which plane to read (GET_WAVE)" hidden><option value="0">L</option><option value="1">R</option><option value="2">L+R</option></select></span></h2>
-    <canvas id="kitwave" style="height:180px"></canvas>
-    <div class="legend" style="margin-top:6px"><span><i style="background:#fff"></i>slice boundary (table — swung where the material swings)</span><span><i style="background:var(--lock)"></i>recording boundary</span><span><i style="background:var(--call)"></i>onset (hits)</span><span><i style="background:#3a3a42"></i>end of the break</span><span id="wv_range"></span></div>
+    <h2><span id="wv_title">Waveform</span><span class="wvbtns"><span id="ed_status" class="pill" hidden>ready</span><button id="wv_fit" class="mini" title="fit the selected key's material">fit</button><button id="wv_all" class="mini" title="the whole buffer up to freePos">all</button><button id="wv_out" class="mini" title="zoom out (wheel on the waveform also zooms; drag pans)">−</button><button id="wv_in" class="mini" title="zoom in">+</button><select id="wv_plane" class="inline" title="which plane to read (GET_WAVE)" hidden><option value="0">L</option><option value="1">R</option><option value="2">L+R</option></select></span></h2>
+    <div id="wv_wrap" style="position:relative">
+      <canvas id="kitwave" style="height:180px"></canvas>
+      <div id="ed_menu" class="edmenu" hidden></div>
+    </div>
+    <div id="ed_field" class="row edfield" style="margin-top:6px" hidden>
+      <b id="ed_sel">—</b>
+      <label>start <input id="ed_start" inputmode="decimal" spellcheck="false" title="type a start — samples, 12.5ms, 0.5s or bar:beat:16th — then Enter (SET_BOUNDARY for a grid slice, SET_ENTRY for a marker)"></label>
+      <label>end <input id="ed_end" inputmode="decimal" spellcheck="false" title="type an end the same way (a grid slice's end is the next boundary)"></label>
+      <select id="ed_unit" class="inline" title="the unit of the two fields; bar:beat:16th from the native tempo"><option value="samples">samples</option><option value="ms">ms</option><option value="bbs">bar:beat:16th</option></select>
+      <span id="ed_len"></span><span id="ed_by" class="by"></span>
+      <label title="a dragged grid boundary snaps to the nearest zero crossing within ±2 ms (after the ±12 ms onset magnet)"><input type="checkbox" id="ed_zgrid" checked> 0-snap grid</label>
+      <label title="a dragged marker edge snaps to the nearest zero crossing within ±2 ms"><input type="checkbox" id="ed_zmark"> 0-snap markers</label>
+    </div>
+    <div class="legend" style="margin-top:6px"><span><i style="background:#fff"></i>grid boundary (table — swung where the material swings)</span><span><i style="background:var(--lock)"></i>recording</span><span id="lg_mark"><i style="background:#8a887f"></i>marker</span><span id="lg_orange"><i style="background:var(--accent)"></i>placed / moved by you</span><span><i style="background:var(--call)"></i>onset (hits)</span><span id="lg_play"><i style="background:#9be0b0"></i>playhead</span><span><i style="background:#3a3a42"></i>end of the break</span><span id="wv_range"></span></div>
+    <p id="wv_help" style="font-size:12px;color:var(--mute);margin:8px 0 0" hidden><b>Waveform:</b> tap inside a marker to <b>split</b> it there (snapped to an onset within 12 ms); tap a grid slice to select it (the grid never splits) · drag a lollipop below the wave to move a grid boundary (linked, ≥ 64 samples each side) or a marker's start — the selected marker has a square <b>end</b> handle too; it plays from the new point as you go and the whole slice once you let go · a second finger or Shift turns the magnets off · double-tap a marker's handle to <b>merge</b> it with the one ending where it starts · long-press a handle or a slice for delete / copy / promote · hold a marker's end handle still to <b>loop</b> its tail · the strip at the bottom pans, zooms (drag up/down, pinch, wheel) and fits the selection on a double-tap.</p>
   </section>
+  <section class="wide" id="editor" hidden>
+    <h2>Edit — the other ways to get markers, and the history <span id="ed_gen" class="pill">—</span></h2>
+    <div class="edpanel">
+      <div>
+        <h3>Chop while it plays</h3>
+        <div class="row" style="align-items:flex-start">
+          <button id="chop" class="chop" title="TAP_MARK (ACTION 29): an orange marker at the playhead minus the Tap Allowance, snapped to an onset within ±60 ms; the marker runs to the next onset (≤ 250 ms)">Chop</button>
+          <div style="flex:1;min-width:140px"><span id="chop_pos" class="pill">playhead —</span><p style="font-size:12px;color:var(--mute);margin:6px 0 0">Tap on the hit. The module timestamps from its own playhead, backs off the <b>Tap Allowance</b> (Options; <span id="chop_allow">40 ms</span>) and snaps to the nearest onset.</p></div>
+        </div>
+        <h3 style="margin-top:10px">Nudge all</h3>
+        <div class="row"><select id="ed_nudge_which" class="inline"><option value="0">grid boundaries</option><option value="1">markers</option></select><button id="ed_nudge_m" class="mini" title="NUDGE_ALL earlier">−</button><input id="ed_nudge" type="number" value="5" min="1" max="500" step="1"> ms<button id="ed_nudge_p" class="mini" title="NUDGE_ALL later">+</button></div>
+        <div class="row" style="margin-top:8px"><button id="ed_follow" class="mini" title="SET_KEY every key back to its span of the grid (the takes stay in the table, keyless)">keys follow the grid</button></div>
+      </div>
+      <div>
+        <h3>Onsets → markers</h3>
+        <div class="row" style="justify-content:space-between"><span style="font-size:12px;color:var(--mute)">drag the line · <b id="ed_onsets_n" style="color:var(--ink)">—</b></span><button id="ed_onsets" class="mini primary" title="FROM_ONSETS(threshold, 35 ms): every grey marker inside the break is replaced by one per onset above the line (orange ones and recordings stay)">Make markers</button></div>
+        <canvas id="onsethist" style="height:96px;margin-top:6px"></canvas>
+        <p style="font-size:12px;color:var(--mute);margin:6px 0 0">Bar height = the salience of the grid slice the onset falls in (the module's strength proxy).</p>
+      </div>
+      <div>
+        <h3>History</h3>
+        <div class="row"><button id="ed_undo" class="mini" disabled title="UNDO (ACTION 30) — live with the EDIT-UNDO firmware; this one reports no journal">Undo</button><button id="ed_redo" class="mini" disabled title="REDO (ACTION 31)">Redo</button><span id="ed_depth" style="font-size:12px;color:var(--mute)"></span></div>
+        <ol id="ed_hist" class="hist"></ol>
+      </div>
+    </div>
+  </section>
+  <div id="ed_ghost" class="edghost" hidden></div>
   <section>
     <h2>Buffer</h2>
     <div class="bar usage" id="k_usage"><i class="mat" id="u_mat" style="width:0"></i><i class="rec" id="u_rec" style="width:0"></i></div>
@@ -245,6 +304,7 @@
 <footer>Runs over the module's front USB-C. Hermetic's <code>/program</code> keeps flashing, presets and settings; this page is the instrument's window. Sources: codeberg.org/combust/Audiothurgist</footer>
 
 <script src="hostlink.js"></script>
+<script src="edit.js"></script>
 <!-- Web Serial on top of WebUSB for Chrome on Android (desktop Chromium has
      navigator.serial and never loads this). A module script so the vendored
      file stays byte-for-byte upstream; it fails quietly on file://. -->
@@ -272,7 +332,10 @@ let pager = null, opts = null, manual = null;
 let demoDevice = null;
 /* Kit: the slice table (grid + recorded entries, real boundaries), the onset
  * table, the selected key, the waveform view and its window cache. */
-let table = null, tableSig = '', hits = null, hitsGen = -1, selKey = 0, kitOk = false, kitShown = false;
+let table = null, tableSig = '', bufSig = '', hits = null, hitsGen = -1, selKey = 0, kitOk = false, kitShown = false;
+/* EDIT-UI: the editor is on when the descriptor says "edit": 1 — otherwise the Kit tab is the view-only one. The onset
+ * threshold for the histogram, the key armed for a copy (long-press), the cell lit as a drop target. */
+let editOk = false, edThresh = 128, copyArm = -1;
 /* Sets: advertised by the descriptor ("sets":1); the last op's sequence the page has shown, and the op it asked for. */
 let setsOk = false, setSeqShown = -1, setAsked = null;
 const view = { a: 0, b: 1 };
@@ -297,7 +360,7 @@ for (const t in TABS) $(t).onclick = () => { showTab(t); history.replaceState(nu
 const D = { bar: 1, wave: 2, scope: 4, text: 8, controls: 16, kit: 32, kitwave: 64, bigscope: 128, all: 255 };
 let dirty = 0, rafPending = false;
 function invalidate(m) { dirty |= m; if (!rafPending) { rafPending = true; requestAnimationFrame(draw); } }
-const canvases = ['ring', 'strip', 'wave', 'scope', 'kitwave', 'bigscope'].map($);
+const canvases = ['ring', 'strip', 'wave', 'scope', 'kitwave', 'bigscope', 'onsethist'].map($);
 function sizeCanvas(c) {
   const r = c.getBoundingClientRect(), d = window.devicePixelRatio || 1;
   const w = Math.max(1, Math.round(r.width * d)), h = Math.max(1, Math.round(r.height * d));
@@ -346,7 +409,7 @@ function draw() {
     if (selSlice >= 0) { const x0 = sliceX(selSlice, w), x1 = sliceX(selSlice + 1, w); g.strokeStyle = '#ffd54a'; g.lineWidth = 2; g.setLineDash([4, 3]); g.strokeRect(x0 + 1, 1, x1 - x0 - 2, h - 2); g.setLineDash([]); }
   }
   if (m & D.kit) drawKit();
-  if (m & D.kitwave) drawKitWave();
+  if (m & D.kitwave) { drawKitWave(); drawHist(); }
   if (m & D.scope) {
     const [g, w, h] = ctx($('scope')); g.clearRect(0, 0, w, h); g.strokeStyle = '#2a2a30'; g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
     if (scope) { g.strokeStyle = '#9be0b0'; g.lineWidth = 1.5; g.beginPath(); for (let i = 0; i < scope.length; i++) { const x = i / (scope.length - 1) * w, y = h / 2 - scope[i] / 127 * h / 2 * 0.95; i ? g.lineTo(x, y) : g.moveTo(x, y); } g.stroke(); }
@@ -539,21 +602,60 @@ const keyCells = [];
   for (let k = 0; k < 24; k++) {
     const el = document.createElement('div'); el.className = 'key'; el.dataset.k = k;
     el.innerHTML = `<div class="nm"><span>${keyName(k)}</span><i>${k}</i></div><div class="info">—</div><div class="meta"></div><div class="kb"><button class="mini rec" title="arm a take into ${keyName(k)} (ACTION 9)">●</button><button class="mini clr" title="clear ${keyName(k)}'s recording (ACTION 10)">✕</button></div>`;
-    el.onclick = () => selectKey(k);
     const rec = el.querySelector('.rec'), clr = el.querySelector('.clr');
     rec.onclick = e => { e.stopPropagation(); selectKey(k); action(ACT.recArm, k); };
     clr.onclick = e => { e.stopPropagation(); selectKey(k); action(ACT.recClear, k); };
+    for (const b of [rec, clr]) b.addEventListener('pointerdown', e => e.stopPropagation());
+    cellPointer(el, k);
     host.appendChild(el); keyCells.push({ el, info: el.querySelector('.info'), meta: el.querySelector('.meta'), rec, clr, sig: '' });
   }
 })();
 const secs = n => (n / SR).toFixed(n < SR ? 3 : 2) + ' s';
 function entryOfKey(k) { if (!table || !st || !st.keySlice) return null; const t = st.keySlice[k]; return t >= 0 && t < table.entries.length ? Object.assign({ t }, table.entries[t]) : null; }
-const keyRecorded = e => !!(e && table && e.t >= table.nSlices);
+/* A recording is a marker with a recorder (its key ≥ 0); a marker inside the break is keyless (EDIT). */
+const keyRecorded = e => !!(e && table && e.t >= table.nSlices && e.key >= 0);
+const keyMarker = e => !!(e && table && e.t >= table.nSlices && e.key < 0);
+const entryLabel = t => !table || t < 0 ? '—' : t < table.nSlices ? `slice ${t}` : table.entries[t].key >= 0 ? `${keyName(table.entries[t].key)}'s recording (${t})` : `marker ${t}`;
+/* ── the key cells' gestures (EDIT-UI B4): tap = select + audition · drag onto another cell = swap (a prompt when the
+ * target is taken) · long-press, then drop or tap another cell = copy. One recogniser, the cell index as the tag. ── */
+const cellG = new ED.Gesture(); let cellHold = null;
+const cellAt = (cx, cy) => { const el = document.elementFromPoint(cx, cy); const c = el && el.closest ? el.closest('.key') : null; return c ? +c.dataset.k : -1; };
+function dropHi(k, red) { keyCells.forEach((c, i) => { c.el.classList.toggle('drop', i === k); c.el.classList.toggle('red', i === k && !!red); }); }
+function ghost(txt, cx, cy) { const gh = $('ed_ghost'); if (!txt) { gh.hidden = true; return; } gh.hidden = false; gh.textContent = txt; gh.style.left = cx + 'px'; gh.style.top = cy + 'px'; }
+/* the cell under the pointer while something is dragged towards the keys, lit by the drop rule */
+function dragOverKeys(src, cx, cy) { const dst = cellAt(cx, cy); const plan = dst >= 0 && st && st.keySlice ? ED.dropPlan({ table, keySlice: st.keySlice }, src, dst) : null; dropHi(plan ? dst : -1, plan && plan.red); return dst; }
+function cellPointer(el, k) {
+  const run = (e, evs) => { for (const ev of evs) cellGesture(ev, e, k); };
+  el.addEventListener('pointerdown', e => { if (!st) return; e.preventDefault(); try { el.setPointerCapture(e.pointerId); } catch {} run(e, cellG.down(e.pointerId, e.clientX, e.clientY, performance.now(), k)); clearTimeout(cellHold); cellHold = setTimeout(() => run(e, cellG.tick(performance.now())), ED.K.holdMs + 1); });
+  el.addEventListener('pointermove', e => { if (cellG.active) run(e, cellG.move(e.pointerId, e.clientX, e.clientY, performance.now())); });
+  el.addEventListener('pointerup', e => { clearTimeout(cellHold); run(e, cellG.up(e.pointerId, e.clientX, e.clientY, performance.now())); });
+  el.addEventListener('pointercancel', e => { clearTimeout(cellHold); run(e, cellG.cancel(e.pointerId)); });
+}
+function cellGesture(ev, e, k) {
+  const t = st && st.keySlice ? st.keySlice[k] : -1, src = copyArm === k ? { t } : { key: k };
+  switch (ev.type) {
+    case 'hold': if (!editOk) break; copyArm = k; setEdStatus(`copy ${keyName(k)}: drop it on a key, or tap one`, ''); invalidate(D.kit); break;
+    case 'dragstart': case 'drag': if (!editOk) break; ghost(`${keyName(k)}${copyArm === k ? ' · copy' : ' · swap'}`, e.clientX, e.clientY); dragOverKeys(src, e.clientX, e.clientY); break;
+    case 'dragend': {
+      ghost(null); dropHi(-1); if (!editOk || ev.cancelled) { if (copyArm === k) { copyArm = -1; invalidate(D.kit); } break; }
+      const dst = cellAt(e.clientX, e.clientY);
+      if (dst >= 0 && dst !== k) { if (copyArm === k) ed.setKey(dst, t); else ed.dropOnKey({ key: k }, dst, e.clientX, e.clientY); }
+      if (copyArm === k) { copyArm = -1; invalidate(D.kit); }
+      break; }
+    case 'tap':
+      if (editOk && copyArm >= 0 && copyArm !== k) { ed.setKey(k, st.keySlice[copyArm]); copyArm = -1; invalidate(D.kit); break; }
+      if (copyArm >= 0) { copyArm = -1; setEdStatus('', ''); invalidate(D.kit); }
+      selectKey(k); if (editOk && t >= 0) ed.auditionEntry(t);
+      break;
+  }
+}
 /* The grid slice the next un-recorded key above k plays (nSlices past the top): an
  * empty key's span of the break runs up to it. */
 function nextGridKey(k) { for (let j = k + 1; j < 24; j++) if (st.keySlice[j] < table.nSlices) return st.keySlice[j]; return table.nSlices; }
-function selectKey(k) { if (k === selKey) return; selKey = k; fitView(); invalidate(D.kit | D.kitwave); }
-function fitView() { const e = entryOfKey(selKey); if (!e || !st) return; const pad = Math.max(200, e.len * 0.02); setView(e.start - pad, e.start + e.len + pad); }
+/* Selecting a key selects its entry in the editor (and the other way round through the editor's select callback). */
+function selectKey(k, fromEditor) { if (k !== selKey) { selKey = k; if (!editOk) fitView(); invalidate(D.kit | D.kitwave); } if (!fromEditor && editOk && st && st.keySlice) { ed.select(st.keySlice[k]); fitEntry(st.keySlice[k]); } }
+function fitView() { const e = editOk && ed.selT >= 0 && table ? table.entries[ed.selT] : entryOfKey(selKey); if (!e || !st) return; const pad = Math.max(200, e.len * 0.02); setView(e.start - pad, e.start + e.len + pad); }
+function fitEntry(t) { const e = table && t >= 0 && t < table.entries.length ? table.entries[t] : null; if (!e || !st || !ED.isLive(e)) return; const pad = Math.max(200, e.len * 0.02); setView(e.start - pad, e.start + e.len + pad); }
 function setView(a, b) {
   const lim = st && st.freePos ? st.freePos : 1; if (b - a < 96) { const c = (a + b) / 2; a = c - 48; b = c + 48; }
   if (b - a > lim) { a = 0; b = lim; } if (a < 0) { b -= a; a = 0; } if (b > lim) { a -= b - lim; b = lim; if (a < 0) a = 0; }
@@ -579,13 +681,16 @@ function drawKit() {
     const c = keyCells[k], e = entryOfKey(k), rec = keyRecorded(e);
     let info = '—', meta = '', cls = -1;
     if (e && rec) { info = `${secs(e.len)} · ${CLS_NAME[e.cls & 3]}${e.hit ? ' · hit' : ''}`; meta = `sal ${Math.round(e.sal / 2.55)}% · dens ${Math.round(e.dens / 2.55)}%`; cls = e.cls & 3; }
+    else if (e && keyMarker(e)) { info = `marker ${e.t}`; meta = `${secs(e.len)} · ${CLS_NAME[e.cls & 3]}`; cls = e.cls & 3; }
     else if (e) { const nxt = nextGridKey(k) - 1; info = nxt > e.t ? `slices ${e.t}–${nxt}` : `slice ${e.t}`; meta = `${secs(e.len)} · ${CLS_NAME[e.cls & 3]}`; }
     else if (st.keySlice) info = `slice ${st.keySlice[k]}`;
     const rstate = rk === k && rs ? REC[rs] : '';
-    const sig = [info, meta, cls, rec, k === selKey, rstate, rs].join('|');
+    const pulse = editOk && e && ed.selT >= 0 && e.t === ed.selT, arm = copyArm === k, mark = !!(e && keyMarker(e)), orange = !!(e && ED.isOrange(e));
+    const sig = [info, meta, cls, rec, k === selKey, rstate, rs, pulse, arm, mark, orange].join('|');
     if (sig === c.sig) continue; c.sig = sig;
     c.info.textContent = info; c.meta.textContent = rstate ? rstate.toUpperCase() : meta;
-    c.el.className = 'key' + (rec ? ' rec' : '') + (k === selKey ? ' sel' : '') + (rstate ? ' ' + rstate : '');
+    c.el.className = 'key' + (rec ? ' rec' : '') + (k === selKey ? ' sel' : '') + (rstate ? ' ' + rstate : '') + (pulse ? ' pulse' : '') + (arm ? ' arm' : '');
+    c.el.style.borderLeftStyle = mark ? (orange ? 'solid' : 'dotted') : 'solid';
     c.el.style.borderLeftColor = cls >= 0 ? COL[cls] : (e ? COL[e.cls & 3] + '66' : '');
     c.rec.disabled = !kitOk || rs !== 0; c.clr.disabled = !kitOk || !rec;
   }
@@ -600,14 +705,19 @@ function drawKit() {
     $('u_mat').style.width = (st.bufLen / st.bufCap * 100).toFixed(2) + '%'; $('u_rec').style.left = (st.bufLen / st.bufCap * 100).toFixed(2) + '%'; $('u_rec').style.width = (recs / st.bufCap * 100).toFixed(2) + '%';
     setText('u_break', secs(st.bufLen)); setText('u_recs', recs ? `${secs(recs)} (${table ? table.nTable - table.nSlices : '?'} key${table && table.nTable - table.nSlices === 1 ? '' : 's'})` : 'none');
     setText('u_free', secs(st.bufCap - st.freePos) + ' of ' + secs(st.bufCap)); setText('u_planes', st.stereo ? 'stereo (L · R)' : 'mono');
-    setText('u_table', table ? `${table.nSlices} grid + ${table.nTable - table.nSlices} recorded = ${table.nTable}` : (st.nTable != null ? `${st.nTable} entries` : '—'));
+    setText('u_table', table ? tableLine() : (st.nTable != null ? `${st.nTable} entries` : '—'));
   }
+  if (editOk) drawEditor();
   const le = st.looperEvents; setText('l_count', le == null ? '—' : String(le)); setText('l_label', le == null ? 'needs LOOPER firmware (state byte 176)' : (le === 1 ? 'event on the bar' : 'events on the bar'));
   $('l_undo').disabled = !le; $('l_clear').disabled = !le;
   drawSet();
-  setPill('kit_status', !st.keySlice ? 'needs sample-mode firmware' : table ? `${table.nTable - table.nSlices} recorded · ${24 - (table.nTable - table.nSlices)} on the break` : 'reading the table…', st.keySlice ? 'ok' : 'warn');
+  setPill('kit_status', !st.keySlice ? 'needs sample-mode firmware' : table ? kitLine() : 'reading the table…', st.keySlice ? 'ok' : 'warn');
   $('wv_plane').hidden = !st.stereo;
 }
+/* EDIT: the table has grid slices, recordings, markers inside the break, and tombstones (free slots). */
+function tableCounts() { let recs = 0, marks = 0, tombs = 0; if (table) for (let t = table.nSlices; t < table.entries.length; t++) { const e = table.entries[t]; if (ED.isTomb(e)) tombs++; else if (e.key >= 0) recs++; else marks++; } return { recs, marks, tombs }; }
+function tableLine() { const { recs, marks, tombs } = tableCounts(); return `${table.nSlices} grid + ${recs} recorded${marks ? ` + ${marks} marker${marks === 1 ? '' : 's'}` : ''}${tombs ? ` + ${tombs} free` : ''} = ${table.nTable}`; }
+function kitLine() { const { recs, marks } = tableCounts(); const onMarks = st.keySlice ? Array.from(st.keySlice).filter(t => t >= table.nSlices && t < table.entries.length && table.entries[t].key < 0).length : 0; return `${recs} recorded${marks ? ` · ${marks} marker${marks === 1 ? '' : 's'} (${onMarks} on keys)` : ''} · ${24 - recs - onMarks} on the break`; }
 /* The set section: the op in flight (with the save's progress), the result of the last one
  * (once per sequence number), the name the material came from. */
 function drawSet() {
@@ -638,10 +748,13 @@ function drawKitWave() {
   const c = $('kitwave'), [g, w, h] = ctx(c); g.clearRect(0, 0, w, h);
   if (!kitOk || !st || !st.freePos) { g.fillStyle = '#5e5c55'; g.font = '12px system-ui'; g.textAlign = 'center'; g.fillText(st && !st.keySlice ? 'this firmware sends no sample-mode state tail' : 'connect to read the material', w / 2, h / 2); setText('wv_title', 'Waveform'); return; }
   wavePlan(w);
-  const a = view.a, span = Math.max(1, view.b - a), mid = h / 2, step = wave.step, win = WAVE_N * step, xOf = p => (p - a) / span * w;
-  const e = entryOfKey(selKey), rec = keyRecorded(e), col = e ? COL[e.cls & 3] : '#9be0b0';
-  if (e) { g.fillStyle = col; g.globalAlpha = 0.12; g.fillRect(xOf(e.start), 0, xOf(e.start + e.len) - xOf(e.start), h); g.globalAlpha = 1; }
-  if (st.bufLen > a && st.bufLen < view.b) { g.fillStyle = '#3a3a42'; g.fillRect(xOf(st.bufLen), 0, 2, h); }
+  const L = ed.layout(w, h), hw = L.wave[1];
+  const a = view.a, span = Math.max(1, view.b - a), mid = hw / 2, step = wave.step, win = WAVE_N * step, xOf = p => (p - a) / span * w;
+  const ke = entryOfKey(selKey), rec = keyRecorded(ke);
+  const selT = L.edit ? ed.selT : (ke ? ke.t : -1), selE = selT >= 0 && table ? table.entries[selT] : null;
+  const col = selE ? COL[selE.cls & 3] : '#9be0b0';
+  if (selE) { const s0 = drawPos(selT, 'start', selE.start), s1 = drawPos(selT, 'end', selE.start + selE.len); g.fillStyle = col; g.globalAlpha = 0.12; g.fillRect(xOf(s0), 0, xOf(s1) - xOf(s0), hw); g.globalAlpha = 1; }
+  if (st.bufLen > a && st.bufLen < view.b) { g.fillStyle = '#3a3a42'; g.fillRect(xOf(st.bufLen), 0, 2, hw); }
   g.fillStyle = col; let have = 0, want = 0;
   for (let x = 0; x < w; x++) {
     const p = a + x / w * span; if (p >= st.freePos) break; want++;
@@ -653,23 +766,166 @@ function drawKitWave() {
   if (table) {
     const pxPer = w / span; g.font = '10px system-ui'; g.textAlign = 'left';
     table.entries.forEach((en, i) => {
-      if (en.start < a || en.start > view.b) return; const x = xOf(en.start), grid = i < table.nSlices;
-      g.fillStyle = grid ? '#ffffff' : '#ffd54a'; g.globalAlpha = 0.55; g.fillRect(x, 0, 1, h); g.globalAlpha = 1;
-      if (en.len * pxPer > 28) { g.fillStyle = grid ? '#8a887f' : '#ffd54a'; g.fillText(grid ? String(i) : keyName(en.key), x + 3, h - 4); }
+      const grid = i < table.nSlices; if (!grid && ED.isTomb(en)) return;   /* tombstones are not drawn */
+      const pos = drawPos(i, 'start', en.start), end = drawPos(i, 'end', en.start + en.len);
+      if (end < a || pos > view.b) return; const x = xOf(pos), colr = entryColor(i, en);
+      if (pos >= a) { g.fillStyle = colr; g.globalAlpha = grid ? 0.55 : 0.85; g.fillRect(x, 0, 1, hw); g.globalAlpha = 1; }
+      if (!grid) { const x0 = Math.max(0, x), x1 = xOf(Math.min(view.b, end)); g.fillStyle = colr; g.globalAlpha = 0.35; g.fillRect(x0, 0, Math.max(1, x1 - x0), 3); g.globalAlpha = 1; }
+      if ((end - pos) * pxPer > 28 && pos >= a) { g.fillStyle = grid ? '#8a887f' : colr; g.fillText(grid ? String(i) : en.key >= 0 ? keyName(en.key) : 'm' + i, x + 3, hw - 4); }
     });
   }
-  if (hits) { g.fillStyle = '#78a0ff'; for (const p of hits) { if (p < a || p > view.b) continue; const x = xOf(p); g.fillRect(x - 1, 0, 3, 8); g.fillRect(x, 8, 1, h * 0.22); } }
+  if (hits) { g.fillStyle = '#78a0ff'; for (const p of hits) { if (p < a || p > view.b) continue; const x = xOf(p); g.fillRect(x - 1, 0, 3, 8); g.fillRect(x, 8, 1, hw * 0.22); } }
+  if (L.edit && st.srcPos != null && st.srcPos >= a && st.srcPos <= view.b) { g.fillStyle = '#9be0b0'; g.globalAlpha = 0.6; g.fillRect(xOf(st.srcPos), 0, 1, hw); g.globalAlpha = 1; }
+  if (ed.drag && ed.drag.kind === 'handle') { const x = xOf(ed.drag.pos); g.fillStyle = ed.drag.by ? '#78a0ff' : '#ffffff'; g.fillRect(x - 1, 0, 2, hw); }
+  if (L.edit) {
+    /* the handle row: a lollipop per movable start (a square for the selected marker's end), the selection ringed */
+    const hy = L.handles[0] + ED.K.handlePx / 2, pulse = 0.5 + 0.5 * Math.sin(performance.now() / 180);
+    g.fillStyle = '#0e0e10'; g.fillRect(0, L.handles[0], w, ED.K.handlePx); g.fillStyle = '#1d1d21'; g.fillRect(0, L.handles[0], w, 1);
+    for (const hd of ed.handles()) {
+      const pos = ed.handlePos(hd); if (pos < a || pos > view.b) continue; const x = xOf(pos), en = table.entries[hd.t], colr = hd.kind === 'grid' ? '#ffffff' : entryColor(hd.t, en), sel = hd.t === selT;
+      g.strokeStyle = colr; g.globalAlpha = 0.55; g.lineWidth = 1; g.beginPath(); g.moveTo(x, hw); g.lineTo(x, hy - 8); g.stroke(); g.globalAlpha = 1;
+      g.fillStyle = colr; g.beginPath(); if (hd.kind === 'end') g.rect(x - 7, hy - 7, 14, 14); else g.arc(x, hy, sel ? 8 : 6.5, 0, Math.PI * 2); g.fill();
+      if (sel) { g.strokeStyle = '#eb7414'; g.globalAlpha = 0.35 + 0.55 * pulse; g.lineWidth = 3; g.beginPath(); g.arc(x, hy, 13, 0, Math.PI * 2); g.stroke(); g.lineWidth = 1; g.globalAlpha = 1; }
+    }
+    /* the strip: the whole buffer with the view's window — drag = pan, drag up / down = zoom, pinch, double-tap = fit */
+    const sy = L.strip[0], sh = h - sy, ox = p => p / st.freePos * w;
+    g.fillStyle = '#121214'; g.fillRect(0, sy, w, sh); g.fillStyle = '#26262a'; g.fillRect(0, sy, w, 1);
+    if (table) for (let i = 0; i < table.entries.length; i++) { const en = table.entries[i]; if (i >= table.nSlices && ED.isTomb(en)) continue; g.fillStyle = i < table.nSlices ? '#34343a' : entryColor(i, en); g.globalAlpha = i < table.nSlices ? 1 : 0.6; g.fillRect(ox(en.start), sy + 6, 1, sh - 12); g.globalAlpha = 1; }
+    if (st.bufLen < st.freePos) { g.fillStyle = '#3a3a42'; g.fillRect(ox(st.bufLen), sy + 3, 2, sh - 6); }
+    if (selE) { g.fillStyle = col; g.globalAlpha = 0.35; g.fillRect(ox(selE.start), sy + 6, Math.max(2, ox(selE.start + selE.len) - ox(selE.start)), sh - 12); g.globalAlpha = 1; }
+    g.strokeStyle = '#e8e6df'; g.globalAlpha = 0.8; g.strokeRect(Math.max(0.5, ox(a) + 0.5), sy + 3.5, Math.max(4, ox(Math.min(view.b, st.freePos)) - ox(Math.max(0, a))), sh - 7); g.globalAlpha = 1;
+    g.fillStyle = '#5e5c55'; g.font = '10px system-ui'; g.textAlign = 'right'; g.fillText('pan · ↕ zoom · pinch · double-tap fits', w - 6, sy + sh - 5);
+    if (ed.drag && ed.drag.kind === 'toKey') { g.fillStyle = '#eb7414'; g.font = '600 12px system-ui'; g.textAlign = 'center'; g.fillText(`${entryLabel(ed.drag.t)} → drop it on a key`, Math.max(60, Math.min(w - 60, ed.drag.x)), Math.max(14, ed.drag.y - 14)); }
+  }
   if (have < want) { g.fillStyle = '#8a887f'; g.font = '11px system-ui'; g.textAlign = 'right'; g.fillText(`loading… ${wave.queue.length} window${wave.queue.length === 1 ? '' : 's'} to go`, w - 6, 14); }
-  const what = e ? (rec ? `${keyName(selKey)} · recording · ${secs(e.len)} · ${CLS_NAME[e.cls & 3]}${e.hit ? ' · hit' : ''}` : `${keyName(selKey)} · slice ${e.t} of the break · ${secs(e.len)}`) : keyName(selKey);
+  let what;
+  if (L.edit && selE) { const ks = ED.keysOn(st.keySlice, selT).map(keyName).join(' '); what = `${entryLabel(selT)}${ks ? ' · ' + ks : ''} · ${secs(selE.len)} · ${CLS_NAME[selE.cls & 3]}${selE.hit ? ' · hit' : ''}${ED.isOrange(selE) ? ' · yours' : ''}`; }
+  else what = ke ? (rec ? `${keyName(selKey)} · recording · ${secs(ke.len)} · ${CLS_NAME[ke.cls & 3]}${ke.hit ? ' · hit' : ''}` : `${keyName(selKey)} · slice ${ke.t} of the break · ${secs(ke.len)}`) : keyName(selKey);
   setText('wv_title', what); setText('wv_range', `view ${secs(a)} – ${secs(view.b)} · ${step === 1 ? 'raw samples' : step + ' samples per pixel'}`);
+  if (L.edit) updateField();
+}
+/* Colour is state: grid white, a recording yellow, a marker grey until touched, orange once placed or moved by the user. */
+function entryColor(i, en) { return i < table.nSlices ? '#ffffff' : en.key >= 0 ? '#ffd54a' : ED.isOrange(en) ? '#eb7414' : '#8a887f'; }
+/* Where an edge is drawn: the drag's local position while a handle moves, the landed position until the refetch confirms it. */
+function drawPos(t, edge, pos) {
+  const dr = ed.drag; if (dr && dr.kind === 'handle') {
+    if (dr.h.kind === 'grid') { if (edge === 'start' && t === dr.h.t) return dr.pos; if (edge === 'end' && t === dr.h.t - 1) return dr.pos; }
+    else if (t === dr.h.t && edge === (dr.h.kind === 'end' ? 'end' : 'start')) return dr.pos;
+  }
+  const lo = ed.local; if (lo && table) {
+    if (lo.t === t) return edge === 'start' ? lo.start : lo.start + lo.len;
+    if (lo.prevLen != null && t === lo.t - 1 && edge === 'end') return lo.start;
+  }
+  return pos;
+}
+/* The field under the handles: the selection's start and end, typed values commit on Enter. */
+let fieldSig = '';
+function updateField() {
+  const v = ed.fieldValues(), f = $('ed_field'); if (f.hidden) return;
+  const sig = v ? [v.t, v.startS, v.endS, v.lenS, v.by, ed.unit].join('|') : ''; if (sig === fieldSig) return; fieldSig = sig;
+  setText('ed_sel', v ? entryLabel(v.t) : 'nothing selected'); setText('ed_len', v ? v.lenS : ''); setText('ed_by', v && v.by ? `snapped to ${v.by.replace('+', ' + ')}` : '');
+  for (const [id, val] of [['ed_start', v ? v.startS : ''], ['ed_end', v ? v.endS : '']]) { const el = $(id); el.disabled = !v; if (document.activeElement !== el && el.value !== val) el.value = val; }
+}
+/* The onset histogram (B2.2): every onset as a bar, height = its slice's salience; the threshold line previews FROM_ONSETS. */
+function drawHist() {
+  const c = $('onsethist'); if ($('editor').hidden || !c._cw) return; const [g, w, h] = ctx(c); g.clearRect(0, 0, w, h);
+  if (!st || !st.bufLen || !table || !hits) { $('ed_onsets').disabled = true; setText('ed_onsets_n', '—'); return; }
+  const bars = ED.onsetBars(hits, table), acc = ED.onsetAccept(bars, edThresh, ED.K.minGapMs * 48, st.bufLen), accSet = new Set(acc.positions);
+  const yT = h - 10 - (h - 14) * edThresh / 255;
+  g.fillStyle = '#2a2a30'; g.fillRect(0, h - 10, w, 1);
+  if (table) for (let i = 1; i < table.nSlices; i++) { g.fillStyle = '#1d1d21'; g.fillRect(table.entries[i].start / st.bufLen * w, 0, 1, h - 10); }
+  for (const b of bars) { if (b.pos >= st.bufLen) continue; const x = b.pos / st.bufLen * w, bh = Math.max(2, (h - 14) * b.strength / 255), on = accSet.has(b.pos); g.fillStyle = on ? '#78a0ff' : b.strength >= edThresh ? '#3a4a6a' : '#3a3a42'; g.fillRect(x - 1.5, h - 10 - bh, 3, bh); }
+  g.fillStyle = '#eb7414'; g.fillRect(0, yT, w, 2); g.fillStyle = '#eb7414'; g.font = '10px system-ui'; g.textAlign = 'left'; g.fillText(`${Math.round(edThresh / 2.55)} %`, 4, yT - 3);
+  const n = acc.count; setText('ed_onsets_n', `${n} marker${n === 1 ? '' : 's'} above the line`); $('ed_onsets').textContent = `Make ${n} marker${n === 1 ? '' : 's'}`; $('ed_onsets').disabled = !n || !link;
 }
 $('wv_in').onclick = () => zoomView(0.5); $('wv_out').onclick = () => zoomView(2); $('wv_fit').onclick = () => { fitView(); }; $('wv_all').onclick = () => { if (st) setView(0, st.freePos); };
 $('wv_plane').onchange = e => { wave.plane = +e.target.value; invalidate(D.kitwave); };
-{ const c = $('kitwave'); let drag = null;
-  c.addEventListener('wheel', e => { if (!st || !st.freePos) return; e.preventDefault(); const r = c.getBoundingClientRect(); const at = view.a + (e.clientX - r.left) / r.width * (view.b - view.a); zoomView(Math.pow(1.25, e.deltaY / 100), at); }, { passive: false });
-  c.addEventListener('pointerdown', e => { drag = { x: e.clientX, a: view.a, b: view.b }; c.setPointerCapture(e.pointerId); });
-  c.addEventListener('pointermove', e => { if (!drag) return; const r = c.getBoundingClientRect(); const d = (e.clientX - drag.x) / r.width * (drag.b - drag.a); setView(drag.a - d, drag.b - d); });
-  c.addEventListener('pointerup', () => { drag = null; }); c.addEventListener('pointercancel', () => { drag = null; }); }
+/* ───────────── The editor (EDIT-UI) ─────────────
+ * ED.Editor decides what every gesture means (edit.js, tested in the selftest); this block only forwards pointer
+ * events from the canvas, draws what the editor holds, and supplies the DOM pieces it asks for: the status pill,
+ * the long-press menu, the swap / replace / cancel prompt, the drop target under a finger, the table refetch. */
+const ed = new ED.Editor({
+  link: () => link, view,
+  ctx: () => ({ table, st, hits, sampleAt, editOk, tapAllowMs: tapAllowMs() }),
+  cb: { redraw: () => invalidate(D.kitwave | D.kit), status: setEdStatus, refetch: refetchKit,
+    select: t => { if (st && st.keySlice) { const ks = ED.keysOn(st.keySlice, t); if (ks.length && !ks.includes(selKey)) selectKey(ks[0], true); } fieldSig = ''; invalidate(D.kit | D.kitwave); },
+    setView, zoomView, fitEntry, menu: showMenu, choose: showChoice, dropTarget: cellAt },
+});
+function setEdStatus(msg, kind) { setPill('ed_status', msg || 'ready', kind || ''); }
+/* Options → Tap Allowance (tap.allow), read like every other option from the live blob; 40 ms without it. */
+function tapAllowMs() { const v = optByte('tap.allow'); return v == null || HL.EDIT.tapAllowMs[v] == null ? HL.EDIT.tapAllowDefault : HL.EDIT.tapAllowMs[v]; }
+/* A sample for the zero-crossing magnet: the finest cached window covering the position, at most 8 samples per
+ * point (a coarser window is a peak picture, not the signal); null when nothing is cached there — then no snap. */
+function sampleAt(i) {
+  let best = null;
+  for (const r of wave.cache.values()) { if (r.step > ED.K.zeroMaxStep || i < r.start || i >= r.start + r.n * r.step) continue; if (!best || r.step < best.step) best = r; }
+  if (!best) return null; return best.data[Math.floor((i - best.start) / best.step)];
+}
+/* A fresh state, then the table (the 14-byte form) — what a landed edit or a refusal asks for. */
+async function refetchKit() {
+  if (!link || !kitOk) return;
+  try { if (poll.pState) await poll.pState; else { const b = await link.request(CMD.state, undefined, { key: 'state', urgent: true }); onState(b); } } catch (e) { warn('state', e); }
+  if (poll.pTable) { try { await poll.pTable; } catch {} }
+  tableSig = ''; if (st) syncKit(st); if (poll.pTable) { try { await poll.pTable; } catch {} }
+}
+/* the long-press menu and the drop prompt share one popover inside the waveform's wrapper */
+let choiceResolve = null;
+function placeMenu(cx, cy) { const m = $('ed_menu'), r = $('wv_wrap').getBoundingClientRect(); m.hidden = false; const x = Math.max(0, Math.min(r.width - m.offsetWidth, cx - r.left - 20)), y = Math.max(0, Math.min(r.height - 8, cy - r.top - 12)); m.style.left = x + 'px'; m.style.top = y + 'px'; }
+function closeMenu(answer = null) { const m = $('ed_menu'); if (m.hidden) return; m.hidden = true; m.innerHTML = ''; m.classList.remove('red'); if (choiceResolve) { const r = choiceResolve; choiceResolve = null; r(answer); } }
+function showMenu(items, cx, cy, t) {
+  closeMenu(); const m = $('ed_menu'); m.innerHTML = `<div class="t">${esc(entryLabel(t))}</div>`;
+  for (const it of items) { const b = document.createElement('button'); b.textContent = it.label; if (it.danger) b.className = 'danger'; b.onclick = () => { closeMenu(); it.run(); }; m.appendChild(b); }
+  placeMenu(cx, cy);
+}
+const CHOICE_LABEL = { swap: 'swap the two keys', replace: 'replace (the target loses it)', cancel: 'cancel' };
+function showChoice(plan, cx, cy) {
+  closeMenu(); const m = $('ed_menu'); m.classList.toggle('red', !!plan.red);
+  m.innerHTML = `<div class="t">${plan.red ? 'that key is the only one playing a recording — replacing orphans it' : 'that key is taken'}</div>`;
+  for (const ch of plan.choices) { const b = document.createElement('button'); b.textContent = CHOICE_LABEL[ch.id] || ch.id; if (ch.id === plan.def) b.className = 'primary'; b.onclick = () => closeMenu(ch.id); m.appendChild(b); }
+  placeMenu(cx == null ? 0 : cx, cy == null ? 0 : cy);
+  return new Promise(res => { choiceResolve = res; });
+}
+document.addEventListener('pointerdown', e => { if (!$('ed_menu').hidden && !$('ed_menu').contains(e.target)) closeMenu(); }, true);
+{ const c = $('kitwave');
+  const pe = (kind, e) => { const r = c.getBoundingClientRect(); ed.pointer(kind, { id: e.pointerId, x: e.clientX - r.left, y: e.clientY - r.top, w: r.width, h: r.height, cx: e.clientX, cy: e.clientY }); if (ed.drag && ed.drag.kind === 'toKey') { ghost(entryLabel(ed.drag.t), e.clientX, e.clientY); dragOverKeys({ t: ed.drag.t }, e.clientX, e.clientY); } };
+  c.addEventListener('pointerdown', e => { if (!st) return; e.preventDefault(); try { c.setPointerCapture(e.pointerId); } catch {} pe('down', e); });
+  c.addEventListener('pointermove', e => { if (ed.g.active) pe('move', e); });
+  c.addEventListener('pointerup', e => { pe('up', e); ghost(null); dropHi(-1); });
+  c.addEventListener('pointercancel', e => { pe('cancel', e); ghost(null); dropHi(-1); });
+  c.addEventListener('wheel', e => { if (!st || !st.freePos) return; e.preventDefault(); const r = c.getBoundingClientRect(); ed.wheel(e.clientX - r.left, r.width, e.deltaY); }, { passive: false });
+  document.addEventListener('keydown', e => { if (e.key === 'Shift') ed.keyModifier(true); }); document.addEventListener('keyup', e => { if (e.key === 'Shift') ed.keyModifier(false); });
+  /* the selection pulses: the canvas is redrawn a few times a second while something is selected */
+  setInterval(() => { if (kitShown && editOk && ed.selT >= 0 && !ed.drag && document.visibilityState !== 'hidden') invalidate(D.kitwave); }, 160);
+}
+/* the field under the handles, the snap toggles, the panel */
+$('ed_start').addEventListener('change', e => { ed.typed('start', e.target.value); fieldSig = ''; }); $('ed_end').addEventListener('change', e => { ed.typed('end', e.target.value); fieldSig = ''; });
+$('ed_unit').onchange = e => { ed.unit = e.target.value; fieldSig = ''; invalidate(D.kitwave); };
+$('ed_zgrid').onchange = e => { ed.zero.grid = e.target.checked; }; $('ed_zmark').onchange = e => { ed.zero.markers = e.target.checked; };
+$('chop').addEventListener('pointerdown', e => { e.preventDefault(); if (!link || !editOk) return; $('chop').classList.add('hit'); setTimeout(() => $('chop').classList.remove('hit'), 120); ed.tapMark(); });
+$('ed_nudge_m').onclick = () => ed.nudge(-nudgeMs(), +$('ed_nudge_which').value); $('ed_nudge_p').onclick = () => ed.nudge(nudgeMs(), +$('ed_nudge_which').value);
+const nudgeMs = () => Math.max(1, Math.min(500, Math.round(+$('ed_nudge').value) || 5));
+$('ed_follow').onclick = () => {
+  if (!table || !st || !st.keySlice) return; let n = 0, recs = 0;
+  for (let k = 0; k < 24; k++) if (st.keySlice[k] !== ED.spanSlice(k, table.nSlices)) { n++; if (keyRecorded(entryOfKey(k))) recs++; }
+  if (!n) { setEdStatus('every key already follows the grid', ''); return; }
+  if (confirm(`${n} key${n === 1 ? '' : 's'} go back to the grid${recs ? ` — ${recs} recorded key${recs === 1 ? '' : 's'} lose${recs === 1 ? 's' : ''} the take (it stays in the table, keyless)` : ''}. Go on?`)) ed.keysFollowGrid();
+};
+{ const c = $('onsethist'); let down = false;
+  const at = e => { const r = c.getBoundingClientRect(); edThresh = Math.max(0, Math.min(255, Math.round((1 - (e.clientY - r.top - 4) / Math.max(1, r.height - 14)) * 255))); invalidate(D.kitwave); };
+  c.addEventListener('pointerdown', e => { if (!st) return; e.preventDefault(); down = true; try { c.setPointerCapture(e.pointerId); } catch {} at(e); });
+  c.addEventListener('pointermove', e => { if (down) at(e); }); c.addEventListener('pointerup', () => { down = false; }); c.addEventListener('pointercancel', () => { down = false; }); }
+$('ed_onsets').onclick = () => ed.fromOnsets(edThresh);
+$('ed_undo').onclick = () => ed.undo(); $('ed_redo').onclick = () => ed.redo();
+/* the history list (the page's labels keyed by tableGen), the undo depth from the tail, the playhead for the Chop pad */
+let histSig = '';
+function drawEditor() {
+  const depth = st.undoDepth || 0; $('ed_undo').disabled = !depth || !link; $('ed_redo').disabled = !depth || !link;
+  setText('ed_depth', st.undoDepth == null ? '' : depth ? `undo depth ${depth}` : 'no journal on this firmware yet (EDIT-UNDO) — the list is what this page did');
+  setPill('ed_gen', st.tableGen != null ? `table gen ${st.tableGen}` : '—', '');
+  setText('chop_pos', st.srcPos != null && st.bufLen ? `playhead ${ED.fmtBbs(st.srcPos, ed.posCtx())} · ${ED.fmtMs(st.srcPos)}` : 'playhead —'); setText('chop_allow', tapAllowMs() + ' ms');
+  $('chop').disabled = !link || !st.bufLen;
+  const list = ed.history.list(), sig = list.map(x => x.gen + x.label).join('|'); if (sig !== histSig) { histSig = sig; $('ed_hist').innerHTML = list.map(x => `<li><i>gen ${x.gen}</i>${esc(x.label)}</li>`).join('') || '<li style="color:var(--dim)">nothing yet</li>'; }
+}
 $('k_rec').onclick = () => action(ACT.recArm, selKey); $('k_clr').onclick = () => action(ACT.recClear, selKey);
 $('k_plays').onchange = async e => { await action(ACT.keyPlays, +e.target.value); refreshLive(); };
 $('l_undo').onclick = () => action(ACT.looperUndo); $('l_clear').onclick = () => action(ACT.looperClear);
@@ -677,12 +933,16 @@ $('l_undo').onclick = () => action(ACT.looperUndo); $('l_clear').onclick = () =>
  * the free position or the key map changes (a take, a clear, a re-slice). */
 function syncKit(s) {
   if (!kitOk || s.keySlice == null) return;
+  if (editOk) ed.noteState(s);
   const sig = [s.matGen, s.nTable, s.freePos, s.bufLen, Array.from(s.keySlice).join(','), s.tableGen].join('|');   /* EDIT: tableGen joins the signature */
   if (sig !== tableSig && !poll.pTable) {
-    poll.pTable = fetchTable(link).then(t => {
-      const before = table ? entryOfKey(selKey) : null; table = t; tableSig = sig; wave.cache.clear(); wave.planSig = '';
-      const after = entryOfKey(selKey); if (!before || !after || before.start !== after.start || before.len !== after.len) fitView();   /* the selected key's material moved */
-      invalidate(D.kit | D.kitwave | D.bar | D.wave);
+    poll.pTable = fetchTable(link, { edit: editOk }).then(t => {   /* EDIT: the 14-byte form (flags) when the capability is there */
+      const before = table ? entryOfKey(selKey) : null; table = t; tableSig = sig;
+      const bs = [s.matGen, s.freePos, s.bufLen].join('|'), bufChanged = bs !== bufSig; bufSig = bs;
+      if (bufChanged) { wave.cache.clear(); wave.planSig = ''; }   /* an edit moves the table, not the audio: the windows stay */
+      if (editOk && ed.selT >= 0 && (ed.selT >= t.entries.length || (ed.selT >= t.nSlices && ED.isTomb(t.entries[ed.selT])))) ed.select(-1);
+      const after = entryOfKey(selKey); if (bufChanged || !before || !after || (!editOk && (before.start !== after.start || before.len !== after.len))) fitView();   /* new material (or, view-only, the key's take moved) */
+      fieldSig = ''; invalidate(D.kit | D.kitwave | D.bar | D.wave);
     }, e => warn('table', e)).finally(() => { poll.pTable = null; });
   }
   if (s.matGen !== hitsGen && !poll.pHits) { const gen = s.matGen; poll.pHits = fetchHits(link).then(hh => { hits = hh; hitsGen = gen; invalidate(D.kitwave | D.wave); }, e => warn('hits', e)).finally(() => { poll.pHits = null; }); }
@@ -910,7 +1170,8 @@ function buildManual() {
 /* ───────────── Connect ───────────── */
 function setDisconnected() {
   stopPolling(); link = null; info = null; desc = null; live = null; st = null; env = null; envGen = -1; scope = null; demoDevice = null; ctlSig = '';
-  table = null; tableSig = ''; hits = null; hitsGen = -1; kitOk = false; wave.cache.clear(); wave.queue.length = 0; wave.planSig = ''; keyCells.forEach(c => { c.sig = ''; });
+  table = null; tableSig = ''; bufSig = ''; hits = null; hitsGen = -1; kitOk = false; wave.cache.clear(); wave.queue.length = 0; wave.planSig = ''; keyCells.forEach(c => { c.sig = ''; });
+  editOk = false; copyArm = -1; ed.selT = -1; ed.drag = null; ed.local = null; ed.history = new ED.History(); histSig = fieldSig = ''; closeMenu(); ghost(null); dropHi(-1); setEditorShown(false);
   setsOk = false; setSeqShown = -1; setAsked = null; setPill('s_status', '—', ''); $('s_save').disabled = $('s_load').disabled = true;
   scope2Ok = scopeCvOk = false; clearTimeout(sc.timer); sc.timer = null; sc.frames.length = 0; sc.fps = sc.rps = sc.bps = 0; sc.err = ''; invalidate(D.bigscope);
   $('connect').textContent = 'Connect'; $('demo').disabled = false; setPill('modpill', 'not connected', ''); setPill('linkpill', 'link: —', ''); setPill('kit_status', '—', '');
@@ -930,6 +1191,8 @@ async function connectPort(port, isDemo) {
     if (desc && desc.error) notice('The module reports a descriptor build error: ' + desc.error);
     else if (!desc || !desc.audiothurgist) notice('Connected, but this firmware does not advertise the Audiothurgist state extension (0x60). Flash v0.7.0+ for the live view.');
     kitOk = !!(desc && desc.audiothurgist && desc.audiothurgist.table);   /* GET_TABLE / GET_WAVE / GET_HITS advertised */
+    editOk = kitOk && !!(desc && desc.audiothurgist && desc.audiothurgist.edit === 1);   /* EDIT-UI: ACTION 16.., the flags form, the tail */
+    setEditorShown(editOk);
     setsOk = !!(desc && desc.audiothurgist && desc.audiothurgist.sets);    /* ACTION 14 / 15 + the 219.. tail */
     scope2Ok = !!(desc && desc.audiothurgist && desc.audiothurgist.scope2); /* SCOPE: the 0x62 body (audio channels) */
     scopeCvOk = !!(desc && desc.audiothurgist && desc.audiothurgist.scope2 >= 2);   /* SCOPE: … with the J3..J8 ext */
@@ -940,6 +1203,13 @@ async function connectPort(port, isDemo) {
     buildOptions(); setPill('opt_status', live ? 'live' : '—', live ? 'ok' : '');
     startPolling(); if (scopeShown) scopeKick(); invalidate(D.bigscope);
   } catch (e) { notice('Connect failed: ' + e.message); if (link) await link.close(); setDisconnected(); }
+}
+/* EDIT-UI: with "edit" the Kit waveform grows its handle row and strip and the Edit panel shows; without it the tab is
+ * the view-only one (no handles, no pad, no field — `?demo=noedit`). */
+function setEditorShown(on) {
+  $('editor').hidden = !on; $('ed_field').hidden = !on; $('ed_status').hidden = !on; $('wv_help').hidden = !on; $('kit_help_edit').hidden = !on; $('lg_mark').hidden = !on; $('lg_orange').hidden = !on; $('lg_play').hidden = !on;
+  $('kitwave').style.height = on ? '290px' : '180px'; $('wv_fit').title = on ? 'fit the selected slice or marker' : 'fit the selected key\'s material';
+  if (on) setEdStatus('ready', '');
 }
 /* The transport: native Web Serial where the browser has it (desktop
  * Chrome / Edge / Opera), Google's polyfill over WebUSB on Chrome for

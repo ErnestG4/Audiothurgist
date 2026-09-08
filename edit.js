@@ -384,15 +384,15 @@ class Editor {
     const gen = c.st ? c.st.tableGen : 0;
     if (h.kind === 'grid') {
       const len = endOf(e) - dr.pos; this.auditionNow(dr.pos, Math.max(1, len / MS), 0);
-      this.local = { t: h.t, start: dr.pos, len, prevLen: dr.pos - tb.entries[h.t - 1].start };
+      this.local = { t: h.t, start: dr.pos, len, prevLen: dr.pos - tb.entries[h.t - 1].start, gen };
       this.commit('boundary', { i: h.t, d }, g => HL.editBoundary(this.d.link(), h.t, dr.pos, g), gen, () => isGrid(this.d.ctx().table, h.t));
     } else if (h.kind === 'start') {
       const r = clampStart(e, dr.pos, c.st.freePos); this.auditionNow(r.start, Math.max(1, r.len / MS), 0);
-      this.local = { t: h.t, start: r.start, len: r.len };
+      this.local = { t: h.t, start: r.start, len: r.len, gen };
       this.commit('start', { t: h.t, d }, g => HL.editEntry(this.d.link(), h.t, r.start, r.len, g), gen, () => isMarker(this.d.ctx().table, h.t) && isLive(this.d.ctx().table.entries[h.t]));
     } else {
       const r = clampEnd(e, dr.pos, c.st.freePos); this.auditionNow(r.start, Math.max(1, r.len / MS), 0);
-      this.local = { t: h.t, start: r.start, len: r.len };
+      this.local = { t: h.t, start: r.start, len: r.len, gen };
       this.commit('end', { t: h.t, d }, g => HL.editEntry(this.d.link(), h.t, r.start, r.len, g), gen, () => isMarker(this.d.ctx().table, h.t) && isLive(this.d.ctx().table.entries[h.t]));
     }
   }
@@ -421,9 +421,13 @@ class Editor {
   auditionEntry(t) { const tb = this.d.ctx().table; if (!tb || t < 0) return; const e = tb.entries[t]; if (isLive(e)) this.auditionNow(e.start, Math.max(1, e.len / MS), 0); }
   _loopStart(h) { this.looping = true; this.stats.loops = (this.stats.loops || 0) + 1; this.auditionNow(h.pos, K.previewMs, HL.EDIT.fromEnd | HL.EDIT.loop); this.cb.status('looping the tail — lift to stop', ''); }
   _loopStop() { this.looping = false; const l = this.d.link(); if (l) { this.stats.releases++; HL.release(l).catch(() => {}); } this.cb.status('', ''); }
-  /* ── the commit pipeline: one edit in flight; on success a refetch; on BAD_STATE a refetch first, then the reason
-   * (a take, a set op, or — the gen moved — stale: retried once with the fresh gen when the target still stands) ── */
-  commit(op, args, fn, gen = 0, stillValid = null) { const p = this._commit(op, args, fn, gen, stillValid); this.pending = p; return p; }
+  /* ── the commit pipeline: one edit in flight on the link; the reply frees it, then a refetch (a poll) confirms the
+   * table; on BAD_STATE a refetch first, then the reason (a take, a set op, or — the gen moved — stale: retried once
+   * with the fresh gen when the target still stands). `queue` chains behind a pending edit instead of refusing. ── */
+  commit(op, args, fn, gen = 0, stillValid = null, queue = false) {
+    if (queue && this.busy && this.pending) { const p = this.pending.then(() => this._commit(op, args, fn, gen, stillValid)); this.pending = p; return p; }
+    const p = this._commit(op, args, fn, gen, stillValid); this.pending = p; return p;
+  }
   async _commit(op, args, fn, gen, stillValid) {
     const l = this.d.link(); if (!l) return null;
     if (this.busy) { this.cb.status('one edit at a time — ' + this.busy + ' is still going', 'warn'); return null; }
@@ -438,6 +442,7 @@ class Editor {
           if (!r.ok && r.status === 3) why = this.whyBadState(this.gen());
         }
       }
+      this.busy = null;   /* the link is free: what follows is a poll */
       if (r.ok) {
         this.stats.commits++; const full = op === 'split' || op === 'copy' || op === 'tap' ? histLabel(op, Object.assign({}, args, { newIdx: r.newIdx })) : op === 'onsets' ? histLabel(op, Object.assign({}, args, { count: r.count })) : label;
         this.history.push(r.tableGen, full); this.cb.status(full + (retried ? ' (after a refetch)' : ''), 'ok');
@@ -475,17 +480,19 @@ class Editor {
   tombstone(t) { if (!isMarker(this.d.ctx().table, t)) return null; if (this.selT === t) this.select(-1); return this.commit('delete', { t }, g => HL.editTombstone(this.d.link(), t, g), this.gen(), () => isMarker(this.d.ctx().table, t) && isLive(this.d.ctx().table.entries[t])); }
   copyOut(t, key = -1) { const tb = this.d.ctx().table; if (!tb) return null; const e = tb.entries[t]; if (!isLive(e)) return null; return this.commit('copy', { from: t }, g => HL.editAdd(this.d.link(), key, e.start, e.len, HL.EDIT.orange, g), this.gen()); }
   promote(t) { const tb = this.d.ctx().table; if (!isMarker(tb, t)) return null; const i = nearestBoundary(tb, tb.entries[t].start); if (i < 0) return null; const pos = clampBoundary(tb, i, tb.entries[t].start); if (pos !== tb.entries[t].start) { this.cb.status(`boundary ${i} cannot reach marker ${t}'s start (64 samples per slice)`, 'warn'); return null; } return this.commit('promote', { t, i }, g => HL.editPromote(this.d.link(), t, i, g), this.gen()); }
-  nudge(ms, which) { if (!ms) return null; return this.commit('nudge', { ms, which }, g => HL.editNudgeAll(this.d.link(), ms, which, g), this.gen()); }
-  fromOnsets(thresh, minGapMs = K.minGapMs) { return this.commit('onsets', { thresh }, g => HL.editFromOnsets(this.d.link(), thresh, minGapMs, g), this.gen()); }
-  tapMark() { const c = this.d.ctx(); const allow = c.tapAllowMs != null ? c.tapAllowMs : K.tapAllowDefault; return this.commit('tap', {}, () => HL.tapMark(this.d.link(), K.tapSnapMs, allow, 0), 0); }
-  setKey(key, t) { return this.commit('key', { key, t }, g => HL.editSetKey(this.d.link(), key, t, g), this.gen()); }
-  swapKeys(a, b) { return this.commit('swap', { a, b }, g => HL.editSwapKeys(this.d.link(), a, b, g), this.gen()); }
-  undo() { return this.commit('undo', {}, () => HL.editUndo(this.d.link()), 0); }
-  redo() { return this.commit('redo', {}, () => HL.editRedo(this.d.link()), 0); }
+  /* the panel's ops queue behind a pending reply (a button, not a finger on a position); gesture ops refuse instead */
+  nudge(ms, which) { if (!ms) return null; return this.commit('nudge', { ms, which }, g => HL.editNudgeAll(this.d.link(), ms, which, g), this.gen(), null, true); }
+  fromOnsets(thresh, minGapMs = K.minGapMs) { return this.commit('onsets', { thresh }, g => HL.editFromOnsets(this.d.link(), thresh, minGapMs, g), this.gen(), null, true); }
+  /* the Chop pad: taps queue behind a pending edit rather than being refused — the module timestamps each at receipt */
+  tapMark() { const c = this.d.ctx(); const allow = c.tapAllowMs != null ? c.tapAllowMs : K.tapAllowDefault; return this.commit('tap', {}, () => HL.tapMark(this.d.link(), K.tapSnapMs, allow, 0), 0, null, true); }
+  setKey(key, t) { return this.commit('key', { key, t }, g => HL.editSetKey(this.d.link(), key, t, g), this.gen(), null, true); }
+  swapKeys(a, b) { return this.commit('swap', { a, b }, g => HL.editSwapKeys(this.d.link(), a, b, g), this.gen(), null, true); }
+  undo() { return this.commit('undo', {}, () => HL.editUndo(this.d.link()), 0, null, true); }
+  redo() { return this.commit('redo', {}, () => HL.editRedo(this.d.link()), 0, null, true); }
   /* every key back to its span slice, one SET_KEY at a time (only the ones that moved) */
   async keysFollowGrid() {
     const c = this.d.ctx(); if (!c.table || !c.st || !c.st.keySlice) return 0; let n = 0;
-    for (let k = 0; k < K.keys; k++) { const want = spanSlice(k, c.table.nSlices); if (this.d.ctx().st.keySlice[k] !== want) { const r = await this.commit('key', { key: k, t: want }, g => HL.editSetKey(this.d.link(), k, want, g), this.gen()); if (r && r.ok) n++; else break; } }
+    for (let k = 0; k < K.keys; k++) { const want = spanSlice(k, c.table.nSlices); if (this.d.ctx().st.keySlice[k] !== want) { const r = await this.commit('key', { key: k, t: want }, g => HL.editSetKey(this.d.link(), k, want, g), this.gen(), null, true); if (r && r.ok) n++; else break; } }
     if (n) this.history.push(this.history.gen, histLabel('follow'));
     return n;
   }
