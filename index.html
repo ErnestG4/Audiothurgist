@@ -565,6 +565,8 @@ function onState(b) {
   }
   if (s.matGen !== envGen && !poll.pEnv) { const gen = s.matGen; poll.pEnv = fetchEnv(link, s.nSlices).then(e => { env = e; envGen = gen; selSlice = -1; invalidate(D.wave); }, e => warn('env', e)).finally(() => { poll.pEnv = null; }); }
   syncKit(s);
+  /* EDIT-PANEL: the module's Edit page publishes its selection (tail byte 257); the editor follows the knobs */
+  if (editOk && s.selSlice != null && s.selSlice >= 0 && s.selSlice !== (p ? p.selSlice : -1) && s.selSlice !== ed.selT) ed.select(s.selSlice);
   /* Options edited elsewhere (a preset load on the panel): the state carries three of them. */
   if (live && opts && !poll.pLive && (optByte('grammar.mode') !== s.grammar || optByte('class.mode') !== s.cls || (s.barsOpt != null && optByte('bars') !== s.barsOpt) || (s.keyPlays != null && optByte('key.plays') != null && optByte('key.plays') !== s.keyPlays))) refreshLive();
   invalidate(m);
