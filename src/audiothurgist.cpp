@@ -260,7 +260,7 @@ static SampleSel gSample;
  * the PLAYING material live (gates + ring colors) without regenerating the
  * pattern, so the lenses can be A/B'd on the same break. */
 static const char* kClassDisp =
-    "{\"kind\":\"enum\",\"labels\":[\"Hockman 3-band\",\"Legacy 120/900 (hi/lo)\",\"Two-band lo/hi\",\"Density (keyframes)\"]}";
+    "{\"kind\":\"enum\",\"labels\":[\"Hockman 3-band\",\"Legacy 120/900 (hi/lo)\",\"Two-band lo/hi\",\"Density (keyframes)\",\"Adaptive (onset, clustered)\"]}";   /* CLASSIFY: mode 4 */
 struct ClassSel
 {
     uint8_t       mode  = 0;
@@ -446,7 +446,7 @@ struct Options : Serializable
     {
         using hostlink::FieldType;
         w.Label("Options");
-        bool ok = w.Field("class.mode",   "Classifier",   0, FieldType::Enum, 0.f, kClassDisp,     4u);
+        bool ok = w.Field("class.mode",   "Classifier",   0, FieldType::Enum, 0.f, kClassDisp,     5u /* CLASSIFY: Adaptive */);
         ok &=     w.Field("clock.ppqn",   "Clock In",     1, FieldType::Enum, 0.f, kPpqnDisp,      8u);
         ok &=     w.Field("voice.mode",   "Voice",        2, FieldType::Enum, 0.f, kVoiceDisp,     2u);
         ok &=     w.Field("gate.len",     "Gate Length",  3, FieldType::Enum, 0.f, kGateLenDisp,   4u);
@@ -674,10 +674,14 @@ Page brain = Page(1).Name("Brain").Color("#3a9fe0")
                  .Knobs(b_x, b_y, b_kick, b_snare, b_hat, b_rot);
 
 /* ── class analysis: core/bb_classify.h (pure, host-tested) ─────────── */
+/* CLASSIFY: the Adaptive lens reads the material's onset table
+ * (gPendOnsets / gPendN — refilled by every load, set load and re-slice
+ * before this is called, and still the playing material's table at a
+ * Classifier switch); the other lenses ignore it. */
 static void ClassifySteps(const float* x, int len, uint8_t* cls, int mode,
                           float* sal = nullptr, int nsl = 0, uint8_t* bands = nullptr /* GATES */)
 {
-    bb::ClassifySteps(x, len, kSr, cls, mode, sal, nullptr, nsl, bands);
+    bb::ClassifySteps(x, len, kSr, cls, mode, sal, nullptr, nsl, bands, gPendOnsets, gPendN /* CLASSIFY */);
 }
 
 /* PLAY: keyframe density per slice (the Density lens, whatever classifier is

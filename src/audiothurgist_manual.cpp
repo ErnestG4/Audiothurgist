@@ -109,7 +109,8 @@ static Manual manual =
             "play them, nothing is written, keeping the beat is yours.")
         .Section("options", "Options, one line each",
             "**Classifier** — which lens labels kick/snare/hat (Hockman "
-            "3-band, the legacy hi/lo split, two-band, or keyframe density). "
+            "3-band, the legacy hi/lo split, two-band, keyframe density, or "
+            "Adaptive: each step judged at its hit, clustered per break). "
             "**Clock In** — J3 PPQN. **Voice** — Choke or Punch. **Gate "
             "Length / Level / Fires / Lanes** — see the Brain section. "
             "**Grammar** — the pattern language. **Bars** — override the bar "
