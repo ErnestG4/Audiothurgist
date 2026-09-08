@@ -66,7 +66,8 @@ const REC_MIN = 480;
 /* EDIT: the engine's table geometry (core/bb_engine.h): the shortest grid slice an edit may leave, the
  * table's capacity, the flag bits, 48 samples per ms, the tap mark's 250 ms cap. */
 const GRID_MIN = 64, MAX_TABLE = 96, F_ORANGE = 1, F_TOMB = 2, MS = 48, TAP_MAX = 250 * MS;
-const EDIT_NEED = [5, 9, 10, 5, 1, 1, 2, 2, 3, 2, 3, 7, 0, 2];   /* field bytes of ACTION 16..29 */
+const EDIT_NEED = [5, 9, 10, 5, 1, 1, 2, 2, 3, 2, 3, 7, 0, 2, 0, 0];   /* field bytes of ACTION 16..31 */
+const UNDO_DEPTH = 64;   /* EDIT-UNDO: the journal's ring */
 const EDIT_STATUS = { Ok: 0, BadOp: 2, BadArgs: 2, Full: 3, NotMarker: 2, NotGrid: 2, Tomb: 2, Stale: 3, NoMaterial: 3 };
 /* SCOPE: the firmware's ring geometry (core/bb_scope.h) and this module's max_body
  * (1024 in the firmware's Makefile; 512 is the protocol default an older build has). */
@@ -123,13 +124,17 @@ class FakeDevice {
   constructor(opts = {}) {
     /* EDIT: `edit: false` plays an older firmware — no "edit" capability, the 13-byte table whatever is asked,
      * the body capped at 255 (no tableGen / srcPos tail), ACTION 16.. unknown (BAD_ARGS). */
-    this.opts = Object.assign({ tail: 262, bpm: 120, nSlices: 32, latencyMs: 8, swing: false, kit: false, maxBody: MAX_BODY, inputs: true, edit: true }, opts);
+    this.opts = Object.assign({ tail: 263, bpm: 120, nSlices: 32, latencyMs: 8, swing: false, kit: false, maxBody: MAX_BODY, inputs: true, edit: true }, opts);
     if (!this.opts.edit && this.opts.tail > 255) this.opts.tail = 255;
     this.live = new Uint8Array(LIVE_SIZE); this.live.fill(0x80, OFF.pager, OFF.pager + 48); this.live[OFF.options + 17] = 2;   /* Tap Allowance 40 ms */
     this.desc = new TextEncoder().encode(JSON.stringify(buildDescriptor(this.opts.edit)));
     /* EDIT: the table generation (never 0), the audition voice's last request, its rate window and the request held
      * for it (ten a second; a later one replaces), and how many went out. */
     this.tableGen = 1; this.audition = null; this.auditionAt = -1e9; this.auditionHeld = null; this.auditionPosted = 0;
+    /* EDIT-UNDO: the journal — the firmware keeps inverse records, the fake keeps whole table snapshots (same semantics on
+     * the wire: 64 deep, a new op clears the redo half, bound to the generation it last wrote so a take / clear / load
+     * / new material ends it). */
+    this.journal = []; this.redoStack = []; this.journalGen = 0;
     this.muted = false; this.flowing = false; this.brain = false; this.ext = false; this.locked = false;
     this.lockMask = 0; this.matGen = 1; this.file = 0; this.histN = 3; this.histDepth = 0; this.callFlash = 255; this.callT = 0;
     this.mult = 1; this.multZone = 2; this.t0 = Date.now(); this.log = [];
@@ -363,7 +368,19 @@ class FakeDevice {
     return { start: p, len };
   }
   editBusy() { return !!(this.rec.state || this.set.state || this.set.pending); }
-  /* ACTION 16..26 and 29: parse, gate, apply, answer [status, tableGen, third]. */
+  /* EDIT-UNDO: a snapshot of what an undo restores (the table and the key map), and the generation rule. */
+  tableSnap() { return { table: this.table.map(e => Object.assign({}, e)), keySlice: Int8Array.from(this.keySlice) }; }
+  tableRestore(sn) { this.table = sn.table.map(e => Object.assign({}, e)); this.keySlice.set(sn.keySlice); }
+  journalCheck() { if (this.tableGen !== this.journalGen) { this.journal = []; this.redoStack = []; } }   /* something went past the journal */
+  journalPush(before) { this.journal.push(before); if (this.journal.length > UNDO_DEPTH) this.journal.shift(); this.redoStack = []; this.journalGen = this.tableGen; }
+  undoStep(redo) {
+    this.journalCheck();
+    const from = redo ? this.redoStack : this.journal, to = redo ? this.journal : this.redoStack;
+    if (!from.length) return 'BadArgs';
+    const now = this.tableSnap(); this.tableRestore(from.pop()); to.push(now);
+    this.bumpGen(); this.journalGen = this.tableGen; return 'Ok';
+  }
+  /* ACTION 16..26, 29, 30, 31: parse, gate, apply, answer [status, tableGen, third]. */
   applyEdit(op, body) {
     const need = EDIT_NEED[op - 16];
     if (body.length < 1 + need) return [2];
@@ -373,6 +390,11 @@ class FakeDevice {
     if (!this.bufLen) return [3];
     if (gen !== 0 && gen !== this.tableGen) return [3];   /* Stale */
     this.lastIdx = -1; this.lastCount = null; let st, third = null;
+    if (op === 30 || op === 31) {   /* EDIT-UNDO: one journal step; the gen bumps inside */
+      st = this.undoStep(op === 31);
+      return st === 'Ok' ? [0, this.tableGen] : [EDIT_STATUS[st]];
+    }
+    const before = this.tableSnap();
     switch (op) {
       case 16: st = this.edSetBoundary(b[1], U32(2)); break;
       case 17: st = this.edSetEntry(b[1], U32(2), U32(6)); break;
@@ -390,7 +412,7 @@ class FakeDevice {
     }
     const status = EDIT_STATUS[st];
     if (status !== 0) return [status];
-    this.bumpGen(); this.edits = (this.edits || 0) + 1;
+    this.journalCheck(); this.bumpGen(); this.journalPush(before); this.edits = (this.edits || 0) + 1;
     return third == null ? [0, this.tableGen] : [0, this.tableGen, third < 0 ? 255 : third];
   }
   /* ACTION 27 / 28: the audition voice, ten a second — inside the window the request is held (a later one replaces)
@@ -529,8 +551,9 @@ class FakeDevice {
         if (tail >= 219) U8(this.options[16]);                             /* 218 Key Plays */
         if (tail >= 223) { const s = this.set; U8(s.state); U8(s.progress); U8(s.result); U8(s.seq); }   /* 219.. SETS */
         if (tail >= 255) { const s = this.set; for (let i = 0; i < 32; i++) U8(i < s.name.length ? s.name.charCodeAt(i) : 0); }
-        if (tail >= 258) { U8(this.tableGen); U8(0); U8(255); }             /* 255.. EDIT: tableGen, undoDepth, selSlice */
+        if (tail >= 258) { this.journalCheck(); U8(this.tableGen); U8(Math.min(255, this.journal.length)); U8(255); }   /* 255.. EDIT: tableGen, undoDepth, selSlice */
         if (tail >= 262) U32(this.srcPos());                                /* 258 EDIT: the position snapshot */
+        if (tail >= 263) U8(Math.min(255, this.redoStack.length));          /* 262 EDIT-UNDO: redoDepth */
         break; }
       case CMD.wave: {
         if (body.length < 7) { U8(2); break; }
@@ -639,8 +662,8 @@ class FakeDevice {
             if (!SET_NAME_RE.test(name)) { ok = false; break; }
             if (this.set.state || this.set.pending || (op === 14 && this.rec.state)) { U8(3); return Uint8Array.from(w); }
             this.set.pending = { op, name }; break; }
-          /* EDIT: 16..29 — unknown to an older firmware (BAD_ARGS) */
-          case 16: case 17: case 18: case 19: case 20: case 21: case 22: case 23: case 24: case 25: case 26: case 29:
+          /* EDIT: 16..29 — unknown to an older firmware (BAD_ARGS); EDIT-UNDO: 30 / 31 */
+          case 16: case 17: case 18: case 19: case 20: case 21: case 22: case 23: case 24: case 25: case 26: case 29: case 30: case 31:
             if (!this.opts.edit) { ok = false; break; }
             return Uint8Array.from(this.applyEdit(op, body));
           case 27: case 28: {

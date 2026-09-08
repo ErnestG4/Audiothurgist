@@ -92,7 +92,7 @@
   .edfield{font-size:12px;color:var(--mute);gap:6px 10px} .edfield input{width:104px;background:#1f1f24;color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 6px;font:inherit;font-size:13px;font-variant-numeric:tabular-nums;min-height:36px}
   .edfield b{color:var(--ink);font-weight:600} .edfield label{display:inline-flex;align-items:center;gap:4px;min-height:36px} .edfield .by{color:var(--call)}
   .chop{min-height:88px;min-width:150px;font-size:20px;font-weight:700;background:#2a1c10;border-color:#6b4a12;color:#ffcf80;touch-action:none;user-select:none;-webkit-user-select:none} .chop:active,.chop.hit{background:var(--accent);color:#111}
-  .hist{list-style:none;margin:6px 0 0;padding:0;font-size:12px;max-height:150px;overflow:auto;font-variant-numeric:tabular-nums} .hist li{display:flex;gap:8px;padding:3px 0;border-bottom:1px solid #1d1d21;color:var(--mute)} .hist li:first-child{color:var(--ink)} .hist li i{font-style:normal;color:var(--dim);min-width:40px}
+  .hist{list-style:none;margin:6px 0 0;padding:0;font-size:12px;max-height:150px;overflow:auto;font-variant-numeric:tabular-nums} .hist li{display:flex;gap:8px;padding:3px 0;border-bottom:1px solid #1d1d21;color:var(--mute)} .hist li:first-child{color:var(--ink)} .hist li i{font-style:normal;color:var(--dim);min-width:40px} .hist li.undone{text-decoration:line-through;opacity:.5}
   .edpanel{display:grid;gap:12px} @media(min-width:900px){.edpanel{grid-template-columns:1fr 1fr 1fr}}
   .edpanel h3{font-size:12px;color:var(--mute);margin:0 0 6px;text-transform:uppercase;letter-spacing:.1em}
   .edpanel input[type=number]{width:64px;background:#1f1f24;color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px;font:inherit;min-height:36px}
@@ -237,7 +237,7 @@
       </div>
       <div>
         <h3>History</h3>
-        <div class="row"><button id="ed_undo" class="mini" disabled title="UNDO (ACTION 30) — live with the EDIT-UNDO firmware; this one reports no journal">Undo</button><button id="ed_redo" class="mini" disabled title="REDO (ACTION 31)">Redo</button><span id="ed_depth" style="font-size:12px;color:var(--mute)"></span></div>
+        <div class="row"><button id="ed_undo" class="mini" disabled title="UNDO (ACTION 30): one step back through the module's journal (64 deep; a take, a set load or new material ends it)">Undo</button><button id="ed_redo" class="mini" disabled title="REDO (ACTION 31): one step forward (a new edit clears the redo half)">Redo</button><span id="ed_depth" style="font-size:12px;color:var(--mute)"></span></div>
         <ol id="ed_hist" class="hist"></ol>
       </div>
     </div>
@@ -916,15 +916,17 @@ $('ed_follow').onclick = () => {
   c.addEventListener('pointermove', e => { if (down) at(e); }); c.addEventListener('pointerup', () => { down = false; }); c.addEventListener('pointercancel', () => { down = false; }); }
 $('ed_onsets').onclick = () => ed.fromOnsets(edThresh);
 $('ed_undo').onclick = () => ed.undo(); $('ed_redo').onclick = () => ed.redo();
-/* the history list (the page's labels keyed by tableGen), the undo depth from the tail, the playhead for the Chop pad */
+/* the history list (the page's labels keyed by tableGen, the undone ones struck through), the two depths from the tail
+ * (EDIT-UNDO: byte 262 is the redo depth and the sign the journal exists), the playhead for the Chop pad */
 let histSig = '';
 function drawEditor() {
-  const depth = st.undoDepth || 0; $('ed_undo').disabled = !depth || !link; $('ed_redo').disabled = !depth || !link;
-  setText('ed_depth', st.undoDepth == null ? '' : depth ? `undo depth ${depth}` : 'no journal on this firmware yet (EDIT-UNDO) — the list is what this page did');
+  const ud = st.undoDepth || 0, rd = st.redoDepth || 0, journal = st.redoDepth != null;
+  $('ed_undo').disabled = !ud || !link; $('ed_redo').disabled = !rd || !link;
+  setText('ed_depth', st.undoDepth == null ? '' : !journal ? 'no journal on this firmware (EDIT-UNDO) — the list is what this page did' : ud || rd ? `undo ${ud} · redo ${rd}` : 'nothing to undo');
   setPill('ed_gen', st.tableGen != null ? `table gen ${st.tableGen}` : '—', '');
   setText('chop_pos', st.srcPos != null && st.bufLen ? `playhead ${ED.fmtBbs(st.srcPos, ed.posCtx())} · ${ED.fmtMs(st.srcPos)}` : 'playhead —'); setText('chop_allow', tapAllowMs() + ' ms');
   $('chop').disabled = !link || !st.bufLen;
-  const list = ed.history.list(), sig = list.map(x => x.gen + x.label).join('|'); if (sig !== histSig) { histSig = sig; $('ed_hist').innerHTML = list.map(x => `<li><i>gen ${x.gen}</i>${esc(x.label)}</li>`).join('') || '<li style="color:var(--dim)">nothing yet</li>'; }
+  const list = ed.history.list(), sig = list.map(x => x.gen + x.label + (x.undone ? '~' : '')).join('|'); if (sig !== histSig) { histSig = sig; $('ed_hist').innerHTML = list.map(x => `<li${x.undone ? ' class="undone"' : ''}><i>gen ${x.gen}</i>${esc(x.label)}</li>`).join('') || '<li style="color:var(--dim)">nothing yet</li>'; }
 }
 $('k_rec').onclick = () => action(ACT.recArm, selKey); $('k_clr').onclick = () => action(ACT.recClear, selKey);
 $('k_plays').onchange = async e => { await action(ACT.keyPlays, +e.target.value); refreshLive(); };
@@ -1273,7 +1275,7 @@ async function connect() {
 async function connectDemo(flags = '') {
   if (link) return; notice('');
   const f = new Set(flags.split(',').filter(Boolean));
-  demoDevice = new DEMO.FakeDevice({ tail: f.has('old') ? 148 : f.has('short') ? 167 : f.has('v099') ? 176 : f.has('nosets') ? 219 : f.has('noedit') ? 255 : 262, latencyMs: 6, kit: f.has('kit'), swing: f.has('kit') || f.has('swing'), inputs: !f.has('noin'), maxBody: f.has('body512') ? 512 : DEMO.MAX_BODY, edit: !(f.has('noedit') || f.has('nosets') || f.has('v099') || f.has('short') || f.has('old')) });
+  demoDevice = new DEMO.FakeDevice({ tail: f.has('old') ? 148 : f.has('short') ? 167 : f.has('v099') ? 176 : f.has('nosets') ? 219 : f.has('noedit') ? 255 : f.has('noundo') ? 262 : 263, latencyMs: 6, kit: f.has('kit'), swing: f.has('kit') || f.has('swing'), inputs: !f.has('noin'), maxBody: f.has('body512') ? 512 : DEMO.MAX_BODY, edit: !(f.has('noedit') || f.has('nosets') || f.has('v099') || f.has('short') || f.has('old')) });
   const d = demoDevice;
   if (f.has('scope')) showTab('tab_scope');
   if (f.has('cv')) $('sc_p_cv').onclick(); if (f.has('gates')) $('sc_p_gates').onclick();

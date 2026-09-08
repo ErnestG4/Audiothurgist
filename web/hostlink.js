@@ -25,7 +25,7 @@ const ACT = { dice: 0, reslice: 1, mute: 2, punch: 3, flow: 4, scrub: 5, load: 6
   /* EDIT (capability "edit": 1): the slice-editing ops, the audition voice, the tap mark */
   setBoundary: 16, setEntry: 17, addEntry: 18, split: 19, merge: 20, tombstone: 21, setKey: 22, swapKeys: 23,
   nudgeAll: 24, promote: 25, fromOnsets: 26, audition: 27, release: 28, tapMark: 29,
-  /* EDIT-UNDO (package 6): the journal's two ops — the page wires its buttons here and disables them while undoDepth is 0 */
+  /* EDIT-UNDO: the journal's two ops (no fields) — the page enables Undo / Redo from the tail's undoDepth / redoDepth */
   undoEdit: 30, redoEdit: 31 };
 /* EDIT: flag bits and constants. Table flags (GET_TABLE's 14-byte form, ADD_ENTRY's flags): orange = user-placed
  * or user-moved, tomb = deleted (len 0, skipped by everything). AUDITION flags: fromEnd = `start` is the region's
@@ -266,10 +266,13 @@ function parseState(b) {
   if (b.length >= 219) st.keyPlays = b[218];                                  // Options → Key Plays (0 one-shot, 1 held)
   if (b.length >= 223) { st.setState = b[219]; st.setProgress = b[220]; st.setResult = b[221]; st.setSeq = b[222]; }   // SETS
   if (b.length >= 255) { let n = 223; while (n < 255 && b[n]) n++; st.setName = new TextDecoder('ascii').decode(b.subarray(223, n)); }
-  /* EDIT tail: 255 tableGen (never 0; carry it back as an op's gen), 256 undoDepth (0 until EDIT-UNDO), 257 selSlice
-   * (the panel's selection, 255 = none, until EDIT-PANEL), 258..261 srcPos (the youngest voice's material position). */
+  /* EDIT tail: 255 tableGen (never 0; carry it back as an op's gen), 256 undoDepth (EDIT-UNDO: journal steps back; 0
+   * on a firmware without the journal), 257 selSlice (the panel's selection, 255 = none, until EDIT-PANEL), 258..261
+   * srcPos (the youngest voice's material position). EDIT-UNDO tail: 262 redoDepth (steps forward) — its presence is
+   * how the page knows the journal exists (a 262-byte body is EDIT-PROTO without package 6). */
   if (b.length >= 258) { st.tableGen = b[255]; st.undoDepth = b[256]; st.selSlice = b[257] === 255 ? -1 : b[257]; }
   if (b.length >= 262) st.srcPos = u32(b, 258);
+  if (b.length >= 263) st.redoDepth = b[262];
   return st;
 }
 /* GET_WAVE: one window of the material buffer — n ≤ 480 output bytes, each
@@ -370,7 +373,7 @@ const audition       = (link, start, lenMs, flags = 0)     => editOp(link, ACT.a
 const release        = link                                => editOp(link, ACT.release, []);
 /* the firmware timestamps: srcPos at receipt − allowMs, snapped to an onset within ±snapMs; an orange marker */
 const tapMark        = (link, snapMs, allowMs, gen = 0)    => editOp(link, ACT.tapMark, [snapMs & 0xff, allowMs & 0xff], gen);
-/* EDIT-UNDO: one journal step either way (BAD_ARGS on a firmware without package 6; the page keeps the buttons off while undoDepth is 0) */
+/* EDIT-UNDO: one journal step either way → { ok, tableGen }; BAD_ARGS = nothing to undo / redo (or a firmware without the journal) */
 const editUndo       = link                                => editOp(link, ACT.undoEdit, []);
 const editRedo       = link                                => editOp(link, ACT.redoEdit, []);
 
