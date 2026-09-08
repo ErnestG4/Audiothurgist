@@ -124,7 +124,33 @@ static Manual manual =
             "Brain (class gates out) or Voice (two v/oct + gate, hit trigger "
             "and velocity out); Follow grammar switches with Play. "
             "**Quantize** — Play's looper: Off (as played), 16ths (punch the "
-            "bar), 8ths.")
+            "bar), 8ths. "
+"**Key Plays** — one-shot, or held until the gate falls. "
+            "**Sampling** — mono, or stereo planes. **Record Source** — the "
+            "inputs, or the module's own output. **Record** — arm a loop "
+            "take into the break (see Sampling).")
+        .Section("sampling", "Sampling (record into a key, loop-record the break)",
+            "One buffer, one slice table: a loaded break and a recorded kit "
+            "are the same thing. **Into a key** (Voice map): play J5 style "
+            "note **7 = Record** — the buttons go red — and every key you hold "
+            "on J4 records from the input for as long as its gate stands "
+            "(release: trim, normalise, analyse, live; the key plays it, its "
+            "position lights on P5's ring). Style **8 = Clear** puts a key "
+            "back on its grid slice; any other style disarms. Records are "
+            "appended after the break; a load clears them. **The break "
+            "itself**: Options → **Record** = Arm, then **B3 tap** or the "
+            "first **J6** edge starts a take into the other buffer. With a "
+            "clock on J3 the take is the **Bars** count of bars at the "
+            "followed tempo and stops itself on the bar; J6 edges during it "
+            "drop **slice markers** (two or more replace the grid). Unclocked, "
+            "B3 or J6 stops it. The take runs the load pipeline and plays; "
+            "the arm drops after one take, and B3's reslice / load are held "
+            "off while armed. **Record Source**: J1/J2, or the module's own "
+            "output — play the keys into a take and chop the chop. "
+            "**Sampling**: Mono sums J1+J2; Stereo keeps J1 → L, J2 → R "
+            "(loads, takes and playback in two planes). Loads keep 8 s of "
+            "the 25 s buffer free for keys. While a take runs the buttons "
+            "are full red and P6 shows the input level.")
         .Section("cards", "Cards and loading",
             "FAT32 microSD, WAVs in the root, 1–4 bar breaks are ideal "
             "(longer files trim to their first four bars; levels normalise on "
@@ -162,18 +188,26 @@ void DescribeManual(hostlink::Host& host)
             .SeeAlso(jk1);
     k_vol.Help("**Volume**, with the reverb tail riding the cluster zone.");
 
-    jk1.Help("Audio in, left (record/resample — coming).");
-    jk2.Help("Audio in, right.");
+    jk1.Help("**Audio in, left.** The record input: summed with J2 (Sampling: "
+             "Mono) or the L plane (Stereo); a key take (J5 style 7) or a loop "
+             "take (Options → Record) hears it unless Record Source = Output.")
+       .SeeAlso(jk5);
+    jk2.Help("**Audio in, right.** Summed with J1, or the R plane (Sampling: Stereo).")
+       .SeeAlso(jk1);
     jk3.Help("**Clock in.** Set PPQN in Options. B1 = pulse/lock indicator.")
        .SeeAlso(k_tempo);
     jk4.Help("**V/Oct** — the keymap's pitch: mute key, modifiers, sixteen "
              "slice keys. Pair with J5.")
        .SeeAlso(jk5);
     jk5.Help("**Gate** (Brain map) — each rising edge samples J4 and dispatches. "
-             "**Style v/oct** (Voice map).")
+             "**Style v/oct** (Voice map): 0 plain · 1 reverse · 2 half · 3 double · "
+             "4 ratchet · 5 staccato · 6 punch/choke flip · **7 Record** (keys held "
+             "on J4 record from the input) · **8 Clear** (the key back to its slice).")
        .SeeAlso(jk4);
     jk6.Help("**Kick gate out** (Brain map) — every kick-class step, or once per hit "
-             "(Gate Fires); Gate Lanes can add it to mixed hits. **Gate in** (Voice map).");
+             "(Gate Fires); Gate Lanes can add it to mixed hits. **Gate in** (Voice map): "
+             "plays the J4 key; with Record armed its first edge starts the loop take, "
+             "later edges drop slice markers (clocked) or stop it (unclocked).");
     jk7.Help("**Snare gate out** (Brain map) — every snare-class step, or once per hit. "
              "**Hit trigger out** (Voice map): 10 ms per call.");
     jk8.Help("**Hat gate out** (Brain map) — every hat-class step, or once per hit. "

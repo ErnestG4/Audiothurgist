@@ -8,6 +8,10 @@
 // sample offsets (rescaled to the output rate). Returns output length in
 // samples, 0 on failure with *err telling why:
 //   1 open failed   2 not RIFF/WAVE   3 unsupported format   4 too short/empty
+// RECORD: give `outR` + `stageR` (a second output plane and a second decode
+// staging plane, each as big as the first) to keep a stereo file's planes
+// apart: L → out, R → outR, *gotR = true. A mono file, or no planes given,
+// takes the mono path unchanged (byte-identical), *gotR = false.
 #include <cstdint>
 #include <cstring>
 #include "bb_yield.h"
@@ -46,8 +50,14 @@ static int Load(const char* name,
                 int*        cues,
                 int*        nCues,
                 int         maxCues,
-                int*        err)
+                int*        err,
+                float*      outR   = nullptr,   /* RECORD: R plane (needs stageR) */
+                float*      stageR = nullptr,
+                bool*       gotR   = nullptr)
 {
+    const bool wantR = outR && stageR;   /* RECORD */
+    bool       isR   = false;
+    if(gotR) *gotR = false;
     BBWAV_DMA_SECTION alignas(32) static uint8_t ioBuf[16384]; // DMA-safe staging
     *err   = 0;
     *nCues = 0;
@@ -92,18 +102,16 @@ static int Load(const char* name,
             uint8_t d[4];
             if(f_read(&f, d, 4, &br) != FR_OK) break;
             uint32_t nc     = rd32(d);
-            uint32_t taken  = 0;
+            uint32_t walked = 0;   /* records READ, kept or not (persist.md's gotcha: the skip counted only the kept ones) */
             for(uint32_t i = 0; i < nc; i++)
             {
                 uint8_t c[24];
                 if(f_read(&f, c, 24, &br) != FR_OK || br != 24) break;
+                walked++;
                 if(*nCues < maxCues)
-                {
                     cues[(*nCues)++] = (int)rd32(c + 20); // dwSampleOffset
-                    taken++;
-                }
             }
-            uint32_t consumed = 4 + 24 * (taken + 0); // still walk oversize lists
+            uint32_t consumed = 4 + 24 * walked; // still walk oversize lists
             if(consumed < sz) f_lseek(&f, f_tell(&f) + (sz - consumed) + (sz & 1));
         }
         else if(!memcmp(ck, "data", 4))
@@ -130,6 +138,25 @@ static int Load(const char* name,
                 bb::Yield();   /* SD read of a big file: keep the clock alive */
                 uint32_t       n = br / fb;
                 const uint8_t* p = ioBuf;
+                if(wantR && ch == 2)   /* RECORD: two planes, no fold */
+                {
+                    isR = true;
+                    for(uint32_t i = 0; i < n; i++)
+                        for(int c = 0; c < 2; c++)
+                        {
+                            float v;
+                            if(bits == 16) { v = (float)(int16_t)rd16(p) * (1.f / 32768.f); p += 2; }
+                            else
+                            {
+                                v = (float)((int32_t)(((uint32_t)p[0] << 8) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 24)) >> 8)
+                                    * (1.f / 8388608.f);
+                                p += 3;
+                            }
+                            (c == 0 ? stage : stageR)[done + i] = v;
+                        }
+                    done += n;
+                    continue;
+                }
                 for(uint32_t i = 0; i < n; i++)
                 {
                     float acc = 0.f;
@@ -182,7 +209,9 @@ static int Load(const char* name,
         if(i0 >= nStage - 1) i0 = nStage - 2;
         float fr = src - i0;
         out[i]   = stage[i0] + fr * (stage[i0 + 1] - stage[i0]);
+        if(isR) outR[i] = stageR[i0] + fr * (stageR[i0 + 1] - stageR[i0]);   /* RECORD */
     }
+    if(gotR) *gotR = isR;   /* RECORD */
     for(int i = 0; i < *nCues; i++)
     {
         int c   = (int)(cues[i] * ratio);
