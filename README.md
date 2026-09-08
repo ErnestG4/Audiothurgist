@@ -73,8 +73,10 @@ opens the Kit tab on a swung 32-slice break with three keys already
 recorded (arm a key and the fake take runs armed → taking → pending →
 committed by itself; the looper count drifts up); `?demo=old` sends a
 pre-v0.8.0 state body, `?demo=short` the 167-byte CLOCK body (no flags)
-and `?demo=v099` the 176-byte body (no sample-mode tail) so you can see
-the fallbacks; **`?demo=scope`** opens the Scope tab (`cv` / `gates`
+and `?demo=v099` the 176-byte body (no sample-mode tail), `?demo=nosets`
+the 219-byte body (no sets tail) and `?demo=noedit` a firmware without
+slice editing (no `"edit"` capability, the 255-byte body, the 13-byte
+table) so you can see the fallbacks; **`?demo=scope`** opens the Scope tab (`cv` / `gates`
 press that preset, `noin` leaves J1/J2 silent, `body512` announces the
 protocol's default `max_body` so a frame takes two requests). `#kit` / `#scope` / `#opts` / `#man` open a tab
 directly.
@@ -252,6 +254,8 @@ i8 keySlice[24]                                                   (194..217, SAM
 u8 keyPlays                                                       (218, SAMPLE)
 u8 setState u8 setProgress u8 setResult u8 setSeq                 (219..222, SETS)
 char setName[32]                                                  (223..254, SETS)
+u8 tableGen u8 undoDepth u8 selSlice                              (255..257, EDIT)
+u32 srcPos                                                        (258..261, EDIT)
 ```
 
 `recState`: 0 idle · 1 armed (waiting for the gate) · 2 taking · 3 pending
@@ -267,16 +271,56 @@ is the last op's outcome (0 ok · 1 no card · 2 card full · 3 write failed
 · 4 bad name · 5 not found · 6 busy · 7 bad file) and `setSeq` bumps when
 one finishes, so the page reports each result once; `setName` names the
 set the playing material came from (empty for a loose file or a take).
+`tableGen` (EDIT, capability `"edit": 1`) is the slice table's generation
+— never 0, bumped by every edit, take, clear, re-slice and set load; the
+page carries it back as an op's trailing `gen` and joins it to the Kit
+tab's refetch signature. `undoDepth` is 0 until EDIT-UNDO, `selSlice` 255
+(none) until EDIT-PANEL. `srcPos` is the material position of the youngest
+sounding voice (else the current step's source), snapshotted by the audio
+thread once per block — the Chop pad's display, and what a TAP_MARK is
+timestamped from.
 
 ## The sample-mode commands (0x64–0x66)
 
 ```
 0x64 GET_WAVE   ← u32 start, u16 n (≤480), u8 plane (0 L · 1 R · 2 L+R), [u8 step 1..128]
                 → u8 status, u32 start, u16 n, u8 step, i8 x[n]
-0x65 GET_TABLE  ← [u8 first, u8 count (≤39)]
+0x65 GET_TABLE  ← [u8 first, u8 count (≤39) [, u8 form]]
                 → u8 status, u8 nSlices, u8 nTable, then per entry (13 bytes)
-                  u32 start, u32 len, i8 key (-1 grid), u8 cls, u8 sal, u8 hit, u8 dens
+                  u32 start, u32 len, i8 key (-1 grid / keyless), u8 cls, u8 sal, u8 hit, u8 dens
+                  [, u8 flags (b0 orange · b1 tombstone) — 14 bytes, when form = 1 and "edit" is present]
 0x66 GET_HITS   ← [u8 first]  → u8 status, u8 nTotal, u8 first, u32 pos[…] (≤127)
+```
+
+## The slice-editing ops (ACTION 16–29, capability `"edit": 1`)
+
+Every body is the op byte, its fields little-endian, then an optional
+trailing `u8 gen` — the `tableGen` the page last saw, 0 = unchecked; a
+stale gen is BAD_STATE (refetch, retry). The reply is `u8 status`, then on
+success `u8 tableGen` and, for ADD / SPLIT / TAP_MARK, `u8 newIdx` (FROM_
+ONSETS: the count). BAD_STATE also while a take is in flight, a set op runs
+or waits, a material swap is pending, the table is full or nothing is
+loaded; BAD_ARGS for anything the engine refuses (an index, a span, a key,
+a neighbour under 64 samples, a tombstone). `hostlink.js` has one helper
+per op (`editBoundary(link, i, pos, gen)` …) resolving
+`{ status, ok, tableGen, newIdx, count }`. Full contract:
+`docs/packages/slice-edit-proto.md`.
+
+```
+16 SET_BOUNDARY  u8 i, u32 pos                 grid boundary i (linked; both neighbours keep ≥ 64)
+17 SET_ENTRY     u8 t, u32 start, u32 len      a marker's span, anywhere in [0, freePos), len ≥ 480
+18 ADD_ENTRY     u8 key (255 none), u32 start, u32 len, u8 flags (b0 orange)   → newIdx
+19 SPLIT         u8 t, u32 pos                 → newIdx (the right half; keys stay on t)
+20 MERGE         u8 t                          t swallows the marker ending at its start (else the previous)
+21 TOMBSTONE     u8 t                          delete: len 0, keys → their span slice, the index stays
+22 SET_KEY       u8 key, u8 t                  any live entry, grid or marker
+23 SWAP_KEYS     u8 a, u8 b
+24 NUDGE_ALL     i16 ms, u8 which (0 grid · 1 markers)
+25 PROMOTE       u8 t, u8 i                    SET_BOUNDARY(i, marker t's start)
+26 FROM_ONSETS   u8 thresh, u16 minGapMs       grey markers inside the break replaced; one per onset ≥ thresh   → count
+27 AUDITION      u32 start, u16 lenMs, u8 flags (b0 from-end · b1 loop)   the scratch voice, ≤ 10/s
+28 RELEASE       —                             ends the audition (5 ms fade)
+29 TAP_MARK      u8 snapMs, u8 allowMs         an orange marker at srcPos − allow, onset-snapped   → newIdx
 ```
 
 ## The scope (0x62)
@@ -348,7 +392,8 @@ number of bells, B2 rings the next change, Brain knobs unused).
 | waveform                 | `0x61 GET_ENV`                    | refetched when the material changes          |
 | scope (Play tab)         | `0x62 SCOPE` (empty body)         | 5 Hz while visible; 256 samples ×4 decimated |
 | scope (Scope tab)        | `0x62 SCOPE` (body, `scope2`)     | ≤ 30 frames/s; audio 4 × 253 or out L + 3 jacks × 252 per request at max_body 1024; trigger, peak, at-pos, the jacks' own decimation |
-| buttons, punch, scrub    | `0x63 ACTION`                     | 0 dice · 1 reslice · 2 mute · 3 punch · 4 flow · 5 scrub · 6 load · 7 clear locks · 8 page · 9 rec arm(key) · 10 rec clear(key) · 11 key plays(0/1) · 12 looper undo · 13 looper clear |
+| buttons, punch, scrub    | `0x63 ACTION`                     | 0 dice · 1 reslice · 2 mute · 3 punch · 4 flow · 5 scrub · 6 load · 7 clear locks · 8 page · 9 rec arm(key) · 10 rec clear(key) · 11 key plays(0/1) · 12 looper undo · 13 looper clear · 14 save set · 15 load set |
+| slice editing            | `0x63 ACTION` 16–29 (`"edit"`)    | the table ops with a gen, the audition voice, the tap mark — the table above |
 | kit waveform             | `0x64 GET_WAVE`                   | on demand, ≤ 3/s, cached windows            |
 | slice table              | `0x65 GET_TABLE`                  | when the state's table signature changes    |
 | onset ticks              | `0x66 GET_HITS`                   | when `matGen` changes                        |
