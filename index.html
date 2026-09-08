@@ -677,7 +677,7 @@ $('l_undo').onclick = () => action(ACT.looperUndo); $('l_clear').onclick = () =>
  * the free position or the key map changes (a take, a clear, a re-slice). */
 function syncKit(s) {
   if (!kitOk || s.keySlice == null) return;
-  const sig = [s.matGen, s.nTable, s.freePos, s.bufLen, Array.from(s.keySlice).join(',')].join('|');
+  const sig = [s.matGen, s.nTable, s.freePos, s.bufLen, Array.from(s.keySlice).join(','), s.tableGen].join('|');   /* EDIT: tableGen joins the signature */
   if (sig !== tableSig && !poll.pTable) {
     poll.pTable = fetchTable(link).then(t => {
       const before = table ? entryOfKey(selKey) : null; table = t; tableSig = sig; wave.cache.clear(); wave.planSig = '';
@@ -989,20 +989,21 @@ async function connect() {
     notice(m);
   }
 }
-/* ?demo[=brain,ext,pending,grids,euclid,camp,locks,kit,swing,old,short,v099,nosets,scope,cv,gates,noin,body512]
+/* ?demo[=brain,ext,pending,grids,euclid,camp,locks,kit,swing,old,short,v099,nosets,noedit,scope,cv,gates,noin,body512]
  * — the fake module, optionally started on the Brain page, following a
  * clock (with a multiplier switch left pending), in a grammar, with locks,
  * with three keys recorded and a swung grid (kit: opens the Kit tab), with
  * a pre-v0.8.0 state body (no tails), the 167-byte CLOCK body (no flags),
  * the 176-byte v0.9.9 body (no sample-mode tail) or the 219-byte sample body
- * (no sets tail); `scope` opens the Scope tab (`cv` / `gates` press that
+ * (no sets tail), `noedit` a firmware without slice editing (no "edit"
+ * capability, the 255-byte body, the 13-byte table); `scope` opens the Scope tab (`cv` / `gates` press that
  * preset), `noin` leaves J1/J2 silent (the input traces stay hidden),
  * `body512` announces the protocol's default max_body so a frame takes
  * two requests. */
 async function connectDemo(flags = '') {
   if (link) return; notice('');
   const f = new Set(flags.split(',').filter(Boolean));
-  demoDevice = new DEMO.FakeDevice({ tail: f.has('old') ? 148 : f.has('short') ? 167 : f.has('v099') ? 176 : f.has('nosets') ? 219 : 255, latencyMs: 6, kit: f.has('kit'), swing: f.has('kit') || f.has('swing'), inputs: !f.has('noin'), maxBody: f.has('body512') ? 512 : DEMO.MAX_BODY });
+  demoDevice = new DEMO.FakeDevice({ tail: f.has('old') ? 148 : f.has('short') ? 167 : f.has('v099') ? 176 : f.has('nosets') ? 219 : f.has('noedit') ? 255 : 262, latencyMs: 6, kit: f.has('kit'), swing: f.has('kit') || f.has('swing'), inputs: !f.has('noin'), maxBody: f.has('body512') ? 512 : DEMO.MAX_BODY, edit: !(f.has('noedit') || f.has('nosets') || f.has('v099') || f.has('short') || f.has('old')) });
   const d = demoDevice;
   if (f.has('scope')) showTab('tab_scope');
   if (f.has('cv')) $('sc_p_cv').onclick(); if (f.has('gates')) $('sc_p_gates').onclick();
