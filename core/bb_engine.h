@@ -935,7 +935,9 @@ struct Engine
      * attack); a recorded entry is bounded by its own end. */
     int ReadEnd(int idx) const
     {
-        return idx >= nSlices ? slices[idx].start + slices[idx].len : bufLen;
+        if(idx < nSlices) return bufLen;
+        const int e = slices[idx].start + slices[idx].len;   /* clamped: a torn Slice read must stay in the plane (review L4) */
+        return e > bufCap ? bufCap : (e < 0 ? 0 : e);
     }
     void FireSlice(int idx, float rate, bool rev, float lenMul = 1.f, bool held = false, int key = -1)
     {
@@ -1082,7 +1084,7 @@ struct Engine
         recStart = freePos;
         recPos   = freePos;
         recFull  = false;
-        recArmed = true;   // last: publishes the take to the audio thread
+        __asm__ volatile("" ::: "memory"); recArmed = true;   // last: publishes the take to the audio thread (compiler fence, review L3)
         return true;
     }
     // AUDIO. Append n input samples at the write head while armed. `inR`
@@ -1140,7 +1142,7 @@ struct Engine
     // count, key — each step leaves a consistent table.
     int CommitSlice(int key, int start, int len, uint8_t cls, float sal, float dens, bool hit)
     {
-        if(!buf || key < 0 || key >= kKeys || len < kRecMin || start < 0 || start + len > bufCap) return -1;
+        if(!buf || key < 0 || key >= kKeys || len < kRecMin || start < 0 || start > bufCap || len > bufCap - start) return -1;   /* overflow-safe (review M1) */
         int t = RecordedEntry(key);
         if(t < 0)
         {
@@ -1182,6 +1184,18 @@ struct Engine
     // The pre-SAMPLE Voice map: keys span the grid (k · nSlices / span,
     // span = min(nSlices, 24); keys past the span play the last slice), then
     // every recorded entry claims its key.
+    static constexpr int kLooperFiresPerBlock = 48;
+    /* Style 8 / browser Clear: the key goes back to its span slice AND its
+     * recorded entry forgets the key, so a re-apply (DefaultKeyTable) does
+     * not re-claim it (review L2). The region stays until the next load. */
+    void ClearKey(int key)
+    {
+        if(key < 0 || key >= kKeys) return;
+        for(int t = nSlices; t < nTable; t++) if(tableKey[t] == key) tableKey[t] = -1;
+        const int span = nSlices < kKeys ? nSlices : kKeys;
+        const int kk = key >= span ? span - 1 : key;
+        keySlice[key] = (int8_t)(span > 0 ? (kk * nSlices) / span : 0);
+    }
     void DefaultKeyTable()
     {
         const int span = nSlices < kKeys ? nSlices : kKeys;
@@ -1339,6 +1353,7 @@ struct Engine
         bool on[kVoices];
         for(int v = 0; v < kVoices; v++) on[v] = voices[v].active;
         int seg = 0;
+        int fires = 0;   /* per-block cap: with 8ths quantise 256 events can share one block (review M4) */
         if(looper.n > 0 && LooperActive())
             for(int pass = 0; pass < 3; pass++)
             {
@@ -1348,6 +1363,7 @@ struct Engine
                 {
                     Looper::Event& e = looper.ev[k];
                     if(e.style & Looper::kSkip) { e.style &= (uint8_t)~Looper::kSkip; continue; }
+                    if(++fires > kLooperFiresPerBlock) continue;   /* the rest of a pile-up is dropped, not deferred */
                     const int off = Looper::Offset(lw, e.phase, sh, n);
                     if(off > seg) { RenderSpan<ST>(out, outR, on, seg, off); seg = off; }
                     LooperFire(e);

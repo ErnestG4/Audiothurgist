@@ -253,7 +253,7 @@ inline bool PlanSetInto(const SetInfo& s, SetPlan& p, int maxGrid, int recMin, i
         const SetSlice& sl = s.slices[i];
         if(sl.key < 0 || sl.key >= keys) return false;
         if(taken & (1u << sl.key)) return false;
-        if(sl.start < material || sl.len < recMin || sl.start + sl.len > s.len) return false;
+        if(sl.start < material || sl.len < recMin || sl.start > s.len || sl.len > s.len - sl.start) return false;   /* overflow-safe (review M1) */
         if(p.nRec >= Engine::kMaxTable) return false;
         taken |= 1u << sl.key;
         p.rec[p.nRec++] = i;
@@ -303,7 +303,7 @@ inline int LooperFromSet(const SetInfo& s, Looper& l)
     for(int i = 0; i < s.nLooper; i++)
     {
         const SetLoopEvent& e = s.looper[i];
-        if(!(e.phase == e.phase) || e.key >= Engine::kKeys) continue;
+        if(!(e.phase == e.phase) || !(e.phase > -1e6f && e.phase < 1e6f) || e.key >= Engine::kKeys) continue;   /* NaN and ±inf (review L6) */
         if(l.Add((double)e.phase, e.key, e.slice, e.style, e.vel)) n++;
     }
     l.Seal();

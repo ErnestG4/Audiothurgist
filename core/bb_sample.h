@@ -38,9 +38,9 @@ inline bool TrimRegion(float* x, float* xR, int start, int len, float sr, int& o
     const float thr = 0.01f * peak;
     auto quiet = [&](int i) { return fabsf(x[i]) < thr && (!xR || fabsf(xR[i]) < thr); };
     int a = start;
-    while(a < end && quiet(a)) a++;
+    while(a < end && quiet(a)) { a++; if((a & 4095) == 0) bb::Yield(); }
     int b = end - 1;
-    while(b > a && quiet(b)) b--;
+    while(b > a && quiet(b)) { b--; if((b & 4095) == 0) bb::Yield(); }
     const int head = (int)(sr / 1500.f), tail = (int)(0.005f * sr);   // 32 / 240 at 48 kHz
     a = (a - head < start) ? start : a - head;
     b = (b + tail > end - 1) ? end - 1 : b + tail;

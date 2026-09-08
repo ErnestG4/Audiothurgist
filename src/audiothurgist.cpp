@@ -192,7 +192,7 @@ static bb::bardetail::BarScratch ALCHEMY_SDRAM_BSS gBarScratchMem;
 Settings           settings(hw, &pager);
 void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.11.0-sample", "web");
+                           "0.11.1-reviewed", "web");
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -822,8 +822,8 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
                        engine.SyncRecordedMeta();   /* SAMPLE */
                        gReclass = false; }
     /* SAMPLE: a call carries its key and the held rule; a release follows the call it belongs to */
+    if(gRelKey >= 0) { engine.ReleaseKey(gRelKey); gRelKey = -1; }   /* the fall preceded the rise: release first (review M3) */
     if(gCallReq)     { engine.CallSlice(gCallIdx, gCallMul, gCallRev, gCallPunch, gCallRat, gCallLen, gCallHeld, gCallKey); gCallReq = false; }
-    if(gRelKey >= 0) { engine.ReleaseKey(gRelKey); gRelKey = -1; }
     /* SAMPLE end */
 
     int n = (int)size;
@@ -906,7 +906,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
         if(fired)
         {
             int sl = engine.gateSlice[c];
-            float sa = (sl >= 0 && sl < bb::Engine::kMaxSlices) ? gSal[sl] : 1.f;
+            float sa = (sl >= 0 && sl < bb::Engine::kMaxTable) ? engine.sliceSal[sl] : 1.f;   /* recorded keys too (review L10) */
             volts = bb::GateVolts(vel, sa, engine.gateAccent[c]);
         }
         bb::GateArm(gGateCd[c], gGateLvl[c], gGateRetrig[c], fired, glen, volts, n);
@@ -925,7 +925,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
         if(engine.callHits)
         {
             const int li = engine.lastCallIdx;
-            gHitVel = 1.5f + 3.5f * ((li >= 0 && li < bb::Engine::kMaxSlices) ? gSal[li] : 1.f);
+            gHitVel = 1.5f + 3.5f * ((li >= 0 && li < bb::Engine::kMaxTable) ? engine.sliceSal[li] : 1.f);
             gHitCd  = (int)(0.010f * kSr);
             engine.callHits = 0;
         }
@@ -1224,7 +1224,12 @@ static void OnPoll(uint32_t /*t_ms*/)
      * 0 plain · 1 reverse · 2 half-speed · 3 double · 4 ratchet · 5 staccato ·
      * 6 punch/choke flip. */
     /* RECORD: the record styles live on the Voice map — leaving it disarms and ends a key take */
-    if(gJackMapCur != 1u) { gKeyArm = false; if(gKeyTake && !gWebTake) gKeyTakeDone = true; }   /* a browser take runs on any map */
+    if(gJackMapCur != 1u)
+    {
+        gKeyArm = false; if(gKeyTake && !gWebTake) gKeyTakeDone = true;   /* a browser take runs on any map */
+        static int s_heldOnLeave = -1;
+        if(gCallHeld && gCallKey >= 0 && s_heldOnLeave != gCallKey) { gRelKey = gCallKey; s_heldOnLeave = gCallKey; }   /* a key held when the map left: release it (review L1) */
+    }
     if(gJackMapCur == 1u)
     {
         static int  s_note = -99, s_style = 0, s_lastIdx = -1;
@@ -1266,7 +1271,7 @@ static void OnPoll(uint32_t /*t_ms*/)
                         if(!gKeyTake && !gKeyTakeDone && !gTakeActive && engine.RecArm(key))
                         { gKeyTake = true; gKeyTakeKey = key; gRecPeak = 0.f; }
                     }
-                    else engine.SetKeySlice(key, bb::SpanSlice(key, engine.nSlices));   /* 8: Clear */
+                    else engine.ClearKey(key);   /* 8: Clear (forgets the recorded entry's key too, review L2) */
                 }
             }
             /* RECORD end */
@@ -1815,8 +1820,11 @@ static int AddSetEntry(const char* name)
 static void SnapshotLooper()
 {
     gSetSnapReq = true;
-    for(int i = 0; i < 4000 && gSetSnapReq; i++) bb::Yield();   /* one block (0.5 ms) normally; bounded */
-    gSetSnapReq = false;
+    {   /* wait ≥ 2 audio blocks by the clock, not by iterations (review M5) */
+        const uint32_t t0 = TickNow();
+        while(gSetSnapReq && (TickNow() - t0) < 2000u * gTicksPerUs) bb::Yield();
+    }
+    if(gSetSnapReq) { gSetSnapReq = false; SetFinish(6); return; }   /* the audio thread never ran: refuse rather than save a stale looper */
 }
 /* Save the playing material as sets/<name>: the WAV first (PCM16, both
  * planes when the material is stereo, cues = the table's starts), then the
@@ -1845,7 +1853,7 @@ static void SaveSet(const char* name)
     /* room: the WAV's exact size + the JSON's ceiling against FatFs's cached free count (unknown → try) */
     bbwav::WriteSpec spec;
     spec.left = engine.buf; spec.right = s.stereo ? engine.bufR : nullptr; spec.len = s.len; spec.sr = (uint32_t)kSr;
-    spec.cues = gSetPlan.onsets; spec.nCues = s.nSlices;
+    spec.cues = nullptr; spec.nCues = s.nSlices;   /* size estimate only (review L8) */
     const uint32_t need = bbwav::FileSize(spec) + (uint32_t)bb::kSetJsonMax;
     uint32_t totalKib = 0, freeKib = 0; bool freeValid = false;
     if(sd.VolumeKib(totalKib, freeKib, freeValid) && freeValid && (uint64_t)freeKib * 1024u < (uint64_t)need + 65536u)
@@ -1855,6 +1863,7 @@ static void SaveSet(const char* name)
     bb::SetLockPath(name, lock, sizeof lock);
     sd.Lock(lock);
     gSetTotal = need - (uint32_t)bb::kSetJsonMax; gSetDone = 0;
+    f_unlink(json);   /* a failed or interrupted save leaves at most a WAV, never a mismatched pair (review M2) */
     bool wavOk = f_open(&gSetFil, wav, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK;
     if(wavOk)
     {
@@ -2340,7 +2349,8 @@ struct StateExt : hostlink::IHostlinkExtension
                      * consume on their gesture paths; 11 is the Key Plays option itself. */
                     case 9:   /* WEB → RECORD: arm a take into key */
                         if(f.len < 2 || f.body[1] >= bb::Engine::kKeys) { w.U8(2u); return; }
-                        if(engine.recArmed || engine.recPending || gKeyTake || gTakeActive) { w.U8(3u); return; }   /* BAD_STATE */
+                        /* a second arm from the browser STOPS a browser take (review H1) */
+                        if(!(gKeyTake && gWebTake) && (engine.recArmed || engine.recPending || gKeyTake || gTakeActive)) { w.U8(3u); return; }   /* BAD_STATE */
                         gWebRecArm = (int8_t)f.body[1];
                         break;
                     case 10:  /* WEB → RECORD: clear key's recording */
@@ -2681,7 +2691,7 @@ int main()
             if(gWebRecClear >= 0)
             {
                 const int k = gWebRecClear; gWebRecClear = -1;
-                if(k < bb::Engine::kKeys && !(gKeyTake && gKeyTakeKey == k)) engine.SetKeySlice(k, bb::SpanSlice(k, engine.nSlices));
+                if(k < bb::Engine::kKeys && !(gKeyTake && gKeyTakeKey == k)) engine.ClearKey(k);
             }
             if(gWebRecArm >= 0)
             {

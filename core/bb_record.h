@@ -172,7 +172,7 @@ struct TakeRecorder
         target = (targetLen > 0 && targetLen < capacity) ? targetLen : capacity;
         pos    = 0;
         peak   = 0.f;
-        running = true;   // last: publishes the take to the audio thread
+        __asm__ volatile("" ::: "memory"); running = true;   // last: publishes the take to the audio thread (review L3)
     }
     /* AUDIO. Append a block; `inR` feeds R (nullptr: L copied to R). */
     void Feed(const float* in, const float* inR, int n)
