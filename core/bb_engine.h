@@ -3,6 +3,7 @@
 #include <cstdint>
 #include "bb_gas.h"
 #include "bb_pattern.h"
+#include "bb_looper.h"   /* LOOPER */
 
 namespace bb {
 
@@ -536,6 +537,30 @@ struct Engine
         playSrc[step]      = (int8_t)src;
         playRev[step]      = rev;
     }
+    /* LOOPER (docs/packages/sample-looper.md): the unquantized looper — Play's
+     * memory when Options → Quantize is Off or 8ths. A call in Play records
+     * itself (its phase, key, style, held) instead of punching a step, and
+     * Process fires the events back through the same call path, sample-exact
+     * within the block, every pass. Quantize = 16ths keeps Play exactly as
+     * it was (punch into steps, byte-identical): the looper never records
+     * or fires then. The list survives a grammar change (silent until Play
+     * again); B3 (Reslice) clears it with the punch bar; B2 undoes the last
+     * pass's overdub. */
+    Looper looper;
+    int    looperQuant = 0;   // Options → Quantize: 0 Off · 1 16ths (punch, looper off) · 2 8ths
+    bool   LooperActive() const { return patternMode == 5 && looperQuant != 1; }
+    static uint8_t LooperStyle(float rateMul, bool rev, bool ratchet, float lenMul, bool held)
+    {
+        uint8_t s = 0;
+        if(rev) s |= Looper::kRev;
+        if(rateMul < 0.75f) s |= Looper::kHalf;
+        else if(rateMul > 1.5f) s |= Looper::kDouble;
+        if(ratchet) s |= Looper::kRatchet;
+        if(lenMul < 0.999f) s |= Looper::kStaccato;
+        if(held) s |= Looper::kHeld;
+        return s;
+    }
+    /* LOOPER end */
     bool   restSustain = false;       // languages (Grids/Euclid): a rest continues
                                       // the break instead of gating a 16th of
                                       // silence — the shell sets this per grammar.
@@ -716,7 +741,7 @@ struct Engine
     }
     void Reslice() // button 2: new chop tree (Play: clear the bar)
     {
-        if(patternMode == 5) ClearPlay();
+        if(patternMode == 5) { ClearPlay(); looper.Clear(); /* LOOPER: B3 clears the loop too */ }
         cellSeed = ((uint64_t)seedRng.Next() << 32) | seedRng.Next();
         PushHistory();
         ApplyPattern(patternKnob, cellSeed, fillSeed);
@@ -741,6 +766,7 @@ struct Engine
                      int nOnsets, const uint8_t* classes = nullptr, int nSlicesHint = 0,
                      float* bR = nullptr, int cap = 0)
     {
+        const bool newPlanes = b != buf;   /* LOOPER: a load empties the loop; a re-apply keeps it */
         /* SAMPLE: which recorded entries survive? */
         const int keepFrom = nSlices;
         int       keepN    = 0;
@@ -864,6 +890,12 @@ struct Engine
         callCountdown      = -1; // a ratcheted Voice call from the OLD material
         loopCount          = 0;
         fillActive         = false;
+        /* LOOPER: phases are bar-relative, so a re-slice of the same material
+         * keeps the loop (rescaled to the new bar); new planes start empty.
+         * barPhase was reset above: the window frontier is forgotten. */
+        looper.divisions = nSlices;
+        looper.ResetPlayhead();
+        if(newPlanes) looper.Clear();
     }
 
     // ── Voice role (M3): the rack plays slices ────────────────────────
@@ -945,6 +977,26 @@ struct Engine
     void CallSlice(int idx, float rateMul, bool rev, bool punch, bool ratchet, float lenMul = 1.f,
                    bool held = false, int key = -1)
     {
+        /* LOOPER: in Play with the looper on, `punch` means "write" — into the
+         * loop, at this phase, instead of into a step. The looper IS the
+         * memory: no step is punched. A full list refuses; the call still
+         * sounds. Quantize = 16ths leaves this whole branch dead. */
+        if(LooperActive())
+        {
+            if(punch && buf && nSlices >= 1)
+            {
+                int t = idx < 0 ? 0 : (idx >= nTable ? nTable - 1 : idx);
+                looper.quant = looperQuant;
+                looper.Record(barPhase, key, t, LooperStyle(rateMul, rev, ratchet, lenMul, held), 1.f);
+            }
+            punch = false;
+        }
+        CallSliceRaw(idx, rateMul, rev, punch, ratchet, lenMul, held, key);
+    }
+    // The call itself, never recorded: the looper's replay path.
+    void CallSliceRaw(int idx, float rateMul, bool rev, bool punch, bool ratchet, float lenMul,
+                      bool held, int key)
+    {
         callLenMul = lenMul;
         if(!buf || nSlices < 1) return;
         if(idx < 0) idx = 0;
@@ -988,8 +1040,25 @@ struct Engine
     // release). One-shot voices are untouched; an unknown key is a no-op.
     void ReleaseKey(int key)
     {
+        if(LooperActive()) looper.RecordRelease(barPhase, key);   /* LOOPER: a held note keeps its length */
+        ReleaseKeyRaw(key);
+    }
+    void ReleaseKeyRaw(int key)
+    {
         for(int i = 0; i < kVoices; i++)
             if(voices[i].active && voices[i].held && voices[i].key == key) voices[i].Release();
+    }
+    /* LOOPER: fire one recorded event through the live call path. A keyed
+     * event resolves its slice through the key table NOW (re-record a key,
+     * re-point it, re-slice the bar: the loop follows); a keyless one plays
+     * the table entry it was called with. Replays never record. */
+    void LooperFire(const Looper::Event& e)
+    {
+        if(e.style & Looper::kRelease) { ReleaseKeyRaw(e.key); return; }
+        const int   idx  = e.key >= 0 ? KeySlice(e.key) : e.slice;
+        const float rate = (e.style & Looper::kHalf) ? 0.5f : ((e.style & Looper::kDouble) ? 2.f : 1.f);
+        CallSliceRaw(idx, rate, (e.style & Looper::kRev) != 0, false, (e.style & Looper::kRatchet) != 0,
+                     (e.style & Looper::kStaccato) ? 0.5f : 1.f, (e.style & Looper::kHeld) != 0, e.key);
     }
 
     // Recorded entry owned by `key`, or -1.
@@ -1259,17 +1328,34 @@ struct Engine
             }
         }
 
-        for(int v = 0; v < kVoices; v++)
-        {
-            if(!voices[v].active) continue;
-            for(int i = 0; i < n; i++)
+        /* LOOPER: the events this block crosses fire at their own sample. The
+         * block renders in segments split at each event's offset; a voice
+         * sounding at the block's start (or fired inside it) renders to the
+         * block's end, exactly as the single loop below used to — with no
+         * events the one segment [0, n) IS that loop, op for op. Advance runs
+         * every block (the wrap closes a generation) whatever the grammar. */
+        Looper::Window lw;
+        looper.Advance(barPhase, (double)blockSec / (double)barSeconds, n, lw);
+        bool on[kVoices];
+        for(int v = 0; v < kVoices; v++) on[v] = voices[v].active;
+        int seg = 0;
+        if(looper.n > 0 && LooperActive())
+            for(int pass = 0; pass < 3; pass++)
             {
-                float l = 0.f, r = 0.f;
-                voices[v].RenderT<ST>(buf, bufR, l, r);
-                out[i] += l;
-                if constexpr(ST) outR[i] += r;
+                int lo, hi; double sh;
+                if(!lw.Range(pass, lo, hi, sh)) continue;
+                for(int k = lo; k < hi; k++)
+                {
+                    Looper::Event& e = looper.ev[k];
+                    if(e.style & Looper::kSkip) { e.style &= (uint8_t)~Looper::kSkip; continue; }
+                    const int off = Looper::Offset(lw, e.phase, sh, n);
+                    if(off > seg) { RenderSpan<ST>(out, outR, on, seg, off); seg = off; }
+                    LooperFire(e);
+                    for(int v = 0; v < kVoices; v++) on[v] = on[v] || voices[v].active;
+                }
             }
-        }
+        RenderSpan<ST>(out, outR, on, seg, n);
+        /* LOOPER end */
         for(int i = 0; i < n; i++)
         {
             float x = out[i] * 0.8f;
@@ -1289,6 +1375,23 @@ struct Engine
     }
 
   private:
+    /* LOOPER: render samples [a, b) of every voice marked `on` into the block */
+    template <bool ST>
+    void RenderSpan(float* out, float* outR, const bool* on, int a, int b)
+    {
+        for(int v = 0; v < kVoices; v++)
+        {
+            if(!on[v]) continue;
+            for(int i = a; i < b; i++)
+            {
+                float l = 0.f, r = 0.f;
+                voices[v].RenderT<ST>(buf, bufR, l, r);
+                out[i] += l;
+                if constexpr(ST) outR[i] += r;
+            }
+        }
+    }
+
     // Fire one grid step: a single natural slice at pitch-control rate.
     // ReCycle paradigm at true slice granularity — tempo (pot 2) re-spaces
     // every hit at unchanged pitch; pitch (encoder) retunes every hit at

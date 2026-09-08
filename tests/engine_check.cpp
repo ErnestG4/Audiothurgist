@@ -1213,6 +1213,7 @@ int main()
         }
 
         Fresh(e, 5, 1.f);   // Play
+        e.looperQuant = 1;  // LOOPER: Quantize = 16ths keeps Play's punch-into-steps memory (Off/8ths: the looper)
         Rendered q = RenderLoops(e, 1);
         CHECK(Rms(q.y.data(), (int)q.y.size()) < 1e-4f, "Play: silent until something is played in");
         e.barPhase = 3.5 / 16.; float o[24]; e.Process(o, 24);
@@ -1500,6 +1501,255 @@ int main()
         CHECK(hStL == gold, "Process(L, R) on mono material: L checksum %016llx != golden", (unsigned long long)hStL);
         CHECK(hDupL == gold && hDupR == gold, "stereo material with R = L: both planes match the golden (%016llx / %016llx)",
               (unsigned long long)hDupL, (unsigned long long)hDupR);
+    }
+
+    /* ── LOOPER package: the unquantized looper behind Play ───────────────── */
+    // Play, Quantize as given, one block rendered at phase 0 so the window
+    // frontier is live (as it always is on the module), hit counter cleared.
+    auto Prime = [&](int quant) {
+        Fresh(e, 5, 1.f); e.looperQuant = quant; e.extPhase = true; e.barPhase = 0.;
+        float o[24]; e.Process(o, 24); e.callHits = 0;
+    };
+    // One block past the loop's end: the playhead CROSSES the wrap (a render
+    // that stops on the boundary has not), which is what closes a generation.
+    auto Wrap = [&]() { float o[24]; e.barPhase = 0.; e.Process(o, 24); };
+    auto FirstNonzero = [](const std::vector<float>& y, size_t from) -> long {
+        for(size_t i = from; i < y.size(); i++) if(y[i] != 0.f) return (long)i;
+        return -1;
+    };
+
+    SECTION("LOOPER: a call in Play writes the loop, not a step; replays every pass after the one being played");
+    {
+        Prime(0);
+        CHECK(e.LooperActive() && e.looper.n == 0 && e.looper.divisions == 16, "Play + Quantize Off: the looper is on, empty, 16 divisions");
+        e.barPhase = 0.3;
+        e.CallSlice(7, 1.f, false, true, false);            // `punch` in Play = write (into the loop now)
+        CHECK(e.looper.n == 1 && e.stepSrc[4] < 0 && e.playSrc[4] < 0, "written into the loop, not into step 4 (n %d, step 4 = %d)", e.looper.n, e.stepSrc[4]);
+        const bb::Looper::Event& ev = e.looper.ev[0];
+        CHECK(fabs(ev.phase - 0.3) < 1e-12 && ev.key == -1 && ev.slice == 7 && ev.gen == 0 && (ev.style & bb::Looper::kSkip),
+              "the event: phase 0.3, keyless → slice 7, generation 0, ahead of the playhead → skipped once");
+        CHECK(e.callHits == 1, "the live call sounded (%d)", e.callHits);
+        e.callHits = 0;
+        Rendered q = RenderLoops(e, 3);
+        CHECK(e.callHits == 2, "fires on passes 2 and 3, not on the pass the player is hearing (%d hits)", e.callHits);
+        const size_t at = (size_t)(0.3 * kLen);
+        CHECK(Rms(&q.y[at + 300], 5400) < 1e-4f, "pass 1: silent at 0.3 (rms %.5f)", Rms(&q.y[at + 300], 5400));
+        CHECK(SliceOfFreq(MeasureFreq(&q.y[kLen + at + 300], 5400), Rms(&q.y[kLen + at + 300], 5400)) == 7
+              && SliceOfFreq(MeasureFreq(&q.y[2 * kLen + at + 300], 5400), Rms(&q.y[2 * kLen + at + 300], 5400)) == 7,
+              "passes 2 and 3: slice 7 sounds at 0.3");
+        CHECK(!(e.looper.ev[0].style & bb::Looper::kSkip) && e.looper.n == 1, "the skip is spent; replays never re-record (n %d)", e.looper.n);
+        // a call with punch = false (style 6 in Play: choke) sounds but is not written
+        e.barPhase = 0.6; e.CallSlice(2, 1.f, false, false, false);
+        CHECK(e.looper.n == 1, "an unwritten call leaves the loop alone");
+    }
+
+    SECTION("LOOPER: sample-exact within a 24-sample block — an event one sample later renders one sample later");
+    {
+        std::vector<float> ya, yb;
+        for(int which = 0; which < 2; which++)
+        {
+            Prime(0);
+            const double ph = (double)(28807 + which) / (double)kLen;   // 7 (then 8) samples into block 1200
+            CHECK(e.looper.Add(ph, -1, 7, 0, 1.f), "Add (the loader's entry: no skip)");
+            e.looper.Seal();
+            Rendered q = RenderLoops(e, 1);
+            (which ? yb : ya) = q.y;
+        }
+        const long fa = FirstNonzero(ya, 20000), fb = FirstNonzero(yb, 20000);
+        CHECK(fa >= 28807 && fa <= 28810 && fb == fa + 1, "onsets at %ld and %ld: one sample apart, at the event's own sample", fa, fb);
+        bool same = true;   // up to the voice's natural end: the click-decay after an end is block-aligned (pre-LOOPER semantics, kept)
+        for(size_t i = 28000; i + 1 < 34000; i++) if(yb[i + 1] != ya[i]) { same = false; break; }
+        CHECK(same, "the two renders are the same samples, shifted by exactly one (segmented render is exact)");
+    }
+
+    SECTION("LOOPER: a held note replays with its release");
+    {
+        Prime(0);
+        e.barPhase = 0.25; e.CallSlice(e.KeySlice(3), 1.f, false, true, false, 1.f, true, 3);
+        CHECK(e.looper.n == 1 && (e.looper.ev[0].style & bb::Looper::kHeld) && e.looper.ev[0].key == 3 && e.looper.heldMask == (1u << 3),
+              "held note-on recorded, key 3 awaiting its release");
+        e.barPhase = 0.5; e.ReleaseKey(3);
+        CHECK(e.looper.n == 2 && (e.looper.ev[1].style & bb::Looper::kRelease) && e.looper.ev[1].key == 3 && e.looper.heldMask == 0
+              && fabs(e.looper.ev[1].phase - 0.5) < 1e-12, "…and its release at 0.5");
+        e.ReleaseKey(3);
+        CHECK(e.looper.n == 2, "a release with no held note-on pending records nothing");
+        Rendered q = RenderLoops(e, 2);
+        CHECK(SliceAtStep(q, 16 + 3) == -1 && SliceAtStep(q, 16 + 4) == 3 && SliceAtStep(q, 16 + 6) == 5 && SliceAtStep(q, 16 + 7) == 6,
+              "pass 2: from 0.25 the held key 3 reads on through slices 3, 4, 5, 6 (%d %d %d %d)",
+              SliceAtStep(q, 16 + 3), SliceAtStep(q, 16 + 4), SliceAtStep(q, 16 + 6), SliceAtStep(q, 16 + 7));
+        CHECK(SliceAtStep(q, 16 + 8) == -1 && SliceAtStep(q, 16 + 9) == -1, "…and stops at the recorded release (0.5)");
+        int heldNow = 0; for(int i = 0; i < bb::Engine::kVoices; i++) heldNow += e.voices[i].active && e.voices[i].held;
+        CHECK(heldNow == 0, "no held voice outlives its release (%d)", heldNow);
+        // the loop follows the key table: re-point key 3 and the replay plays the new slice
+        e.SetKeySlice(3, 9);
+        q = RenderLoops(e, 2);
+        CHECK(SliceAtStep(q, 16 + 4) == 9, "key 3 → slice 9 now: the loop replays through the key (%d)", SliceAtStep(q, 16 + 4));
+    }
+
+    SECTION("LOOPER: Quantize 16ths = Play's punch, untouched; 8ths snaps the phase at record time");
+    {
+        Prime(1);
+        CHECK(!e.LooperActive(), "16ths: the looper is off");
+        e.barPhase = 3.5 / 16.; float o[24]; e.Process(o, 24);
+        e.CallSlice(7, 1.f, false, true, false);
+        CHECK(e.looper.n == 0 && e.stepSrc[3] == 7 && e.playSrc[3] == 7, "16ths: the call punches step 3, records nothing (n %d, step 3 = %d)", e.looper.n, e.stepSrc[3]);
+        Rendered a = RenderLoops(e, 2);
+        Fresh(e, 5, 1.f); e.looperQuant = 1; e.extPhase = true; e.barPhase = 0.; e.Process(o, 24);
+        e.barPhase = 3.5 / 16.; e.Process(o, 24);
+        e.PunchStep(3, 7, false);                            // the web's punch: the same memory
+        Rendered b = RenderLoops(e, 2);
+        bool same = a.y.size() == b.y.size();
+        for(size_t i = kLen; same && i < a.y.size(); i++) if(a.y[i] != b.y[i]) same = false;
+        CHECK(same, "16ths: a punched call and a web punch render the same second pass (byte-identical)");
+        Prime(2);
+        e.barPhase = 0.3;  e.CallSlice(7, 1.f, false, true, false);
+        e.barPhase = 0.98; e.CallSlice(2, 1.f, true, true, false);
+        CHECK(e.looper.n == 2 && e.stepSrc[4] < 0, "8ths: written into the loop, no step punched (n %d)", e.looper.n);
+        CHECK(e.looper.ev[0].phase == 0.0 && e.looper.ev[1].phase == 0.25, "8ths: 0.3 → 0.25 (2/8), 0.98 → the downbeat (%.4f %.4f)", e.looper.ev[0].phase, e.looper.ev[1].phase);
+        CHECK(e.looper.ev[0].slice == 2 && (e.looper.ev[0].style & bb::Looper::kRev) && e.looper.ev[1].slice == 7, "…sorted by phase, styles kept");
+        CHECK(bb::Looper::Snap(0.3, 16) == 0.3125 && bb::Looper::Snap(0.99, 16) == 0.0 && bb::Looper::Snap(0.3, 0) == 0.3, "Snap: nearest division, 1.0 wraps to 0, no division = exact");
+        e.callHits = 0;
+        Rendered q = RenderLoops(e, 2);
+        CHECK(e.callHits == 2 && SliceAtStep(q, 16 + 4) == 7, "8ths: pass 2 plays slice 7 on step 4 (%d hits, step 4 = %d)", e.callHits, SliceAtStep(q, 16 + 4));
+    }
+
+    SECTION("LOOPER: undo removes only the last generation (a pass with something recorded)");
+    {
+        Prime(0);
+        e.barPhase = 0.2; e.CallSlice(2, 1.f, false, true, false);
+        e.barPhase = 0.4; e.CallSlice(4, 1.f, false, true, false);
+        RenderLoops(e, 1);
+        CHECK(e.looper.gen == 0 && e.looper.dirty, "up to the loop's end the generation is still open (gen %d)", e.looper.gen);
+        Wrap();                                              // crossing the wrap closes generation 0
+        CHECK(e.looper.gen == 1 && !e.looper.dirty, "a wrap after recording opens generation 1 (gen %d)", e.looper.gen);
+        RenderLoops(e, 1); Wrap();
+        CHECK(e.looper.gen == 1, "a pass with nothing recorded does not open a generation");
+        e.barPhase = 0.6; e.CallSlice(6, 1.f, false, true, false);
+        RenderLoops(e, 1); Wrap();
+        e.barPhase = 0.8; e.CallSlice(8, 1.f, false, true, false);   // generation 2, still open
+        CHECK(e.looper.n == 4 && e.looper.ev[0].gen == 0 && e.looper.ev[1].gen == 0 && e.looper.ev[2].gen == 1 && e.looper.ev[3].gen == 2,
+              "four events in generations 0 0 1 2 (%d %d %d %d)", e.looper.ev[0].gen, e.looper.ev[1].gen, e.looper.ev[2].gen, e.looper.ev[3].gen);
+        CHECK(e.looper.UndoLast() && e.looper.n == 3 && e.looper.ev[2].slice == 6 && e.looper.gen == 2 && !e.looper.dirty,
+              "undo: the open generation goes, the rest stay (n %d)", e.looper.n);
+        e.barPhase = 0.9; e.CallSlice(9, 1.f, false, true, false);
+        CHECK(e.looper.n == 4 && e.looper.ev[3].gen == 2, "a new overdub takes the freed generation");
+        CHECK(e.looper.UndoLast() && e.looper.UndoLast() && e.looper.n == 2 && e.looper.ev[0].slice == 2 && e.looper.ev[1].slice == 4 && e.looper.gen == 1,
+              "two more undos: back to the first pass, generation 1 free again (n %d, gen %d)", e.looper.n, e.looper.gen);
+        CHECK(e.looper.UndoLast() && e.looper.n == 0 && e.looper.gen == 0 && !e.looper.UndoLast(), "the last undo empties; an empty loop refuses");
+        // the generation byte wraps: 256 sealed generations still undo one at a time
+        bb::Looper L;
+        for(int i = 0; i < 256; i++) { L.Add((double)i / 256., -1, (int8_t)(i & 15), 0, 1.f); L.Seal(); }
+        CHECK(L.n == 256 && L.UndoLast() && L.n == 255 && L.UndoLast() && L.n == 254, "256 generations: undo still peels one (n %d)", L.n);
+    }
+
+    SECTION("LOOPER: clear (B3 in Play) empties; only Play records; the loop waits through other grammars");
+    {
+        Prime(0);
+        e.barPhase = 0.2; e.CallSlice(2, 1.f, false, true, false);
+        e.barPhase = 0.4; e.CallSlice(4, 1.f, false, true, false);
+        e.Reslice();
+        CHECK(e.looper.n == 0 && e.looper.gen == 0, "Reslice in Play clears the loop with the bar");
+        e.barPhase = 0.2; e.CallSlice(2, 1.f, false, true, false);
+        e.looper.Clear();
+        CHECK(e.looper.n == 0 && e.looper.heldMask == 0, "Clear empties");
+        Fresh(e, 0, 1.f); e.extPhase = true; e.barPhase = 0.3; float o[24]; e.Process(o, 24);
+        e.CallSlice(7, 1.f, false, true, false);
+        CHECK(e.looper.n == 0 && e.stepSrc[4] == 7, "Classic: a punch is a punch, nothing recorded");
+        Fresh(e, 6, 1.f); e.extPhase = true; e.barPhase = 0.3; e.Process(o, 24);
+        e.CallSlice(7, 1.f, false, true, false);
+        CHECK(e.looper.n == 0, "Pads: nothing is ever written");
+        Prime(0);
+        e.barPhase = 0.6; e.CallSlice(6, 1.f, false, true, false);
+        e.patternMode = 0; e.RegenPattern(); e.callHits = 0;
+        RenderLoops(e, 2);
+        CHECK(e.looper.n == 1 && e.callHits == 0, "another grammar: the loop is kept but silent (%d hits)", e.callHits);
+        e.patternMode = 5; e.RegenPattern(); e.callHits = 0;
+        RenderLoops(e, 2);
+        CHECK(e.callHits == 2, "back in Play it plays again (%d hits)", e.callHits);
+        // a re-slice of the same material keeps the loop; new material drops it
+        e.SetMaterial(gMat, kLen, kSr, nullptr, 0, gCls, 32);
+        CHECK(e.looper.n == 1 && e.looper.divisions == 32, "the same planes re-sliced: the loop stays, 32 divisions");
+        static float other[kLen]; memcpy(other, gMat, sizeof gMat);
+        e.SetMaterial(other, kLen, kSr, nullptr, 0, gCls);
+        CHECK(e.looper.n == 0, "new material: the loop starts empty");
+    }
+
+    // Render `loops` loops at `block` samples, counting hits per block (callHits is a byte).
+    auto RenderHits = [&](int loops, int block, std::vector<float>& y) -> int {
+        int hits = 0; y.clear();
+        e.extPhase = true; double t = 0.; float out[128];
+        const double total = (double)loops * e.barSeconds;
+        while(t < total - 1e-9)
+        {
+            e.barPhase = fmod(t / (double)e.barSeconds, 1.0);
+            e.Process(out, block); y.insert(y.end(), out, out + block);
+            hits += e.callHits; e.callHits = 0;
+            t += (double)block / kSr;
+        }
+        return hits;
+    };
+
+    SECTION("LOOPER: events across the wrap fire every pass, at the same sample whatever the block size");
+    {
+        std::vector<float> y;
+        Prime(0); e.looper.Add(0.999, -1, 3, 0, 1.f); e.looper.Seal();    // 96 samples before the wrap
+        int h = RenderHits(2, 24, y);
+        long f = FirstNonzero(y, 90000);
+        CHECK(h == 2 && f >= 95904 && f <= 95907, "0.999: one hit per pass, onset at sample 95904+ (%d hits, %ld)", h, f);
+        Prime(0); e.looper.Add(0.0005, -1, 5, 0, 1.f); e.looper.Seal();   // 48 samples after it
+        h = RenderHits(2, 24, y);
+        f = FirstNonzero(y, 40);
+        CHECK(h == 2 && f >= 48 && f <= 51, "0.0005: one hit per pass, onset at sample 48+ (%d hits, %ld)", h, f);
+        f = FirstNonzero(y, (size_t)kLen + 40);
+        CHECK(f >= kLen + 48 && f <= kLen + 51, "…and again at 96048+ on pass 2 (%ld)", f);
+        std::vector<float> y24, y7;
+        int hits24 = 0, hits7 = 0;
+        for(int which = 0; which < 2; which++)
+        {
+            Prime(0);
+            e.looper.Add(0.999, -1, 3, 0, 1.f); e.looper.Add(0.0005, -1, 5, 0, 1.f); e.looper.Seal();
+            (which ? hits7 : hits24) = RenderHits(3, which ? 7 : 24, which ? y7 : y24);   // 24: the wrap on a block boundary · 7: inside one
+        }
+        CHECK(hits24 == 6 && hits7 == 6, "two events × three passes = 6 hits at 24- and 7-sample blocks (%d, %d)", hits24, hits7);
+        // the onsets around the first wrap, on fresh voices, before either ends (a voice's end
+        // decay and the residual a re-triggered voice inherits are block-aligned: engine semantics kept)
+        bool same = y7.size() >= (size_t)(3 * kLen);
+        for(size_t i = 95800; same && i < (size_t)kLen + 3000; i++) if(y7[i] != y24[i]) same = false;
+        CHECK(same, "the onsets are block-size invariant: identical samples across the wrap");
+    }
+
+    SECTION("LOOPER: the 256-event cap refuses gracefully; deterministic");
+    {
+        Prime(0);
+        for(int i = 0; i < 256; i++) { e.barPhase = (double)i / 256.; e.CallSlice(i & 15, 1.f, (i & 1) != 0, true, false); }
+        CHECK(e.looper.n == 256 && e.looper.Full(), "256 events fit (n %d)", e.looper.n);
+        e.callHits = 0; e.barPhase = 0.5; e.CallSlice(3, 1.f, false, true, false);
+        CHECK(e.looper.n == 256 && e.callHits == 1, "the 257th is refused; the call still sounds");
+        CHECK(!e.looper.Add(0.1, -1, 1, 0, 1.f) && !e.looper.RecordRelease(0.1, 3), "Add and a release refuse too");
+        int sorted = 1; for(int i = 1; i < e.looper.n; i++) if(e.looper.ev[i].phase < e.looper.ev[i - 1].phase) sorted = 0;
+        CHECK(sorted, "the list stays sorted by phase");
+        e.callHits = 0;
+        std::vector<float> yf;
+        const int hits = RenderHits(2, 24, yf);
+        bool finite = true; for(float v : yf) if(!std::isfinite(v)) finite = false;
+        CHECK(finite && hits == 256 + 127, "a full loop renders finite audio, every event fires (%d hits: 127 on pass 1 — those beyond half a loop ahead of the frontier — 256 on pass 2)", hits);
+        CHECK(e.looper.UndoLast() && e.looper.n == 0, "one undo clears a single-pass loop");
+        // determinism: two engines, the same gestures, the same bits
+        std::vector<float> r1, r2;
+        for(int run = 0; run < 2; run++)
+        {
+            Prime(0);
+            e.barPhase = 0.11; e.CallSlice(1, 1.f, false, true, false);
+            e.barPhase = 0.37; e.CallSlice(e.KeySlice(5), 2.f, true, true, true, 1.f, true, 5);
+            e.barPhase = 0.52; e.ReleaseKey(5);
+            e.barPhase = 0.80; e.CallSlice(9, 0.5f, false, true, false, 0.5f);
+            RenderLoops(e, 1); Wrap();
+            e.barPhase = 0.66; e.CallSlice(6, 1.f, false, true, false);
+            Rendered q2 = RenderLoops(e, 3, 24);
+            (run ? r2 : r1) = q2.y;
+        }
+        CHECK(r1 == r2 && Fnv(r1) == Fnv(r2), "the same gestures render the same bits");
+        CHECK(e.looper.n == 5 && e.looper.ev[2].gen == 0 && e.looper.ev[3].gen == 1, "…with five events in two generations");
     }
 
     printf("\n%d passed, %d failed\n", gPass, gFail);

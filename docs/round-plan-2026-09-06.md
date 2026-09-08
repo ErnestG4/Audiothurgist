@@ -45,6 +45,8 @@ u16 lockMask  f32 nativeBpm u8 gridBars u8 barsOpt (156..163, v0.8.0)
 u16 jitterUs  u8 multZone                          (164..166, CLOCK)
 u8 clkFlags   u16 jitterRmsUs                       (167..169, CLOCK)
 u8 stallPhase u16 gateLateUs u16 overruns           (170..174, v0.9.5 forensics)
+u8 jackMap                                          (175, SAMPLE: 0 Brain, 1 Voice)
+u8 looperEvents                                     (176, LOOPER: events in Play's loop, capped 255)
 ```
 ACTION ops: 0 dice · 1 reslice · 2 mute · 3 punch(step,slice) · 4 flow(on)
 · 5 scrub(depth) · 6 load(idx) · 7 clear locks · 8 page(0/1).
