@@ -1,7 +1,11 @@
 // classify_check — run every classifier lens over real breaks and print them
 // side by side, one character per grid step (K kick · S snare · H hat · .
 // silent), plus the Density lens's raw keyframe density per step and each
-// lens's agreement with Hockman. Build:
+// lens's agreement with Hockman; the Adaptive lens (CLASSIFY, mode 4) gets
+// the onset table the engine would have, and prints which steps it judged
+// at a detected hit (h), at a rise it found itself (r) or at the step start
+// (.). No assertions here: tests/classify_bench.cpp measures the lenses
+// against ground truth. Build:
 //   g++ -O2 -std=gnu++17 -Icore -Ivendor/capicola/lib tests/classify_check.cpp -o /tmp/cc
 //   /tmp/cc "path/to/break.wav" [more.wav ...]
 #include <cstdio>
@@ -10,6 +14,8 @@
 #include <vector>
 #include <string>
 #include "bb_classify.h"
+#include "bb_onset.h"   /* CLASSIFY: the Adaptive lens takes the onset table */
+static bb::OnsetDetector gDet;
 
 static bool LoadWav(const char* path, std::vector<float>& mono, float& sr)
 {
@@ -62,7 +68,7 @@ static bool LoadWav(const char* path, std::vector<float>& mono, float& sr)
 
 int main(int argc, char** argv)
 {
-    static const char* names[4] = {"Hockman", "Legacy ", "Two-band", "Density"};
+    static const char* names[5] = {"Hockman", "Legacy ", "Two-band", "Density", "Adaptive"};
     for(int a = 1; a < argc; a++)
     {
         std::vector<float> x; float sr;
@@ -72,7 +78,7 @@ int main(int argc, char** argv)
         int nsl = bb::GridSlices(len, sr);
         const char* base = strrchr(argv[a], '/'); base = base ? base + 1 : argv[a];
         printf("\n%s  (%.1f s, %d steps, %g Hz)\n", base, len / sr, nsl, sr);
-        static uint8_t cls[4][bb::Engine::kMaxSlices];
+        static uint8_t cls[5][bb::Engine::kMaxSlices];
         static float   dens[bb::Engine::kMaxSlices];
         static const float epsSweep[] = {0.2f, 0.35f, 0.5f};
         auto line = [&](int m, const char* label) {
@@ -107,6 +113,15 @@ int main(int argc, char** argv)
             for(int s = 0; s < nsl; s++) { int v = (int)(dens[s] / mx * 9.f + 0.5f); printf("%d", v > 9 ? 9 : v); if((s & 15) == 15 && s != nsl - 1) putchar('|'); }
             printf("   max %.3f kf/sample\n", mx);
         }
+        /* CLASSIFY: the Adaptive lens on the engine's onset table (mode 0 detector) */
+        static int ons[128];
+        gDet.mode = 0;
+        const int no = gDet.Detect(x.data(), len, sr, ons, 128, nullptr);
+        bb::ClassifySteps(x.data(), len, sr, cls[4], 4, nullptr, nullptr, 0, nullptr, ons, no);
+        line(4, names[4]);
+        printf("   window at   ");
+        for(int s = 0; s < nsl; s++) { putchar(cls[4][s] == 3 ? ' ' : (bb::gAdaptHit[s] ? 'h' : (bb::gAdaptAt[s] > s * (len / nsl) ? 'r' : '.'))); if((s & 15) == 15 && s != nsl - 1) putchar('|'); }
+        printf("   %d onsets\n", no);
     }
     return 0;
 }

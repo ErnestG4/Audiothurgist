@@ -391,7 +391,7 @@ int main()
     SECTION("Classifier lenses");
     {
         uint8_t cls[64]; float sal[64], dens[64];
-        for(int m = 0; m < 4; m++)
+        for(int m = 0; m < 5; m++)   /* CLASSIFY: five lenses */
         {
             bb::ClassifySteps(gMat, kLen, kSr, cls, m, sal, dens);
             int bad = 0; for(int s = 0; s < 16; s++) bad += cls[s] > 3;
@@ -399,6 +399,7 @@ int main()
             CHECK(cls[15] == 3, "mode %d: the silent step is class 3 (got %d)", m, cls[15]);
             CHECK(sal[15] < 1e-3f && sal[0] > 0.5f, "mode %d: salience 0 on silence, high on tone", m);
         }
+        bb::ClassifySteps(gMat, kLen, kSr, cls, 3, sal, dens);   /* CLASSIFY: the density checks read mode 3 */
         int nK = 0, nS = 0, nH = 0; for(int s = 0; s < 15; s++) { nK += cls[s] == 0; nS += cls[s] == 1; nH += cls[s] == 2; }
         CHECK(nK >= 3 && nH >= 5, "density lens splits by rank (K%d S%d H%d of 15)", nK, nS, nH);
         // rising frequency per step → density rises with the step index
@@ -698,16 +699,90 @@ int main()
         CHECK(sup == 15, "Multi-label is a superset of the Hockman lens's lane (%d/15)", sup);
         memcpy(ref, bands, 64);
         int lensDep = 0;
-        for(int m = 1; m < 4; m++) { bb::ClassifySteps(drum, kLen, kSr, cls, m, nullptr, nullptr, 0, bands); lensDep += memcmp(ref, bands, 64) != 0; }
+        for(int m = 1; m < 5; m++) { bb::ClassifySteps(drum, kLen, kSr, cls, m, nullptr, nullptr, 0, bands); lensDep += memcmp(ref, bands, 64) != 0; }
         CHECK(lensDep == 0, "the mask is lens-independent (%d lenses differ)", lensDep);
         // the classification itself is untouched by asking for the mask
         uint8_t c1[64], c2[64]; float s1[64], s2[64];
-        for(int m = 0; m < 4; m++)
+        for(int m = 0; m < 5; m++)
         {
             bb::ClassifySteps(gMat, kLen, kSr, c1, m, s1, nullptr, 0, nullptr);
             bb::ClassifySteps(gMat, kLen, kSr, c2, m, s2, nullptr, 0, bands);
             CHECK(memcmp(c1, c2, 16) == 0 && memcmp(s1, s2, 16 * sizeof(float)) == 0, "mode %d: classes and salience identical with bandsOut", m);
         }
+    }
+
+    // ── CLASSIFY package (docs/packages/classify.md) ──────────────────────
+    SECTION("CLASSIFY: the Adaptive lens — deterministic, onset-placed, the two-class guard, the others untouched");
+    {
+        /* the GATES drum loop again, with an onset table where the drums are */
+        static float drum[kLen];
+        for(int i = 0; i < kLen; i++) drum[i] = 0.f;
+        uint32_t rng = 7u;
+        /* the GATES bursts, but a snare with a BODY: 200 Hz shell tone under
+         * noise low-passed at 4 kHz (the GATES snare is a 1.8 kHz tone plus
+         * white noise — brighter than any real snare, and the anchors, fitted
+         * on real breaks, read it as a hat: the lens telling the truth) */
+        auto burst = [&](int at, float f, float amp, int n, bool noise, int tone /* 0 none, 1 bright HP², 2 dull LP */) {
+            float lp1 = 0.f, lp2 = 0.f; const float a = 1.f - expf(-2.f * 3.14159f * (tone == 2 ? 4000.f : 6000.f) / kSr);
+            for(int i = 0; i < n && at + i < kLen; i++)
+            {
+                rng = rng * 1664525u + 1013904223u;
+                float nz = noise ? ((float)(rng >> 8) / 8388608.f - 1.f) : 0.f;
+                if(tone == 1) { lp1 += a * (nz - lp1); float h = nz - lp1; lp2 += a * (h - lp2); nz = h - lp2; }
+                if(tone == 2) { lp1 += a * (nz - lp1); nz = lp1 * 2.f; }
+                float env = expf(-(float)i / (float)n * 5.f);
+                drum[at + i] += amp * env * (0.6f * sinf(6.2831853f * f * i / kSr) + 0.4f * nz);
+            } };
+        auto kick  = [&](int s) { burst(s * kStep, 60.f, 0.9f, 4000, false, 0); };
+        auto snare = [&](int s) { burst(s * kStep, 200.f, 0.8f, 4000, true, 2); };
+        auto hat   = [&](int s, float a) { burst(s * kStep, 8000.f, a, 2400, true, 1); };
+        kick(0); kick(8); kick(6); kick(14); snare(4); snare(12); hat(2, 0.35f); hat(10, 0.35f);
+        hat(6, 0.35f); hat(14, 0.35f); hat(4, 0.35f);
+        for(int s = 1; s < 15; s += 2) hat(s, 0.15f);
+        int ons[16]; for(int s = 0; s < 15; s++) ons[s] = s * kStep;
+        uint8_t a1[64], a2[64], a3[64], bands[64]; float s1[64], s2[64];
+        bb::ClassifySteps(drum, kLen, kSr, a1, 4, s1, nullptr, 0, bands, ons, 15);
+        bb::ClassifySteps(drum, kLen, kSr, a2, 4, s2, nullptr, 0, nullptr, ons, 15);
+        CHECK(memcmp(a1, a2, 16) == 0 && memcmp(s1, s2, 16 * sizeof(float)) == 0, "the same loop twice: identical labels and salience (with and without the mask)");
+        int bad = 0; for(int s = 0; s < 16; s++) bad += a1[s] > 3;
+        CHECK(bad == 0 && a1[15] == 3 && s1[15] < 1e-3f, "classes in 0..3, the silent step stays class 3 with zero salience");
+        CHECK(a1[0] == 0 && a1[8] == 0, "pure kick steps read kick (0:%c 8:%c)", "KSH."[a1[0]], "KSH."[a1[8]]);
+        CHECK(a1[12] == 1, "the pure snare step reads snare (%c)", "KSH."[a1[12]]);
+        CHECK(a1[2] == 2 && a1[10] == 2, "pure hat steps read hat (2:%c 10:%c)", "KSH."[a1[2]], "KSH."[a1[10]]);
+        int carpet = 0; for(int s = 1; s < 15; s += 2) carpet += a1[s] == 2;
+        CHECK(carpet >= 5, "the quiet hat carpet reads hat (%d/7)", carpet);
+        /* salience is the common rule: identical to the Hockman lens's */
+        uint8_t h0[64]; float sh[64];
+        bb::ClassifySteps(drum, kLen, kSr, h0, 0, sh, nullptr, 0, nullptr);
+        CHECK(memcmp(sh, s1, 16 * sizeof(float)) == 0, "salience is lens-independent (Hockman == Adaptive)");
+        /* without an onset table the lens finds the rises itself: same labels on this loop */
+        bb::ClassifySteps(drum, kLen, kSr, a3, 4, nullptr, nullptr, 0, nullptr, nullptr, 0);
+        int agree = 0; for(int s = 0; s < 15; s++) agree += a3[s] == a1[s];
+        CHECK(agree >= 11, "no onset table: the self-found rises give much the same labels (%d/15)", agree);
+        /* two-class guard: a loop of kicks and snares only never grows a hat cluster */
+        static float ks[kLen];
+        for(int i = 0; i < kLen; i++) ks[i] = 0.f;
+        { float* keep = drum; (void)keep; }
+        for(int i = 0; i < kLen; i++) { float t = drum[i]; drum[i] = ks[i]; ks[i] = t; }   /* swap: build the K/S loop in `drum` */
+        rng = 7u;
+        kick(0); kick(2); kick(8); kick(10); kick(6); snare(4); snare(12); snare(14); kick(13); snare(7);
+        int ons2[16]; int no2 = 0; for(int s : {0, 2, 4, 6, 7, 8, 10, 12, 13, 14}) ons2[no2++] = s * kStep;
+        uint8_t g[64];
+        bb::ClassifySteps(drum, kLen, kSr, g, 4, nullptr, nullptr, 0, nullptr, ons2, no2);
+        int nHat = 0, nK = 0, nS = 0; for(int s = 0; s < 15; s++) { nHat += g[s] == 2; nK += g[s] == 0; nS += g[s] == 1; }
+        CHECK(nHat == 0 && nK >= 4 && nS >= 3, "kick/snare loop: no step is called hat (K%d S%d H%d)", nK, nS, nHat);
+        CHECK(g[0] == 0 && g[8] == 0 && g[4] == 1 && g[12] == 1, "…and the kicks and snares keep their names (0:%c 8:%c 4:%c 12:%c)", "KSH."[g[0]], "KSH."[g[8]], "KSH."[g[4]], "KSH."[g[12]]);
+        for(int i = 0; i < kLen; i++) { float t = drum[i]; drum[i] = ks[i]; ks[i] = t; }   /* swap back */
+        /* the other lenses ignore the table: byte-identical with and without it */
+        int touched = 0;
+        for(int m = 0; m < 4; m++)
+        {
+            uint8_t c1[64], c2[64]; float t1[64], t2[64];
+            bb::ClassifySteps(drum, kLen, kSr, c1, m, t1, nullptr, 0, nullptr);
+            bb::ClassifySteps(drum, kLen, kSr, c2, m, t2, nullptr, 0, nullptr, ons, 15);
+            touched += memcmp(c1, c2, 16) != 0 || memcmp(t1, t2, 16 * sizeof(float)) != 0;
+        }
+        CHECK(touched == 0, "modes 0–3 are untouched by an onset table (%d differ)", touched);
     }
 
     SECTION("GATES: engine lanes — dominant identical, multi-label raises every marked lane");

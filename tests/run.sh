@@ -19,8 +19,10 @@
 # 7. bars_check     — builds; with WAVs on the command line, prints the bar/
 #                     tempo estimate per file (tests/bars_corpus.sh validates
 #                     against the corpus truth set).
-# 8. classify_check — smoke run of the four classifier lenses on any WAVs
+# 8. classify_check — smoke run of the five classifier lenses on any WAVs
 #                     given on the command line (prints, no assertions).
+# 9. classify_bench — builds; tests/classify_bench.sh measures every lens
+#                     against ground truth (CLASSIFY package).
 set -u
 cd "$(dirname "$0")/.."
 OUT=${TMPDIR:-/tmp}/audiothurgist-tests
@@ -55,6 +57,8 @@ $CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $I
 "$OUT/sc" || fail=1
 echo; echo "== bars_check (build; corpus run: tests/bars_corpus.sh) =="
 $CXX -O2 -std=gnu++17 $INC tests/bars_check.cpp -o "$OUT/bc" || fail=1
+echo; echo "== classify_bench (build; truth run: tests/classify_bench.sh) =="
+$CXX -O2 -std=gnu++17 $INC tests/classify_bench.cpp -o "$OUT/cb" || fail=1
 
 if [ $# -gt 0 ]; then
   echo; echo "== classify_check =="
