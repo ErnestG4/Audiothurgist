@@ -1,8 +1,8 @@
 /* demo.js — a fake Audiothurgist on a fake serial port.
  *
  * Answers HostLink frames exactly as the firmware would (same framing, same
- * StateExt layouts including the v0.8.0 and CLOCK tails — 170 bytes with
- * the clock flags and RMS jitter, or shorter on request — a descriptor in
+ * StateExt layouts including the v0.8.0, CLOCK and SAMPLE tails — 219 bytes
+ * with the record state and key table, or shorter on request — a descriptor in
  * the SDK's shape with the Options block, pager help and the manual), so
  * the page can be exercised without hardware — open index.html?demo — and
  * so selftest.mjs can drive the real Link end to end. The port exposes
@@ -32,6 +32,7 @@ const OPTION_FIELDS = [
   ['flow.dejavu', 'Flow Déjà Vu', ['Off', 'Some (¼ of flow bars from history)', 'Lots (¾)']],
   ['swing', 'Swing', ['Straight 16ths', 'Auto (the material\'s swing)']],
   ['onsets', 'Onsets', ['Spectral flux', 'Log-filtered flux (Böck 2012)']],
+  ['key.plays', 'Key Plays', ['One-shot (the slice)', 'Held (read on until the gate falls)']],
 ];
 const FILES = ['amen_170.wav', 'apache_120.wav', 'funky_drummer_100.wav', 'think_110.wav'];
 const KNOBS = [
@@ -49,10 +50,15 @@ const KNOBS = [
    ['lang.rot', 'Rotation', '**Rotation** — Euclid: rotates every class\'s hits together.']],
 ];
 
-/* Blob layout, in Manage() order: pager 48 · locks 64 · sample 1 · options 16 · settings 2. */
-const OFF = { pager: 0, locks: 48, sample: 112, options: 113, settings: 129 };
-const LIVE_SIZE = 131;
-const SCHEMA = 0x0a0d1071;
+/* Blob layout, in Manage() order: pager 48 · locks 64 · sample 1 · options 17 · settings 2. */
+const OFF = { pager: 0, locks: 48, sample: 112, options: 113, settings: 130 };
+const N_OPTIONS = OPTION_FIELDS.length;   /* 17: the firmware's byte 16 (Jacks) is not modelled; Key Plays sits at 16 here */
+const LIVE_SIZE = 132;
+const SCHEMA = 0x0a0d1072;
+/* The fake material: 48 kHz, one plane, 16 s of capacity; the break fills
+ * nSlices × 6000 samples (32 slices = 4 s = two bars at 120 BPM). */
+const SR = 48000, BUF_CAP = SR * 16, SLICE_LEN = 6000, KEYS = 24;
+const REC_MIN = 480;
 
 function buildDescriptor() {
   const pagerFields = [];
@@ -70,7 +76,7 @@ function buildDescriptor() {
       { id: 'locks', kind: 'param_locks', hash: 2, size: 64, off: OFF.locks, name: 'Param Locks', slots: 2, slotSize: 32, bufLen: 4, layout: { activeOff: 0, lengthOff: 1, baseOff: 3, bufOff: 7 } },
       { id: 'sample', kind: 'fields', hash: 0x53414d50, size: 1, off: OFF.sample, name: 'Sample',
         fields: [{ id: 'sample.idx', name: 'File', off: 0, type: 'enum', zones: FILES.length, def: 0, disp: { kind: 'enum', labels: FILES } }] },
-      { id: 'options', kind: 'fields', hash: 0x4f505432, size: 16, off: OFF.options, name: 'Options',
+      { id: 'options', kind: 'fields', hash: 0x4f505434, size: N_OPTIONS, off: OFF.options, name: 'Options',
         fields: OPTION_FIELDS.map(([id, name, labels], i) => ({ id, name, off: i, type: 'enum', zones: labels.length, def: 0, disp: { kind: 'enum', labels } })) },
       { id: 'settings', kind: 'settings', hash: 4, size: 2, off: OFF.settings, pages: 1, pageNames: ['Setup'],
         fields: [{ id: 'brightness', name: 'Brightness', off: 0, type: 'f32', page: 0, pot: 0, def: 0.7, disp: { kind: 'brightness', lo: 0.1, hi: 1 } }] },
@@ -87,7 +93,7 @@ function buildDescriptor() {
       { id: 'out_l', name: 'Audio Out L', sig: 'audioOut', help: 'Audio out, left.' },
       { id: 'out_r', name: 'Audio Out R', sig: 'audioOut', help: 'Audio out, right.' },
     ],
-    audiothurgist: { ext: 1, state: 96, env: 97, scope: 98, action: 99 },
+    audiothurgist: { ext: 1, state: 96, env: 97, scope: 98, action: 99, wave: 100, table: 101, hits: 102 },
     manual: {
       preamble: '**Audiothurgist chops breaks to a grid and rearranges them** with one knob that travels from *the record, verbatim* to rolls, bursts, and reverb rubble. Patterns hold until you ask for new ones. (Demo descriptor — the module\'s own text replaces this.)',
       sections: [
@@ -102,7 +108,7 @@ function buildDescriptor() {
 
 class FakeDevice {
   constructor(opts = {}) {
-    this.opts = Object.assign({ tail: 170, bpm: 120, nSlices: 32, latencyMs: 8 }, opts);
+    this.opts = Object.assign({ tail: 219, bpm: 120, nSlices: 32, latencyMs: 8, swing: false, kit: false }, opts);
     this.live = new Uint8Array(LIVE_SIZE); this.live.fill(0x80, OFF.pager, OFF.pager + 48);
     this.desc = new TextEncoder().encode(JSON.stringify(buildDescriptor()));
     this.muted = false; this.flowing = false; this.brain = false; this.ext = false; this.locked = false;
@@ -113,20 +119,82 @@ class FakeDevice {
     this.p2Engaged = false; this.pending = false; this.aligned = false; this.extTrans = 0; this._lastExt = false;
     this.src = new Int8Array(64); this.stepClass = new Uint8Array(64);
     this.env = new Uint8Array(64 * 16); this.scopePhase = 0;
+    /* SAMPLE: the material buffer, the slice table (grid then recorded), the
+     * key table, the onset table, and a take's state machine driven by time:
+     * armed → (700 ms) taking → (1.2 s, the write head advancing) → pending
+     * → (300 ms) committed. */
+    this.buf = new Float32Array(BUF_CAP); this.bufLen = 0; this.freePos = 0;
+    this.table = []; this.keySlice = new Int8Array(KEYS); this.hits = [];
+    this.rec = { state: 0, key: -1, t: 0, pos: 0 }; this.inLevel = 0; this.looperEvents = 0;
     this.newMaterial();
+    if (this.opts.kit) { this.recordKey(3, 0.35, 0); this.recordKey(7, 0.9, 1); this.recordKey(14, 1.6, 2); this.looperEvents = 3; }
     this.blob = null;
   }
   get nSlices() { return this.opts.nSlices; }
-  get options() { return this.live.subarray(OFF.options, OFF.options + 16); }
-  get clkFlags() {
-    if (this.ext !== this._lastExt) { this._lastExt = this.ext; this.extTrans = (this.extTrans + 1) & 0xff; }
-    return (this.p2Engaged ? 1 : 0) | (this.pending ? 2 : 0) | (this.aligned ? 4 : 0) | ((this.extTrans & 15) << 4);
+  get options() { return this.live.subarray(OFF.options, OFF.options + N_OPTIONS); }
+  get nTable() { return this.table.length; }
+  /* A synthetic break: one hit per slice (kick / snare / hat / other by class), swung
+   * boundaries when asked (odd slices open 15 % late, as the SLICE package does). */
+  synthHit(at, len, cls, gain) {
+    const b = this.buf; let seed = (at * 2654435761) >>> 0;
+    const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296 * 2 - 1; };
+    for (let i = 0; i < len && at + i < b.length; i++) {
+      const t = i / SR; let v;
+      if (cls === 0) v = Math.sin(2 * Math.PI * (55 + 40 * Math.exp(-t * 30)) * t) * Math.exp(-t * 9);
+      else if (cls === 1) v = (rnd() * 0.7 + Math.sin(2 * Math.PI * 190 * t) * 0.5) * Math.exp(-t * 14);
+      else if (cls === 2) v = rnd() * Math.exp(-t * 45);
+      else v = Math.sin(2 * Math.PI * 330 * t) * Math.exp(-t * 6) * 0.6;
+      b[at + i] += v * gain;
+    }
   }
   newMaterial() {
     const n = this.nSlices;
     for (let s = 0; s < n; s++) { this.stepClass[s] = s % 4 === 0 ? 0 : s % 4 === 2 ? 1 : (s % 8 === 7 ? 3 : 2); this.src[s] = s; }
     for (let s = 0; s < n; s++) for (let p = 0; p < 8; p++) { const a = Math.exp(-p / 2.5) * (this.stepClass[s] === 0 ? 0.9 : 0.6); this.env[s * 16 + p * 2] = Math.round(128 - a * 127); this.env[s * 16 + p * 2 + 1] = Math.round(128 + a * 127); }
+    /* Material + grid; recordings past the old material are dropped (new material). */
+    this.bufLen = n * SLICE_LEN; this.freePos = this.bufLen; this.buf.fill(0);
+    const sw = this.opts.swing ? Math.round(SLICE_LEN * 0.15) : 0;
+    this.table = []; this.hits = [];
+    for (let s = 0; s < n; s++) {
+      const start = s * SLICE_LEN + (s & 1 ? sw : 0), end = s + 1 < n ? (s + 1) * SLICE_LEN + ((s + 1) & 1 ? sw : 0) : this.bufLen;
+      const cls = this.stepClass[s], hit = s % 8 !== 5;
+      this.table.push({ start, len: end - start, key: -1, cls, sal: cls === 0 ? 240 : cls === 1 ? 200 : 120, hit, dens: cls === 2 ? 220 : cls === 0 ? 60 : 130 });
+      if (hit) { this.synthHit(start, Math.min(end - start, 9000), cls, cls === 0 ? 0.95 : 0.7); this.hits.push(start); }
+      if (s % 4 === 3) { const g = start + Math.round((end - start) * 0.5); this.synthHit(g, 2400, 2, 0.25); this.hits.push(g); }   /* a ghost hat */
+    }
+    const span = Math.min(n, KEYS); for (let k = 0; k < KEYS; k++) this.keySlice[k] = Math.min(n - 1, Math.floor(k * n / span));
+    this.rec = { state: 0, key: -1, t: 0, pos: 0 };
     this.matGen = (this.matGen + 1) & 0xff;
+  }
+  /* CommitSlice's twin: publish [freePos, freePos + len) as key's entry (a tone burst is synthesised into it). */
+  recordKey(key, seconds, cls = 1) {
+    const room = BUF_CAP - this.freePos; if (room < REC_MIN) return -1;
+    const len = Math.max(REC_MIN, Math.min(Math.round(seconds * SR), room));
+    const start = this.freePos; this.buf.fill(0, start, start + len);
+    this.synthHit(start, Math.min(len, 12000), cls, 0.9); if (len > 20000) this.synthHit(start + 16000, Math.min(len - 16000, 12000), 2, 0.5);
+    const e = { start, len, key, cls, sal: 255, hit: true, dens: cls === 2 ? 210 : 90 };
+    let t = this.table.findIndex(x => x.key === key);
+    if (t < 0) { t = this.table.length; this.table.push(e); } else this.table[t] = e;
+    this.keySlice[key] = t; this.freePos = start + len; return t;
+  }
+  clearKey(key) {
+    const t = this.table.findIndex(x => x.key === key); if (t < 0) return false;
+    this.table.splice(t, 1);
+    for (let k = 0; k < KEYS; k++) if (this.keySlice[k] > t) this.keySlice[k]--;
+    const n = this.nSlices, span = Math.min(n, KEYS); this.keySlice[key] = Math.min(n - 1, Math.floor(key * n / span));
+    return true;
+  }
+  /* Advance the take's state machine (called per state poll). */
+  recTick() {
+    const r = this.rec, now = Date.now(); if (!r.state) { this.inLevel = Math.max(0, this.inLevel - 40); return; }
+    this.inLevel = 90 + Math.floor(Math.random() * 130);
+    if (r.state === 1 && now - r.t > 700) { r.state = 2; r.t = now; r.pos = this.freePos; }
+    else if (r.state === 2) { r.pos = Math.min(BUF_CAP, this.freePos + Math.round((now - r.t) / 1000 * SR)); if (now - r.t > 1200 || r.pos >= BUF_CAP) { r.state = 3; r.t = now; } }
+    else if (r.state === 3 && now - r.t > 300) { this.recordKey(r.key, (r.pos - this.freePos) / SR, 1 + (r.key % 3)); r.state = 0; r.key = -1; }
+  }
+  get clkFlags() {
+    if (this.ext !== this._lastExt) { this._lastExt = this.ext; this.extTrans = (this.extTrans + 1) & 0xff; }
+    return (this.p2Engaged ? 1 : 0) | (this.pending ? 2 : 0) | (this.aligned ? 4 : 0) | ((this.extTrans & 15) << 4);
   }
   dice() { const n = this.nSlices; for (let s = 0; s < n; s++) this.src[s] = Math.random() < 0.3 ? -1 : Math.floor(Math.random() * n); this.histN = Math.min(16, this.histN + 1); }
   curStep() { const beat = (Date.now() - this.t0) / 60000 * this.opts.bpm * this.mult * 4; return Math.floor(beat) % this.nSlices; }
@@ -173,6 +241,37 @@ class FakeDevice {
         if (tail >= 164) { U16(this.lockMask); F32(this.opts.bpm); U8(this.nSlices / 16); U8(this.options[7]); }
         if (tail >= 167) { U16(this.ext ? 120 + Math.floor(Math.random() * 60) : 0); U8(this.multZone); }
         if (tail >= 170) { U8(this.clkFlags); U16(this.ext ? 40 + Math.floor(Math.random() * 20) : 0); }
+        if (tail >= 175) { U8(0); U16(0); U16(0); }                       /* v0.9.5 forensics */
+        if (tail >= 176) U8(0);                                            /* jack map: Brain */
+        if (tail >= 177) U8(this.looperEvents);                            /* 176 LOOPER */
+        if (tail >= 194) {                                                 /* 177.. SAMPLE / WEB */
+          this.recTick(); const r = this.rec;
+          U8(r.state); U8(r.state ? r.key : 255); U32(this.freePos); U32(BUF_CAP); U8(0); U8(this.inLevel); U8(this.nTable); U32(this.bufLen);
+        }
+        if (tail >= 218) for (let k = 0; k < KEYS; k++) U8(this.keySlice[k]);
+        if (tail >= 219) U8(this.options[16]);                             /* 218 Key Plays */
+        break; }
+      case CMD.wave: {
+        if (body.length < 7) { U8(2); break; }
+        const start = u32(body, 0), plane = body[6], step = Math.max(1, Math.min(128, body.length >= 8 ? body[7] : 1)); let n = Math.min(480, u16(body, 4));
+        if (plane > 2 || start >= this.freePos) { U8(2); break; }
+        if (start + n * step > this.freePos) n = Math.floor((this.freePos - start) / step);
+        if (!n) { U8(2); break; }
+        U8(0); U32(start); U16(n); U8(step);
+        for (let i = 0; i < n; i++) { let best = 0, mag = -1; for (let k = 0; k < step; k++) { const v = this.buf[start + i * step + k], m = Math.abs(v); if (m > mag) { mag = m; best = v; } }
+          U8(Math.round(Math.max(-127, Math.min(127, best * 127)))); }
+        break; }
+      case CMD.table: {
+        const first = body.length >= 1 ? body[0] : 0; let count = body.length >= 2 ? body[1] : 39;
+        if (first > this.nTable) { U8(2); break; }
+        count = Math.min(count, 39, this.nTable - first);
+        U8(0); U8(this.nSlices); U8(this.nTable);
+        for (let t = first; t < first + count; t++) { const e = this.table[t]; U32(e.start); U32(e.len); U8(e.key); U8(e.cls); U8(e.sal); U8(e.hit ? 1 : 0); U8(e.dens); }
+        break; }
+      case CMD.hits: {
+        const first = body.length >= 1 ? body[0] : 0, n = this.hits.length;
+        if (first > n) { U8(2); break; }
+        const count = Math.min(127, n - first); U8(0); U8(n); U8(first); for (let i = first; i < first + count; i++) U32(this.hits[i]);
         break; }
       case CMD.env: {
         const first = body[0] || 0, n = Math.min(body[1] || 30, 30, 64 - first);
@@ -194,6 +293,11 @@ class FakeDevice {
           case 6: if (a < FILES.length) { this.file = a; this.live[OFF.sample] = a; this.newMaterial(); } break;
           case 7: this.lockMask = 0; break;
           case 8: this.brain = !!a; break;
+          case 9:  if (body.length < 2 || a >= KEYS) ok = false; else if (this.rec.state) { U8(3); return Uint8Array.from(w); } else this.rec = { state: 1, key: a, t: Date.now(), pos: 0 }; break;
+          case 10: if (body.length < 2 || a >= KEYS) ok = false; else if (!this.clearKey(a)) { U8(3); return Uint8Array.from(w); } break;
+          case 11: if (body.length < 2 || a > 1) ok = false; else this.options[16] = a; break;
+          case 12: this.looperEvents = Math.max(0, this.looperEvents - 1); break;
+          case 13: this.looperEvents = 0; break;
           default: ok = false;
         }
         U8(ok ? 0 : 2); break; }
@@ -220,6 +324,6 @@ class FakePort {
   async open() {} async close() {}
 }
 
-const api = { FakeDevice, FakePort, buildDescriptor, OPTION_FIELDS, FILES, LIVE_SIZE, SCHEMA, OFF };
+const api = { FakeDevice, FakePort, buildDescriptor, OPTION_FIELDS, FILES, LIVE_SIZE, SCHEMA, OFF, SR, BUF_CAP, SLICE_LEN, KEYS };
 if (typeof module === 'object' && module.exports) module.exports = api; else root.DEMO = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

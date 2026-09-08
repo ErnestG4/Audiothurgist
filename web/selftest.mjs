@@ -50,6 +50,12 @@ function stateBody(len) {
   if (len >= 164) { dv.setUint16(156, 0x0041, true); dv.setFloat32(158, 172.25, true); b[162] = 2; b[163] = 3; }
   if (len >= 167) { dv.setUint16(164, 350, true); b[166] = 1; }
   if (len >= 170) { b[167] = 0x33; dv.setUint16(168, 120, true); }   /* engaged · pending · 3 ext transitions; 120 µs rms */
+  if (len >= 175) { b[170] = 4; dv.setUint16(171, 1500, true); dv.setUint16(173, 2, true); }
+  if (len >= 176) b[175] = 1;                                             /* Voice jack map */
+  if (len >= 177) b[176] = 5;                                             /* LOOPER: five events */
+  if (len >= 194) { b[177] = 2; b[178] = 7; dv.setUint32(179, 250000, true); dv.setUint32(183, 480000, true); b[187] = 1; b[188] = 180; b[189] = 35; dv.setUint32(190, 192000, true); }
+  if (len >= 218) { for (let k = 0; k < 24; k++) b[194 + k] = k === 7 ? 34 : Math.floor(k * 32 / 24); }
+  if (len >= 219) b[218] = 1;                                             /* Key Plays = Held */
   return b;
 }
 {
@@ -70,6 +76,30 @@ function stateBody(len) {
   check('state longer body still parses', HL.parseState(stateBody(180)).jitterRmsUs === 120);
   check('zone table', HL.ZONE_MULT.length === 5 && HL.ZONE_MULT[2] === 1 && HL.ZONE_MULT[s4.multZone] === 0.5);
   const sc = HL.parseScope(Uint8Array.of(0, 4, 0, 1, 0xff, 0x7f, 0x80)); check('scope signed', sc.length === 4 && sc[1] === -1 && sc[2] === 127 && sc[3] === -128);
+  /* SAMPLE / WEB tails: 176 (looper), 177..193 (record + buffer), 194..217 (key table). */
+  const s5 = HL.parseState(stateBody(176));
+  check('state 176: jack map, no looper', s5.jackMap === 1 && s5.looperEvents === undefined && s5.recState === undefined && s5.keySlice === undefined);
+  const s6 = HL.parseState(stateBody(177));
+  check('state 177: looper events, no record tail', s6.looperEvents === 5 && s6.recState === undefined);
+  check('state 180: record tail needs all 17 bytes', HL.parseState(stateBody(180)).recState === undefined);
+  const s7 = HL.parseState(stateBody(194));
+  check('state 194: record + buffer tail', s7.recState === 2 && HL.REC[s7.recState] === 'taking' && s7.recKey === 7 && s7.freePos === 250000 && s7.bufCap === 480000 && s7.stereo === true && s7.inLevel === 180 && s7.nTable === 35 && s7.bufLen === 192000 && s7.keySlice === undefined);
+  const s8 = HL.parseState(stateBody(218));
+  check('state 218: key table', s8.keySlice && s8.keySlice.length === 24 && s8.keySlice[7] === 34 && s8.keySlice[23] === 30 && s8.keySlice[0] === 0 && s8.keyPlays === undefined);
+  check('state 219: key plays', HL.parseState(stateBody(219)).keyPlays === 1);
+  { const b = stateBody(218); b[178] = 255; check('recKey 255 → -1', HL.parseState(b).recKey === -1); }
+  /* GET_WAVE / GET_TABLE / GET_HITS bodies. */
+  const wv = HL.parseWave(Uint8Array.of(0, 0x10, 0x27, 0, 0, 3, 0, 4, 0x7f, 0x81, 0));
+  check('wave body', wv.start === 10000 && wv.n === 3 && wv.step === 4 && wv.data.length === 3 && wv.data[0] === 127 && wv.data[1] === -127 && wv.data[2] === 0);
+  { const t = new Uint8Array(3 + 2 * HL.TABLE_ENTRY); t[0] = 0; t[1] = 32; t[2] = 34; const dv = new DataView(t.buffer);
+    dv.setUint32(3, 100, true); dv.setUint32(7, 6000, true); t[11] = 0xff; t[12] = 0; t[13] = 240; t[14] = 1; t[15] = 60;
+    dv.setUint32(16, 192000, true); dv.setUint32(20, 48000, true); t[24] = 7; t[25] = 2; t[26] = 255; t[27] = 0; t[28] = 210;
+    const tb = HL.parseTableChunk(t);
+    check('table chunk', tb.nSlices === 32 && tb.nTable === 34 && tb.entries.length === 2 && tb.entries[0].key === -1 && tb.entries[0].start === 100 && tb.entries[0].len === 6000 && tb.entries[0].hit === true && tb.entries[0].sal === 240 && tb.entries[1].key === 7 && tb.entries[1].cls === 2 && tb.entries[1].hit === false && tb.entries[1].dens === 210);
+    check('table chunk: 39 entries fit 512', 3 + 39 * HL.TABLE_ENTRY <= 512 && 3 + 40 * HL.TABLE_ENTRY > 512); }
+  { const h = new Uint8Array(3 + 8); h[0] = 0; h[1] = 130; h[2] = 128; new DataView(h.buffer).setUint32(3, 1, true); new DataView(h.buffer).setUint32(7, 0xfffffffe, true);
+    const hc = HL.parseHitsChunk(h); check('hits chunk', hc.total === 130 && hc.first === 128 && hc.positions.length === 2 && hc.positions[1] === 0xfffffffe); }
+  check('key names: two octaves from C', HL.keyName(0) === 'C1' && HL.keyName(11) === 'B1' && HL.keyName(12) === 'C2' && HL.keyName(23) === 'B2' && HL.keyName(1) === 'C♯1');
 }
 
 /* ── 3. The Link end to end over the fake module: priority, coalescing, RTT, live blob ── */
@@ -83,7 +113,7 @@ await link.start();
   check('descriptor crc+json', desc && desc.dv === 1);
   const opts = HL.optionsInfo(desc);
   const wantIds = DEMO.OPTION_FIELDS.map(f => f[0]);
-  check('options block: 16 enum fields with the firmware ids', opts && opts.fields.length === 16 && wantIds.every(id => opts.fields.some(f => f.id === id)));
+  check('options block: 17 enum fields with the firmware ids (Key Plays included)', opts && opts.fields.length === DEMO.OPTION_FIELDS.length && opts.fields.length === 17 && wantIds.every(id => opts.fields.some(f => f.id === id)) && opts.fields.some(f => f.id === 'key.plays'));
   const gl = HL.fieldLabels(desc, 'grammar.mode');
   check('labels from disp', gl[3] === 'Euclid' && HL.fieldLabels(desc, 'sample.idx').length === DEMO.FILES.length);
   check('grammar has five labels, index 4 = Camp', gl.length === 5 && gl[4] === 'Camp' && opts.fields.find(f => f.id === 'grammar.mode').zones === 5);
@@ -125,7 +155,69 @@ await link.start();
   bytes[opts.comp.off + gf.off] = 4; await HL.setLive(link, info, bytes);
   const stc = HL.parseState(await link.request(HL.CMD.state)); check('Camp selectable: state grammar 4 labelled Camp', stc.grammar === 4 && gl[stc.grammar] === 'Camp');
   check('rtt measured', link.stats.rtt > 0 && link.stats.reqs > 10);
+  check('demo 170-byte body carries no sample tail', st.recState === undefined && st.keySlice === undefined);
   await link.close();
+}
+
+/* ── 4. The Kit: table / wave / hits and the record + looper actions over a 64-slice kit demo ── */
+{
+  const kit = new DEMO.FakeDevice({ tail: 219, kit: true, nSlices: 64, latencyMs: 2, swing: true });
+  const kl = new HL.Link(new DEMO.FakePort(kit)); await kl.start();
+  const info = await HL.hello(kl); const desc = await HL.getDescriptor(kl, info);
+  check('kit demo advertises wave/table/hits', desc.audiothurgist.wave === 100 && desc.audiothurgist.table === 101 && desc.audiothurgist.hits === 102);
+  const s = HL.parseState(await kl.request(HL.CMD.state));
+  check('kit state tail', s.nSlices === 64 && s.nTable === 67 && s.bufLen === 64 * DEMO.SLICE_LEN && s.freePos > s.bufLen && s.bufCap === DEMO.BUF_CAP && s.recState === 0 && s.recKey === -1 && s.looperEvents === 3 && s.keySlice.length === 24 && s.keyPlays === 0);
+  check('kit keys: recorded keys point past the grid, others at their span slice', s.keySlice[3] === 64 && s.keySlice[7] === 65 && s.keySlice[14] === 66 && s.keySlice[0] === 0 && s.keySlice[23] === 61);
+  /* GET_TABLE chunks: 67 entries = 39 + 28. */
+  kit.log.length = 0;
+  const tb = await HL.fetchTable(kl);
+  check('table fetched in two chunks', kit.log.filter(t => t === HL.CMD.table).length === 2 && tb.nSlices === 64 && tb.nTable === 67 && tb.entries.length === 67);
+  check('table: grid entries keyless and contiguous, swung odd boundaries', tb.entries[0].key === -1 && tb.entries[1].start === DEMO.SLICE_LEN + 900 && tb.entries[0].len === DEMO.SLICE_LEN + 900 && tb.entries[2].start === 2 * DEMO.SLICE_LEN && tb.entries.slice(0, 64).every((e, i, a) => i === 0 || e.start === a[i - 1].start + a[i - 1].len));
+  check('table: recorded entries carry their key, class, hit', tb.entries[64].key === 3 && tb.entries[64].cls === 0 && tb.entries[65].key === 7 && tb.entries[65].len === Math.round(0.9 * DEMO.SR) && tb.entries[66].key === 14 && tb.entries[66].hit === true && tb.entries[64].start === s.bufLen);
+  { let bad = null; try { await kl.request(HL.CMD.table, Uint8Array.of(70, 10)); } catch (e) { bad = e; } check('table: first past nTable → BAD_ARGS', bad && /BAD_ARGS/.test(bad.message)); }
+  /* GET_HITS: 64 hits minus the muted ones, plus ghosts; every position inside the material and ascending. */
+  const hits = await HL.fetchHits(kl);
+  check('hits fetched', hits.length === kit.hits.length && hits.length > 64 && hits.every((p, i) => p < s.bufLen && (i === 0 || p >= hits[i - 1])));
+  /* GET_WAVE: a raw window, a decimated window, the clamp at freePos, BAD_ARGS past it. */
+  const e0 = tb.entries[64];
+  const w1 = await HL.fetchWave(kl, e0.start, 480, 0, 1);
+  check('wave raw window', w1.start === e0.start && w1.n === 480 && w1.step === 1 && w1.data.length === 480 && w1.data.some(v => v > 40));
+  const w2 = await HL.fetchWave(kl, e0.start, 480, 2, 128);
+  check('wave decimated window', w2.step === 128 && w2.n === Math.min(480, Math.floor((s.freePos - e0.start) / 128)) && w2.data.some(v => v !== 0));
+  const w3 = await HL.fetchWave(kl, s.freePos - 100, 480, 0, 1);
+  check('wave clamps at freePos', w3.n === 100);
+  { let bad = null; try { await HL.fetchWave(kl, s.freePos, 480, 0, 1); } catch (e) { bad = e; } check('wave past freePos → BAD_ARGS', bad && /BAD_ARGS/.test(bad.message)); }
+  { let bad = null; try { await HL.fetchWave(kl, 0, 480, 3, 1); } catch (e) { bad = e; } check('wave bad plane → BAD_ARGS', bad && /BAD_ARGS/.test(bad.message)); }
+  kit.log.length = 0; await Promise.all([HL.fetchWave(kl, 0, 10), HL.fetchWave(kl, 0, 10)]);
+  check('wave requests coalesce on their key', kit.log.filter(t => t === HL.CMD.wave).length === 1);
+  /* ACTION 9: arm → the tail says armed on that key; a second arm is BAD_STATE. */
+  await kl.request(HL.CMD.action, Uint8Array.of(HL.ACT.recArm, 5), { urgent: true });
+  const sa = HL.parseState(await kl.request(HL.CMD.state));
+  check('rec arm: state armed on key 5', sa.recState === 1 && HL.REC[sa.recState] === 'armed' && sa.recKey === 5 && sa.inLevel > 0);
+  { let bad = null; try { await kl.request(HL.CMD.action, Uint8Array.of(HL.ACT.recArm, 6), { urgent: true }); } catch (e) { bad = e; } check('rec arm while armed → BAD_STATE', bad && /BAD_STATE/.test(bad.message)); }
+  { let bad = null; try { await kl.request(HL.CMD.action, Uint8Array.of(HL.ACT.recArm, 24), { urgent: true }); } catch (e) { bad = e; } check('rec arm key 24 → BAD_ARGS', bad && /BAD_ARGS/.test(bad.message)); }
+  /* Let the fake take run its course: armed → taking → pending → committed into key 5. */
+  kit.rec.t -= 5000; HL.parseState(await kl.request(HL.CMD.state));   /* → taking */
+  kit.rec.t -= 5000; const st2 = HL.parseState(await kl.request(HL.CMD.state));
+  check('rec taking → pending', st2.recState === 3 && st2.recKey === 5);
+  kit.rec.t -= 5000; const st3 = HL.parseState(await kl.request(HL.CMD.state));
+  check('rec committed: idle, key 5 points at a new entry, freePos advanced', st3.recState === 0 && st3.recKey === -1 && st3.nTable === 68 && st3.keySlice[5] === 67 && st3.freePos > s.freePos);
+  /* ACTION 10: clear key 3 → the table shrinks, later keys re-index, key 3 falls back to its span slice. */
+  await kl.request(HL.CMD.action, Uint8Array.of(HL.ACT.recClear, 3), { urgent: true });
+  const st4 = HL.parseState(await kl.request(HL.CMD.state));
+  check('rec clear: entry gone, keys re-pointed', st4.nTable === 67 && st4.keySlice[3] === 8 && st4.keySlice[7] === 64 && st4.keySlice[14] === 65 && st4.keySlice[5] === 66);
+  { let bad = null; try { await kl.request(HL.CMD.action, Uint8Array.of(HL.ACT.recClear, 3), { urgent: true }); } catch (e) { bad = e; } check('rec clear an empty key → BAD_STATE', bad && /BAD_STATE/.test(bad.message)); }
+  /* ACTION 11: Key Plays lands in the Options byte the blob carries. */
+  await kl.request(HL.CMD.action, Uint8Array.of(HL.ACT.keyPlays, 1), { urgent: true });
+  const live = await HL.getLive(kl, info); const opts = HL.optionsInfo(desc); const kp = opts.fields.find(f => f.id === 'key.plays');
+  check('key plays → options byte and the state tail', live.bytes[opts.comp.off + kp.off] === 1 && HL.parseState(await kl.request(HL.CMD.state)).keyPlays === 1);
+  { let bad = null; try { await kl.request(HL.CMD.action, Uint8Array.of(HL.ACT.keyPlays, 2), { urgent: true }); } catch (e) { bad = e; } check('key plays 2 → BAD_ARGS', bad && /BAD_ARGS/.test(bad.message)); }
+  /* ACTION 12 / 13: looper undo and clear. */
+  await kl.request(HL.CMD.action, Uint8Array.of(HL.ACT.looperUndo), { urgent: true });
+  check('looper undo', HL.parseState(await kl.request(HL.CMD.state)).looperEvents === 2);
+  await kl.request(HL.CMD.action, Uint8Array.of(HL.ACT.looperClear), { urgent: true });
+  check('looper clear', HL.parseState(await kl.request(HL.CMD.state)).looperEvents === 0);
+  await kl.close();
 }
 
 console.log(`${fail ? 'FAIL' : 'OK'}: ${pass} passed, ${fail} failed`);

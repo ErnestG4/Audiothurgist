@@ -59,6 +59,18 @@
   .man{max-width:760px;font-size:14px;line-height:1.55} .man h3{margin:14px 0 6px;font-size:15px} .man h4{margin:10px 0 4px;font-size:13px;color:var(--mute);text-transform:uppercase;letter-spacing:.08em}
   .man p{margin:6px 0} .man code{background:#1f1f24;padding:1px 4px;border-radius:4px;font-size:12px} .man .tag{color:var(--mute);font-style:italic}
   .man dl{margin:4px 0} .man dt{font-weight:600;margin-top:6px} .man dd{margin:0 0 4px 0;color:#c9c7bf}
+  /* Kit */
+  .keys{display:grid;grid-template-columns:repeat(12,1fr);gap:4px} @media(max-width:700px){.keys{grid-template-columns:repeat(6,1fr)}}
+  .key{border:1px solid var(--line);border-left-width:4px;border-radius:8px;padding:5px 6px;min-height:78px;background:#121214;cursor:pointer;font-size:11px;color:var(--mute);display:flex;flex-direction:column;gap:2px;min-width:0}
+  .key:hover{border-color:#3a3a42} .key.sel{outline:2px solid var(--lock);outline-offset:-1px} .key.rec{background:#17171b} .key .nm{font-weight:700;color:var(--ink);font-size:13px;display:flex;justify-content:space-between;align-items:center}
+  .key .nm i{font-style:normal;font-size:10px;color:var(--dim);font-weight:500} .key .info{color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis} .key .meta{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .key .kb{display:flex;gap:3px;margin-top:auto} .key .kb button{padding:1px 6px;font-size:11px;border-radius:5px;line-height:1.4} .key .kb .rec{color:#ff6a5a} .key .kb .rec:disabled{color:var(--mute)}
+  .key.armed{animation:arm 1s ease-in-out infinite;border-color:#ff6a5a} .key.taking{animation:arm .4s ease-in-out infinite;border-color:#ff6a5a;background:#2a1414} .key.pending{border-color:#ffcf80}
+  @keyframes arm{0%,100%{box-shadow:0 0 0 0 rgba(255,106,90,0)}50%{box-shadow:0 0 0 3px rgba(255,106,90,.45)}}
+  .bar{position:relative;height:14px;border-radius:7px;background:#0a0a0c;overflow:hidden;border:1px solid var(--line)} .bar i{position:absolute;top:0;bottom:0;left:0}
+  .meter{width:160px} .meter i{background:#9be0b0;transition:width .08s linear} .meter.hot i{background:#ff6a5a}
+  .usage i.mat{background:#3c78e6} .usage i.rec{background:#28c878}
+  .wvbtns{display:flex;gap:4px;align-items:center;font-weight:400;text-transform:none;letter-spacing:0}
 </style>
 </head>
 <body>
@@ -75,7 +87,7 @@
   <span id="diagpill" class="pill" title="worst control-loop gap and audio callback in the last second; playhead jumps > 1.5 steps and pattern regenerations since boot">diag: —</span>
 </header>
 <div id="notice"></div>
-<nav><button id="tab_play" class="on">Play</button><button id="tab_opts">Options</button><button id="tab_man">Manual</button></nav>
+<nav><button id="tab_play" class="on">Play</button><button id="tab_kit">Kit</button><button id="tab_opts">Options</button><button id="tab_man">Manual</button></nav>
 
 <main id="play" class="show">
   <section class="wide">
@@ -140,6 +152,38 @@
   </section>
 </main>
 
+<main id="kit">
+  <section class="wide">
+    <h2>Kit — the 24 Voice-map keys <span id="kit_status" class="pill">—</span></h2>
+    <div id="keys" class="keys"></div>
+    <div class="row" style="margin-top:8px;gap:12px">
+      <button id="k_rec" class="mini" title="arm a take into the selected key (ACTION 9); the panel's record gesture does the same">● Record into —</button>
+      <button id="k_clr" class="mini" title="clear the selected key's recording (ACTION 10)">✕ Clear —</button>
+      <label class="ctl" style="min-width:0;flex-direction:row;align-items:center;gap:6px">Key plays<select id="k_plays" class="inline" title="Options → Key Plays (ACTION 11): one-shot plays the slice; held reads on until the gate falls"><option value="0">One-shot (the slice)</option><option value="1">Held (until the gate falls)</option></select></label>
+      <span id="k_recstate" class="pill">record: —</span>
+      <div class="bar meter" id="k_meterbox" title="input peak, last audio block"><i id="k_meter" style="width:0"></i></div>
+    </div>
+    <p id="kit_help" style="font-size:12px;color:var(--mute);margin:8px 0 0">Click a key to see its material below. An empty key plays its span of the break; a recorded key plays its take. ● arms a take into that key (the next gate on J6 / the panel gesture starts it); ✕ clears a recording. Class colours: kick, snare, hat, other.</p>
+  </section>
+  <section class="wide">
+    <h2><span id="wv_title">Waveform</span><span class="wvbtns"><button id="wv_fit" class="mini" title="fit the selected key's material">fit</button><button id="wv_all" class="mini" title="the whole buffer up to freePos">all</button><button id="wv_out" class="mini" title="zoom out (wheel on the waveform also zooms; drag pans)">−</button><button id="wv_in" class="mini" title="zoom in">+</button><select id="wv_plane" class="inline" title="which plane to read (GET_WAVE)" hidden><option value="0">L</option><option value="1">R</option><option value="2">L+R</option></select></span></h2>
+    <canvas id="kitwave" style="height:180px"></canvas>
+    <div class="legend" style="margin-top:6px"><span><i style="background:#fff"></i>slice boundary (table — swung where the material swings)</span><span><i style="background:var(--lock)"></i>recording boundary</span><span><i style="background:var(--call)"></i>onset (hits)</span><span><i style="background:#3a3a42"></i>end of the break</span><span id="wv_range"></span></div>
+  </section>
+  <section>
+    <h2>Buffer</h2>
+    <div class="bar usage" id="k_usage"><i class="mat" id="u_mat" style="width:0"></i><i class="rec" id="u_rec" style="width:0"></i></div>
+    <div class="kv" style="margin-top:8px">
+      <span>break</span><b id="u_break">—</b><span>recordings</span><b id="u_recs">—</b><span>free</span><b id="u_free">—</b><span>planes</span><b id="u_planes">—</b><span>table</span><b id="u_table">—</b>
+    </div>
+  </section>
+  <section>
+    <h2>Looper</h2>
+    <div class="row"><b id="l_count" style="font-size:20px">—</b><span id="l_label" style="color:var(--mute)">events on the bar</span><button id="l_undo" class="mini" title="undo the last looper event (ACTION 12)">Undo</button><button id="l_clear" class="mini" title="clear every looper event (ACTION 13)">Clear</button></div>
+    <p style="font-size:12px;color:var(--mute);margin:8px 0 0">Loop-record writes performance events onto the bar; the count comes from the state (byte 176). Undo and Clear take the same path as the panel gestures.</p>
+  </section>
+</main>
+
 <main id="opts">
   <section class="wide">
     <h2>Options <span id="opt_status" class="pill">—</span></h2>
@@ -158,9 +202,11 @@
 <script src="demo.js"></script>
 <script>
 'use strict';
-const { CMD, ACT, ZONE_MULT, Link, hello, getDescriptor, getLive, setLive, parseState, fetchEnv, parseScope, fieldLabels, pagerInfo, optionsInfo, manualInfo } = HL;
+const { CMD, ACT, REC, ZONE_MULT, keyName, Link, hello, getDescriptor, getLive, setLive, parseState, fetchEnv, parseScope, fetchWave, fetchTable, fetchHits, fieldLabels, pagerInfo, optionsInfo, manualInfo } = HL;
 const $ = id => document.getElementById(id);
 const COL = ['#eb4614', '#28c878', '#e6c828', '#3c78e6'];
+const CLS_NAME = ['kick', 'snare', 'hat', 'other'];
+const SR = 48000;   /* the engine's rate: lengths and positions are shown in seconds */
 
 /* ───────────── App state ───────────── */
 let link = null, info = null, desc = null, live = null;
@@ -168,22 +214,28 @@ let st = null, env = null, envGen = -1, scope = null, selSlice = -1;
 let labels = { grammar: [], classifier: [], sample: [] };
 let pager = null, opts = null, manual = null;
 let demoDevice = null;
+/* Kit: the slice table (grid + recorded entries, real boundaries), the onset
+ * table, the selected key, the waveform view and its window cache. */
+let table = null, tableSig = '', hits = null, hitsGen = -1, selKey = 0, kitOk = false, kitShown = false;
+const view = { a: 0, b: 1 };
+const wave = { cache: new Map(), queue: [], planSig: '', plane: 0, step: 1 };
+const WAVE_N = 480, WAVE_MS = 334;   /* ≤ 3 waveform windows per second */
 
 /* ───────────── Notice / tabs ───────────── */
 function notice(msg) { const n = $('notice'); n.style.display = msg ? 'block' : 'none'; n.textContent = msg || ''; }
-const TABS = { tab_play: 'play', tab_opts: 'opts', tab_man: 'man' };
-function showTab(t) { for (const k in TABS) { $(k).classList.toggle('on', k === t); $(TABS[k]).classList.toggle('show', k === t); } }
-for (const t in TABS) $(t).onclick = () => { showTab(t); history.replaceState(null, '', '#' + TABS[t]); };
+const TABS = { tab_play: 'play', tab_kit: 'kit', tab_opts: 'opts', tab_man: 'man' };
+function showTab(t) { for (const k in TABS) { $(k).classList.toggle('on', k === t); $(TABS[k]).classList.toggle('show', k === t); } kitShown = t === 'tab_kit'; }
+for (const t in TABS) $(t).onclick = () => { showTab(t); history.replaceState(null, '', '#' + TABS[t]); if (kitShown) invalidate(D.kit | D.kitwave); };
 { const t = Object.keys(TABS).find(k => '#' + TABS[k] === location.hash); if (t) showTab(t); }
 
 /* ───────────── Rendering: dirty flags + one rAF ─────────────
  * Nothing draws on arrival; frames flag what changed and a single
  * requestAnimationFrame draws only those parts. Canvas backing stores are
  * sized by ResizeObserver, never measured in the draw loop. */
-const D = { bar: 1, wave: 2, scope: 4, text: 8, controls: 16, all: 31 };
+const D = { bar: 1, wave: 2, scope: 4, text: 8, controls: 16, kit: 32, kitwave: 64, all: 127 };
 let dirty = 0, rafPending = false;
 function invalidate(m) { dirty |= m; if (!rafPending) { rafPending = true; requestAnimationFrame(draw); } }
-const canvases = ['ring', 'strip', 'wave', 'scope'].map($);
+const canvases = ['ring', 'strip', 'wave', 'scope', 'kitwave'].map($);
 function sizeCanvas(c) {
   const r = c.getBoundingClientRect(), d = window.devicePixelRatio || 1;
   const w = Math.max(1, Math.round(r.width * d)), h = Math.max(1, Math.round(r.height * d));
@@ -195,6 +247,11 @@ else window.addEventListener('resize', () => { canvases.forEach(sizeCanvas); inv
 canvases.forEach(sizeCanvas);
 function ctx(c) { if (!c._cw) sizeCanvas(c); const g = c.getContext('2d'); g.setTransform(c._d, 0, 0, c._d, 0, 0); return [g, c._cw, c._ch]; }
 function stepColor(s) { if (!st || s >= st.nSlices) return '#141416'; const src = st.src[s]; return src < 0 ? '#141416' : COL[st.stepClass[src] & 3]; }
+/* Slice geometry on the Play tab: the table's real boundaries (swung where the
+ * material swings) when GET_TABLE has answered for this grid, else i·step. */
+const gridTable = () => table && st && table.nSlices === st.nSlices && st.bufLen > 0 ? table : null;
+function sliceX(s, w) { const ns = st.nSlices, t = gridTable(); if (s >= ns) return w; return t ? t.entries[s].start / st.bufLen * w : s / ns * w; }
+function sliceAt(x, w) { const ns = st.nSlices, t = gridTable(); if (!t) return Math.max(0, Math.min(ns - 1, Math.floor(x / w * ns))); const p = x / w * st.bufLen; let s = 0; while (s + 1 < ns && t.entries[s + 1].start <= p) s++; return s; }
 /* Scope polls only while its canvas is on screen. */
 let scopeVisible = true;
 if ('IntersectionObserver' in window) new IntersectionObserver(es => { scopeVisible = es[0].isIntersecting; }).observe($('scope'));
@@ -210,20 +267,23 @@ function draw() {
       g.beginPath(); g.arc(cx + Math.cos(a) * R, cy + Math.sin(a) * R, Math.max(4, R * 0.11), 0, Math.PI * 2); g.fillStyle = col; g.globalAlpha = st.muted ? 0.35 : 1; g.fill(); g.globalAlpha = 1; }
     g.fillStyle = '#e8e6df'; g.textAlign = 'center'; g.font = '600 20px system-ui'; g.fillText(st.bpm.toFixed(0), cx, cy + 6);
     g.font = '11px system-ui'; g.fillStyle = '#8a887f'; g.fillText(st.muted ? 'MUTED' : (st.mult !== 1 ? multLabel(st.mult) : 'BPM'), cx, cy + 22);
-    const c = $('strip'); const [g2, w2, h2] = ctx(c); g2.clearRect(0, 0, w2, h2); const cw = w2 / ns;
-    for (let s = 0; s < ns; s++) { g2.fillStyle = stepColor(s); g2.globalAlpha = st.muted ? 0.35 : 1; g2.fillRect(s * cw + 1, 6, Math.max(1, cw - 2), h2 - 12); g2.globalAlpha = 1;
-      if (s % 16 === 0) { g2.fillStyle = '#2a2a30'; g2.fillRect(s * cw, 0, 1, h2); } }
-    if (st.callFlash !== 255) { g2.strokeStyle = '#78a0ff'; g2.lineWidth = 2; g2.strokeRect(st.callFlash * cw + 1, 2, cw - 2, h2 - 4); }
-    g2.strokeStyle = '#fff'; g2.lineWidth = 2; g2.strokeRect(cur * cw + 1, 2, cw - 2, h2 - 4);
+    const c = $('strip'); const [g2, w2, h2] = ctx(c); g2.clearRect(0, 0, w2, h2);
+    for (let s = 0; s < ns; s++) { const x0 = sliceX(s, w2), x1 = sliceX(s + 1, w2); g2.fillStyle = stepColor(s); g2.globalAlpha = st.muted ? 0.35 : 1; g2.fillRect(x0 + 1, 6, Math.max(1, x1 - x0 - 2), h2 - 12); g2.globalAlpha = 1;
+      if (s % 16 === 0) { g2.fillStyle = '#2a2a30'; g2.fillRect(x0, 0, 1, h2); } }
+    if (st.callFlash !== 255) { const x0 = sliceX(st.callFlash, w2), x1 = sliceX(st.callFlash + 1, w2); g2.strokeStyle = '#78a0ff'; g2.lineWidth = 2; g2.strokeRect(x0 + 1, 2, x1 - x0 - 2, h2 - 4); }
+    { const x0 = sliceX(cur, w2), x1 = sliceX(cur + 1, w2); g2.strokeStyle = '#fff'; g2.lineWidth = 2; g2.strokeRect(x0 + 1, 2, x1 - x0 - 2, h2 - 4); }
   }
   if (m & D.wave) {
-    const [g, w, h] = ctx($('wave')); g.clearRect(0, 0, w, h); const cw = w / ns, mid = h / 2; const playing = st.src[cur];
-    for (let s = 0; s < ns; s++) { const cls = st.stepClass[s] & 3; g.fillStyle = COL[cls]; g.globalAlpha = 0.18; g.fillRect(s * cw, 0, cw, h); g.globalAlpha = 1;
-      if (env) { g.fillStyle = COL[cls]; for (let p = 0; p < 8; p++) { const mn = (env[s * 16 + p * 2] - 128) / 127, mx = (env[s * 16 + p * 2 + 1] - 128) / 127; const x0 = s * cw + p * cw / 8; g.fillRect(x0, mid - mx * mid * 0.92, Math.max(1, cw / 8 - 0.5), Math.max(1, (mx - mn) * mid * 0.92)); } }
-      g.fillStyle = '#2a2a30'; g.fillRect(s * cw, 0, 1, h); }
-    if (playing >= 0) { g.strokeStyle = '#fff'; g.lineWidth = 2; g.strokeRect(playing * cw + 1, 1, cw - 2, h - 2); }
-    if (selSlice >= 0) { g.strokeStyle = '#ffd54a'; g.lineWidth = 2; g.setLineDash([4, 3]); g.strokeRect(selSlice * cw + 1, 1, cw - 2, h - 2); g.setLineDash([]); }
+    const [g, w, h] = ctx($('wave')); g.clearRect(0, 0, w, h); const mid = h / 2; const playing = st.src[cur];
+    for (let s = 0; s < ns; s++) { const cls = st.stepClass[s] & 3, x0 = sliceX(s, w), cw = sliceX(s + 1, w) - x0; g.fillStyle = COL[cls]; g.globalAlpha = 0.18; g.fillRect(x0, 0, cw, h); g.globalAlpha = 1;
+      if (env) { g.fillStyle = COL[cls]; for (let p = 0; p < 8; p++) { const mn = (env[s * 16 + p * 2] - 128) / 127, mx = (env[s * 16 + p * 2 + 1] - 128) / 127; const px = x0 + p * cw / 8; g.fillRect(px, mid - mx * mid * 0.92, Math.max(1, cw / 8 - 0.5), Math.max(1, (mx - mn) * mid * 0.92)); } }
+      g.fillStyle = '#2a2a30'; g.fillRect(x0, 0, 1, h); }
+    if (hits && gridTable()) { g.fillStyle = '#78a0ff'; for (const p of hits) { if (p >= st.bufLen) break; const x = p / st.bufLen * w; g.fillRect(x - 1, 0, 3, 6); } }
+    if (playing >= 0) { const x0 = sliceX(playing, w), x1 = sliceX(playing + 1, w); g.strokeStyle = '#fff'; g.lineWidth = 2; g.strokeRect(x0 + 1, 1, x1 - x0 - 2, h - 2); }
+    if (selSlice >= 0) { const x0 = sliceX(selSlice, w), x1 = sliceX(selSlice + 1, w); g.strokeStyle = '#ffd54a'; g.lineWidth = 2; g.setLineDash([4, 3]); g.strokeRect(x0 + 1, 1, x1 - x0 - 2, h - 2); g.setLineDash([]); }
   }
+  if (m & D.kit) drawKit();
+  if (m & D.kitwave) drawKitWave();
   if (m & D.scope) {
     const [g, w, h] = ctx($('scope')); g.clearRect(0, 0, w, h); g.strokeStyle = '#2a2a30'; g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
     if (scope) { g.strokeStyle = '#9be0b0'; g.lineWidth = 1.5; g.beginPath(); for (let i = 0; i < scope.length; i++) { const x = i / (scope.length - 1) * w, y = h / 2 - scope[i] / 127 * h / 2 * 0.95; i ? g.lineTo(x, y) : g.moveTo(x, y); } g.stroke(); }
@@ -345,7 +405,7 @@ const popcount = n => { let c = 0; while (n) { c += n & 1; n >>= 1; } return c; 
  * State ~10 Hz, scope ~5 Hz while visible, envelope only when matGen moves.
  * Each stream keeps at most one request outstanding; user actions go out
  * `urgent` and are pumped before any queued poll. Paused while hidden. */
-const poll = { on: false, timer: null, tState: 0, tScope: 0, tLink: 0, pState: null, pScope: null, pEnv: null, pLive: null };
+const poll = { on: false, timer: null, tState: 0, tScope: 0, tLink: 0, tWave: 0, pState: null, pScope: null, pEnv: null, pLive: null, pTable: null, pHits: null, pWave: null };
 const STATE_MS = 100, SCOPE_MS = 200;
 function startPolling() { poll.on = true; poll.tState = poll.tScope = 0; tick(); }
 function stopPolling() { poll.on = false; clearTimeout(poll.timer); }
@@ -354,7 +414,12 @@ function tick() {
   const now = performance.now();
   if (document.visibilityState !== 'hidden') {
     if (!poll.pState && now - poll.tState >= STATE_MS) { poll.tState = now; poll.pState = link.request(CMD.state, undefined, { key: 'state' }).then(onState, e => warn('state', e)).finally(() => { poll.pState = null; }); }
-    if (!poll.pScope && scopeVisible && now - poll.tScope >= SCOPE_MS) { poll.tScope = now; poll.pScope = link.request(CMD.scope, undefined, { key: 'scope' }).then(b => { scope = parseScope(b); invalidate(D.scope); }, e => warn('scope', e)).finally(() => { poll.pScope = null; }); }
+    if (!poll.pScope && scopeVisible && !kitShown && now - poll.tScope >= SCOPE_MS) { poll.tScope = now; poll.pScope = link.request(CMD.scope, undefined, { key: 'scope' }).then(b => { scope = parseScope(b); invalidate(D.scope); }, e => warn('scope', e)).finally(() => { poll.pScope = null; }); }
+    /* Waveform windows: only while the Kit tab shows, one at a time, ≤ 3/s. */
+    if (kitShown && wave.queue.length && !poll.pWave && now - poll.tWave >= WAVE_MS && st && st.freePos) {
+      const q = wave.queue.shift(); poll.tWave = now;
+      if (q.start < st.freePos) poll.pWave = fetchWave(link, q.start, WAVE_N, wave.plane, q.step).then(r => { wave.cache.set(q.key, r); invalidate(D.kitwave); }, e => warn('wave', e)).finally(() => { poll.pWave = null; });
+    }
     if (now - poll.tLink >= 250) { poll.tLink = now; drawLink(); }
   }
   poll.timer = setTimeout(tick, 25);
@@ -370,10 +435,12 @@ function onState(b) {
   else {
     if (p.cur !== s.cur || p.callFlash !== s.callFlash || p.muted !== s.muted || p.nSlices !== s.nSlices || Math.round(p.bpm) !== Math.round(s.bpm) || p.mult !== s.mult || !arrEq(p.src, s.src) || !arrEq(p.stepClass, s.stepClass)) m |= D.bar | D.wave;
     m |= D.text | D.controls;   /* cheap: both bail when their strings are unchanged */
+    if (kitShown) m |= D.kit;   /* cheap too: cells re-render only when their strings change */
   }
   if (s.matGen !== envGen && !poll.pEnv) { const gen = s.matGen; poll.pEnv = fetchEnv(link, s.nSlices).then(e => { env = e; envGen = gen; selSlice = -1; invalidate(D.wave); }, e => warn('env', e)).finally(() => { poll.pEnv = null; }); }
+  syncKit(s);
   /* Options edited elsewhere (a preset load on the panel): the state carries three of them. */
-  if (live && opts && !poll.pLive && (optByte('grammar.mode') !== s.grammar || optByte('class.mode') !== s.cls || (s.barsOpt != null && optByte('bars') !== s.barsOpt))) refreshLive();
+  if (live && opts && !poll.pLive && (optByte('grammar.mode') !== s.grammar || optByte('class.mode') !== s.cls || (s.barsOpt != null && optByte('bars') !== s.barsOpt) || (s.keyPlays != null && optByte('key.plays') != null && optByte('key.plays') !== s.keyPlays))) refreshLive();
   invalidate(m);
 }
 function drawLink() {
@@ -395,15 +462,148 @@ $('b_clear').onclick = () => action(ACT.clearLocks);
 $('b_load').onclick = () => { const v = +$('sample').value; if (Number.isInteger(v) && v >= 0) action(ACT.load, v); };
 $('hist').addEventListener('change', e => { if (!st) return; action(ACT.scrub, Math.max(0, st.histN - 1 - +e.target.value)); });
 $('sample').addEventListener('change', e => { const v = +e.target.value; if (Number.isInteger(v) && v >= 0) action(ACT.load, v); });
-$('wave').addEventListener('click', e => { if (!st) return; const r = e.currentTarget.getBoundingClientRect(); const s = Math.floor((e.clientX - r.left) / r.width * st.nSlices); selSlice = (selSlice === s) ? -1 : s; invalidate(D.wave); });
-$('strip').addEventListener('click', e => { if (!st) return; const r = e.currentTarget.getBoundingClientRect(); const step = Math.floor((e.clientX - r.left) / r.width * st.nSlices); if (selSlice >= 0) action(ACT.punch, step, selSlice); });
+$('wave').addEventListener('click', e => { if (!st) return; const r = e.currentTarget.getBoundingClientRect(); const s = sliceAt(e.clientX - r.left, r.width); selSlice = (selSlice === s) ? -1 : s; invalidate(D.wave); });
+$('strip').addEventListener('click', e => { if (!st) return; const r = e.currentTarget.getBoundingClientRect(); const step = sliceAt(e.clientX - r.left, r.width); if (selSlice >= 0) action(ACT.punch, step, selSlice); });
+
+/* ───────────── Kit tab ─────────────
+ * 24 key cells (two octaves from C) from the state's key table + GET_TABLE;
+ * the selected key's material from GET_WAVE windows, fetched on demand at
+ * ≤ 3/s and cached per (plane, start, step); boundaries from the table and
+ * onset ticks from GET_HITS drawn over it. */
+const keyCells = [];
+(function buildKeys() {
+  const host = $('keys');
+  for (let k = 0; k < 24; k++) {
+    const el = document.createElement('div'); el.className = 'key'; el.dataset.k = k;
+    el.innerHTML = `<div class="nm"><span>${keyName(k)}</span><i>${k}</i></div><div class="info">—</div><div class="meta"></div><div class="kb"><button class="mini rec" title="arm a take into ${keyName(k)} (ACTION 9)">●</button><button class="mini clr" title="clear ${keyName(k)}'s recording (ACTION 10)">✕</button></div>`;
+    el.onclick = () => selectKey(k);
+    const rec = el.querySelector('.rec'), clr = el.querySelector('.clr');
+    rec.onclick = e => { e.stopPropagation(); selectKey(k); action(ACT.recArm, k); };
+    clr.onclick = e => { e.stopPropagation(); selectKey(k); action(ACT.recClear, k); };
+    host.appendChild(el); keyCells.push({ el, info: el.querySelector('.info'), meta: el.querySelector('.meta'), rec, clr, sig: '' });
+  }
+})();
+const secs = n => (n / SR).toFixed(n < SR ? 3 : 2) + ' s';
+function entryOfKey(k) { if (!table || !st || !st.keySlice) return null; const t = st.keySlice[k]; return t >= 0 && t < table.entries.length ? Object.assign({ t }, table.entries[t]) : null; }
+const keyRecorded = e => !!(e && table && e.t >= table.nSlices);
+/* The grid slice the next un-recorded key above k plays (nSlices past the top): an
+ * empty key's span of the break runs up to it. */
+function nextGridKey(k) { for (let j = k + 1; j < 24; j++) if (st.keySlice[j] < table.nSlices) return st.keySlice[j]; return table.nSlices; }
+function selectKey(k) { if (k === selKey) return; selKey = k; fitView(); invalidate(D.kit | D.kitwave); }
+function fitView() { const e = entryOfKey(selKey); if (!e || !st) return; const pad = Math.max(200, e.len * 0.02); setView(e.start - pad, e.start + e.len + pad); }
+function setView(a, b) {
+  const lim = st && st.freePos ? st.freePos : 1; if (b - a < 96) { const c = (a + b) / 2; a = c - 48; b = c + 48; }
+  if (b - a > lim) { a = 0; b = lim; } if (a < 0) { b -= a; a = 0; } if (b > lim) { a -= b - lim; b = lim; if (a < 0) a = 0; }
+  view.a = Math.floor(a); view.b = Math.ceil(b); invalidate(D.kitwave);
+}
+function zoomView(f, at) { const c = at == null ? (view.a + view.b) / 2 : at, span = (view.b - view.a) * f; setView(c - (c - view.a) * f, c - (c - view.a) * f + span); }
+/* Plan the windows the current view needs: the step that puts ~one output
+ * byte per pixel (1..128), windows aligned to WAVE_N·step, nearest the
+ * centre first, only those not cached. Re-planned when the view, the width,
+ * the plane or the buffer changes. */
+function wavePlan(W) {
+  if (!kitOk || !st || !st.freePos) { wave.queue.length = 0; return; }
+  const span = Math.max(1, view.b - view.a), step = Math.max(1, Math.min(128, Math.ceil(span / Math.max(50, W)))), win = WAVE_N * step;
+  const sig = [view.a, view.b, W, step, wave.plane, st.freePos].join('|'); if (sig === wave.planSig) return; wave.planSig = sig; wave.step = step;
+  wave.queue.length = 0; const mid = (view.a + view.b) / 2;
+  for (let s0 = Math.floor(view.a / win) * win; s0 < view.b && s0 < st.freePos; s0 += win) if (!wave.cache.has(wave.plane + ':' + s0 + ':' + step)) wave.queue.push({ start: s0, step, key: wave.plane + ':' + s0 + ':' + step });
+  wave.queue.sort((p, q) => Math.abs(p.start + win / 2 - mid) - Math.abs(q.start + win / 2 - mid));
+}
+function drawKit() {
+  if (!st) return;
+  const rs = st.recState || 0, rk = st.recKey == null ? -1 : st.recKey;
+  for (let k = 0; k < 24; k++) {
+    const c = keyCells[k], e = entryOfKey(k), rec = keyRecorded(e);
+    let info = '—', meta = '', cls = -1;
+    if (e && rec) { info = `${secs(e.len)} · ${CLS_NAME[e.cls & 3]}${e.hit ? ' · hit' : ''}`; meta = `sal ${Math.round(e.sal / 2.55)}% · dens ${Math.round(e.dens / 2.55)}%`; cls = e.cls & 3; }
+    else if (e) { const nxt = nextGridKey(k) - 1; info = nxt > e.t ? `slices ${e.t}–${nxt}` : `slice ${e.t}`; meta = `${secs(e.len)} · ${CLS_NAME[e.cls & 3]}`; }
+    else if (st.keySlice) info = `slice ${st.keySlice[k]}`;
+    const rstate = rk === k && rs ? REC[rs] : '';
+    const sig = [info, meta, cls, rec, k === selKey, rstate, rs].join('|');
+    if (sig === c.sig) continue; c.sig = sig;
+    c.info.textContent = info; c.meta.textContent = rstate ? rstate.toUpperCase() : meta;
+    c.el.className = 'key' + (rec ? ' rec' : '') + (k === selKey ? ' sel' : '') + (rstate ? ' ' + rstate : '');
+    c.el.style.borderLeftColor = cls >= 0 ? COL[cls] : (e ? COL[e.cls & 3] + '66' : '');
+    c.rec.disabled = !kitOk || rs !== 0; c.clr.disabled = !kitOk || !rec;
+  }
+  const e = entryOfKey(selKey), rec = keyRecorded(e), kn = keyName(selKey);
+  $('k_rec').textContent = `● Record into ${kn}`; $('k_rec').disabled = !kitOk || rs !== 0;
+  $('k_clr').textContent = `✕ Clear ${kn}`; $('k_clr').disabled = !kitOk || !rec;
+  setPill('k_recstate', rs ? `record: ${REC[rs]} · ${rk >= 0 ? keyName(rk) : '—'}` : 'record: idle', rs === 2 ? 'warn' : rs ? 'ok' : '');
+  const lvl = st.inLevel || 0; $('k_meter').style.width = Math.round(lvl / 2.55) + '%'; $('k_meterbox').classList.toggle('hot', lvl > 230); $('k_meterbox').style.opacity = rs ? 1 : 0.45;
+  const kp = st.keyPlays != null ? st.keyPlays : optByte('key.plays'); const ks = $('k_plays'); if (kp != null && document.activeElement !== ks && ks.value !== String(kp)) ks.value = String(kp); ks.disabled = !kitOk;
+  if (st.bufCap) {
+    const recs = Math.max(0, st.freePos - st.bufLen);
+    $('u_mat').style.width = (st.bufLen / st.bufCap * 100).toFixed(2) + '%'; $('u_rec').style.left = (st.bufLen / st.bufCap * 100).toFixed(2) + '%'; $('u_rec').style.width = (recs / st.bufCap * 100).toFixed(2) + '%';
+    setText('u_break', secs(st.bufLen)); setText('u_recs', recs ? `${secs(recs)} (${table ? table.nTable - table.nSlices : '?'} key${table && table.nTable - table.nSlices === 1 ? '' : 's'})` : 'none');
+    setText('u_free', secs(st.bufCap - st.freePos) + ' of ' + secs(st.bufCap)); setText('u_planes', st.stereo ? 'stereo (L · R)' : 'mono');
+    setText('u_table', table ? `${table.nSlices} grid + ${table.nTable - table.nSlices} recorded = ${table.nTable}` : (st.nTable != null ? `${st.nTable} entries` : '—'));
+  }
+  const le = st.looperEvents; setText('l_count', le == null ? '—' : String(le)); setText('l_label', le == null ? 'needs LOOPER firmware (state byte 176)' : (le === 1 ? 'event on the bar' : 'events on the bar'));
+  $('l_undo').disabled = !le; $('l_clear').disabled = !le;
+  setPill('kit_status', !st.keySlice ? 'needs sample-mode firmware' : table ? `${table.nTable - table.nSlices} recorded · ${24 - (table.nTable - table.nSlices)} on the break` : 'reading the table…', st.keySlice ? 'ok' : 'warn');
+  $('wv_plane').hidden = !st.stereo;
+}
+function drawKitWave() {
+  const c = $('kitwave'), [g, w, h] = ctx(c); g.clearRect(0, 0, w, h);
+  if (!kitOk || !st || !st.freePos) { g.fillStyle = '#5e5c55'; g.font = '12px system-ui'; g.textAlign = 'center'; g.fillText(st && !st.keySlice ? 'this firmware sends no sample-mode state tail' : 'connect to read the material', w / 2, h / 2); setText('wv_title', 'Waveform'); return; }
+  wavePlan(w);
+  const a = view.a, span = Math.max(1, view.b - a), mid = h / 2, step = wave.step, win = WAVE_N * step, xOf = p => (p - a) / span * w;
+  const e = entryOfKey(selKey), rec = keyRecorded(e), col = e ? COL[e.cls & 3] : '#9be0b0';
+  if (e) { g.fillStyle = col; g.globalAlpha = 0.12; g.fillRect(xOf(e.start), 0, xOf(e.start + e.len) - xOf(e.start), h); g.globalAlpha = 1; }
+  if (st.bufLen > a && st.bufLen < view.b) { g.fillStyle = '#3a3a42'; g.fillRect(xOf(st.bufLen), 0, 2, h); }
+  g.fillStyle = col; let have = 0, want = 0;
+  for (let x = 0; x < w; x++) {
+    const p = a + x / w * span; if (p >= st.freePos) break; want++;
+    const s0 = Math.floor(p / win) * win, r = wave.cache.get(wave.plane + ':' + s0 + ':' + step); if (!r) continue;
+    const i = Math.floor((p - s0) / step); if (i >= r.n) continue; have++;
+    const v = Math.abs(r.data[i]) / 127, bh = Math.max(0.5, v * mid * 0.92); g.fillRect(x, mid - bh, 1, bh * 2);
+  }
+  g.fillStyle = '#2a2a30'; g.fillRect(0, mid, w, 1);
+  if (table) {
+    const pxPer = w / span; g.font = '10px system-ui'; g.textAlign = 'left';
+    table.entries.forEach((en, i) => {
+      if (en.start < a || en.start > view.b) return; const x = xOf(en.start), grid = i < table.nSlices;
+      g.fillStyle = grid ? '#ffffff' : '#ffd54a'; g.globalAlpha = 0.55; g.fillRect(x, 0, 1, h); g.globalAlpha = 1;
+      if (en.len * pxPer > 28) { g.fillStyle = grid ? '#8a887f' : '#ffd54a'; g.fillText(grid ? String(i) : keyName(en.key), x + 3, h - 4); }
+    });
+  }
+  if (hits) { g.fillStyle = '#78a0ff'; for (const p of hits) { if (p < a || p > view.b) continue; const x = xOf(p); g.fillRect(x - 1, 0, 3, 8); g.fillRect(x, 8, 1, h * 0.22); } }
+  if (have < want) { g.fillStyle = '#8a887f'; g.font = '11px system-ui'; g.textAlign = 'right'; g.fillText(`loading… ${wave.queue.length} window${wave.queue.length === 1 ? '' : 's'} to go`, w - 6, 14); }
+  const what = e ? (rec ? `${keyName(selKey)} · recording · ${secs(e.len)} · ${CLS_NAME[e.cls & 3]}${e.hit ? ' · hit' : ''}` : `${keyName(selKey)} · slice ${e.t} of the break · ${secs(e.len)}`) : keyName(selKey);
+  setText('wv_title', what); setText('wv_range', `view ${secs(a)} – ${secs(view.b)} · ${step === 1 ? 'raw samples' : step + ' samples per pixel'}`);
+}
+$('wv_in').onclick = () => zoomView(0.5); $('wv_out').onclick = () => zoomView(2); $('wv_fit').onclick = () => { fitView(); }; $('wv_all').onclick = () => { if (st) setView(0, st.freePos); };
+$('wv_plane').onchange = e => { wave.plane = +e.target.value; invalidate(D.kitwave); };
+{ const c = $('kitwave'); let drag = null;
+  c.addEventListener('wheel', e => { if (!st || !st.freePos) return; e.preventDefault(); const r = c.getBoundingClientRect(); const at = view.a + (e.clientX - r.left) / r.width * (view.b - view.a); zoomView(Math.pow(1.25, e.deltaY / 100), at); }, { passive: false });
+  c.addEventListener('pointerdown', e => { drag = { x: e.clientX, a: view.a, b: view.b }; c.setPointerCapture(e.pointerId); });
+  c.addEventListener('pointermove', e => { if (!drag) return; const r = c.getBoundingClientRect(); const d = (e.clientX - drag.x) / r.width * (drag.b - drag.a); setView(drag.a - d, drag.b - d); });
+  c.addEventListener('pointerup', () => { drag = null; }); c.addEventListener('pointercancel', () => { drag = null; }); }
+$('k_rec').onclick = () => action(ACT.recArm, selKey); $('k_clr').onclick = () => action(ACT.recClear, selKey);
+$('k_plays').onchange = async e => { await action(ACT.keyPlays, +e.target.value); refreshLive(); };
+$('l_undo').onclick = () => action(ACT.looperUndo); $('l_clear').onclick = () => action(ACT.looperClear);
+/* The table follows the state: refetched when the material, the table size,
+ * the free position or the key map changes (a take, a clear, a re-slice). */
+function syncKit(s) {
+  if (!kitOk || s.keySlice == null) return;
+  const sig = [s.matGen, s.nTable, s.freePos, s.bufLen, Array.from(s.keySlice).join(',')].join('|');
+  if (sig !== tableSig && !poll.pTable) {
+    poll.pTable = fetchTable(link).then(t => {
+      const before = table ? entryOfKey(selKey) : null; table = t; tableSig = sig; wave.cache.clear(); wave.planSig = '';
+      const after = entryOfKey(selKey); if (!before || !after || before.start !== after.start || before.len !== after.len) fitView();   /* the selected key's material moved */
+      invalidate(D.kit | D.kitwave | D.bar | D.wave);
+    }, e => warn('table', e)).finally(() => { poll.pTable = null; });
+  }
+  if (s.matGen !== hitsGen && !poll.pHits) { const gen = s.matGen; poll.pHits = fetchHits(link).then(hh => { hits = hh; hitsGen = gen; invalidate(D.kitwave | D.wave); }, e => warn('hits', e)).finally(() => { poll.pHits = null; }); }
+}
 
 /* ───────────── Options (live blob edits) ─────────────
  * Values live in the running blob: read it fresh, change one byte, write it
  * back as a live audition. The read happens right before the write so the
  * pager's stored knob positions are current, not a stale snapshot. */
 const GROUPS = [
-  ['Sound', ['voice.mode', 'fades', 'tail', 'rests', 'swing']],
+  ['Sound', ['voice.mode', 'key.plays', 'fades', 'tail', 'rests', 'swing']],
   ['Brain & gates', ['grammar.mode', 'swaps', 'flow.dejavu', 'gate.mode', 'gate.len', 'gate.lvl', 'gate.lanes']],
   ['Clock', ['clock.ppqn', 'bars']],
   ['Analysis', ['class.mode', 'onsets']],
@@ -479,7 +679,9 @@ function buildManual() {
 /* ───────────── Connect ───────────── */
 function setDisconnected() {
   stopPolling(); link = null; info = null; desc = null; live = null; st = null; env = null; envGen = -1; scope = null; demoDevice = null; ctlSig = '';
-  $('connect').textContent = 'Connect'; $('demo').disabled = false; setPill('modpill', 'not connected', ''); setPill('linkpill', 'link: —', '');
+  table = null; tableSig = ''; hits = null; hitsGen = -1; kitOk = false; wave.cache.clear(); wave.queue.length = 0; wave.planSig = ''; keyCells.forEach(c => { c.sig = ''; });
+  $('connect').textContent = 'Connect'; $('demo').disabled = false; setPill('modpill', 'not connected', ''); setPill('linkpill', 'link: —', ''); setPill('kit_status', '—', '');
+  invalidate(D.kit | D.kitwave);
 }
 async function connectPort(port, isDemo) {
   try {
@@ -494,6 +696,8 @@ async function connectPort(port, isDemo) {
     $('b_load').disabled = !labels.sample.length;
     if (desc && desc.error) notice('The module reports a descriptor build error: ' + desc.error);
     else if (!desc || !desc.audiothurgist) notice('Connected, but this firmware does not advertise the Audiothurgist state extension (0x60). Flash v0.7.0+ for the live view.');
+    kitOk = !!(desc && desc.audiothurgist && desc.audiothurgist.table);   /* GET_TABLE / GET_WAVE / GET_HITS advertised */
+    setPill('kit_status', kitOk ? 'reading…' : 'this firmware has no sample-mode commands (0x64–0x66)', kitOk ? '' : 'warn');
     buildManual();
     if (opts) { try { live = await getLive(link, info); } catch (e) { notice('Options unreadable: ' + e.message); } }
     buildOptions(); setPill('opt_status', live ? 'live' : '—', live ? 'ok' : '');
@@ -506,15 +710,18 @@ async function connect() {
   try { const port = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x0483 }] }); await connectPort(port, false); }
   catch (e) { if (e.name !== 'NotFoundError') notice('Connect failed: ' + e.message); }
 }
-/* ?demo[=brain,ext,pending,grids,euclid,camp,locks,old,short] — the fake
- * module, optionally started on the Brain page, following a clock (with a
- * multiplier switch left pending), in a grammar, with locks, with a
- * pre-v0.8.0 state body (no tails) or the 167-byte CLOCK body (no flags). */
+/* ?demo[=brain,ext,pending,grids,euclid,camp,locks,kit,swing,old,short,v099]
+ * — the fake module, optionally started on the Brain page, following a
+ * clock (with a multiplier switch left pending), in a grammar, with locks,
+ * with three keys recorded and a swung grid (kit: opens the Kit tab), with
+ * a pre-v0.8.0 state body (no tails), the 167-byte CLOCK body (no flags) or
+ * the 176-byte v0.9.9 body (no sample-mode tail). */
 async function connectDemo(flags = '') {
   if (link) return; notice('');
   const f = new Set(flags.split(',').filter(Boolean));
-  demoDevice = new DEMO.FakeDevice({ tail: f.has('old') ? 148 : f.has('short') ? 167 : 170, latencyMs: 6 });
+  demoDevice = new DEMO.FakeDevice({ tail: f.has('old') ? 148 : f.has('short') ? 167 : f.has('v099') ? 176 : 219, latencyMs: 6, kit: f.has('kit'), swing: f.has('kit') || f.has('swing') });
   const d = demoDevice;
+  if (f.has('kit')) { showTab('tab_kit'); setInterval(() => { if (demoDevice === d && d.looperEvents < 16 && Math.random() < 0.5) d.looperEvents++; }, 3000); }
   if (f.has('brain')) d.brain = true;
   if (f.has('ext')) { d.ext = true; d.locked = true; d.mult = 2; d.multZone = 3; d.p2Engaged = true; }
   if (f.has('pending')) { d.multZone = 4; d.pending = true; }

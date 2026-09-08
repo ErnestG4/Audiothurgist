@@ -1440,13 +1440,57 @@ static void ServiceLoad()
  *   0x63 ACTION     ← u8 op [,args]: 0 dice · 1 reslice · 2 mute toggle ·
  *                     3 punch(u8 step, u8 slice) · 4 flow(u8 on) ·
  *                     5 scrub(u8 depth) · 6 load(u8 fileIdx)      → u8 status */
+/* WEB ── sample-mode shell state the browser reads and the flags it raises.
+ * Phase F (web) defines these so the branch compiles alone; the RECORD and
+ * LOOPER phases own the real ones — de-duplicate on merge (same names).
+ *   gRecState  0 idle · 1 armed (waiting for the gate) · 2 taking · 3 pending
+ *   gRecKey    key of the take in flight, 255 none
+ *   gInLevel   peak |input| of the last audio block, 0..255
+ * While gRecState stays 0 the state tail derives the record state from the
+ * engine (recArmed / recPending / recKey), so the page shows engine-driven
+ * takes even before RECORD lands.
+ *   0x64 GET_WAVE   ← u32 start, u16 n (≤480), u8 plane (0 L · 1 R · 2 mono sum)
+ *                     [, u8 step (1..128: each output byte = the largest-magnitude
+ *                     sample of `step` source samples)]
+ *                   → u8 status, u32 start, u16 n, u8 step, i8 x[n]   (BAD_ARGS past freePos)
+ *   0x65 GET_TABLE  ← [u8 first, u8 count] → u8 status, u8 nSlices, u8 nTable, then per
+ *                     entry {u32 start, u32 len, i8 key, u8 cls, u8 sal, u8 hit, u8 dens}
+ *                     (13 bytes; ≤39 per reply — chunk with first/count; count from length)
+ *   0x66 GET_HITS   ← [u8 first] → u8 status, u8 nTotal, u8 first, u32 pos[…] (≤127 per reply)
+ *   0x63 ACTION     9 rec arm(u8 key) · 10 rec clear(u8 key) · 11 key plays(u8 0/1) ·
+ *                   12 looper undo · 13 looper clear
+ *   state tail      176 u8 looperEvents (LOOPER) · 177 u8 recState · 178 u8 recKey ·
+ *                   179 u32 freePos · 183 u32 bufCap · 187 u8 stereo · 188 u8 inLevel ·
+ *                   189 u8 nTable · 190 u32 bufLen · 194 i8 keySlice[24] · 218 u8 keyPlays
+ *                   (ends at 219) */
+static volatile uint8_t gRecState = 0;        /* WEB: owned by RECORD after merge */
+static volatile uint8_t gRecKey   = 255u;     /* WEB: owned by RECORD after merge */
+static volatile uint8_t gInLevel  = 0;        /* WEB: owned by RECORD after merge (audio writes) */
+static volatile uint8_t gLooperEvents = 0;    /* WEB: owned by LOOPER after merge; state tail byte 176 */
+/* WEB → RECORD: ACTION 9 / 10. -1 = nothing requested; the consumer clears
+ * the flag after acting on it (the same path as the panel's record gestures). */
+static volatile int8_t  gWebRecArm   = -1;    /* WEB → RECORD: arm a take into this key */
+static volatile int8_t  gWebRecClear = -1;    /* WEB → RECORD: clear this key's recording */
+/* WEB → LOOPER: ACTION 12 / 13. The consumer clears the flag after acting. */
+static volatile bool    gWebLooperUndo  = false;   /* WEB → LOOPER */
+static volatile bool    gWebLooperClear = false;   /* WEB → LOOPER */
+/* WEB */
+
 struct StateExt : hostlink::IHostlinkExtension
 {
     uint8_t FirstCmd() const override { return 0x60u; }
     uint8_t LastCmd()  const override { return 0x6Fu; }
     const char* DescriptorRootJson() const override
     {
-        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99}";
+        /* WEB: wave/table/hits (0x64..0x66) advertised so the page can feature-detect the Kit tab. */
+        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102}";
+    }
+    /* WEB: one float → i8 (±127), saturating. */
+    static int8_t ToI8(float v)
+    {
+        float s = v * 127.f;
+        if(s > 127.f) s = 127.f; else if(s < -127.f) s = -127.f;
+        return (int8_t)(s >= 0.f ? s + 0.5f : s - 0.5f);
     }
     void Handle(const hostlink::ParsedFrame& f, hostlink::FrameWriter& w, uint32_t) override
     {
@@ -1488,6 +1532,25 @@ struct StateExt : hostlink::IHostlinkExtension
                 /* v0.9.5 forensics: u8 stallPhase, u16 gateLateUs, u16 overruns (170..174) */
                 w.U8(gDiagStallPhase); w.U16(gDiagGateLateUs); w.U16(gDiagOverruns);
                 w.U8(gJackMapCur == 1u ? 1u : 0u);   /* 175: jack map (0 Brain, 1 Voice) */
+                /* WEB: sample-mode tail (176..218). 176 is LOOPER's event count; 177+ is the
+                 * record state (RECORD's globals, else derived from the engine), the buffer
+                 * bookkeeping the Kit tab draws, and the key table so the page can tell an
+                 * empty key (a break region) from a recorded one without another request. */
+                w.U8(gLooperEvents);                                          /* 176 */
+                {
+                    uint8_t rs = gRecState, rk = gRecKey;
+                    if(rs == 0u && (engine.recArmed || engine.recPending))
+                    {
+                        rs = engine.recPending ? 3u : (engine.recPos > engine.freePos ? 2u : 1u);
+                        rk = engine.recKey < 0 ? 255u : (uint8_t)engine.recKey;
+                    }
+                    w.U8(rs); w.U8(rk);                                        /* 177, 178 */
+                }
+                w.U32((uint32_t)engine.freePos); w.U32((uint32_t)engine.bufCap);   /* 179, 183 */
+                w.U8(engine.bufR ? 1u : 0u); w.U8(gInLevel);                  /* 187, 188 */
+                w.U8((uint8_t)engine.nTable); w.U32((uint32_t)engine.bufLen); /* 189, 190 */
+                w.Bytes((const uint8_t*)engine.keySlice, (size_t)bb::Engine::kKeys);   /* 194..217 */
+                w.U8(gKeyPlays.sel);                                          /* 218: Options → Key Plays */
                 return;
             }
             case 0x61u:
@@ -1546,9 +1609,97 @@ struct StateExt : hostlink::IHostlinkExtension
                         pager.GoToPage(f.len >= 2 && f.body[1] ? 1u : 0u, ph);
                         break;
                     }
+                    /* WEB: sample-mode ops. 9/10 and 12/13 raise the flags RECORD / LOOPER
+                     * consume on their gesture paths; 11 is the Key Plays option itself. */
+                    case 9:   /* WEB → RECORD: arm a take into key */
+                        if(f.len < 2 || f.body[1] >= bb::Engine::kKeys) { w.U8(2u); return; }
+                        if(engine.recArmed || engine.recPending || gRecState != 0u) { w.U8(3u); return; }   /* BAD_STATE */
+                        gWebRecArm = (int8_t)f.body[1];
+                        break;
+                    case 10:  /* WEB → RECORD: clear key's recording */
+                        if(f.len < 2 || f.body[1] >= bb::Engine::kKeys) { w.U8(2u); return; }
+                        if(engine.RecordedEntry(f.body[1]) < 0) { w.U8(3u); return; }                    /* BAD_STATE */
+                        gWebRecClear = (int8_t)f.body[1];
+                        break;
+                    case 11:  /* Key Plays: 0 one-shot · 1 held (Options byte 17, same as a blob write) */
+                        if(f.len < 2 || f.body[1] > 1u) { w.U8(2u); return; }
+                        if(f.body[1] != gKeyPlays.sel) { gKeyPlays.sel = f.body[1]; gKeyPlays.dirty = true; }
+                        break;
+                    case 12: gWebLooperUndo  = true; break;   /* WEB → LOOPER */
+                    case 13: gWebLooperClear = true; break;   /* WEB → LOOPER */
                     default: w.U8(2u); return;   /* BAD_ARGS */
                 }
                 w.U8(0u);
+                return;
+            }
+            /* WEB: 0x64 GET_WAVE — the material buffer, windowed and optionally decimated.
+             * Bounded by freePos (recordings live past bufLen); a take in flight is not
+             * exposed until it is committed. ≤ 480 × 128 source samples per call (~1 ms). */
+            case 0x64u:
+            {
+                if(f.len < 7) { w.U8(2u); return; }   /* BAD_ARGS */
+                uint32_t start = (uint32_t)f.body[0] | ((uint32_t)f.body[1] << 8) | ((uint32_t)f.body[2] << 16) | ((uint32_t)f.body[3] << 24);
+                uint32_t n     = (uint32_t)f.body[4] | ((uint32_t)f.body[5] << 8);
+                const uint8_t plane = f.body[6];
+                uint32_t step = f.len >= 8 ? f.body[7] : 1u;
+                if(step == 0u) step = 1u;
+                if(step > 128u) step = 128u;
+                if(n > 480u) n = 480u;
+                const float* L = engine.buf; const float* R = engine.bufR ? engine.bufR : engine.buf;
+                const uint32_t lim = (uint32_t)(engine.freePos > 0 ? engine.freePos : 0);
+                if(!L || plane > 2u || start >= lim) { w.U8(2u); return; }   /* BAD_ARGS */
+                if(start + n * step > lim) n = (lim - start) / step;         /* whole steps only */
+                if(n == 0u) { w.U8(2u); return; }
+                w.U8(0u); w.U32(start); w.U16((uint16_t)n); w.U8((uint8_t)step);
+                const float* P = plane == 1u ? R : L;
+                for(uint32_t i = 0; i < n; i++)
+                {
+                    const uint32_t a = start + i * step;
+                    float best = 0.f, mag = -1.f;
+                    for(uint32_t k = 0; k < step; k++)
+                    {
+                        float v = plane == 2u ? 0.5f * (L[a + k] + R[a + k]) : P[a + k];
+                        float m = v < 0.f ? -v : v;
+                        if(m > mag) { mag = m; best = v; }
+                    }
+                    w.U8((uint8_t)ToI8(best));
+                }
+                return;
+            }
+            /* WEB: 0x65 GET_TABLE — every table entry, grid then recorded, 13 bytes each. */
+            case 0x65u:
+            {
+                const int nt = engine.nTable;
+                int first = f.len >= 1 ? f.body[0] : 0;
+                int count = f.len >= 2 ? f.body[1] : 39;
+                if(first > nt) { w.U8(2u); return; }   /* BAD_ARGS (first == nt → empty reply) */
+                if(count > 39) count = 39;
+                if(first + count > nt) count = nt - first;
+                w.U8(0u); w.U8((uint8_t)engine.nSlices); w.U8((uint8_t)nt);
+                for(int t = first; t < first + count; t++)
+                {
+                    w.U32((uint32_t)engine.slices[t].start); w.U32((uint32_t)engine.slices[t].len);
+                    w.U8((uint8_t)(t >= engine.nSlices ? engine.tableKey[t] : -1));
+                    w.U8(engine.stepClass[t] & 3u);
+                    float sal = engine.sliceSal[t];  if(sal < 0.f) sal = 0.f; if(sal > 1.f) sal = 1.f;
+                    w.U8((uint8_t)(sal * 255.f + 0.5f));
+                    w.U8(engine.stepHit[t] ? 1u : 0u);
+                    /* sliceDens is keyframes per sample; the adaptive fade spans 0.02 (sparse) .. 0.2 (dense) */
+                    float d = engine.sliceDens[t] * 5.f; if(d < 0.f) d = 0.f; if(d > 1.f) d = 1.f;
+                    w.U8((uint8_t)(d * 255.f + 0.5f));
+                }
+                return;
+            }
+            /* WEB: 0x66 GET_HITS — the shell's onset table for the current material
+             * (gPendOnsets / gPendN: refilled by every load and re-slice, read after apply). */
+            case 0x66u:
+            {
+                int n = gPendN; if(n < 0) n = 0; if(n > kMaxOnsets) n = kMaxOnsets;
+                int first = f.len >= 1 ? f.body[0] : 0;
+                if(first > n) { w.U8(2u); return; }   /* BAD_ARGS */
+                int count = n - first; if(count > 127) count = 127;
+                w.U8(0u); w.U8((uint8_t)n); w.U8((uint8_t)first);
+                for(int i = first; i < first + count; i++) w.U32((uint32_t)(gPendOnsets[i] < 0 ? 0 : gPendOnsets[i]));
                 return;
             }
             default: w.U8(1u); return;   /* UNSUPPORTED */

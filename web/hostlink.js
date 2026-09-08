@@ -4,7 +4,8 @@
  * alchemy-sdk's tools/hostlink-cli/hostlink.mjs), a single-outstanding-
  * request Link with a priority queue and round-trip measurement, the
  * standard commands the page needs (HELLO, GET_DESCRIPTOR, GET_LIVE, live
- * BLOB writes) and the firmware's StateExt parsers (0x60–0x63).
+ * BLOB writes) and the firmware's StateExt parsers (0x60–0x66: state, envelope,
+ * scope, actions, and the sample-mode wave / table / hits reads).
  *
  * Plain script in the browser (globals via window.HL); CommonJS in node so
  * selftest.mjs can pin it to the SDK's golden vectors. No dependencies.
@@ -16,9 +17,14 @@ const PROTO = 1;
 const CMD = {
   hello: 0x01, getDescriptor: 0x02, blobBegin: 0x12, blobData: 0x13, blobCommit: 0x14,
   getLive: 0x20, reboot: 0x40,
-  state: 0x60, env: 0x61, scope: 0x62, action: 0x63,
+  state: 0x60, env: 0x61, scope: 0x62, action: 0x63, wave: 0x64, table: 0x65, hits: 0x66,
 };
-const ACT = { dice: 0, reslice: 1, mute: 2, punch: 3, flow: 4, scrub: 5, load: 6, clearLocks: 7, page: 8 };
+const ACT = { dice: 0, reslice: 1, mute: 2, punch: 3, flow: 4, scrub: 5, load: 6, clearLocks: 7, page: 8,
+  recArm: 9, recClear: 10, keyPlays: 11, looperUndo: 12, looperClear: 13 };
+/* Record state (state tail byte 177) and the 24 Voice-map keys, two octaves from C. */
+const REC = ['idle', 'armed', 'taking', 'pending'];
+const NOTE_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
+const keyName = k => NOTE_NAMES[k % 12] + (1 + Math.floor(k / 12));
 const STATUS = ['OK', 'UNSUPPORTED', 'BAD_ARGS', 'BAD_STATE', 'BAD_CRC', 'BAD_SLOT', 'TOO_LARGE',
   'SCHEMA_MISMATCH', 'FLASH_FAIL', 'BUSY', 'FRAME_ERROR'];
 
@@ -229,7 +235,59 @@ function parseState(b) {
   if (b.length >= 176) {   // v0.9.9 jack map
     st.jackMap = b[175];
   }
+  if (b.length >= 177) st.looperEvents = b[176];   // LOOPER: events on the bar strip
+  if (b.length >= 194) {   // SAMPLE / WEB: record state, buffer bookkeeping
+    st.recState = b[177]; st.recKey = b[178] === 255 ? -1 : b[178];
+    st.freePos = u32(b, 179); st.bufCap = u32(b, 183); st.stereo = !!b[187]; st.inLevel = b[188];
+    st.nTable = b[189]; st.bufLen = u32(b, 190);
+  }
+  if (b.length >= 218) st.keySlice = Int8Array.from(b.subarray(194, 218));   // table entry each key plays
+  if (b.length >= 219) st.keyPlays = b[218];                                  // Options → Key Plays (0 one-shot, 1 held)
   return st;
+}
+/* GET_WAVE: one window of the material buffer — n ≤ 480 output bytes, each
+ * the largest-magnitude sample of `step` (1..128) source samples, so a
+ * window spans n·step samples. plane 0 L · 1 R · 2 mono sum. Resolves
+ * { start, n, step, data: Int8Array }; BAD_ARGS past freePos. */
+async function fetchWave(link, start, n = 480, plane = 0, step = 1, opts = {}) {
+  const req = new Uint8Array(8); const dv = new DataView(req.buffer);
+  dv.setUint32(0, start >>> 0, true); dv.setUint16(4, Math.min(480, n), true); req[6] = plane; req[7] = Math.max(1, Math.min(128, step));
+  const b = await link.request(CMD.wave, req, Object.assign({ key: 'wave' }, opts));
+  return parseWave(b);
+}
+function parseWave(b) { const n = u16(b, 5); return { start: u32(b, 1), n, step: b[7] || 1, data: Int8Array.from(b.subarray(8, 8 + n)) }; }
+/* GET_TABLE: every table entry (grid [0, nSlices) then recorded [nSlices, nTable)),
+ * 13 bytes each, ≤ 39 per reply. Resolves { nSlices, nTable, entries[] } with
+ * entries of { start, len, key (-1 grid), cls, sal, hit, dens }. */
+const TABLE_ENTRY = 13, TABLE_CHUNK = 39;
+function parseTableChunk(b) {
+  const n = Math.floor((b.length - 3) / TABLE_ENTRY), entries = [];
+  for (let i = 0; i < n; i++) { const at = 3 + i * TABLE_ENTRY; const k = b[at + 8];
+    entries.push({ start: u32(b, at), len: u32(b, at + 4), key: k > 127 ? k - 256 : k, cls: b[at + 9], sal: b[at + 10], hit: !!b[at + 11], dens: b[at + 12] }); }
+  return { nSlices: b[1], nTable: b[2], entries };
+}
+async function fetchTable(link, opts = {}) {
+  let first = 0, out = null;
+  do {
+    const c = parseTableChunk(await link.request(CMD.table, Uint8Array.of(first, TABLE_CHUNK), Object.assign({ key: 'table' + first }, opts)));
+    if (!out) out = { nSlices: c.nSlices, nTable: c.nTable, entries: [] };
+    out.entries.push(...c.entries); first += c.entries.length;
+    if (!c.entries.length) break;
+  } while (first < out.nTable);
+  return out;
+}
+/* GET_HITS: the shell's onset table for the current material (u32 sample
+ * positions, ≤ 127 per reply). Resolves a Uint32Array. */
+function parseHitsChunk(b) { const n = Math.floor((b.length - 3) / 4), p = new Uint32Array(n); for (let i = 0; i < n; i++) p[i] = u32(b, 3 + i * 4); return { total: b[1], first: b[2], positions: p }; }
+async function fetchHits(link, opts = {}) {
+  let first = 0, total = 0; const parts = [];
+  do {
+    const c = parseHitsChunk(await link.request(CMD.hits, Uint8Array.of(first), Object.assign({ key: 'hits' + first }, opts)));
+    total = c.total; parts.push(c.positions); first += c.positions.length;
+    if (!c.positions.length) break;
+  } while (first < total);
+  const out = new Uint32Array(parts.reduce((s, p) => s + p.length, 0)); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
 }
 /* GET_ENV: fetch nSlices × 16 envelope bytes in ≤30-slice chunks. */
 async function fetchEnv(link, n) {
@@ -274,8 +332,9 @@ function manualInfo(desc) {
            presetsHelp: (m && m.presets && m.presets.help) || '', jacks: desc.jacks || [] };
 }
 
-const api = { PROTO, CMD, ACT, STATUS, statusName, crc32, cobsEncode, cobsDecode, buildFrame, FrameParser, Link,
+const api = { PROTO, CMD, ACT, REC, NOTE_NAMES, keyName, STATUS, statusName, crc32, cobsEncode, cobsDecode, buildFrame, FrameParser, Link,
   u16, u32, f32, readStr, hello, getDescriptor, getLive, setLive, concat,
-  STATE_MIN, ZONE_MULT, parseState, fetchEnv, parseScope, allFields, findField, fieldLabels, pagerInfo, optionsInfo, manualInfo };
+  STATE_MIN, ZONE_MULT, parseState, fetchEnv, parseScope, allFields, findField, fieldLabels, pagerInfo, optionsInfo, manualInfo,
+  TABLE_ENTRY, TABLE_CHUNK, fetchWave, parseWave, fetchTable, parseTableChunk, fetchHits, parseHitsChunk };
 if (typeof module === 'object' && module.exports) module.exports = api; else root.HL = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
