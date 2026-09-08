@@ -92,6 +92,7 @@ map** (Options → Jacks, or automatically with Play/Pads): J4 slice · J5 style
 | Record Source | **Inputs** · Output (resample the module) |
 | Record | **Off** · Arm (B3 tap or J6 starts a loop take) |
 | Quantize | **Off (as played)** · 16ths · 8ths — Play's looper |
+| Autosave | Off · **On (2 s after an edit)** — the slice table and key map to the set's JSON, or a `sets/<file>.slices.json` sidecar beside a loose WAV |
 
 ## The web app
 
