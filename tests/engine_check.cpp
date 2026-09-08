@@ -1827,6 +1827,327 @@ int main()
         CHECK(e.looper.n == 5 && e.looper.ev[2].gen == 0 && e.looper.ev[3].gen == 1, "…with five events in two generations");
     }
 
+    /* ── EDIT package: slice editing on the audio thread ──────────────────── */
+    using bb::EditOp; using bb::EditReq; using bb::EditStatus;
+    // does the grid tile [0, bufLen) with every slice ≥ kGridMin?
+    auto Tiles = [](const bb::Engine& g) -> bool {
+        if(g.nSlices < 1 || g.slices[0].start != 0) return false;
+        for(int i = 0; i < g.nSlices; i++)
+        {
+            if(g.slices[i].len < bb::Engine::kGridMin) return false;
+            const int next = i + 1 < g.nSlices ? g.slices[i + 1].start : g.bufLen;
+            if(g.slices[i].start + g.slices[i].len != next) return false;
+        }
+        return true;
+    };
+    auto Bnd = [](int i, int pos, uint8_t gen = 0) { EditReq r; r.op = EditOp::SetBoundary; r.i = i; r.start = pos; r.gen = gen; return r; };
+    auto Ent = [](int t, int start, int len) { EditReq r; r.op = EditOp::SetEntry; r.t = t; r.start = start; r.len = len; return r; };
+    auto Add = [](int key, int start, int len, uint8_t flags = EditReq::kOrange) { EditReq r; r.op = EditOp::AddEntry; r.key = key; r.start = start; r.len = len; r.flags = flags; return r; };
+    auto One = [](EditOp op, int t) { EditReq r; r.op = op; r.t = t; return r; };
+    auto Nudge = [](int samples, int which) { EditReq r; r.op = EditOp::NudgeAll; r.a = samples; r.b = which; return r; };
+
+    SECTION("EDIT: a moved grid boundary plays the new region on the next trigger; a sounding voice finishes unchanged");
+    {
+        Fresh(e, 0, 1.f); e.muted = true;
+        float out[24];
+        auto renderN = [&](std::vector<float>& y, int nSamp) {
+            for(int i = 0; i < nSamp; i += 24) { e.Process(out, 24); y.insert(y.end(), out, out + 24); }
+        };
+        const uint8_t g0 = e.tableGen;
+        std::vector<float> y;
+        e.CallSlice(5, 1.f, false, false, false);          // slice 5 = [30000, 36000): 450 Hz
+        renderN(y, 1200);
+        const EditStatus st = e.ApplyEdit(Bnd(5, 27000));  // slice 5 now opens 3000 samples early, inside slice 4's tone
+        CHECK(st == EditStatus::Ok && e.tableGen != g0, "SetBoundary(5, 27000) accepted, tableGen bumped (%d)", (int)st);
+        CHECK(e.slices[4].start == 24000 && e.slices[4].len == 3000 && e.slices[5].start == 27000 && e.slices[5].len == 9000 && Tiles(e),
+              "linked: slice 4 = [24000, 27000), slice 5 = [27000, 36000), the grid still tiles");
+        CHECK((e.TableFlags(5) & bb::Engine::kFlagOrange) && !(e.TableFlags(4) & bb::Engine::kFlagOrange), "boundary 5 is orange, slice 4 is not");
+        renderN(y, 4800);
+        CHECK(SliceOfFreq(MeasureFreq(&y[1500], 4000), Rms(&y[1500], 4000)) == 5, "the voice fired before the edit still plays slice 5's old region (%.0f Hz)", MeasureFreq(&y[1500], 4000));
+        renderN(y, 6000);
+        int alive = 0; for(int i = 0; i < bb::Engine::kVoices; i++) alive += e.voices[i].active;
+        CHECK(alive == 0, "…and ends where it always did");
+        std::vector<float> z;
+        e.CallSlice(5, 1.f, false, false, false);
+        renderN(z, 6000);
+        CHECK(SliceOfFreq(MeasureFreq(&z[300], 2400), Rms(&z[300], 2400)) == 4 && SliceOfFreq(MeasureFreq(&z[3300], 2400), Rms(&z[3300], 2400)) == 5,
+              "the next call of slice 5 opens with the 3000 samples taken from slice 4, then its own (%.0f / %.0f Hz)",
+              MeasureFreq(&z[300], 2400), MeasureFreq(&z[3300], 2400));
+        // the sequencer: step 5 fires at its own time (the grid clock is untouched) and plays the moved content
+        e.muted = false; e.RegenPattern();
+        Rendered q = RenderLoops(e, 2);
+        const int a = 16 * kStep + 5 * kStep;
+        CHECK(SliceOfFreq(MeasureFreq(&q.y[a + 300], 2400), Rms(&q.y[a + 300], 2400)) == 4
+              && SliceOfFreq(MeasureFreq(&q.y[a + 3300], 2400), Rms(&q.y[a + 3300], 2400)) == 5,
+              "loop 2, step 5's slot: slice 4's tone for 3000 samples, then slice 5's (%.0f / %.0f Hz)",
+              MeasureFreq(&q.y[a + 300], 2400), MeasureFreq(&q.y[a + 3300], 2400));
+        CHECK(Rms(&q.y[16 * kStep + 4 * kStep + 3600], 2000) < 1e-3f, "step 4's slot: its 3000-sample slice, then honest silence (moving a boundary moves what plays, not when)");
+        // hits follow the geometry: with an onset at every old slice start, slice 5 no longer opens on one
+        {
+            int on[16]; for(int k = 0; k < 16; k++) on[k] = k * kStep;
+            Fresh(e, 0, 1.f); e.SetMaterial(gMat, kLen, kSr, on, 16, gCls);
+            CHECK(e.stepHit[4] && e.stepHit[5], "every slice opens on an onset");
+            e.ApplyEdit(Bnd(5, 27000));
+            CHECK(e.stepHit[4] && !e.stepHit[5], "after the move slice 5 = [27000, 36000): the onset at 30000 is past its first quarter → no hit");
+            e.ApplyEdit(Bnd(5, 29800));
+            CHECK(e.stepHit[5], "…at [29800, 36000) the onset at 30000 is inside it → hit again");
+            CHECK(e.loopState[5] == 0 && e.loopState[4] == 0, "loop points of both neighbours forgotten");
+        }
+    }
+
+    SECTION("EDIT: contiguity under any SetBoundary / NudgeAll sequence; refusals; tableGen bumps only on success; deterministic");
+    {
+        Fresh(e, 0, 1.f);
+        const uint8_t g0 = e.tableGen;
+        int refused = 0;
+        auto refuse = [&](const EditReq& r, EditStatus want, const char* what) {
+            const uint8_t g = e.tableGen;
+            const EditStatus st = e.ApplyEdit(r);
+            if(st == want && e.tableGen == g && Tiles(e)) refused++;
+            else printf("  (refusal '%s': status %d, wanted %d; gen %d→%d)\n", what, (int)st, (int)want, g, e.tableGen);
+        };
+        refuse(Bnd(0, 100), EditStatus::NotGrid, "i = 0");
+        refuse(Bnd(16, 100), EditStatus::NotGrid, "i = nSlices");
+        refuse(Bnd(5, 24000 + 63), EditStatus::BadArgs, "slice 4 would be 63 samples");
+        refuse(Bnd(5, 36000 - 63), EditStatus::BadArgs, "slice 5 would be 63 samples");
+        refuse(Bnd(5, -1), EditStatus::BadArgs, "pos < 0");
+        refuse(Bnd(5, kLen), EditStatus::BadArgs, "pos = bufLen");
+        refuse(Bnd(5, 31000, (uint8_t)(e.tableGen + 1)), EditStatus::Stale, "a stale gen");
+        refuse(Nudge(0, 0), EditStatus::BadArgs, "nudge by 0");
+        refuse(Nudge(100, 1), EditStatus::BadArgs, "nudge markers with none");
+        refuse(One(EditOp::Tombstone, 3), EditStatus::NotMarker, "tombstone a grid slice");
+        refuse(One(EditOp::Merge, 3), EditStatus::NotMarker, "merge a grid slice");
+        refuse(Ent(3, 0, 6000), EditStatus::NotMarker, "SetEntry on a grid slice");
+        { EditReq r; r.op = (EditOp)200; refuse(r, EditStatus::BadOp, "an unknown op"); }
+        CHECK(refused == 13 && e.tableGen == g0, "%d refusals, each leaving the table and tableGen alone", refused);
+        CHECK(e.ApplyEdit(Bnd(5, 31000, e.tableGen)) == EditStatus::Ok, "a matching gen is accepted");
+        // a sequence of moves and nudges: the grid always tiles with ≥ 64 per slice
+        auto sequence = [&](bb::Engine& g) {
+            g.ApplyEdit(Bnd(3, 15000)); g.ApplyEdit(Nudge(1000, 0)); g.ApplyEdit(Bnd(12, 70000));
+            g.ApplyEdit(Nudge(-500000, 0)); g.ApplyEdit(Nudge(4000, 0)); g.ApplyEdit(Bnd(1, 90000));
+            g.ApplyEdit(Nudge(700000, 0)); g.ApplyEdit(Bnd(8, 40000));
+        };
+        bool tiled = true;
+        {
+            Fresh(e, 0, 1.f);
+            e.ApplyEdit(Bnd(3, 15000)); tiled = tiled && Tiles(e);
+            e.ApplyEdit(Nudge(1000, 0)); tiled = tiled && Tiles(e) && e.slices[3].start == 16000 && e.slices[1].start == 7000;
+            e.ApplyEdit(Nudge(-500000, 0)); tiled = tiled && Tiles(e) && e.slices[1].start == 64 && e.slices[15].start == 15 * 64;
+            e.ApplyEdit(Nudge(700000, 0)); tiled = tiled && Tiles(e) && e.slices[15].start == kLen - 64 && e.slices[1].start == kLen - 15 * 64;
+            CHECK(tiled, "nudges clamp every boundary so its neighbours keep 64 samples, and the grid keeps tiling");
+            uint64_t orange = 0; for(int i = 0; i < 16; i++) if(e.TableFlags(i) & bb::Engine::kFlagOrange) orange |= 1ull << i;
+            CHECK(orange == 0xFFFEull, "every moved boundary is orange (slice 0's start never moves): %llx", (unsigned long long)orange);
+        }
+        bb::Engine e2;
+        Fresh(e, 0, 1.f); Fresh(e2, 0, 1.f);
+        sequence(e); sequence(e2);
+        bool same = e.tableGen == e2.tableGen && Tiles(e);
+        for(int i = 0; i < 16 && same; i++) same = e.slices[i].start == e2.slices[i].start && e.slices[i].len == e2.slices[i].len && e.tableFlags[i] == e2.tableFlags[i];
+        CHECK(same, "the same edit sequence on two engines gives the same table and generation");
+    }
+
+    SECTION("EDIT: markers — ADD inside the break, SPLIT, MERGE, TOMBSTONE, keys re-point, tombstones never trigger, slots are reused");
+    {
+        static float big2[kLen + 48000];
+        memcpy(big2, gMat, sizeof gMat);
+        for(int i = kLen; i < kLen + 48000; i++) big2[i] = 0.5f * sinf(6.2831853f * 1000.f * (float)(i - kLen) / kSr);   // a "recording": 1 kHz
+        auto setup = [&](int mode) {
+            e = bb::Engine(); e.Init(0x1234); e.patternMode = mode; e.patternKnob = 1.f;
+            e.SetMaterial(big2, kLen, kSr, nullptr, 0, gCls, 0, nullptr, kLen + 48000);
+            e.SetBpm(0.f); e.RegenPattern(); e.muted = true;
+            CHECK(e.CommitSlice(3, kLen, 12000, 1, 1.f, 0.01f, true) == 16, "a recording on key 3 is entry 16");
+        };
+        setup(0);
+        float out[24];
+        auto renderN = [&](std::vector<float>& y, int nSamp) {
+            for(int i = 0; i < nSamp; i += 24) { e.Process(out, 24); y.insert(y.end(), out, out + 24); }
+        };
+        auto callFreq = [&](int idx) -> float {   // call, measure the first 2400 samples, then let the voice drain
+            std::vector<float> y; e.CallSlice(idx, 1.f, false, false, false); renderN(y, 3000);
+            const float f = Rms(&y[300], 2400) < 0.02f ? 0.f : MeasureFreq(&y[300], 2400);
+            std::vector<float> drain; renderN(drain, 24000); return f; };
+        // ADD a marker over slice 7's region, key 5, with the control thread's analysis
+        EditReq r = Add(5, 7 * kStep, kStep);
+        bb::AnalyseEntry(e, r.start, r.len, r.meta); r.flags |= EditReq::kMeta;
+        CHECK(r.meta.cls == 1 && r.meta.sal == 1.f && r.meta.hit && r.meta.dens > 0.f, "AnalyseEntry: a 550 Hz tone is mid band, full salience, a hit, some density");
+        int idx = -1;
+        CHECK(e.ApplyEdit(r, &idx) == EditStatus::Ok && idx == 17 && e.nTable == 18, "ADD → entry 17 (got %d, nTable %d)", idx, e.nTable);
+        CHECK(e.KeySlice(5) == 17 && e.stepClass[17] == 1 && e.stepHit[17] && e.tableKey[17] == -1 && e.TableFlags(17) == bb::Engine::kFlagOrange,
+              "key 5 → 17 at once; meta copied; no owner key (not a recording); orange");
+        CHECK(SliceOfFreq(callFreq(17), 0.5f) == 7, "the marker plays slice 7's tone");
+        CHECK(e.RecordedEntry(5) < 0 && e.RecArm(5), "a take into key 5 would append, not replace the marker"); { int rs, rl; e.RecStop(rs, rl); }
+        // SPLIT it at +2400: 17 = [42000, 44400), 18 = [44400, 48000)
+        { EditReq s = One(EditOp::Split, 17); s.start = 7 * kStep + 2400;
+          CHECK(e.ApplyEdit(s, &idx) == EditStatus::Ok && idx == 18 && e.slices[17].len == 2400 && e.slices[18].start == 44400 && e.slices[18].len == 3600,
+                "SPLIT → 17 = [42000, 44400), 18 = [44400, 48000) (got %d)", idx);
+          CHECK(e.KeySlice(5) == 17 && e.stepClass[18] == 1 && e.TableFlags(18) == bb::Engine::kFlagOrange, "keys stay on 17; the new half inherits the class; orange");
+          s.start = 7 * kStep + 100;
+          CHECK(e.ApplyEdit(s) == EditStatus::BadArgs, "a split leaving a half under kRecMin is refused"); }
+        // a keyless ADD, then SET_KEY onto it and onto a grid slice
+        CHECK(e.ApplyEdit(Add(-1, 2 * kStep, kStep, 0), &idx) == EditStatus::Ok && idx == 19 && e.TableFlags(19) == 0 && e.stepClass[19] == 3,
+              "ADD without a key or meta → 19, grey, class 3");
+        { EditReq k; k.op = EditOp::SetKey; k.key = 6; k.t = 19;
+          CHECK(e.ApplyEdit(k) == EditStatus::Ok && e.KeySlice(6) == 19, "SET_KEY 6 → 19");
+          k.key = 7; k.t = 2;
+          CHECK(e.ApplyEdit(k) == EditStatus::Ok && e.KeySlice(7) == 2, "SET_KEY 7 → grid slice 2");
+          k.key = 7; k.t = 19;
+          CHECK(e.ApplyEdit(k) == EditStatus::Ok && e.KeySlice(7) == 19 && e.KeySlice(6) == 19, "two keys on one entry (decision 5)"); }
+        // SET_ENTRY: free start / len inside [0, freePos), overlaps allowed; refusals
+        CHECK(e.ApplyEdit(Ent(19, 1000, 20000)) == EditStatus::Ok && e.slices[19].start == 1000 && e.slices[19].len == 20000, "SET_ENTRY moves a marker freely (overlapping the grid)");
+        CHECK(e.ApplyEdit(Ent(19, e.freePos - 1000, 2000)) == EditStatus::BadArgs && e.ApplyEdit(Ent(19, 0, 479)) == EditStatus::BadArgs, "…but not past freePos or under kRecMin");
+        // MERGE 18 with the marker ending at its start (17): 17 is tombstoned, key 5 follows to 18
+        CHECK(e.ApplyEdit(One(EditOp::Merge, 18)) == EditStatus::Ok && e.slices[18].start == 42000 && e.slices[18].len == 6000, "MERGE(18) swallows 17: [42000, 48000)");
+        CHECK(e.IsTomb(17) && e.slices[17].len == 0 && e.tableKey[17] == -1 && e.KeySlice(5) == 18 && (e.TableFlags(17) & bb::Engine::kFlagTomb),
+              "17 is a tombstone; key 5 re-pointed to 18");
+        // tombstones never trigger
+        e.callHits = 0;
+        CHECK(callFreq(17) == 0.f && e.callHits == 0, "calling the tombstone: silence, no hit counted");
+        int alive = 0; for(int i = 0; i < bb::Engine::kVoices; i++) alive += e.voices[i].active;
+        CHECK(alive == 0, "…and no voice");
+        CHECK(!e.SetKeySlice(5, 17) && e.ApplyEdit(One(EditOp::Tombstone, 17)) == EditStatus::Tomb && e.ApplyEdit(Ent(17, 0, 6000)) == EditStatus::Tomb,
+              "a tombstone refuses keys, a second delete and a move");
+        e.PunchStep(3, 17, false);
+        CHECK(e.stepSrc[3] != 17, "a tombstone cannot be punched into a step");
+        // TOMBSTONE 19 (keys 6 and 7 on it) → both keys back to their span slices; a punched step of it becomes a rest
+        e.PunchStep(4, 19, false);
+        CHECK(e.stepSrc[4] == 19, "marker 19 punched into step 4");
+        CHECK(e.ApplyEdit(One(EditOp::Tombstone, 19)) == EditStatus::Ok && e.KeySlice(6) == 6 && e.KeySlice(7) == 7 && e.IsTomb(19) && e.stepSrc[4] == -1 && e.playSrc[4] == -1,
+              "TOMBSTONE(19): keys 6 and 7 → span slices 6 and 7; step 4 is a rest");
+        CHECK(e.nTable == 20, "the table does not shrink on a delete (nTable %d)", e.nTable);
+        // a new marker takes the first tombstone's slot
+        CHECK(e.ApplyEdit(Add(-1, 9 * kStep, kStep), &idx) == EditStatus::Ok && idx == 17 && !e.IsTomb(17) && e.nTable == 20, "ADD reuses slot 17 (got %d)", idx);
+        CHECK(SliceOfFreq(callFreq(17), 0.5f) == 9, "…and it plays");
+        // MERGE with no adjacent marker: the previous live marker (by index)
+        CHECK(e.ApplyEdit(One(EditOp::Merge, 18)) == EditStatus::Ok && e.slices[18].start == 42000 && e.slices[18].len == 18000 && e.IsTomb(17),
+              "MERGE(18) with nothing ending at its start joins the previous marker 17 = [54000, 60000): the union [42000, 60000)");
+        // fill the table: ADD refuses with Full, RecArm too
+        int added = 0; EditStatus last = EditStatus::Ok;
+        while(added < 200 && (last = e.ApplyEdit(Add(-1, 0, kStep))) == EditStatus::Ok) added++;
+        CHECK(last == EditStatus::Full && e.nTable == bb::Engine::kMaxTable && added == bb::Engine::kMaxTable - 18, "the table fills to kMaxTable (%d added) then refuses Full", added);
+        CHECK(!e.RecArm(9) && e.RecArm(3), "RecArm refuses a new key with no slot, accepts a key that has an entry"); { int rs, rl; e.RecStop(rs, rl); }
+        CHECK(e.ApplyEdit(One(EditOp::Tombstone, 40)) == EditStatus::Ok && e.RecArm(9), "…a delete frees a slot for it"); { int rs, rl; e.RecStop(rs, rl); }
+        // NUDGE markers: every live marker moves, clamped into [0, freePos)
+        { const int s18 = e.slices[18].start, s95 = e.slices[95].start;
+          CHECK(e.ApplyEdit(Nudge(-100000, 1)) == EditStatus::Ok && e.slices[18].start == 0 && e.slices[95].start == 0 && e.slices[40].len == 0,
+                "NUDGE markers −100000: clamped to 0; the tombstone untouched (18: %d → %d, 95: %d → %d)", s18, e.slices[18].start, s95, e.slices[95].start);
+          CHECK(e.ApplyEdit(Nudge(100000000, 1)) == EditStatus::Ok && e.slices[18].start + e.slices[18].len == e.freePos, "…and +∞ clamps to freePos"); }
+        // SWAP_KEYS trades the recorded entry's owner too
+        setup(0);
+        { EditReq w; w.op = EditOp::SwapKeys; w.a = 3; w.b = 9;
+          CHECK(e.ApplyEdit(w) == EditStatus::Ok && e.KeySlice(9) == 16 && e.KeySlice(3) == 9 && e.tableKey[16] == 9 && e.RecordedEntry(9) == 16,
+                "SWAP_KEYS(3, 9): key 9 plays the recording and owns it; key 3 plays what 9 did (grid slice 9)");
+          w.b = 3; CHECK(e.ApplyEdit(w) == EditStatus::BadArgs, "a == b is refused"); }
+        // compaction at SetMaterial on the same planes: tombstones go, keys and keyless looper events follow
+        setup(5); e.looperQuant = 0; e.extPhase = true; e.barPhase = 0.; e.Process(out, 24); e.muted = false;
+        CHECK(e.ApplyEdit(Add(5, 7 * kStep, kStep), &idx) == EditStatus::Ok && idx == 17, "Play: marker 17 over slice 7 on key 5");
+        CHECK(e.ApplyEdit(Add(-1, 2 * kStep, kStep), &idx) == EditStatus::Ok && idx == 18, "…and a keyless marker 18 over slice 2");
+        e.barPhase = 0.25; e.CallSlice(18, 1.f, false, true, false);                         // keyless event on 18
+        e.barPhase = 0.5;  e.CallSlice(e.KeySlice(3), 1.f, false, true, false, 1.f, false, 3); // keyed event: key 3 (the recording)
+        e.barPhase = 0.75; e.CallSlice(17, 1.f, false, true, false);                         // keyless event on 17
+        CHECK(e.looper.n == 3 && e.looper.ev[0].slice == 18 && e.looper.ev[1].key == 3 && e.looper.ev[2].slice == 17, "three events: keyless 18, key 3, keyless 17");
+        CHECK(e.ApplyEdit(One(EditOp::Tombstone, 18)) == EditStatus::Ok && e.looper.n == 2 && e.looper.ev[0].key == 3 && e.looper.ev[1].slice == 17,
+              "TOMBSTONE(18) drops the keyless event on it from the loop (n %d)", e.looper.n);
+        Rendered q1 = RenderLoops(e, 2);
+        const float f8 = MeasureFreq(&q1.y[kLen + 8 * kStep + 300], 2400), f12 = MeasureFreq(&q1.y[kLen + 12 * kStep + 300], 2400);
+        CHECK(fabsf(f8 - 1000.f) < 30.f && SliceOfFreq(f12, 0.5f) == 7 && SliceAtStep(q1, 16 + 4) == -1,
+              "pass 2: the recording at 0.5 (%.0f Hz), marker 17 at 0.75 (%.0f Hz), silence at 0.25", f8, f12);
+        e.SetMaterial(big2, kLen, kSr, nullptr, 0, gCls, 32, nullptr, kLen + 48000);   // 2 bars over the same planes
+        CHECK(e.nSlices == 32 && e.nTable == 34 && !e.IsTomb(32) && !e.IsTomb(33), "re-slice to 32: the tombstone is compacted away (nTable %d)", e.nTable);
+        CHECK(e.KeySlice(3) == 32 && e.KeySlice(5) == 33 && e.slices[33].start == 7 * kStep && e.tableKey[32] == 3 && e.TableFlags(33) == bb::Engine::kFlagOrange,
+              "key 3 → 32 (the recording), key 5 → 33 (the marker, still orange)");
+        CHECK(e.looper.n == 2 && e.looper.ev[1].slice == 33 && e.looper.ev[0].key == 3, "the keyless event follows 17 → 33; the keyed one is untouched");
+        Rendered q2 = RenderLoops(e, 2);
+        const float g8 = MeasureFreq(&q2.y[kLen + 8 * kStep + 300], 2400), g12 = MeasureFreq(&q2.y[kLen + 12 * kStep + 300], 2400);
+        CHECK(fabsf(g8 - 1000.f) < 30.f && SliceOfFreq(g12, 0.5f) == 7, "…and the loop resolves to the same audio (%.0f / %.0f Hz)", g8, g12);
+        // a recording the new material grows over is dropped; a marker inside the break is kept
+        e.SetMaterial(big2, kLen + 6000, kSr, nullptr, 0, gCls, 16, nullptr, kLen + 48000);
+        CHECK(e.nTable == 17 && e.KeySlice(5) == 16 && e.slices[16].start == 7 * kStep && e.KeySlice(3) == 3, "material grown by 6000: the recording under it goes, the marker stays (nTable %d)", e.nTable);
+    }
+
+    SECTION("EDIT: SWAP_KEYS with a looper event recorded on key a — the loop plays b's audio after the swap");
+    {
+        Prime(0);
+        e.barPhase = 0.25; e.CallSlice(e.KeySlice(3), 1.f, false, true, false, 1.f, false, 3);
+        CHECK(e.looper.n == 1 && e.looper.ev[0].key == 3, "an event on key 3");
+        Rendered q = RenderLoops(e, 2);
+        CHECK(SliceAtStep(q, 16 + 4) == 3, "pass 2, step 4: slice 3 (%d)", SliceAtStep(q, 16 + 4));
+        EditReq w; w.op = EditOp::SwapKeys; w.a = 3; w.b = 9;
+        CHECK(e.ApplyEdit(w) == EditStatus::Ok && e.KeySlice(3) == 9 && e.KeySlice(9) == 3, "swap 3 ↔ 9");
+        q = RenderLoops(e, 2);
+        CHECK(SliceAtStep(q, 16 + 4) == 9, "…the same event now plays slice 9 — it resolves through KeySlice at fire time (%d)", SliceAtStep(q, 16 + 4));
+    }
+
+    SECTION("EDIT: the boundary overlay — edits survive a same-plane SetMaterial, are dropped when nSlices changes; markers survive too");
+    {
+        Fresh(e, 0, 1.f);
+        e.ApplyEdit(Bnd(5, 27000)); e.ApplyEdit(Bnd(9, 52000));
+        e.SetMaterial(gMat, kLen, kSr, nullptr, 0, gCls);   // the same planes, same count (a Classifier / Onsets re-apply)
+        CHECK(e.slices[5].start == 27000 && e.slices[4].len == 3000 && e.slices[9].start == 52000 && Tiles(e), "both moved boundaries are back after the re-apply");
+        CHECK((e.TableFlags(5) & bb::Engine::kFlagOrange) && (e.TableFlags(9) & bb::Engine::kFlagOrange) && !(e.TableFlags(3) & bb::Engine::kFlagOrange), "…and still orange; untouched ones white");
+        e.swing = 0.6f; e.SetMaterial(gMat, kLen, kSr, nullptr, 0, gCls);   // a Swing re-apply: the untouched odd boundaries swing, the moved ones hold
+        CHECK(e.swung && e.slices[3].start == 2 * kStep + (int)(2.f * kStep * 0.6f + 0.5f) && e.slices[5].start == 27000 && e.slices[9].start == 52000 && Tiles(e),
+              "Swing re-apply: boundary 3 swings to %d, boundaries 5 and 9 stay where the user put them", e.slices[3].start);
+        e.swing = 0.5f;
+        e.SetMaterial(gMat, kLen, kSr, nullptr, 0, gCls, 32);               // another count: the overlay is dropped
+        bool plain = e.nSlices == 32;
+        for(int i = 0; i < 32 && plain; i++) plain = e.slices[i].start == i * 3000 && e.TableFlags(i) == 0;
+        CHECK(plain && e.ovOrange == 0, "32 slices: the computed grid, nothing orange, no overlay");
+        e.SetMaterial(gMat, kLen, kSr, nullptr, 0, gCls, 16);
+        CHECK(e.slices[5].start == 30000, "…and back to 16: the plain grid (the overlay did not linger)");
+        static float other[kLen]; memcpy(other, gMat, sizeof gMat);
+        e.ApplyEdit(Bnd(5, 27000));
+        e.SetMaterial(other, kLen, kSr, nullptr, 0, gCls);
+        CHECK(e.slices[5].start == 30000 && e.ovOrange == 0, "new planes: the overlay goes with the material");
+        // a moved boundary that a re-apply cannot honour is clamped, not dropped
+        Fresh(e, 0, 1.f);
+        e.ApplyEdit(Bnd(1, 100)); e.ApplyEdit(Bnd(2, 200));
+        e.swing = 0.6f; e.SetMaterial(gMat, kLen, kSr, nullptr, 0, gCls);
+        CHECK(Tiles(e) && e.slices[1].start == 100 && e.slices[2].start == 200, "tight boundaries survive a swing re-apply intact (%d, %d)", e.slices[1].start, e.slices[2].start);
+        e.swing = 0.5f;
+        // markers inside the break survive a same-plane re-apply (the relaxed keep rule), with their keys
+        Fresh(e, 0, 1.f);
+        int idx = -1;
+        e.ApplyEdit(Add(5, 7 * kStep, kStep), &idx);
+        { EditReq k; k.op = EditOp::SetKey; k.key = 8; k.t = 2; e.ApplyEdit(k); }   // key 8 on grid slice 2
+        e.SetMaterial(gMat, kLen, kSr, nullptr, 0, gCls);
+        CHECK(e.nTable == 17 && e.slices[16].start == 7 * kStep && e.KeySlice(5) == 16 && e.KeySlice(8) == 2, "same count: the marker and both key overrides survive");
+        e.SetMaterial(gMat, kLen, kSr, nullptr, 0, gCls, 32);
+        CHECK(e.nTable == 33 && e.slices[32].start == 7 * kStep && e.KeySlice(5) == 32 && e.KeySlice(8) == (8 * 32) / 24,
+              "32 slices: the marker follows to 32 with key 5; key 8's grid override falls back to the span (→ %d)", e.KeySlice(8));
+        e.SetMaterial(other, kLen, kSr, nullptr, 0, gCls);
+        CHECK(e.nTable == 16 && e.KeySlice(5) == 5, "new planes: markers gone, keys default");
+    }
+
+    SECTION("EDIT: SetGridBoundaries and SetKeyTable — the set loader's round trip");
+    {
+        Fresh(e, 0, 1.f);
+        int starts[16]; for(int i = 0; i < 16; i++) starts[i] = e.slices[i].start;
+        const uint8_t g0 = e.tableGen;
+        CHECK(e.SetGridBoundaries(starts, 16) && e.tableGen == g0 && e.ovOrange == 0, "the computed grid is a no-op: nothing orange, no gen bump");
+        starts[5] = 27000; starts[9] = 52000;
+        CHECK(e.SetGridBoundaries(starts, 16) && e.tableGen != g0 && Tiles(e) && e.slices[5].start == 27000 && e.slices[4].len == 3000
+              && (e.TableFlags(5) & bb::Engine::kFlagOrange) && (e.TableFlags(9) & bb::Engine::kFlagOrange) && !(e.TableFlags(4) & bb::Engine::kFlagOrange),
+              "two moved boundaries: applied, linked, orange where they differ");
+        int back[16]; for(int i = 0; i < 16; i++) back[i] = e.slices[i].start;
+        e.SetMaterial(gMat, kLen, kSr, nullptr, 0, gCls);
+        bool same = true; for(int i = 0; i < 16; i++) same = same && e.slices[i].start == back[i];
+        CHECK(same, "…and they are in the overlay: a re-apply keeps them");
+        int bad[16];
+        memcpy(bad, back, sizeof bad); CHECK(!e.SetGridBoundaries(bad, 15), "refused: n ≠ nSlices");
+        memcpy(bad, back, sizeof bad); bad[0] = 1;  CHECK(!e.SetGridBoundaries(bad, 16), "refused: starts[0] ≠ 0");
+        memcpy(bad, back, sizeof bad); bad[7] = bad[6] + 63; CHECK(!e.SetGridBoundaries(bad, 16), "refused: a 63-sample slice");
+        memcpy(bad, back, sizeof bad); bad[15] = kLen - 63; CHECK(!e.SetGridBoundaries(bad, 16), "refused: 63 samples before the end");
+        memcpy(bad, back, sizeof bad); bad[8] = bad[9]; CHECK(!e.SetGridBoundaries(bad, 16) && e.slices[8].start == back[8], "refused: not ascending — and nothing was written");
+        int8_t keys[24]; for(int k = 0; k < 24; k++) keys[k] = -1;
+        keys[3] = 9;
+        CHECK(e.SetKeyTable(keys) && e.KeySlice(3) == 9 && e.KeySlice(4) == 4 && e.KeySlice(20) == 15, "SetKeyTable: −1 = the default, 3 → 9");
+        keys[0] = 16; CHECK(!e.SetKeyTable(keys) && e.KeySlice(3) == 9, "refused: an index ≥ nTable, nothing written");
+        int idx = -1; e.ApplyEdit(Add(-1, 0, kStep), &idx); e.ApplyEdit(One(EditOp::Tombstone, idx));
+        keys[0] = (int8_t)idx; CHECK(!e.SetKeyTable(keys), "refused: a tombstone");
+        keys[0] = -1; keys[1] = (int8_t)idx; e.ApplyEdit(Add(-1, 0, kStep), &idx);   // the slot is alive again
+        CHECK(e.SetKeyTable(keys) && e.KeySlice(1) == idx, "…alive again after the slot is reused: accepted");
+    }
+
     printf("\n%d passed, %d failed\n", gPass, gFail);
     return gFail ? 1 : 0;
 }
