@@ -64,7 +64,7 @@ const REC_MIN = 480;
 /* SCOPE: the firmware's ring geometry (core/bb_scope.h) and this module's max_body
  * (1024 in the firmware's Makefile; 512 is the protocol default an older build has). */
 const MAX_BODY = 1024;
-const SCOPE_RING = 4096, SCOPE_USABLE = 3840, SCOPE_HYST = 4, SCOPE_MAX_N = 512, SCOPE_HDR = 10;
+const SC = HL.SCOPE;
 
 function buildDescriptor() {
   const pagerFields = [];
@@ -99,7 +99,7 @@ function buildDescriptor() {
       { id: 'out_l', name: 'Audio Out L', sig: 'audioOut', help: 'Audio out, left.' },
       { id: 'out_r', name: 'Audio Out R', sig: 'audioOut', help: 'Audio out, right.' },
     ],
-    audiothurgist: { ext: 1, state: 96, env: 97, scope: 98, action: 99, wave: 100, table: 101, hits: 102, sets: 1, scope2: 1 },
+    audiothurgist: { ext: 1, state: 96, env: 97, scope: 98, action: 99, wave: 100, table: 101, hits: 102, sets: 1, scope2: 2 },
     manual: {
       preamble: '**Audiothurgist chops breaks to a grid and rearranges them** with one knob that travels from *the record, verbatim* to rolls, bursts, and reverb rubble. Patterns hold until you ask for new ones. (Demo descriptor — the module\'s own text replaces this.)',
       sections: [
@@ -233,32 +233,67 @@ class FakeDevice {
     if (this.ext !== this._lastExt) { this._lastExt = this.ext; this.extTrans = (this.extTrans + 1) & 0xff; }
     return (this.p2Engaged ? 1 : 0) | (this.pending ? 2 : 0) | (this.aligned ? 4 : 0) | ((this.extTrans & 15) << 4);
   }
-  /* SCOPE: the four channels as functions of the module's virtual sample clock — the
-   * step's class plays a kick / snare / hat / tone burst on out L (out R a little
-   * different), a 110 Hz saw sits on in L and a 440 Hz tone with tremolo on in R (both
-   * silent with opts.inputs = false); muted stops the outputs. */
-  scopePos() { return Math.floor((Date.now() - this.t0) / 1000 * SR); }
+  /* SCOPE: the ten channels as functions of the module's virtual sample clock, never
+   * materialised (a 64 K ring per request would be too slow here) — the step's class
+   * plays a kick / snare / hat / tone burst on out L (out R a little different), a
+   * 110 Hz saw sits on in L and a 440 Hz tone with tremolo on in R (both silent with
+   * opts.inputs = false); muted stops the outputs. The six CV jacks follow their Brain-
+   * map roles: J3 a 5 ms clock pulse per step (only while `ext`), J4 a 0.3 Hz ±5 V LFO
+   * (something patched into v/oct), J5 a 50 % gate per step, J6 / J7 / J8 the kick /
+   * snare / hat gates (6 ms of 5 V on their class's steps) — what the DACs drive reads
+   * back on the ADC. Positions are on the firmware's clock (wrap 24·2^26; cv = pos / 24). */
+  scopePos() { const p = Math.floor((Date.now() - this.t0) / 1000 * SR); return (p - p % SC.cvDiv) % SC.wrap; }
+  scopeStep(p) { const stepLen = Math.max(1, Math.round(60 / (this.opts.bpm * this.mult) / 4 * SR)), stepIdx = Math.floor(p / stepLen); return { stepLen, stepIdx, t: (p - stepIdx * stepLen) / SR, step: ((stepIdx % this.nSlices) + this.nSlices) % this.nSlices }; }
   scopeSample(c, p) {
-    const stepLen = Math.max(1, Math.round(60 / (this.opts.bpm * this.mult) / 4 * SR)), stepIdx = Math.floor(p / stepLen), t = (p - stepIdx * stepLen) / SR;
+    const { stepIdx, t, step } = this.scopeStep(p);
     const hash = q => (Math.imul(q | 0, 1664525) + 1013904223 >>> 0) / 4294967296 * 2 - 1;
     if (c >= 2) {
       if (!this.opts.inputs) return 0;
       return c === 2 ? 0.45 * (2 * (((p * 110 / SR) % 1) + 1) % 1 - 1) : 0.3 * Math.sin(2 * Math.PI * 440 * p / SR) * (0.75 + 0.25 * Math.sin(2 * Math.PI * 3 * p / SR));
     }
-    const src = this.src[((stepIdx % this.nSlices) + this.nSlices) % this.nSlices], cls = src < 0 ? -1 : this.stepClass[src]; let v = 0;
+    const src = this.src[step], cls = src < 0 ? -1 : this.stepClass[src]; let v = 0;
     if (!this.muted && cls >= 0) {
       if (cls === 0) v = Math.sin(2 * Math.PI * (55 + 40 * Math.exp(-t * 30)) * t) * Math.exp(-t * 9) * 0.9;
       else if (cls === 1) v = (hash(p) * 0.7 + Math.sin(2 * Math.PI * 190 * t) * 0.5) * Math.exp(-t * 14) * 0.6;
       else if (cls === 2) v = hash(p) * Math.exp(-t * 45) * 0.5;
       else v = Math.sin(2 * Math.PI * 330 * t) * Math.exp(-t * 6) * 0.5;
     }
+    void stepIdx;
     return c === 0 ? v : v * 0.8 + 0.08 * Math.sin(2 * Math.PI * 1000 * p / SR);
   }
-  /* the rings as the firmware holds them at snapshot wpos: [wpos - 4096, wpos) per channel */
-  scopeRings(wpos) {
-    const i8 = v => Math.trunc(Math.max(-1, Math.min(1, v)) * 127), R = [];
-    for (let c = 0; c < 4; c++) { const r = new Int8Array(SCOPE_RING); for (let p = wpos - SCOPE_RING; p < wpos; p++) r[((p % SCOPE_RING) + SCOPE_RING) % SCOPE_RING] = i8(this.scopeSample(c, p)); R.push(r); }
-    return R;
+  /* a cv jack's volts at cv index k (one per block) */
+  scopeCvVolts(j, k) {
+    const p = k * SC.cvDiv, { t, step } = this.scopeStep(p), src = this.src[step], cls = src < 0 ? -1 : this.stepClass[src];
+    switch (j) {
+      case 0: return this.ext && t < 0.005 ? 5 : 0.01 * Math.sin(k);
+      case 1: return 5 * Math.sin(2 * Math.PI * 0.3 * p / SR);
+      case 2: return t < 0.0625 ? 5 : 0;
+      default: return (!this.muted && cls === j - 3 && t < 0.006) ? 5 : 0.02;
+    }
+  }
+  scopeAud(c, p) { return Math.trunc(Math.max(-1, Math.min(1, this.scopeSample(c, p))) * 127); }
+  scopeCv(j, k) { return HL.scopeCvCode(this.scopeCvVolts(j, k)); }
+  /* core/bb_scope.h's ScopeCrossing, ported: the most recent rising crossing of `level` that leaves `span`, Schmitt ±hyst, walked backwards */
+  scopeCrossing(get, usable, wrap, wpos, span, level) {
+    const hi = level + SC.hyst, lo = level - SC.hyst, prev = p => p === 0 ? wrap - 1 : p - 1;
+    if (span < 1 || span > usable) return -1;
+    let p = prev(wpos), next = get(p), age = 1, left = usable - 1, high = false;
+    for (;;) {
+      if (left <= 0) return -1;
+      let q = prev(p), v = get(q); left--; age++;
+      if (next >= hi) high = true;
+      if (v < level) {
+        if (next >= level && high && age - 1 >= span) {
+          const cand = p;
+          while (!(v <= lo || v >= hi) && left > 0) { q = prev(q); v = get(q); left--; age++; }
+          if (v <= lo) return cand;
+          if (v < hi) return -1;
+          p = q; next = v; high = true; continue;
+        }
+        high = false;
+      }
+      p = q; next = v;
+    }
   }
   dice() { const n = this.nSlices; for (let s = 0; s < n; s++) this.src[s] = Math.random() < 0.3 ? -1 : Math.floor(Math.random() * n); this.histN = Math.min(16, this.histN + 1); }
   curStep() { const beat = (Date.now() - this.t0) / 60000 * this.opts.bpm * this.mult * 4; return Math.floor(beat) % this.nSlices; }
@@ -345,45 +380,62 @@ class FakeDevice {
         if (first >= 64) { U8(2); break; }
         U8(0); U8(first); U8(n); for (let i = 0; i < n * 16; i++) U8(this.env[first * 16 + i]); break; }
       /* SCOPE: the firmware's 0x62 — the empty body is the old mono reply, a body is the
-       * four-channel one with the same parse / clamp / trigger / at-pos / decimation rules
-       * as core/bb_scope.h (kept in step by hand: selftest.mjs pins both). */
+       * ten-channel one with the same parse / clamp / window / trigger / at-pos / decimation
+       * rules as core/bb_scope.h (kept in step by hand: selftest.mjs pins both). */
       case CMD.scope: {
-        const wpos = this.scopePos(), R = this.scopeRings(wpos), slot = p => ((p % SCOPE_RING) + SCOPE_RING) % SCOPE_RING;
+        const wpos = this.scopePos(), cvW = Math.floor(wpos / SC.cvDiv);
+        const sub = (p, k, wrap) => { k %= wrap; return p >= k ? p - k : p + (wrap - k); }, add = (p, k, wrap) => (p + k) % wrap;
         if (!body.length) {
-          U8(0); U16(256); const start = ((wpos - 1) & ~3) - 1020;
-          for (let i = 0; i < 256; i++) { const s = slot(start + i * 4); U8(Math.trunc((R[0][s] + R[1][s]) / 2)); }
+          U8(0); U16(256); let p = sub(sub(wpos, 1, SC.wrap) & ~3, 1020, SC.wrap);
+          for (let i = 0; i < 256; i++) { U8(Math.trunc((this.scopeAud(0, p) + this.scopeAud(1, p)) / 2)); p = add(p, 4, SC.wrap); }
           break;
         }
-        if (body.length < 5) { U8(2); break; }
-        const mask = body[0], decim = body[1], flags = body[4]; let n = u16(body, 2);
-        if (!mask || mask > 15 || !decim || decim > 16 || !n || ((flags & 4) && body.length < 9)) { U8(2); break; }
-        let chans = 0; for (let c = 0; c < 4; c++) if (mask & (1 << c)) chans++;
-        n = Math.max(1, Math.min(n, SCOPE_MAX_N, Math.floor((this.opts.maxBody - SCOPE_HDR) / chans), Math.floor(SCOPE_USABLE / decim)));
-        const span = n * decim; let start = wpos - span, fl = 0;
-        if (flags & 4) {
-          const pos = u32(body, 5); let age = (wpos - pos) % 4294967296; if (age < 0) age += 4294967296; if (age >= 2147483648) age -= 4294967296;
-          if (age >= span && age <= SCOPE_USABLE) { start = wpos - age; fl = 2; }
-        } else if (flags & 1) {
-          let first = 0; while (!(mask & (1 << first))) first++;
-          const r = R[first], oldest = wpos - SCOPE_USABLE, latest = wpos - span; let armed = false, pending = false, cand = 0, prev = r[slot(oldest)], found = false, best = 0;
-          for (let p = oldest + 1; p < wpos; p++) {
-            const v = r[slot(p)];
-            if (v <= -SCOPE_HYST) { armed = true; pending = false; }
-            if (pending) { if (v < 0) pending = false; else if (v >= SCOPE_HYST) { pending = false; armed = false; if (cand <= latest) { best = cand; found = true; } } }
-            else if (armed && prev < 0 && v >= 0) { pending = true; cand = p; }
-            prev = v;
-          }
-          if (found) { start = best; fl = 1; }
+        if (body.length < SC.reqMin) { U8(2); break; }
+        const mask = body[0], decim = body[1], flags = body[4]; let n = u16(body, 2), pos = 0, maskHi = 0, cvDecim = 1, level = 0, trig = 0;
+        if (mask > 15 || !decim || decim > SC.maxDecim || !n) { U8(2); break; }
+        if (flags & (SC.at | SC.ext)) { if (body.length < SC.reqPos) { U8(2); break; } pos = u32(body, 5); if ((flags & SC.at) && pos >= SC.wrap) { U8(2); break; } }
+        if (flags & SC.ext) {
+          if (body.length < SC.reqExt) { U8(2); break; }
+          maskHi = body[9]; cvDecim = body[10]; level = body[11] > 127 ? body[11] - 256 : body[11]; trig = body[12];
+          if (maskHi > 63 || !cvDecim || cvDecim > SC.cvMaxDecim) { U8(2); break; }
+          if ((trig & SC.trigSet) ? (trig & 0x7f) >= 10 : trig !== 0) { U8(2); break; }
         }
-        U8(0); U8(mask); U8(decim); U16(n); U8(fl); U32(((start % 4294967296) + 4294967296) % 4294967296);
-        for (let c = 0; c < 4; c++) {
-          if (!(mask & (1 << c))) continue;
-          for (let i = 0; i < n; i++) {
-            const a = start + i * decim; let v = R[c][slot(a)];
-            if ((flags & 2) && decim > 1) { let mag = -1; for (let k = 0; k < decim; k++) { const x = R[c][slot(a + k)], m = Math.abs(x); if (m > mag) { mag = m; v = x; } } }
-            U8(v);
+        if (!mask && !maskHi) { U8(2); break; }
+        const count = m => { let c = 0; for (let i = 0; i < 8; i++) if (m & (1 << i)) c++; return c; }, first = m => { for (let i = 0; i < 8; i++) if (m & (1 << i)) return i; return -1; };
+        const hdr = SC.hdr + ((flags & SC.ext) ? SC.hdrExt : 0);
+        n = Math.min(n, SC.maxN, Math.floor((this.opts.maxBody - hdr) / (count(mask) + count(maskHi))));
+        if (mask) n = Math.min(n, Math.floor(SC.usable / decim)); if (maskHi) n = Math.min(n, Math.floor(SC.cvUsable / cvDecim)); n = Math.max(1, n);
+        const spanA = mask ? n * decim : 0, spanC = maskHi ? n * cvDecim : 0;
+        const holdsA = p => { const a = HL.scopeAge(wpos, p); return a >= spanA && a <= SC.usable; }, holdsC = k => { const a = HL.scopeAge(cvW, k, SC.cvWrap); return a >= spanC && a <= SC.cvUsable; };
+        const place = (p, fl) => { const w = { pos: p, cvPos: Math.floor(p / SC.cvDiv), flags: fl };
+          if (mask && !holdsA(w.pos)) { w.pos = sub(wpos, spanA, SC.wrap); w.flags |= SC.detached; }
+          if (maskHi && !holdsC(w.cvPos)) { w.cvPos = sub(cvW, spanC, SC.cvWrap); w.flags |= SC.detached; } return w; };
+        let newest = mask ? sub(wpos, spanA, SC.wrap) : wpos;
+        if (maskHi) { const nc = sub(cvW, spanC, SC.cvWrap) * SC.cvDiv; if (HL.scopeAge(wpos, nc) > HL.scopeAge(wpos, newest)) newest = nc; }
+        const src = (trig & SC.trigSet) ? (trig & 0x7f) : first(mask) >= 0 ? first(mask) : first(maskHi) >= 0 ? 4 + first(maskHi) : -1;
+        let win;
+        if (flags & SC.at) {
+          if ((!mask || holdsA(pos)) && (!maskHi || holdsC(Math.floor(pos / SC.cvDiv)))) win = { pos, cvPos: Math.floor(pos / SC.cvDiv), flags: SC.atHonoured };
+          else win = place(newest, 0);
+        } else if ((flags & SC.trig) && src >= 0) {
+          if (src < 4) {
+            let need = spanA; if (maskHi && spanC * SC.cvDiv > need) need = spanC * SC.cvDiv; if (need > SC.usable) need = spanA > 0 ? spanA : SC.usable; need = Math.max(1, need);
+            const c = this.scopeCrossing(p => this.scopeAud(src, p), SC.usable, SC.wrap, wpos, need, level);
+            win = c >= 0 ? place(c, SC.triggered) : place(newest, 0);
+          } else {
+            let need = spanC; const fromA = Math.ceil(spanA / SC.cvDiv); if (fromA > need) need = fromA; need = Math.max(1, Math.min(need, SC.cvUsable));
+            const c = this.scopeCrossing(k => this.scopeCv(src - 4, k), SC.cvUsable, SC.cvWrap, cvW, need, level);
+            win = c >= 0 ? place(c * SC.cvDiv, SC.triggered) : place(newest, 0);
           }
-        }
+        } else win = place(newest, 0);
+        U8(0); U8(mask); U8(decim); U16(n); U8(win.flags | ((flags & SC.ext) ? SC.extReply : 0)); U32(win.pos);
+        if (flags & SC.ext) { U8(maskHi); U8(cvDecim); U8(SC.cvDiv); U8((flags & SC.trig) && !(flags & SC.at) && src >= 0 ? src : SC.trigNone); }
+        const extract = (get, wrap, start, dec) => { let p = start;
+          for (let i = 0; i < n; i++) { let v = get(p);
+            if ((flags & SC.peak) && dec > 1) { let mag = -1, q = p; for (let k = 0; k < dec; k++) { const x = get(q), m = Math.abs(x); if (m > mag) { mag = m; v = x; } q = add(q, 1, wrap); } }
+            U8(v); p = add(p, dec, wrap); } };
+        for (let c = 0; c < 4; c++) if (mask & (1 << c)) extract(p => this.scopeAud(c, p), SC.wrap, win.pos, decim);
+        for (let j = 0; j < 6; j++) if (maskHi & (1 << j)) extract(k => this.scopeCv(j, k), SC.cvWrap, win.cvPos, cvDecim);
         break; }
       case CMD.action: {
         const op = body[0], a = body[1], b = body[2]; let ok = true;
@@ -433,6 +485,6 @@ class FakePort {
   async open() {} async close() {}
 }
 
-const api = { FakeDevice, FakePort, buildDescriptor, OPTION_FIELDS, FILES, LIVE_SIZE, SCHEMA, OFF, SR, BUF_CAP, SLICE_LEN, KEYS, MAX_BODY, SCOPE_RING, SCOPE_USABLE };
+const api = { FakeDevice, FakePort, buildDescriptor, OPTION_FIELDS, FILES, LIVE_SIZE, SCHEMA, OFF, SR, BUF_CAP, SLICE_LEN, KEYS, MAX_BODY };
 if (typeof module === 'object' && module.exports) module.exports = api; else root.DEMO = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
