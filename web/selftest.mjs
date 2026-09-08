@@ -58,6 +58,8 @@ function stateBody(len) {
   if (len >= 219) b[218] = 1;                                             /* Key Plays = Held */
   if (len >= 223) { b[219] = 1; b[220] = 128; b[221] = 2; b[222] = 9; }   /* SETS: saving, 50 %, last result card full, seq 9 */
   if (len >= 255) { const nm = 'Amen_kit-2'; for (let i = 0; i < nm.length; i++) b[223 + i] = nm.charCodeAt(i); }
+  if (len >= 258) { b[255] = 77; b[256] = 3; b[257] = 255; }              /* EDIT: tableGen 77, undo depth 3, no selection */
+  if (len >= 262) dv.setUint32(258, 123456, true);                        /* EDIT: srcPos */
   return b;
 }
 {
@@ -254,10 +256,12 @@ await link.start();
   check('rec taking → pending', st2.recState === 3 && st2.recKey === 5);
   kit.rec.t -= 5000; const st3 = HL.parseState(await kl.request(HL.CMD.state));
   check('rec committed: idle, key 5 points at a new entry, freePos advanced', st3.recState === 0 && st3.recKey === -1 && st3.nTable === 68 && st3.keySlice[5] === 67 && st3.freePos > s.freePos);
-  /* ACTION 10: clear key 3 → the table shrinks, later keys re-index, key 3 falls back to its span slice. */
+  /* ACTION 10: clear key 3 → the recording stays, keyless and at its index (Engine::ClearKey: nothing shifts), key 3
+   * falls back to its span slice, every other key holds. */
   await kl.request(HL.CMD.action, Uint8Array.of(HL.ACT.recClear, 3), { urgent: true });
   const st4 = HL.parseState(await kl.request(HL.CMD.state));
-  check('rec clear: entry gone, keys re-pointed', st4.nTable === 67 && st4.keySlice[3] === 8 && st4.keySlice[7] === 64 && st4.keySlice[14] === 65 && st4.keySlice[5] === 66);
+  check('rec clear: index-stable — the entry stays keyless, key 3 → its span slice, the others hold', st4.nTable === 68 && st4.keySlice[3] === 8 && st4.keySlice[7] === 65 && st4.keySlice[14] === 66 && st4.keySlice[5] === 67);
+  { const t4 = await HL.fetchTable(kl); check('rec clear: entry 64 is still there, keyless, its span intact', t4.entries[64].key === -1 && t4.entries[64].start === s.bufLen && t4.entries[64].len === Math.round(0.35 * DEMO.SR)); }
   { let bad = null; try { await kl.request(HL.CMD.action, Uint8Array.of(HL.ACT.recClear, 3), { urgent: true }); } catch (e) { bad = e; } check('rec clear an empty key → BAD_STATE', bad && /BAD_STATE/.test(bad.message)); }
   /* ACTION 11: Key Plays lands in the Options byte the blob carries. */
   await kl.request(HL.CMD.action, Uint8Array.of(HL.ACT.keyPlays, 1), { urgent: true });
@@ -300,7 +304,7 @@ await link.start();
   check('the saved set joined the list at the end', HL.fieldLabels(await HL.getDescriptor(l, await HL.hello(l)), 'sample.idx').slice(-1)[0] === 'kit_1 [set]' && s3.file === labs.length);
   /* change the kit, then load the set back: the table and keys return */
   await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.recClear, 3), { urgent: true });
-  const s4 = HL.parseState(await l.request(HL.CMD.state)); check('kit changed', s4.nTable === 66 && s4.keySlice[3] === 8);
+  const s4 = HL.parseState(await l.request(HL.CMD.state)); check('kit changed', s4.nTable === 67 && s4.keySlice[3] === 8);
   await HL.loadSet(l, 'kit_1');
   const s5 = await finish();
   check('load done: table and keys back, material generation moved', s5.setState === 0 && s5.setResult === 0 && s5.setSeq === 2 && s5.setName === 'kit_1' && s5.nTable === 67 && s5.keySlice[3] === 64 && s5.matGen !== s4.matGen);
@@ -417,6 +421,185 @@ await link.start();
   d.log.length = 0; await Promise.all([l.request(HL.CMD.scope, undefined, { key: 'scope' }), l.request(HL.CMD.scope, undefined, { key: 'scope' }), l.request(HL.CMD.scope, HL.scopeReq(0x0f, 4, 253), { key: 'scope15' })]);
   check('old and new scope requests keep their own keys', d.log.filter(t => t === HL.CMD.scope).length === 2);
   await lq.close(); await l.close();
+}
+
+/* ── 7. EDIT: the tail and table bodies, then every op over the fake module — OK / BAD_ARGS / BAD_STATE, tableGen,
+ *       the 14-byte table, tombstones, keys, FROM_ONSETS, the audition voice, TAP_MARK, and an older firmware ── */
+{
+  /* the synthetic bodies: old lengths still parse, the new bytes appear at 258 and 262 */
+  const e0 = HL.parseState(stateBody(255)); check('state 255: no edit tail', e0.setName === 'Amen_kit-2' && e0.tableGen === undefined && e0.srcPos === undefined);
+  check('state 257: the three bytes need 258', HL.parseState(stateBody(257)).tableGen === undefined);
+  const e1 = HL.parseState(stateBody(258)); check('state 258: tableGen, undoDepth, selSlice −1; no srcPos', e1.tableGen === 77 && e1.undoDepth === 3 && e1.selSlice === -1 && e1.srcPos === undefined);
+  const e2 = HL.parseState(stateBody(262)); check('state 262: srcPos', e2.srcPos === 123456 && e2.tableGen === 77);
+  { const b = stateBody(262); b[257] = 9; check('selSlice 9', HL.parseState(b).selSlice === 9); }
+  check('state 300: a longer body still parses', HL.parseState(stateBody(300)).srcPos === 123456);
+  { const t = new Uint8Array(3 + 2 * HL.TABLE_ENTRY_EDIT); t[0] = 0; t[1] = 32; t[2] = 34; const dv = new DataView(t.buffer);
+    dv.setUint32(3, 100, true); dv.setUint32(7, 6000, true); t[11] = 0xff; t[12] = 0; t[13] = 240; t[14] = 1; t[15] = 60; t[16] = HL.EDIT.orange;
+    dv.setUint32(17, 192000, true); dv.setUint32(21, 0, true); t[25] = 0xff; t[26] = 2; t[27] = 255; t[28] = 0; t[29] = 210; t[30] = HL.EDIT.tomb;
+    const tb = HL.parseTableChunk(t, HL.TABLE_ENTRY_EDIT);
+    check('table chunk, 14-byte form: flags read, the rest as before', tb.entries.length === 2 && tb.entries[0].flags === HL.EDIT.orange && tb.entries[0].len === 6000 && tb.entries[0].key === -1 && tb.entries[1].flags === HL.EDIT.tomb && tb.entries[1].len === 0 && tb.entries[1].cls === 2);
+    check('table chunk, 13-byte form: flags 0', HL.parseTableChunk(t.subarray(0, 3 + 2 * HL.TABLE_ENTRY)).entries[0].flags === 0);
+    check('39 × 14 fit max_body 1024', 3 + 39 * HL.TABLE_ENTRY_EDIT <= 1024 && HL.TABLE_CHUNK === 39); }
+  check('ACT: the edit ops 16..29', HL.ACT.setBoundary === 16 && HL.ACT.fromOnsets === 26 && HL.ACT.audition === 27 && HL.ACT.release === 28 && HL.ACT.tapMark === 29 && HL.EDIT.orange === 1 && HL.EDIT.tomb === 2);
+
+  const SL = DEMO.SLICE_LEN;
+  const d = new DEMO.FakeDevice({ kit: true, nSlices: 32, latencyMs: 1 });
+  const l = new HL.Link(new DEMO.FakePort(d)); await l.start();
+  const info = await HL.hello(l); const desc = await HL.getDescriptor(l, info);
+  const state = async () => HL.parseState(await l.request(HL.CMD.state));
+  const table = () => HL.fetchTable(l, { edit: true });
+  check('demo advertises edit', desc.audiothurgist.edit === 1 && desc.audiothurgist.sets === 1);
+  const s0 = await state();
+  check('tail: tableGen ≥ 1, undoDepth 0, selSlice −1, srcPos inside the material', s0.tableGen >= 1 && s0.undoDepth === 0 && s0.selSlice === -1 && s0.srcPos >= 0 && s0.srcPos < s0.bufLen && s0.nTable === 35);
+  const t0 = await table();
+  check('14-byte form: 32 grid + 3 recordings, every flag white', t0.entries.length === 35 && t0.entries.every(e => e.flags === 0) && t0.entries[32].key === 3);
+  const t13 = await HL.fetchTable(l);
+  check('the 13-byte form still answers, flags 0', t13.entries.length === 35 && t13.entries[1].start === t0.entries[1].start && t13.entries[32].flags === 0);
+  const gen0 = s0.tableGen;
+  /* SET_BOUNDARY: ok with the gen, refetch shows the linked move and the orange flag; the state's tableGen follows */
+  let r = await HL.editBoundary(l, 5, 5 * SL - 1000, gen0);
+  check('SET_BOUNDARY ok: the reply carries the new tableGen, no index', r.ok && r.status === 0 && r.tableGen !== gen0 && r.newIdx === null);
+  let t = await table();
+  check('refetch: boundary 5 moved, linked, slice 5 orange, slice 4 white', t.entries[5].start === 5 * SL - 1000 && t.entries[4].len === SL - 1000 && t.entries[5].len === SL + 1000 && (t.entries[5].flags & HL.EDIT.orange) && !(t.entries[4].flags & HL.EDIT.orange));
+  let s = await state(); check('the state tail carries the reply\'s tableGen', s.tableGen === r.tableGen);
+  r = await HL.editBoundary(l, 6, 6 * SL - 1000, gen0);
+  check('a stale gen → BAD_STATE, nothing done, tableGen unchanged', r.status === 3 && !r.ok && r.tableGen === null && (await table()).entries[6].start === 6 * SL && (await state()).tableGen === s.tableGen);
+  r = await HL.editBoundary(l, 6, 6 * SL - 1000);
+  check('gen 0 is unchecked', r.ok && (await table()).entries[6].start === 6 * SL - 1000);
+  s = await state();
+  const bad = await Promise.all([HL.editBoundary(l, 0, 100), HL.editBoundary(l, 7, 6 * SL - 1000 + 63), HL.editBoundary(l, 7, s.bufLen), HL.editBoundary(l, 32, 100)]);
+  check('SET_BOUNDARY BAD_ARGS: i 0, a 63-sample neighbour, pos = bufLen, i = nSlices; tableGen holds', bad.every(x => x.status === 2) && (await state()).tableGen === s.tableGen);
+  { let e = null; try { await l.request(HL.CMD.action, Uint8Array.of(16, 5), { urgent: true }); } catch (x) { e = x; } check('a short body → BAD_ARGS', e && /BAD_ARGS/.test(e.message)); }
+  /* ADD_ENTRY: a marker over slice 7 on key 5, orange; a keyless grey one over slice 2 */
+  r = await HL.editAdd(l, 5, 7 * SL, SL, HL.EDIT.orange, s.tableGen);
+  s = await state();
+  check('ADD_ENTRY: newIdx 35, key 5 → 35, nTable 36', r.ok && r.newIdx === 35 && s.keySlice[5] === 35 && s.nTable === 36 && s.tableGen === r.tableGen);
+  t = await table();
+  check('the marker: slice 7\'s span, no owner, orange, its slice\'s class', t.entries[35].start === 7 * SL && t.entries[35].len === SL && t.entries[35].key === -1 && t.entries[35].flags === HL.EDIT.orange && t.entries[35].cls === t.entries[7].cls);
+  r = await HL.editAdd(l, null, 2 * SL, SL, 0);
+  check('a keyless grey marker: 36, flags 0, no key moved', r.ok && r.newIdx === 36 && (await table()).entries[36].flags === 0 && (await state()).keySlice[2] === 2);
+  check('ADD BAD_ARGS: len 479, past freePos', (await HL.editAdd(l, null, 0, 479)).status === 2 && (await HL.editAdd(l, null, s.freePos - 100, 480)).status === 2);
+  /* SPLIT / MERGE: keys stay on the left half; merge swallows the adjacent one and leaves a tombstone */
+  r = await HL.editSplit(l, 35, 7 * SL + 2400, (await state()).tableGen);
+  t = await table(); s = await state();
+  check('SPLIT 35 at +2400 → 37; keys stay on 35; both orange', r.ok && r.newIdx === 37 && t.entries[35].len === 2400 && t.entries[37].start === 7 * SL + 2400 && t.entries[37].len === SL - 2400 && (t.entries[37].flags & HL.EDIT.orange) && s.keySlice[5] === 35 && s.nTable === 38);
+  check('SPLIT BAD_ARGS: a half under 480, a grid slice, an index past nTable', (await HL.editSplit(l, 37, 7 * SL + 2400 + 100)).status === 2 && (await HL.editSplit(l, 3, 3 * SL + 3000)).status === 2 && (await HL.editSplit(l, 200, 0)).status === 2);
+  r = await HL.editMerge(l, 37);
+  t = await table(); s = await state();
+  check('MERGE 37 swallows 35 (it ends at 37\'s start): the union, key 5 → 37, 35 a tombstone', r.ok && t.entries[37].start === 7 * SL && t.entries[37].len === SL && s.keySlice[5] === 37 && (t.entries[35].flags & HL.EDIT.tomb) && t.entries[35].len === 0 && t.entries[35].key === -1 && s.nTable === 38);
+  const gT = s.tableGen;
+  check('a tombstone is skipped: SET_ENTRY / MERGE / SET_KEY / SPLIT / TOMBSTONE on it → BAD_ARGS, nothing bumps',
+    (await HL.editEntry(l, 35, 0, 4800)).status === 2 && (await HL.editMerge(l, 35)).status === 2 && (await HL.editSetKey(l, 9, 35)).status === 2 && (await HL.editSplit(l, 35, 100)).status === 2 && (await HL.editTombstone(l, 35)).status === 2 && (await state()).tableGen === gT);
+  r = await HL.editAdd(l, null, 3 * SL, SL, HL.EDIT.orange);
+  check('ADD reuses the tombstone\'s slot 35, orange again', r.ok && r.newIdx === 35 && (await table()).entries[35].flags === HL.EDIT.orange && (await state()).nTable === 38);
+  /* SET_ENTRY: anywhere in [0, freePos); refused on the grid, under 480, past freePos */
+  r = await HL.editEntry(l, 36, 4 * SL, 2 * SL);
+  t = await table();
+  check('SET_ENTRY 36 → [4 SL, 6 SL), orange now', r.ok && t.entries[36].start === 4 * SL && t.entries[36].len === 2 * SL && (t.entries[36].flags & HL.EDIT.orange));
+  check('SET_ENTRY BAD_ARGS: a grid slice, len 479, past freePos', (await HL.editEntry(l, 3, 0, 4800)).status === 2 && (await HL.editEntry(l, 36, 0, 479)).status === 2 && (await HL.editEntry(l, 36, s.freePos - 100, 4800)).status === 2);
+  /* TOMBSTONE with two keys on it: both go back to their span slices */
+  check('SET_KEY 6 → 37 (two keys on one entry)', (await HL.editSetKey(l, 6, 37)).ok && (await state()).keySlice[6] === 37);
+  r = await HL.editTombstone(l, 37, (await state()).tableGen);
+  s = await state(); t = await table();
+  check('TOMBSTONE 37: keys 5 and 6 → their span slices, the index stays', r.ok && s.keySlice[5] === Math.floor(5 * 32 / 24) && s.keySlice[6] === Math.floor(6 * 32 / 24) && (t.entries[37].flags & HL.EDIT.tomb) && s.nTable === 38);
+  check('TOMBSTONE BAD_ARGS: a grid slice', (await HL.editTombstone(l, 2)).status === 2);
+  /* SET_KEY onto the grid; refusals */
+  check('SET_KEY 9 → grid slice 2', (await HL.editSetKey(l, 9, 2)).ok && (await state()).keySlice[9] === 2);
+  check('SET_KEY BAD_ARGS: entry past nTable, key 24', (await HL.editSetKey(l, 9, 200)).status === 2 && (await HL.editSetKey(l, 24, 2)).status === 2);
+  /* SWAP_KEYS: the recording on key 3 goes to key 9 and the owner follows; a == b refused */
+  r = await HL.editSwapKeys(l, 3, 9);
+  s = await state(); t = await table();
+  check('SWAP_KEYS 3 ↔ 9: key 9 plays the recording and owns it, key 3 plays slice 2', r.ok && s.keySlice[9] === 32 && s.keySlice[3] === 2 && t.entries[32].key === 9);
+  check('SWAP_KEYS BAD_ARGS: a == b, key 24', (await HL.editSwapKeys(l, 4, 4)).status === 2 && (await HL.editSwapKeys(l, 4, 24)).status === 2);
+  /* NUDGE_ALL: grid +10 ms (every boundary, clamped, all orange); markers −10 ms; refusals */
+  const before = (await table()).entries.map(e => e.start);
+  r = await HL.editNudgeAll(l, 10, HL.EDIT.grid);
+  t = await table();
+  check('NUDGE_ALL grid +10 ms: every boundary 480 later, all orange, slice 0 fixed', r.ok && t.entries[1].start === before[1] + 480 && t.entries[31].start === before[31] + 480 && t.entries[0].start === 0 && t.entries.slice(1, 32).every(e => e.flags & HL.EDIT.orange) && t.entries.slice(0, 32).every((e, i, a) => i === 0 || e.start === a[i - 1].start + a[i - 1].len));
+  r = await HL.editNudgeAll(l, -10, HL.EDIT.markers);
+  t = await table();
+  check('NUDGE_ALL markers −10 ms: live markers 480 earlier, the tombstone untouched', r.ok && t.entries[35].start === 3 * SL - 480 && t.entries[36].start === 4 * SL - 480 && t.entries[37].len === 0 && t.entries[32].start === before[32] - 480);
+  check('NUDGE_ALL BAD_ARGS: 0 ms, which 2', (await HL.editNudgeAll(l, 0, 0)).status === 2 && (await HL.editNudgeAll(l, 5, 2)).status === 2);
+  /* PROMOTE: a marker's start becomes a grid boundary */
+  await HL.editEntry(l, 36, 5 * SL + 300, SL);
+  r = await HL.editPromote(l, 36, 5);
+  check('PROMOTE 36 → boundary 5: the grid opens slice 5 at the marker', r.ok && (await table()).entries[5].start === 5 * SL + 300);
+  check('PROMOTE BAD_ARGS: a grid slice, a tombstone, a boundary out of reach', (await HL.editPromote(l, 2, 5)).status === 2 && (await HL.editPromote(l, 37, 5)).status === 2 && (await HL.editPromote(l, 36, 9)).status === 2);
+  /* FROM_ONSETS: with the grid nudged back so every onset sits in its own slice, thresh 210 keeps the kicks
+   * (salience 240) — one grey marker per kick, to the next kick; a grey marker inside the break is replaced, the
+   * orange ones (35, and 36 since SET_ENTRY touched it) and the recordings stay */
+  await HL.editNudgeAll(l, -10, HL.EDIT.grid);
+  r = await HL.editAdd(l, null, 9 * SL, SL, 0); const grey0 = r.newIdx;
+  s = await state();
+  r = await HL.editFromOnsets(l, 210, 35, s.tableGen);
+  t = await table(); s = await state();
+  const kicks = d.hits.filter(p => d.onsetStrength(p) >= 210);
+  const greys = t.entries.map((e, i) => [e, i]).filter(([e, i]) => i >= 32 && !(e.flags & (HL.EDIT.orange | HL.EDIT.tomb)) && e.key < 0);
+  check('FROM_ONSETS(210, 35): eight kick markers, grey, each to the next kick, the last to the break\'s end', r.ok && kicks.length === 8 && r.count === 8 && greys.length === 8 && greys.every(([e], j) => e.start === kicks[j] && (j < 7 ? e.len === greys[j + 1][0].start - e.start : e.start + e.len === s.bufLen)));
+  check('…the grey marker over 9 SL was replaced (its slot reused by a kick marker), the orange 35 / 36 and the recordings kept',
+    !t.entries.some((e, i) => i >= 32 && e.start === 9 * SL && e.len === SL) && t.entries[grey0].start === kicks[greys.findIndex(([, i]) => i === grey0)] && (t.entries[35].flags & HL.EDIT.orange) && (t.entries[36].flags & HL.EDIT.orange) && t.entries[32].len > 0 && t.entries[33].key === 7);
+  r = await HL.editFromOnsets(l, 100, 35);
+  t = await table();
+  check('FROM_ONSETS(100, 35): every onset (28 hits + 8 ghosts = 36), the previous greys replaced', r.ok && r.count === 36 && t.entries.filter((e, i) => i >= 32 && !(e.flags & (HL.EDIT.orange | HL.EDIT.tomb)) && e.key < 0).length === 36);
+  r = await HL.editFromOnsets(l, 100, 200);
+  check('FROM_ONSETS(100, 200 ms): the min gap thins them to one per 200 ms (16)', r.ok && r.count === 16);
+  check('FROM_ONSETS with a stale gen → BAD_STATE', (await HL.editFromOnsets(l, 100, 35, 7)).status === 3);
+  /* the audition voice: 27 posts at once outside the window; inside it the request is held and the last one wins */
+  d.auditionAt = -1e9;
+  r = await HL.audition(l, 7 * SL, 250);
+  check('AUDITION: ok, the region posted (250 ms = 12 000 samples), no gen byte', r.ok && r.tableGen === null && d.audition && d.audition.start === 7 * SL && d.audition.len === 12000 && d.auditionPosted === 1);
+  await HL.audition(l, 7 * SL + 100, 250); await HL.audition(l, 7 * SL + 200, 250, HL.EDIT.fromEnd);
+  check('two more inside 100 ms: held, the later replacing the earlier; nothing posted', d.auditionPosted === 1 && d.auditionHeld && d.auditionHeld.start === 7 * SL + 200 && d.auditionHeld.flags === HL.EDIT.fromEnd);
+  d.auditionAt -= 200; await state();
+  check('the window ends: the held one goes out on the next poll', d.auditionPosted === 2 && d.audition.start === 7 * SL + 200 && d.audition.flags === HL.EDIT.fromEnd && !d.auditionHeld);
+  d.auditionAt = -1e9; await HL.audition(l, 2 * SL, 100, HL.EDIT.loop); await HL.audition(l, 2 * SL, 100);
+  r = await HL.release(l);
+  check('RELEASE: the voice and the held request go', r.ok && d.audition === null && d.auditionHeld === null);
+  check('AUDITION BAD_ARGS: flags 4, start past freePos, lenMs 0 (under 64 samples)', (await HL.audition(l, 0, 100, 4)).status === 2 && (await HL.audition(l, s.freePos + 1, 100)).status === 2 && (await HL.editOp(l, HL.ACT.audition, [0, 0, 0, 0, 0, 0, 0])).status === 2);
+  /* TAP_MARK: the fake's position snapshot pinned — allowance, onset snap, the length to the next onset, orange */
+  d.srcPos = () => 8 * SL + 1000;
+  r = await HL.tapMark(l, 10, 20, (await state()).tableGen);
+  t = await table();
+  check('TAP_MARK(10, 20): 8 SL + 1000 − 960 → 40 from the kick at 8 SL → snapped; to the next onset (9 SL); orange; newIdx', r.ok && r.newIdx >= 32 && t.entries[r.newIdx].start === 8 * SL && t.entries[r.newIdx].len === SL && t.entries[r.newIdx].flags === HL.EDIT.orange);
+  d.srcPos = () => 8 * SL + 3000;
+  r = await HL.tapMark(l, 10, 0); t = await table();
+  check('TAP_MARK(10, 0) at 8 SL + 3000: no onset within ±480 → raw, to the next onset', r.ok && t.entries[r.newIdx].start === 8 * SL + 3000 && t.entries[r.newIdx].len === SL - 3000);
+  d.srcPos = () => 4 * SL + 100;
+  r = await HL.tapMark(l, 10, 0); t = await table();
+  check('TAP_MARK at 4 SL + 100: snaps to the kick; slice 5 is silent, so the next onset is 6 SL = the 250 ms cap', r.ok && t.entries[r.newIdx].start === 4 * SL && t.entries[r.newIdx].len === 12000);
+  check('TAP_MARK BAD_ARGS: a short body', (await HL.editOp(l, HL.ACT.tapMark, [10])).status === 2);
+  /* BAD_STATE during a take (the audition is not gated), during a set op */
+  await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.recArm, 2), { urgent: true });
+  s = await state();
+  check('a take in flight: every table op is BAD_STATE, the audition still plays', s.recState === 1 && (await HL.editTombstone(l, 35)).status === 3 && (await HL.editAdd(l, null, 0, 4800)).status === 3 && (await HL.editBoundary(l, 4, 4 * SL)).status === 3 && (await HL.tapMark(l, 10, 20)).status === 3 && (await HL.audition(l, 0, 100)).ok);
+  d.rec = { state: 0, key: -1, t: 0, pos: 0 };
+  await HL.saveSet(l, 'edited');
+  check('a set op running: BAD_STATE', (await state()).setState === 1 && (await HL.editTombstone(l, 35)).status === 3);
+  d.set.t -= 2000; await state();
+  check('…and accepted again after it', (await state()).setState === 0 && (await HL.editSetKey(l, 10, 35)).ok);
+  /* the table fills: Full → BAD_STATE; a tombstone frees a slot; tableGen bumped only on success */
+  s = await state(); let adds = 0, full = null;
+  for (let i = 0; i < 80 && !full; i++) { const x = await HL.editAdd(l, null, 0, 4800, 0); if (x.ok) adds++; else full = x; }
+  s = await state();
+  check('ADD until the table is full: 96 entries (tombstones reused first), then BAD_STATE', s.nTable === DEMO.MAX_TABLE && full && full.status === 3 && adds > 0 && (await table()).entries.every(e => !(e.flags & HL.EDIT.tomb)));
+  const gFull = s.tableGen;
+  check('a full table: the refusal does not bump tableGen', (await HL.editAdd(l, null, 0, 4800)).status === 3 && (await state()).tableGen === gFull);
+  check('TOMBSTONE frees a slot: the next ADD takes it', (await HL.editTombstone(l, 40)).ok && (await HL.editAdd(l, null, 0, 4800)).newIdx === 40 && (await state()).nTable === DEMO.MAX_TABLE);
+  await l.close();
+  /* an older firmware (noedit): no capability, the 13-byte table whatever is asked, the 255-byte body, ops unknown */
+  const o = new DEMO.FakeDevice({ kit: true, nSlices: 32, latencyMs: 1, edit: false });
+  const ol = new HL.Link(new DEMO.FakePort(o)); await ol.start();
+  const oi = await HL.hello(ol); const od = await HL.getDescriptor(ol, oi);
+  check('noedit: no "edit" capability, sets still there', od.audiothurgist.edit === undefined && od.audiothurgist.sets === 1);
+  const os = await state.call(null).catch(() => null) || HL.parseState(await ol.request(HL.CMD.state));
+  const os2 = HL.parseState(await ol.request(HL.CMD.state));
+  check('noedit: the 255-byte body — no tableGen, no srcPos, the set name still parses', os2.tableGen === undefined && os2.srcPos === undefined && os2.setName === '' && os2.keySlice.length === 24);
+  const raw = await ol.request(HL.CMD.table, Uint8Array.of(0, 39, 1));
+  check('noedit: form 1 is ignored — 13-byte entries', (raw.length - 3) % 13 === 0 && (raw.length - 3) / 13 === 35);
+  check('noedit: the page\'s 13-byte fetch parses it', (await HL.fetchTable(ol)).entries.length === 35);
+  check('noedit: ACTION 16 / 27 / 29 → BAD_ARGS (unknown op)', (await HL.editBoundary(ol, 5, 100)).status === 2 && (await HL.audition(ol, 0, 100)).status === 2 && (await HL.tapMark(ol, 10, 20)).status === 2);
+  void os;
+  await ol.close();
 }
 
 /* ── the Android path: Google's Web Serial polyfill (vendored, unmodified) and the install manifest ── */

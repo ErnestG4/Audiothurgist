@@ -61,12 +61,17 @@ const SCHEMA = 0x0a0d1072;
  * nSlices × 6000 samples (32 slices = 4 s = two bars at 120 BPM). */
 const SR = 48000, BUF_CAP = SR * 16, SLICE_LEN = 6000, KEYS = 24;
 const REC_MIN = 480;
+/* EDIT: the engine's table geometry (core/bb_engine.h): the shortest grid slice an edit may leave, the
+ * table's capacity, the flag bits, 48 samples per ms, the tap mark's 250 ms cap. */
+const GRID_MIN = 64, MAX_TABLE = 96, F_ORANGE = 1, F_TOMB = 2, MS = 48, TAP_MAX = 250 * MS;
+const EDIT_NEED = [5, 9, 10, 5, 1, 1, 2, 2, 3, 2, 3, 7, 0, 2];   /* field bytes of ACTION 16..29 */
+const EDIT_STATUS = { Ok: 0, BadOp: 2, BadArgs: 2, Full: 3, NotMarker: 2, NotGrid: 2, Tomb: 2, Stale: 3, NoMaterial: 3 };
 /* SCOPE: the firmware's ring geometry (core/bb_scope.h) and this module's max_body
  * (1024 in the firmware's Makefile; 512 is the protocol default an older build has). */
 const MAX_BODY = 1024;
 const SC = HL.SCOPE;
 
-function buildDescriptor() {
+function buildDescriptor(edit = true) {
   const pagerFields = [];
   KNOBS.forEach((page, pg) => page.forEach(([id, name, help], pot) => pagerFields.push({ id, name, off: (pg * 6 + pot) * 4, type: 'f32', page: pg, pot, def: 0.5, disp: pot === 3 && pg === 0 ? { kind: 'linear', lo: -12, hi: 12, unit: 'st' } : { kind: 'norm' }, help })));
   return {
@@ -99,7 +104,7 @@ function buildDescriptor() {
       { id: 'out_l', name: 'Audio Out L', sig: 'audioOut', help: 'Audio out, left.' },
       { id: 'out_r', name: 'Audio Out R', sig: 'audioOut', help: 'Audio out, right.' },
     ],
-    audiothurgist: { ext: 1, state: 96, env: 97, scope: 98, action: 99, wave: 100, table: 101, hits: 102, sets: 1, scope2: 2 },
+    audiothurgist: Object.assign({ ext: 1, state: 96, env: 97, scope: 98, action: 99, wave: 100, table: 101, hits: 102, sets: 1, scope2: 2 }, edit ? { edit: 1 } : {}),
     manual: {
       preamble: '**Audiothurgist chops breaks to a grid and rearranges them** with one knob that travels from *the record, verbatim* to rolls, bursts, and reverb rubble. Patterns hold until you ask for new ones. (Demo descriptor — the module\'s own text replaces this.)',
       sections: [
@@ -114,9 +119,15 @@ function buildDescriptor() {
 
 class FakeDevice {
   constructor(opts = {}) {
-    this.opts = Object.assign({ tail: 255, bpm: 120, nSlices: 32, latencyMs: 8, swing: false, kit: false, maxBody: MAX_BODY, inputs: true }, opts);
+    /* EDIT: `edit: false` plays an older firmware — no "edit" capability, the 13-byte table whatever is asked,
+     * the body capped at 255 (no tableGen / srcPos tail), ACTION 16.. unknown (BAD_ARGS). */
+    this.opts = Object.assign({ tail: 262, bpm: 120, nSlices: 32, latencyMs: 8, swing: false, kit: false, maxBody: MAX_BODY, inputs: true, edit: true }, opts);
+    if (!this.opts.edit && this.opts.tail > 255) this.opts.tail = 255;
     this.live = new Uint8Array(LIVE_SIZE); this.live.fill(0x80, OFF.pager, OFF.pager + 48);
-    this.desc = new TextEncoder().encode(JSON.stringify(buildDescriptor()));
+    this.desc = new TextEncoder().encode(JSON.stringify(buildDescriptor(this.opts.edit)));
+    /* EDIT: the table generation (never 0), the audition voice's last request, its rate window and the request held
+     * for it (ten a second; a later one replaces), and how many went out. */
+    this.tableGen = 1; this.audition = null; this.auditionAt = -1e9; this.auditionHeld = null; this.auditionPosted = 0;
     this.muted = false; this.flowing = false; this.brain = false; this.ext = false; this.locked = false;
     this.lockMask = 0; this.matGen = 1; this.file = 0; this.histN = 3; this.histDepth = 0; this.callFlash = 255; this.callT = 0;
     this.mult = 1; this.multZone = 2; this.t0 = Date.now(); this.log = [];
@@ -149,8 +160,10 @@ class FakeDevice {
     this.opts.nSlices = sn.nSlices; this.bufLen = sn.bufLen; this.freePos = sn.freePos; this.table = sn.table.map(e => Object.assign({}, e));
     this.keySlice.set(sn.keySlice); this.hits = sn.hits.slice(); this.looperEvents = sn.looperEvents; this.options.set(sn.options);
     this.buf.fill(0); this.buf.set(sn.buf); this.src.set(sn.src); this.stepClass.set(sn.stepClass); this.env.set(sn.env);
-    this.rec = { state: 0, key: -1, t: 0, pos: 0 }; this.matGen = (this.matGen + 1) & 0xff;
+    this.rec = { state: 0, key: -1, t: 0, pos: 0 }; this.matGen = (this.matGen + 1) & 0xff; this.bumpGen();
   }
+  /* EDIT: every table change bumps the generation (an edit, a take's commit, a clear, new material, a set load). */
+  bumpGen() { this.tableGen = (this.tableGen % 255) + 1; }
   setTick() {
     const s = this.set, now = Date.now();
     if (!s.state && s.pending) { s.state = s.pending.op === 14 ? 1 : 2; s.progress = 0; s.t = now; }
@@ -160,7 +173,7 @@ class FakeDevice {
     const { op, name } = s.pending; s.pending = null; s.state = 0; s.progress = 0;
     if (op === 14) {
       if (name === 'nocard') s.result = 1; else if (name === 'full') s.result = 2;
-      else { this.sets.set(name, this.snapshot()); s.result = 0; s.name = name; const lab = name + ' [set]'; if (!FILES.includes(lab)) { FILES.push(lab); this.desc = new TextEncoder().encode(JSON.stringify(buildDescriptor())); } this.file = FILES.indexOf(lab); this.live[OFF.sample] = this.file; }
+      else { this.sets.set(name, this.snapshot()); s.result = 0; s.name = name; const lab = name + ' [set]'; if (!FILES.includes(lab)) { FILES.push(lab); this.desc = new TextEncoder().encode(JSON.stringify(buildDescriptor(this.opts.edit))); } this.file = FILES.indexOf(lab); this.live[OFF.sample] = this.file; }
     } else {
       const sn = this.sets.get(name);
       if (!sn) s.result = 5; else { this.restore(sn); s.result = 0; s.name = name; const i = FILES.indexOf(name + ' [set]'); this.file = i >= 0 ? i : 255; if (i >= 0) this.live[OFF.sample] = i; }
@@ -195,32 +208,193 @@ class FakeDevice {
     for (let s = 0; s < n; s++) {
       const start = s * SLICE_LEN + (s & 1 ? sw : 0), end = s + 1 < n ? (s + 1) * SLICE_LEN + ((s + 1) & 1 ? sw : 0) : this.bufLen;
       const cls = this.stepClass[s], hit = s % 8 !== 5;
-      this.table.push({ start, len: end - start, key: -1, cls, sal: cls === 0 ? 240 : cls === 1 ? 200 : 120, hit, dens: cls === 2 ? 220 : cls === 0 ? 60 : 130 });
+      this.table.push({ start, len: end - start, key: -1, cls, sal: cls === 0 ? 240 : cls === 1 ? 200 : 120, hit, dens: cls === 2 ? 220 : cls === 0 ? 60 : 130, flags: 0 });
       if (hit) { this.synthHit(start, Math.min(end - start, 9000), cls, cls === 0 ? 0.95 : 0.7); this.hits.push(start); }
       if (s % 4 === 3) { const g = start + Math.round((end - start) * 0.5); this.synthHit(g, 2400, 2, 0.25); this.hits.push(g); }   /* a ghost hat */
     }
-    const span = Math.min(n, KEYS); for (let k = 0; k < KEYS; k++) this.keySlice[k] = Math.min(n - 1, Math.floor(k * n / span));
+    for (let k = 0; k < KEYS; k++) this.keySlice[k] = this.spanSlice(k);
     this.rec = { state: 0, key: -1, t: 0, pos: 0 };
-    this.matGen = (this.matGen + 1) & 0xff;
+    this.matGen = (this.matGen + 1) & 0xff; this.bumpGen();
   }
-  /* CommitSlice's twin: publish [freePos, freePos + len) as key's entry (a tone burst is synthesised into it). */
+  /* The span mapping: key k → grid slice k · nSlices / span (Engine::SpanSlice). */
+  spanSlice(key) { const n = this.nSlices, span = Math.min(n, KEYS), kk = key >= span ? span - 1 : key; return Math.floor(kk * n / span); }
+  /* EDIT: the first tombstone's slot past the grid, else the end (−1 = full) — Engine::FreeSlot. */
+  freeSlot() { for (let t = this.nSlices; t < this.nTable; t++) if (this.table[t].flags & F_TOMB) return t; return this.nTable < MAX_TABLE ? this.nTable : -1; }
+  isTomb(t) { return !!(this.table[t].flags & F_TOMB); }
+  isMarker(t) { return t >= this.nSlices && t < this.nTable; }
+  /* CommitSlice's twin: publish [freePos, freePos + len) as key's entry (a tone burst is synthesised into it).
+   * A second take into a key replaces its recording; a new one takes a tombstone's slot, else appends. */
   recordKey(key, seconds, cls = 1) {
     const room = BUF_CAP - this.freePos; if (room < REC_MIN) return -1;
     const len = Math.max(REC_MIN, Math.min(Math.round(seconds * SR), room));
     const start = this.freePos; this.buf.fill(0, start, start + len);
     this.synthHit(start, Math.min(len, 12000), cls, 0.9); if (len > 20000) this.synthHit(start + 16000, Math.min(len - 16000, 12000), 2, 0.5);
-    const e = { start, len, key, cls, sal: 255, hit: true, dens: cls === 2 ? 210 : 90 };
-    let t = this.table.findIndex(x => x.key === key);
-    if (t < 0) { t = this.table.length; this.table.push(e); } else this.table[t] = e;
-    this.keySlice[key] = t; this.freePos = start + len; return t;
+    const e = { start, len, key, cls, sal: 255, hit: true, dens: cls === 2 ? 210 : 90, flags: 0 };
+    let t = this.table.findIndex((x, i) => i >= this.nSlices && x.key === key);
+    if (t < 0) { t = this.freeSlot(); if (t < 0) return -1; if (t === this.nTable) this.table.push(e); else this.table[t] = e; } else this.table[t] = e;
+    this.keySlice[key] = t; this.freePos = start + len; this.bumpGen(); return t;
   }
+  /* Engine::ClearKey: the recording STAYS, keyless and at its index (nothing shifts — the looper's events, the
+   * page's indices and the key table all hold); the key falls back to its span slice. */
   clearKey(key) {
-    const t = this.table.findIndex(x => x.key === key); if (t < 0) return false;
-    this.table.splice(t, 1);
-    for (let k = 0; k < KEYS; k++) if (this.keySlice[k] > t) this.keySlice[k]--;
-    const n = this.nSlices, span = Math.min(n, KEYS); this.keySlice[key] = Math.min(n - 1, Math.floor(key * n / span));
-    return true;
+    const t = this.table.findIndex((x, i) => i >= this.nSlices && x.key === key); if (t < 0) return false;
+    this.table[t].key = -1;
+    this.keySlice[key] = this.spanSlice(key);
+    this.bumpGen(); return true;
   }
+  /* ── EDIT: the ops, with core/bb_edit.h's rules (docs/packages/slice-edit-core.md). Each returns an EditStatus
+   * name; applyEdit maps it to the HostLink status, checks the gen first and bumps it on success. ── */
+  refreshEntry(t) {   /* the hit flag from the onset table: an onset in the first quarter, or within 10 ms before */
+    const e = this.table[t]; if (e.start >= this.bufLen) return;
+    e.hit = this.hits.some(p => (p >= e.start && p - e.start <= e.len / 4) || (p < e.start && e.start - p <= 480));
+  }
+  edSetBoundary(i, pos) {
+    const n = this.nSlices, T = this.table;
+    if (i <= 0 || i >= n) return 'NotGrid';
+    if (pos < 0 || pos >= this.bufLen) return 'BadArgs';
+    const lo = T[i - 1].start + GRID_MIN, hi = T[i].start + T[i].len - GRID_MIN;
+    if (pos < lo || pos > hi) return 'BadArgs';
+    const end = T[i].start + T[i].len;
+    T[i - 1].len = pos - T[i - 1].start; T[i].start = pos; T[i].len = end - pos; T[i].flags |= F_ORANGE;
+    this.refreshEntry(i - 1); this.refreshEntry(i); return 'Ok';
+  }
+  edSetEntry(t, start, len) {
+    if (!this.isMarker(t)) return 'NotMarker'; if (this.isTomb(t)) return 'Tomb';
+    if (start < 0 || len < REC_MIN || start > this.freePos || len > this.freePos - start) return 'BadArgs';
+    const e = this.table[t]; e.start = start; e.len = len; e.flags |= F_ORANGE; this.refreshEntry(t); return 'Ok';
+  }
+  metaAt(start) {   /* AnalyseEntry's stand-in: the class / salience of the grid slice the span opens in */
+    const k = this.table.findIndex((e, i) => i < this.nSlices && start >= e.start && start < e.start + e.len);
+    return k >= 0 ? { cls: this.table[k].cls, sal: this.table[k].sal, dens: this.table[k].dens } : { cls: 3, sal: 0, dens: 0 };
+  }
+  edAdd(key, start, len, flags) {
+    if (start < 0 || len < REC_MIN || start > this.freePos || len > this.freePos - start) return 'BadArgs';
+    const t = this.freeSlot(); if (t < 0) return 'Full';
+    const e = Object.assign({ start, len, key: -1, hit: false, flags: flags & F_ORANGE }, this.metaAt(start));
+    if (t === this.nTable) this.table.push(e); else this.table[t] = e;
+    this.refreshEntry(t); if (key >= 0 && key < KEYS) this.keySlice[key] = t;
+    this.lastIdx = t; return 'Ok';
+  }
+  edSplit(t, pos) {
+    if (!this.isMarker(t)) return 'NotMarker'; if (this.isTomb(t)) return 'Tomb';
+    const e = this.table[t], end = e.start + e.len;
+    if (pos - e.start < REC_MIN || end - pos < REC_MIN) return 'BadArgs';
+    const u = this.freeSlot(); if (u < 0) return 'Full';
+    const r = { start: pos, len: end - pos, key: -1, cls: e.cls, sal: e.sal, hit: e.hit, dens: e.dens, flags: F_ORANGE };
+    if (u === this.nTable) this.table.push(r); else this.table[u] = r;
+    e.len = pos - e.start; e.flags |= F_ORANGE; this.refreshEntry(t); this.refreshEntry(u);
+    this.lastIdx = u; return 'Ok';
+  }
+  edMerge(t) {
+    if (!this.isMarker(t)) return 'NotMarker'; if (this.isTomb(t)) return 'Tomb';
+    const T = this.table; let u = -1;
+    for (let v = this.nSlices; v < this.nTable && u < 0; v++) if (v !== t && !this.isTomb(v) && T[v].start + T[v].len === T[t].start) u = v;
+    for (let v = t - 1; v >= this.nSlices && u < 0; v--) if (!this.isTomb(v)) u = v;
+    if (u < 0) return 'BadArgs';
+    const a = Math.min(T[u].start, T[t].start), e = Math.max(T[u].start + T[u].len, T[t].start + T[t].len);
+    T[t].start = a; T[t].len = e - a; T[t].flags |= F_ORANGE; if (T[t].key < 0) T[t].key = T[u].key;
+    for (let k = 0; k < KEYS; k++) if (this.keySlice[k] === u) this.keySlice[k] = t;
+    T[u].key = -1; T[u].len = 0; T[u].flags = F_TOMB; T[u].hit = false;
+    this.refreshEntry(t); return 'Ok';
+  }
+  edTomb(t) {
+    if (!this.isMarker(t)) return 'NotMarker'; if (this.isTomb(t)) return 'Tomb';
+    for (let k = 0; k < KEYS; k++) if (this.keySlice[k] === t) this.keySlice[k] = this.spanSlice(k);
+    const e = this.table[t]; e.key = -1; e.len = 0; e.flags = F_TOMB; e.hit = false; return 'Ok';
+  }
+  edSetKey(key, t) {
+    if (key < 0 || key >= KEYS || t < 0 || t >= this.nTable) return 'BadArgs'; if (this.isTomb(t)) return 'Tomb';
+    this.keySlice[key] = t; return 'Ok';
+  }
+  edSwapKeys(a, b) {
+    if (a < 0 || a >= KEYS || b < 0 || b >= KEYS || a === b) return 'BadArgs';
+    const ta = this.keySlice[a], tb = this.keySlice[b]; this.keySlice[a] = tb; this.keySlice[b] = ta;
+    if (this.isMarker(ta) && this.table[ta].key === a) this.table[ta].key = b;
+    if (this.isMarker(tb) && this.table[tb].key === b) this.table[tb].key = a;
+    return 'Ok';
+  }
+  edNudge(delta, which) {
+    if (delta === 0) return 'BadArgs';
+    const n = this.nSlices, T = this.table;
+    if (which === 0) {
+      if (n < 2 || GRID_MIN * n > this.bufLen) return 'BadArgs';
+      for (let i = 1; i < n; i++) { const lo = T[i - 1].start + GRID_MIN, hi = this.bufLen - GRID_MIN * (n - i); T[i].start = Math.max(lo, Math.min(hi, T[i].start + delta)); T[i].flags |= F_ORANGE; }
+      for (let i = 0; i < n; i++) T[i].len = (i + 1 < n ? T[i + 1].start : this.bufLen) - T[i].start;
+      for (let i = 0; i < n; i++) this.refreshEntry(i);
+      return 'Ok';
+    }
+    if (which === 1) {
+      let moved = 0;
+      for (let t = n; t < this.nTable; t++) { if (this.isTomb(t)) continue; T[t].start = Math.max(0, Math.min(this.freePos - T[t].len, T[t].start + delta)); T[t].flags |= F_ORANGE; this.refreshEntry(t); moved++; }
+      return moved ? 'Ok' : 'BadArgs';
+    }
+    return 'BadArgs';
+  }
+  /* The strength of an onset: the salience of the grid slice it falls in (the onset table has positions only). */
+  onsetStrength(p) { const k = this.table.findIndex((e, i) => i < this.nSlices && p >= e.start && p < e.start + e.len); return k >= 0 ? this.table[k].sal : 0; }
+  /* FROM_ONSETS: the grey markers inside the break go (recordings, orange markers and anything past the break stay),
+   * then one grey marker per accepted onset spanning to the next accepted one; stops when the table fills. */
+  edFromOnsets(thresh, minGap) {
+    for (let t = this.nSlices; t < this.nTable; t++) { const e = this.table[t]; if (this.isTomb(t) || (e.flags & F_ORANGE) || e.key >= 0 || e.start >= this.bufLen) continue; this.edTomb(t); }
+    const acc = []; let last = -1;
+    for (const p of this.hits) { if (p < 0 || p >= this.bufLen || this.onsetStrength(p) < thresh) continue; if (last >= 0 && p - last < minGap) continue; acc.push(p); last = p; }
+    let count = 0, st = 'Ok';
+    for (let j = 0; j < acc.length; j++) { const end = j + 1 < acc.length ? acc[j + 1] : this.bufLen; if (end - acc[j] < REC_MIN) continue; st = this.edAdd(-1, acc[j], end - acc[j], 0); if (st !== 'Ok') break; count++; }
+    this.lastCount = count;
+    return st === 'Ok' || (st === 'Full' && count > 0) ? 'Ok' : st;
+  }
+  /* The audio thread's position snapshot: the current step's source, the step's phase into it. */
+  srcPos() {
+    const beat = (Date.now() - this.t0) / 60000 * this.opts.bpm * this.mult * 4, step = Math.floor(beat) % this.nSlices, frac = beat - Math.floor(beat);
+    const src = this.src[step] < 0 ? step : this.src[step], e = this.table[src];
+    return e.start + Math.floor(frac * e.len);
+  }
+  /* TAP_MARK: core/bb_edit.h's TapMarkAt, ported — the snapshot minus the allowance, snapped to the nearest onset within
+   * ±snap (the earlier wins a tie), to the next onset or 250 ms, ≥ REC_MIN, shortened to freePos. */
+  tapMarkAt(srcPos, allow, snap) {
+    let p = Math.max(0, srcPos - allow), best = -1, bestD = snap + 1;
+    this.hits.forEach((o, i) => { const d = Math.abs(o - p); if (d < bestD) { bestD = d; best = i; } });
+    if (best >= 0) p = this.hits[best];
+    let len = TAP_MAX; for (const o of this.hits) if (o > p && o - p < len) len = o - p;
+    if (len < REC_MIN) len = REC_MIN;
+    if (p + len > this.freePos) { len = this.freePos - p; if (len < REC_MIN) { len = REC_MIN; p = this.freePos - len; if (p < 0) { p = 0; len = this.freePos; } } }
+    return { start: p, len };
+  }
+  editBusy() { return !!(this.rec.state || this.set.state || this.set.pending); }
+  /* ACTION 16..26 and 29: parse, gate, apply, answer [status, tableGen, third]. */
+  applyEdit(op, body) {
+    const need = EDIT_NEED[op - 16];
+    if (body.length < 1 + need) return [2];
+    const gen = body.length > 1 + need ? body[1 + need] : 0;
+    const b = body, U16 = at => u16(b, at), I16 = at => { const v = u16(b, at); return v > 0x7fff ? v - 0x10000 : v; }, U32 = at => u32(b, at);
+    if (this.editBusy()) return [3];
+    if (!this.bufLen) return [3];
+    if (gen !== 0 && gen !== this.tableGen) return [3];   /* Stale */
+    this.lastIdx = -1; this.lastCount = null; let st, third = null;
+    switch (op) {
+      case 16: st = this.edSetBoundary(b[1], U32(2)); break;
+      case 17: st = this.edSetEntry(b[1], U32(2), U32(6)); break;
+      case 18: st = this.edAdd(b[1] < KEYS ? b[1] : -1, U32(2), U32(6), b[10]); third = this.lastIdx; break;
+      case 19: st = this.edSplit(b[1], U32(2)); third = this.lastIdx; break;
+      case 20: st = this.edMerge(b[1]); break;
+      case 21: st = this.edTomb(b[1]); break;
+      case 22: st = this.edSetKey(b[1], b[2]); break;
+      case 23: st = this.edSwapKeys(b[1], b[2]); break;
+      case 24: st = this.edNudge(I16(1) * MS, b[3]); break;
+      case 25: st = !this.isMarker(b[1]) ? 'NotMarker' : this.isTomb(b[1]) ? 'Tomb' : this.edSetBoundary(b[2], this.table[b[1]].start); break;
+      case 26: st = this.edFromOnsets(b[1], U16(2) * MS); third = this.lastCount; break;
+      case 29: { const m = this.tapMarkAt(this.srcPos(), b[2] * MS, b[1] * MS); st = this.edAdd(-1, m.start, m.len, F_ORANGE); third = this.lastIdx; break; }
+      default: st = 'BadOp';
+    }
+    const status = EDIT_STATUS[st];
+    if (status !== 0) return [status];
+    this.bumpGen(); this.edits = (this.edits || 0) + 1;
+    return third == null ? [0, this.tableGen] : [0, this.tableGen, third < 0 ? 255 : third];
+  }
+  /* ACTION 27 / 28: the audition voice, ten a second — inside the window the request is held (a later one replaces)
+   * and goes out on the next state poll after the window ends, as the firmware's OnPoll does. */
+  postAudition(a) { this.audition = a; this.auditionAt = Date.now(); this.auditionPosted++; }
+  auditionTick() { if (this.auditionHeld && Date.now() - this.auditionAt >= 100) { const a = this.auditionHeld; this.auditionHeld = null; this.postAudition(a); } }
   /* Advance the take's state machine (called per state poll). */
   recTick() {
     const r = this.rec, now = Date.now(); if (!r.state) { this.inLevel = Math.max(0, this.inLevel - 40); return; }
@@ -330,6 +504,7 @@ class FakeDevice {
         U8(0); break; }
       case CMD.state: {
         if (this.opts.tail >= 223) this.setTick();   /* SETS: the op finishes before the body is built, as the firmware's main loop does */
+        if (this.opts.edit) this.auditionTick();       /* EDIT-AUDITION: a held request whose window has ended */
         if (this.callT > 0 && --this.callT === 0) this.callFlash = 255;
         const flags = (this.muted ? 1 : 0) | (this.ext ? 2 : 0) | (this.locked ? 4 : 0) | (this.flowing ? 8 : 0) | (this.brain ? 16 : 0);
         U8(0); U8(this.nSlices); U8(this.curStep()); U8(flags); U8(this.matGen); U8(this.options[5]); U8(this.options[0]); U8(this.file);
@@ -352,6 +527,8 @@ class FakeDevice {
         if (tail >= 219) U8(this.options[16]);                             /* 218 Key Plays */
         if (tail >= 223) { const s = this.set; U8(s.state); U8(s.progress); U8(s.result); U8(s.seq); }   /* 219.. SETS */
         if (tail >= 255) { const s = this.set; for (let i = 0; i < 32; i++) U8(i < s.name.length ? s.name.charCodeAt(i) : 0); }
+        if (tail >= 258) { U8(this.tableGen); U8(0); U8(255); }             /* 255.. EDIT: tableGen, undoDepth, selSlice */
+        if (tail >= 262) U32(this.srcPos());                                /* 258 EDIT: the position snapshot */
         break; }
       case CMD.wave: {
         if (body.length < 7) { U8(2); break; }
@@ -367,8 +544,9 @@ class FakeDevice {
         const first = body.length >= 1 ? body[0] : 0; let count = body.length >= 2 ? body[1] : 39;
         if (first > this.nTable) { U8(2); break; }
         count = Math.min(count, 39, this.nTable - first);
+        const wide = this.opts.edit && body.length >= 3 && body[2] !== 0;   /* EDIT: form 1 → the 14-byte entry */
         U8(0); U8(this.nSlices); U8(this.nTable);
-        for (let t = first; t < first + count; t++) { const e = this.table[t]; U32(e.start); U32(e.len); U8(e.key); U8(e.cls); U8(e.sal); U8(e.hit ? 1 : 0); U8(e.dens); }
+        for (let t = first; t < first + count; t++) { const e = this.table[t]; U32(e.start); U32(e.len); U8(e.key); U8(e.cls); U8(e.sal); U8(e.hit ? 1 : 0); U8(e.dens); if (wide) U8(e.flags); }
         break; }
       case CMD.hits: {
         const first = body.length >= 1 ? body[0] : 0, n = this.hits.length;
@@ -459,6 +637,20 @@ class FakeDevice {
             if (!SET_NAME_RE.test(name)) { ok = false; break; }
             if (this.set.state || this.set.pending || (op === 14 && this.rec.state)) { U8(3); return Uint8Array.from(w); }
             this.set.pending = { op, name }; break; }
+          /* EDIT: 16..29 — unknown to an older firmware (BAD_ARGS) */
+          case 16: case 17: case 18: case 19: case 20: case 21: case 22: case 23: case 24: case 25: case 26: case 29:
+            if (!this.opts.edit) { ok = false; break; }
+            return Uint8Array.from(this.applyEdit(op, body));
+          case 27: case 28: {
+            if (!this.opts.edit) { ok = false; break; }
+            if (!this.bufLen) { U8(3); return Uint8Array.from(w); }
+            if (op === 28) { this.auditionHeld = null; this.audition = null; break; }
+            if (body.length < 8) { ok = false; break; }
+            const start = u32(body, 1), len = u16(body, 5) * MS, flags = body[7];
+            if (start > this.freePos || len < GRID_MIN || (flags & ~3)) { ok = false; break; }
+            const a = { start, len, flags };
+            if (Date.now() - this.auditionAt >= 100) { this.auditionHeld = null; this.postAudition(a); } else this.auditionHeld = a;
+            break; }
           default: ok = false;
         }
         U8(ok ? 0 : 2); break; }
@@ -485,6 +677,6 @@ class FakePort {
   async open() {} async close() {}
 }
 
-const api = { FakeDevice, FakePort, buildDescriptor, OPTION_FIELDS, FILES, LIVE_SIZE, SCHEMA, OFF, SR, BUF_CAP, SLICE_LEN, KEYS, MAX_BODY };
+const api = { FakeDevice, FakePort, buildDescriptor, OPTION_FIELDS, FILES, LIVE_SIZE, SCHEMA, OFF, SR, BUF_CAP, SLICE_LEN, KEYS, MAX_BODY, MAX_TABLE, REC_MIN, GRID_MIN };
 if (typeof module === 'object' && module.exports) module.exports = api; else root.DEMO = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

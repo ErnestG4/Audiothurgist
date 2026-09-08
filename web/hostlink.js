@@ -21,7 +21,14 @@ const CMD = {
   state: 0x60, env: 0x61, scope: 0x62, action: 0x63, wave: 0x64, table: 0x65, hits: 0x66,
 };
 const ACT = { dice: 0, reslice: 1, mute: 2, punch: 3, flow: 4, scrub: 5, load: 6, clearLocks: 7, page: 8,
-  recArm: 9, recClear: 10, keyPlays: 11, looperUndo: 12, looperClear: 13, saveSet: 14, loadSet: 15 };
+  recArm: 9, recClear: 10, keyPlays: 11, looperUndo: 12, looperClear: 13, saveSet: 14, loadSet: 15,
+  /* EDIT (capability "edit": 1): the slice-editing ops, the audition voice, the tap mark */
+  setBoundary: 16, setEntry: 17, addEntry: 18, split: 19, merge: 20, tombstone: 21, setKey: 22, swapKeys: 23,
+  nudgeAll: 24, promote: 25, fromOnsets: 26, audition: 27, release: 28, tapMark: 29 };
+/* EDIT: flag bits and constants. Table flags (GET_TABLE's 14-byte form, ADD_ENTRY's flags): orange = user-placed
+ * or user-moved, tomb = deleted (len 0, skipped by everything). AUDITION flags: fromEnd = `start` is the region's
+ * END (the last lenMs up to it), loop = repeat until RELEASE. NUDGE_ALL's `which`: grid or markers. */
+const EDIT = { orange: 1, tomb: 2, fromEnd: 1, loop: 2, grid: 0, markers: 1, noKey: 255, maxNudgeMs: 32767, maxAuditionMs: 65535 };
 /* SETS (state tail 219..254): a set is sets/<name>.wav + sets/<name>.json on the card. The op's
  * state, its progress, the result of the last op and a sequence that bumps when one finishes;
  * then the name of the set the material came from. A name is 1..31 of [A-Za-z0-9_-]. */
@@ -256,6 +263,10 @@ function parseState(b) {
   if (b.length >= 219) st.keyPlays = b[218];                                  // Options → Key Plays (0 one-shot, 1 held)
   if (b.length >= 223) { st.setState = b[219]; st.setProgress = b[220]; st.setResult = b[221]; st.setSeq = b[222]; }   // SETS
   if (b.length >= 255) { let n = 223; while (n < 255 && b[n]) n++; st.setName = new TextDecoder('ascii').decode(b.subarray(223, n)); }
+  /* EDIT tail: 255 tableGen (never 0; carry it back as an op's gen), 256 undoDepth (0 until EDIT-UNDO), 257 selSlice
+   * (the panel's selection, 255 = none, until EDIT-PANEL), 258..261 srcPos (the youngest voice's material position). */
+  if (b.length >= 258) { st.tableGen = b[255]; st.undoDepth = b[256]; st.selSlice = b[257] === 255 ? -1 : b[257]; }
+  if (b.length >= 262) st.srcPos = u32(b, 258);
   return st;
 }
 /* GET_WAVE: one window of the material buffer — n ≤ 480 output bytes, each
@@ -269,20 +280,27 @@ async function fetchWave(link, start, n = 480, plane = 0, step = 1, opts = {}) {
   return parseWave(b);
 }
 function parseWave(b) { const n = u16(b, 5); return { start: u32(b, 1), n, step: b[7] || 1, data: Int8Array.from(b.subarray(8, 8 + n)) }; }
-/* GET_TABLE: every table entry (grid [0, nSlices) then recorded [nSlices, nTable)),
- * 13 bytes each, ≤ 39 per reply. Resolves { nSlices, nTable, entries[] } with
- * entries of { start, len, key (-1 grid), cls, sal, hit, dens }. */
-const TABLE_ENTRY = 13, TABLE_CHUNK = 39;
-function parseTableChunk(b) {
-  const n = Math.floor((b.length - 3) / TABLE_ENTRY), entries = [];
-  for (let i = 0; i < n; i++) { const at = 3 + i * TABLE_ENTRY; const k = b[at + 8];
-    entries.push({ start: u32(b, at), len: u32(b, at + 4), key: k > 127 ? k - 256 : k, cls: b[at + 9], sal: b[at + 10], hit: !!b[at + 11], dens: b[at + 12] }); }
+/* GET_TABLE: every table entry (grid [0, nSlices) then markers [nSlices, nTable): recordings and,
+ * with "edit", spans of the break), 13 bytes each, ≤ 39 per reply. Resolves { nSlices, nTable,
+ * entries[] } with entries of { start, len, key (-1 grid / keyless), cls, sal, hit, dens, flags }.
+ * EDIT: a firmware with "edit": 1 answers a third request byte (form 1) with a trailing u8 flags
+ * per entry (EDIT.orange · EDIT.tomb) — 14 bytes; pass { edit: true } to fetchTable (the page does
+ * when the capability is present) or the entry size to parseTableChunk. Without it the 13-byte form
+ * comes back with flags 0, whatever the firmware — an old page keeps working against a new module. */
+const TABLE_ENTRY = 13, TABLE_ENTRY_EDIT = 14, TABLE_CHUNK = 39;
+function parseTableChunk(b, entrySize = TABLE_ENTRY) {
+  const n = Math.floor((b.length - 3) / entrySize), entries = [];
+  for (let i = 0; i < n; i++) { const at = 3 + i * entrySize; const k = b[at + 8];
+    entries.push({ start: u32(b, at), len: u32(b, at + 4), key: k > 127 ? k - 256 : k, cls: b[at + 9], sal: b[at + 10], hit: !!b[at + 11], dens: b[at + 12],
+      flags: entrySize >= TABLE_ENTRY_EDIT ? b[at + 13] : 0 }); }
   return { nSlices: b[1], nTable: b[2], entries };
 }
 async function fetchTable(link, opts = {}) {
   let first = 0, out = null;
+  const edit = !!opts.edit, size = edit ? TABLE_ENTRY_EDIT : TABLE_ENTRY;
   do {
-    const c = parseTableChunk(await link.request(CMD.table, Uint8Array.of(first, TABLE_CHUNK), Object.assign({ key: 'table' + first }, opts)));
+    const req = edit ? Uint8Array.of(first, TABLE_CHUNK, 1) : Uint8Array.of(first, TABLE_CHUNK);
+    const c = parseTableChunk(await link.request(CMD.table, req, Object.assign({ key: 'table' + first }, opts)), size);
     if (!out) out = { nSlices: c.nSlices, nTable: c.nTable, entries: [] };
     out.entries.push(...c.entries); first += c.entries.length;
     if (!c.entries.length) break;
@@ -307,6 +325,49 @@ async function fetchHits(link, opts = {}) {
  * in its main loop and the state tail (setState / setProgress / setResult / setSeq) tells. */
 function saveSet(link, name) { if (!setNameOk(name)) return Promise.reject(new Error('bad set name')); return link.request(CMD.action, Uint8Array.of(ACT.saveSet, ...nameBytes(name)), { urgent: true }); }
 function loadSet(link, name) { if (!setNameOk(name)) return Promise.reject(new Error('bad set name')); return link.request(CMD.action, Uint8Array.of(ACT.loadSet, ...nameBytes(name)), { urgent: true }); }
+/* ───────────── EDIT (ACTION 16..29, capability "edit": 1) ─────────────
+ * Every op's body is its fields, little-endian, then an optional trailing u8 gen: the tableGen the
+ * page last saw (state byte 255), 0 = unchecked. A stale gen is BAD_STATE — refetch the table and
+ * retry; the design sends it for split / merge / delete, not for drags. The reply is u8 status,
+ * then on success u8 tableGen (the new generation) and, for ADD / SPLIT / TAP_MARK, u8 newIdx (the
+ * new entry's index) — FROM_ONSETS puts the number of markers added there. These helpers resolve
+ * { status, ok, tableGen, newIdx, count } for every device answer (0 OK · 2 BAD_ARGS · 3 BAD_STATE:
+ * a stale gen, a take in flight, a set op, a swap pending, the table full, no material) and reject
+ * only on a link failure. All urgent: they are the user's hand. */
+const u32b = v => [v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff];
+const u16b = v => [v & 0xff, (v >>> 8) & 0xff];
+const i16b = v => u16b(v < 0 ? v + 0x10000 : v);
+async function editOp(link, op, fields, gen = 0) {
+  const body = Uint8Array.of(op, ...fields, ...(gen ? [gen & 0xff] : []));
+  try {
+    const b = await link.request(CMD.action, body, { urgent: true });
+    const third = b.length > 2 ? b[2] : null;
+    return { status: 0, ok: true, tableGen: b.length > 1 ? b[1] : null, newIdx: third === 255 ? -1 : third, count: third };
+  } catch (e) {
+    const s = STATUS.indexOf(e.message); if (s < 0) throw e;
+    return { status: s, ok: false, tableGen: null, newIdx: null, count: null };
+  }
+}
+const editBoundary   = (link, i, pos, gen = 0)             => editOp(link, ACT.setBoundary, [i & 0xff, ...u32b(pos)], gen);
+const editEntry      = (link, t, start, len, gen = 0)      => editOp(link, ACT.setEntry, [t & 0xff, ...u32b(start), ...u32b(len)], gen);
+/* key null / -1 / 255 = none; flags EDIT.orange for a user-placed marker (0 = grey, an auto marker) */
+const editAdd        = (link, key, start, len, flags = EDIT.orange, gen = 0) => editOp(link, ACT.addEntry, [key == null || key < 0 ? EDIT.noKey : key & 0xff, ...u32b(start), ...u32b(len), flags & 0xff], gen);
+const editSplit      = (link, t, pos, gen = 0)             => editOp(link, ACT.split, [t & 0xff, ...u32b(pos)], gen);
+const editMerge      = (link, t, gen = 0)                  => editOp(link, ACT.merge, [t & 0xff], gen);
+const editTombstone  = (link, t, gen = 0)                  => editOp(link, ACT.tombstone, [t & 0xff], gen);
+const editSetKey     = (link, key, t, gen = 0)             => editOp(link, ACT.setKey, [key & 0xff, t & 0xff], gen);
+const editSwapKeys   = (link, a, b, gen = 0)               => editOp(link, ACT.swapKeys, [a & 0xff, b & 0xff], gen);
+/* ms → samples happens in the firmware (48 per ms); which: EDIT.grid or EDIT.markers */
+const editNudgeAll   = (link, ms, which, gen = 0)          => editOp(link, ACT.nudgeAll, [...i16b(Math.max(-EDIT.maxNudgeMs, Math.min(EDIT.maxNudgeMs, Math.round(ms)))), which & 0xff], gen);
+const editPromote    = (link, t, i, gen = 0)               => editOp(link, ACT.promote, [t & 0xff, i & 0xff], gen);
+/* thresh 0..255 against each onset's strength (its slice's salience); grey markers inside the break are replaced */
+const editFromOnsets = (link, thresh, minGapMs, gen = 0)   => editOp(link, ACT.fromOnsets, [thresh & 0xff, ...u16b(Math.max(0, Math.min(65535, Math.round(minGapMs))))], gen);
+/* the scratch voice: start (samples), lenMs, flags EDIT.fromEnd | EDIT.loop; ≤ 10/s (a later one replaces) */
+const audition       = (link, start, lenMs, flags = 0)     => editOp(link, ACT.audition, [...u32b(start), ...u16b(Math.max(1, Math.min(EDIT.maxAuditionMs, Math.round(lenMs)))), flags & 0xff]);
+const release        = link                                => editOp(link, ACT.release, []);
+/* the firmware timestamps: srcPos at receipt − allowMs, snapped to an onset within ±snapMs; an orange marker */
+const tapMark        = (link, snapMs, allowMs, gen = 0)    => editOp(link, ACT.tapMark, [snapMs & 0xff, allowMs & 0xff], gen);
+
 /* GET_ENV: fetch nSlices × 16 envelope bytes in ≤30-slice chunks. */
 async function fetchEnv(link, n) {
   const out = new Uint8Array(64 * 16);
@@ -444,7 +505,8 @@ function manualInfo(desc) {
 const api = { PROTO, CMD, ACT, REC, NOTE_NAMES, keyName, STATUS, statusName, crc32, cobsEncode, cobsDecode, buildFrame, FrameParser, Link,
   u16, u32, f32, readStr, hello, getDescriptor, getLive, setLive, concat,
   STATE_MIN, ZONE_MULT, parseState, fetchEnv, parseScope, SCOPE, SCOPE_CH, SCOPE_JACK_ROLE, SCOPE_JACK_IN, scopeVolts, scopeCvCode, scopeAge, scopeReq, parseScope2, scopePlan, fetchScopeFrame, allFields, findField, fieldLabels, pagerInfo, optionsInfo, manualInfo,
-  TABLE_ENTRY, TABLE_CHUNK, fetchWave, parseWave, fetchTable, parseTableChunk, fetchHits, parseHitsChunk,
-  SET_STATE, SET_RESULT, setNameOk, setLabelName, nameBytes, saveSet, loadSet };
+  TABLE_ENTRY, TABLE_ENTRY_EDIT, TABLE_CHUNK, fetchWave, parseWave, fetchTable, parseTableChunk, fetchHits, parseHitsChunk,
+  SET_STATE, SET_RESULT, setNameOk, setLabelName, nameBytes, saveSet, loadSet,
+  EDIT, editOp, editBoundary, editEntry, editAdd, editSplit, editMerge, editTombstone, editSetKey, editSwapKeys, editNudgeAll, editPromote, editFromOnsets, audition, release, tapMark };
 if (typeof module === 'object' && module.exports) module.exports = api; else root.HL = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
