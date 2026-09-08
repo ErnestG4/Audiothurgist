@@ -117,8 +117,10 @@ The page keeps its own label list keyed by the reply's `tableGen`
 "promote 36 → boundary 9", "keys follow the grid". A `tableGen` the page
 did not cause (a take, the panel, a re-slice, a set load) gets **"changed
 on the module"**. The list is a viewer, not a source of truth: the depth
-line reads the tail's `undoDepth`, and Undo / Redo are live only when it
-is non-zero.
+line reads the tail's `undoDepth` / `redoDepth`, Undo enables from the
+first and Redo from the second, and (EDIT-UNDO) an undo strikes the newest
+live entry through — it stays listed — a redo un-marks it, a new op drops
+the struck ones, and a redo depth of 0 from the tail clears the marks.
 
 ## What is pure (edit.js) and what is DOM (index.html)
 
@@ -254,9 +256,9 @@ No Chromium in this environment, so nothing below has been *seen*:
 
 - **5 EDIT-PERSIST**: nothing here persists; the Autosave option will
   show up in the Options tab by itself.
-- **6 EDIT-UNDO**: ACTION 30 / 31 exist as `HL.editUndo` / `editRedo` and
-  the buttons; the history list becomes the journal's labels when the tail
-  offers them (today it lists what this page did).
+- **6 EDIT-UNDO**: *done — [slice-edit-undo.md](slice-edit-undo.md)*: the
+  buttons drive the module's journal, the list marks the undone entries;
+  the labels stay the page's.
 - **7 EDIT-PANEL**: `selSlice` (tail byte 257) is parsed and unused; when
   the panel selects, `ed.select(st.selSlice)` is the one line.
 - Open: the numeric field sits in a row under the handle row rather than

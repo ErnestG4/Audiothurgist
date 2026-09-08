@@ -39,6 +39,8 @@ says so, a third byte.
 | 27 AUDITION | `u32 start, u16 lenMs, u8 flags (b0 from-end · b1 loop)` | — (no `tableGen` either) | the scratch voice, below; never gated by the table |
 | 28 RELEASE | — | — | ends the audition with the 5 ms fade; drops a held request |
 | 29 TAP_MARK | `u8 snapMs, u8 allowMs` | `u8 newIdx` | below; an orange marker |
+| 30 UNDO_EDIT | — | — | EDIT-UNDO ([slice-edit-undo.md](slice-edit-undo.md)): one journal step back; BAD_ARGS when there is none |
+| 31 REDO_EDIT | — | — | one step forward; BAD_ARGS when there is none (a new edit clears the redo half) |
 
 Status: `EditStatus` → HostLink — `Ok` 0; `BadArgs` / `NotMarker` /
 `NotGrid` / `Tomb` / `BadOp` → **2 BAD_ARGS**; `Stale` / `NoMaterial` /
@@ -61,14 +63,15 @@ onset (the last to the break's end; a span under 480 is skipped), each
 analysed by `AnalyseEntry`. The gen is checked by the first apply only.
 `Full` after at least one add is still OK with the count so far.
 
-**State tail** (append-only after `setName`, body now 262 bytes):
+**State tail** (append-only after `setName`, body 262 bytes here, 263 with EDIT-UNDO):
 
 | byte | field | meaning |
 |---|---|---|
 | 255 | `u8 tableGen` | `engine.tableGen` — never 0; bumps on every table change (an edit, a take, a clear, a re-slice, a set load) |
-| 256 | `u8 undoDepth` | 0 until EDIT-UNDO |
+| 256 | `u8 undoDepth` | EDIT-UNDO: journal steps back (saturating; 0 when a take / clear / load ended the history) |
 | 257 | `u8 selSlice` | 255 (none) until EDIT-PANEL |
 | 258 | `u32 srcPos` | `engine.SrcPos()`, snapshotted by the audio thread after every `Process`: the material position of the youngest sounding voice that is not an audition, else the start of what the current step plays |
+| 262 | `u8 redoDepth` | EDIT-UNDO: journal steps forward; its presence tells a page the journal exists |
 
 **GET_TABLE** takes a third request byte, `u8 form`: 1 appends `u8 flags`
 (b0 orange · b1 tombstone) to every entry — 14 bytes, 39 per chunk (549 of
@@ -229,7 +232,9 @@ pre-existing "rec clear" checks now assert the index-stable rule.
 - **5 EDIT-PERSIST**: nothing here persists; `SetGridBoundaries` /
   `SetKeyTable` are unused; a set saved after an edit still fails
   `PlanSet` (core doc, item 2).
-- **6 EDIT-UNDO**: tail byte 256 is 0; ops 30/31 (UNDO / REDO) are free.
+- **6 EDIT-UNDO**: *done — [slice-edit-undo.md](slice-edit-undo.md)*: ops
+  30 / 31, byte 256 live, byte 262 `redoDepth` appended (body 263), the
+  FROM_ONSETS applies joined into one undo step (`EditReq::kJoin`).
 - **7 EDIT-PANEL**: tail byte 257 is 255; the Tap Allowance option is read
   by nobody in the firmware yet (the page sends its own `allowMs`).
 - Open: SET_BOUNDARY leaves the neighbours' class / salience alone (core
