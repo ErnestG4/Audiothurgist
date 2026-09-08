@@ -24,11 +24,14 @@ const ACT = { dice: 0, reslice: 1, mute: 2, punch: 3, flow: 4, scrub: 5, load: 6
   recArm: 9, recClear: 10, keyPlays: 11, looperUndo: 12, looperClear: 13, saveSet: 14, loadSet: 15,
   /* EDIT (capability "edit": 1): the slice-editing ops, the audition voice, the tap mark */
   setBoundary: 16, setEntry: 17, addEntry: 18, split: 19, merge: 20, tombstone: 21, setKey: 22, swapKeys: 23,
-  nudgeAll: 24, promote: 25, fromOnsets: 26, audition: 27, release: 28, tapMark: 29 };
+  nudgeAll: 24, promote: 25, fromOnsets: 26, audition: 27, release: 28, tapMark: 29,
+  /* EDIT-UNDO (package 6): the journal's two ops — the page wires its buttons here and disables them while undoDepth is 0 */
+  undoEdit: 30, redoEdit: 31 };
 /* EDIT: flag bits and constants. Table flags (GET_TABLE's 14-byte form, ADD_ENTRY's flags): orange = user-placed
  * or user-moved, tomb = deleted (len 0, skipped by everything). AUDITION flags: fromEnd = `start` is the region's
  * END (the last lenMs up to it), loop = repeat until RELEASE. NUDGE_ALL's `which`: grid or markers. */
-const EDIT = { orange: 1, tomb: 2, fromEnd: 1, loop: 2, grid: 0, markers: 1, noKey: 255, maxNudgeMs: 32767, maxAuditionMs: 65535 };
+const EDIT = { orange: 1, tomb: 2, fromEnd: 1, loop: 2, grid: 0, markers: 1, noKey: 255, maxNudgeMs: 32767, maxAuditionMs: 65535,
+  tapAllowMs: [0, 20, 40, 60, 80], tapAllowDefault: 40 };   /* Options → Tap Allowance (tap.allow): index → ms */
 /* SETS (state tail 219..254): a set is sets/<name>.wav + sets/<name>.json on the card. The op's
  * state, its progress, the result of the last op and a sequence that bumps when one finishes;
  * then the name of the set the material came from. A name is 1..31 of [A-Za-z0-9_-]. */
@@ -367,6 +370,9 @@ const audition       = (link, start, lenMs, flags = 0)     => editOp(link, ACT.a
 const release        = link                                => editOp(link, ACT.release, []);
 /* the firmware timestamps: srcPos at receipt − allowMs, snapped to an onset within ±snapMs; an orange marker */
 const tapMark        = (link, snapMs, allowMs, gen = 0)    => editOp(link, ACT.tapMark, [snapMs & 0xff, allowMs & 0xff], gen);
+/* EDIT-UNDO: one journal step either way (BAD_ARGS on a firmware without package 6; the page keeps the buttons off while undoDepth is 0) */
+const editUndo       = link                                => editOp(link, ACT.undoEdit, []);
+const editRedo       = link                                => editOp(link, ACT.redoEdit, []);
 
 /* GET_ENV: fetch nSlices × 16 envelope bytes in ≤30-slice chunks. */
 async function fetchEnv(link, n) {
@@ -507,6 +513,6 @@ const api = { PROTO, CMD, ACT, REC, NOTE_NAMES, keyName, STATUS, statusName, crc
   STATE_MIN, ZONE_MULT, parseState, fetchEnv, parseScope, SCOPE, SCOPE_CH, SCOPE_JACK_ROLE, SCOPE_JACK_IN, scopeVolts, scopeCvCode, scopeAge, scopeReq, parseScope2, scopePlan, fetchScopeFrame, allFields, findField, fieldLabels, pagerInfo, optionsInfo, manualInfo,
   TABLE_ENTRY, TABLE_ENTRY_EDIT, TABLE_CHUNK, fetchWave, parseWave, fetchTable, parseTableChunk, fetchHits, parseHitsChunk,
   SET_STATE, SET_RESULT, setNameOk, setLabelName, nameBytes, saveSet, loadSet,
-  EDIT, editOp, editBoundary, editEntry, editAdd, editSplit, editMerge, editTombstone, editSetKey, editSwapKeys, editNudgeAll, editPromote, editFromOnsets, audition, release, tapMark };
+  EDIT, editOp, editBoundary, editEntry, editAdd, editSplit, editMerge, editTombstone, editSetKey, editSwapKeys, editNudgeAll, editPromote, editFromOnsets, audition, release, tapMark, editUndo, editRedo };
 if (typeof module === 'object' && module.exports) module.exports = api; else root.HL = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
