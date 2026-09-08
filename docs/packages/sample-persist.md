@@ -6,7 +6,21 @@
 > break's length; `len` is the whole WAV, recordings included), `swing`, a
 > slice `key` of **−1 for grid entries** (recorded ones carry 0..23), a
 > looper event's `slice`; `kSetMaxSlices` is 96 (the engine's whole table)
-> and `kSetJsonMax` 32 KiB (a worst-case set is 28.5 KB).
+> and `kSetJsonMax` 32 KiB.
+>
+> **EDIT-PERSIST** ([slice-edit-persist.md](slice-edit-persist.md)) added,
+> still under schema 1: per entry `"flags"` (b0 orange — user-placed or
+> user-moved; tombstones are never written and every table index in the
+> file is re-indexed to the compacted order), a top-level `"grid"` (the
+> grid's entry count; absent = the leading `key −1` entries inside the
+> material, an old file's only kind) and `"keys":[24]` (the entry each
+> Voice key plays as an index into the file's `slices[]`, −1 = the
+> default). `key` on an entry is provenance — the key that recorded it, −1
+> for a grid slice or a marker nobody recorded — not the map. Options are
+> 24 bytes (`OPT8`: 22 Tap Allowance, 23 Autosave; `bb::kSetOptionsToday`,
+> static_asserted against `Options::kBytes` in the shell). A worst-case set
+> is 29.5 KB. The same document minus the material, options and looper is
+> the loose-file **sidecar** `sets/<wavname>.slices.json` (there).
 
 Phase E of [the sample-mode plan](../sample-mode-plan.md) §4, the pure half.
 Ernest: "JSON is cheap, a 20 s WAV is cheap." A **set** is
@@ -82,8 +96,10 @@ test proves the byte stream is identical for a 64-byte, a 1000-byte and a
 | `stereo` | 0/1 (or bool) | two planes in the WAV |
 | `len` | int | frames per plane |
 | `bars`, `bpm` | int, float | the analysis result at save time |
-| `slices[]` | | `start`, `len` frames · `key` pad index · `cls` 0 kick 1 snare 2 hat 3 other · `sal` 0‥1 · `hit` 0/1 · `name` ≤ 31 |
-| `options[]` | ints 0‥255 | the `Options` block bytes in Serialize order (17 today: class, clock, voice, gate len, gate lvl, grammar, gate mode, bars, rests, gate lanes, fades, tail, swaps, déjà vu, swing, onsets, jacks). Apply through `Options::Deserialize`, which already range-checks each byte |
+| `grid` | int | the grid's entry count (EDIT-PERSIST); absent → inferred |
+| `slices[]` | | `start`, `len` frames · `key` the pad that recorded it, −1 none · `cls` 0 kick 1 snare 2 hat 3 other · `sal` 0‥1 · `hit` 0/1 · `flags` b0 orange (EDIT-PERSIST) · `name` ≤ 31 |
+| `keys[]` | int[24] | the key map, file indices, −1 = default (EDIT-PERSIST) |
+| `options[]` | ints 0‥255 | the `Options` block bytes in Serialize order (17 when this was written: class, clock, voice, gate len, gate lvl, grammar, gate mode, bars, rests, gate lanes, fades, tail, swaps, déjà vu, swing, onsets, jacks; **24 today** — 17 key plays, 18 sampling, 19 record source, 20 record, 21 quantize, 22 tap allowance, 23 autosave). Apply through `Options::Deserialize`, which already range-checks each byte |
 | `looper[]` | | `phase` bars (unquantized) · `key` · `style` · `vel` |
 
 Capacities (`bb::kSet…`): 64 slices, 256 looper events, 32 option bytes;
