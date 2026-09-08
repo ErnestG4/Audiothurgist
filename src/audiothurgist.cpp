@@ -64,6 +64,7 @@
 #include "bb_sample.h"   /* SAMPLE: TrimRegion, AnalyseRegion (a key take, control thread) */
 #include "bb_record.h"   /* RECORD: record input, kit map, take length, markers → cues, TakeRecorder */
 #include "bb_sets.h"     /* SETS: set naming, engine ↔ SetInfo, the load plan (docs/packages/sample-sets.md) */
+#include "bb_scope.h"    /* SCOPE: four-channel rings, trigger, decimation behind 0x62 (pure, host-tested) */
 #include <new>           /* SETS: placement-new for the NOLOAD SDRAM objects */
 
 using namespace alchemy;
@@ -139,15 +140,22 @@ static float          gPendDens[bb::Engine::kMaxSlices];   /* keyframe density p
 
 /* ── Web frontend state (HostLink extension 0x60–0x6F, see StateExt) ────
  * Per-slice envelope (8 min/max pairs, u8 with 128 = 0) computed at load on
- * the control thread; a 1 KB ring of the mono output decimated ×4 for the
- * scope, written by the audio thread. gMatGen bumps on every material swap so
- * the page knows when to refetch the envelope. */
+ * the control thread. gMatGen bumps on every material swap so the page
+ * knows when to refetch the envelope.
+ * SCOPE: four int8 rings — out L, out R, in L (J1), in R (J2) — of
+ * bb::kScopeRing samples each (16 KB, SDRAM: the audio thread already
+ * streams takes into SDRAM, and DTCM is the scarce one), written at full
+ * rate by AudioCb under ONE write index so the channels stay sample-aligned;
+ * 0x62 snapshots the index once and reads every channel from it. "in" is
+ * what the record path sees with Record Source = Inputs (the codec's J1/J2
+ * buffers, before the Sampling mix); with Record Source = Output the record
+ * path sees out L/R, which the scope shows anyway. */
 static constexpr int kEnvPts = 8;
 static uint8_t ALCHEMY_SDRAM_BSS gEnv[bb::Engine::kMaxSlices][kEnvPts][2];
 static uint8_t ALCHEMY_SDRAM_BSS gPendEnv[bb::Engine::kMaxSlices][kEnvPts][2];
 static volatile uint8_t  gMatGen  = 0;
-static int8_t            gScope[1024];
-static volatile uint16_t gScopeW  = 0;
+static int8_t ALCHEMY_SDRAM_BSS gScopeRing[bb::kScopeChans][bb::kScopeRing];   /* SCOPE */
+static volatile uint32_t gScopeW  = 0;                                          /* SCOPE: absolute sample count, wraps */
 
 /* Jack descriptors (browser labels; HYBRID/BRAIN map fills in at M3). */
 Jack jk1 ("audio_l", "Audio In L",  JackSig::AudioIn);
@@ -949,6 +957,9 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
     }
 
     const float v = gVol, send = gVerbSend;
+    const uint32_t scopeW = gScopeW;   /* SCOPE: one index for all four rings; published once, after the block */
+    const float* const scopeInL = in[kCodecInChJ1];
+    const float* const scopeInR = in[kCodecInChJ2];
     for(int i = 0; i < n; i++)
     {
         const float dl = gMono[i], dr = gOutR[i];   /* RECORD: stereo-aware mix; mono material has dr == dl */
@@ -960,8 +971,14 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
         if(r > 1.f) r = 1.f; else if(r < -1.f) r = -1.f;
         out[0][i] = l;
         out[1][i] = r;
-        if((i & 3) == 0) { gScope[gScopeW & 1023u] = (int8_t)(0.5f * (l + r) * 127.f); gScopeW = (uint16_t)(gScopeW + 1u); }   /* RECORD: the scope keeps the mono sum */
+        /* SCOPE: full-rate int8 of out L, out R, in L, in R — four stores per sample */
+        const int ss = bb::ScopeSlot(scopeW + (uint32_t)i);
+        gScopeRing[0][ss] = bb::ScopeI8(l);
+        gScopeRing[1][ss] = bb::ScopeI8(r);
+        gScopeRing[2][ss] = bb::ScopeI8(scopeInL[i]);
+        gScopeRing[3][ss] = bb::ScopeI8(scopeInR[i]);
     }
+    gScopeW = scopeW + (uint32_t)n;
     /* RECORD: feed the takes — the engine's (into a key, past the material)
      * and the shell's (the loop, into the other buffer); both return at once
      * when idle. Record Source: J1/J2, or what just left J9/J10 (the
@@ -2172,7 +2189,22 @@ static void ServiceLoad()
  *   0x63 ACTION ops 7 clear locks · 8 page(u8 0/1)
  *   0x61 GET_ENV    ← u8 first, u8 count(≤30) → u8 status, u8 first, u8 n,
  *                     then n × (8 × {u8 min, u8 max})
- *   0x62 SCOPE      → u8 status, u16 n(256), i8 samples[256] (×4 decimated)
+ *   0x62 SCOPE      ← (empty)  → u8 status, u16 n(256), i8 samples[256]: (out L + out R) / 2,
+ *                     ×4 decimated, the newest 21 ms — the pre-SCOPE reply, kept for old pages
+ *                   ← u8 chanMask (b0 out L · b1 out R · b2 in L · b3 in R), u8 decim (1..16),
+ *                     u16 n (samples per channel; clamped to 512, to what fits max_body beside
+ *                     the header, and to the ring: n·decim ≤ 3840), u8 flags (b0 trigger: start
+ *                     the window on the most recent rising zero crossing of the FIRST selected
+ *                     channel that leaves n·decim samples after it, hysteresis ±4 · b1 peak:
+ *                     each sample = the max-magnitude one of its decim group, else the first ·
+ *                     b2 at: + u32 pos — start there instead (a second request of the same
+ *                     frame: the channels of one frame can be split over requests and stay
+ *                     sample-aligned))
+ *                   → u8 status, u8 chanMask, u8 decim, u16 n, u8 flags (b0 triggered ·
+ *                     b1 pos honoured), u32 pos (ring position of the window start: absolute
+ *                     sample count, so consecutive frames tell apart), then n × i8 per selected
+ *                     channel in mask order. BAD_ARGS: chanMask 0 or > 0x0f, decim 0 / > 16,
+ *                     n 0, a short body. Capability "scope2":1 in the descriptor (core/bb_scope.h).
  *   0x63 ACTION     ← u8 op [,args]: 0 dice · 1 reslice · 2 mute toggle ·
  *                     3 punch(u8 step, u8 slice) · 4 flow(u8 on) ·
  *                     5 scrub(u8 depth) · 6 load(u8 fileIdx)      → u8 status */
@@ -2218,7 +2250,8 @@ struct StateExt : hostlink::IHostlinkExtension
     {
         /* WEB: wave/table/hits (0x64..0x66) advertised so the page can feature-detect the Kit tab. */
         /* SETS: "sets":1 = ACTION 14 / 15 and the 219.. state tail. */
-        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102,\"sets\":1}";
+        /* SCOPE: "scope2":1 = the four-channel 0x62 body (chanMask / decim / n / flags) beside the empty-body reply. */
+        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102,\"sets\":1,\"scope2\":1}";
     }
     /* WEB: one float → i8 (±127), saturating. */
     static int8_t ToI8(float v)
@@ -2300,12 +2333,32 @@ struct StateExt : hostlink::IHostlinkExtension
                 w.Bytes(&gEnv[first][0][0], (size_t)n * kEnvPts * 2u);
                 return;
             }
+            /* SCOPE: one snapshot of the write index serves every channel (sample-aligned);
+             * the pure routines in core/bb_scope.h do the window, trigger and decimation.
+             * Worst case: one pass over 3840 samples for the trigger plus 4 × 512 × 16 ring
+             * reads for a peak-decimated frame — well under a millisecond from SDRAM. */
             case 0x62u:
             {
-                uint8_t buf[256];
-                const uint16_t wpos = gScopeW;
-                for(int i = 0; i < 256; i++) buf[i] = (uint8_t)gScope[(wpos - 256 + i) & 1023u];
-                w.U8(0u); w.U16(256u); w.Bytes(buf, 256u);
+                const uint32_t wpos = gScopeW;
+                if(f.len == 0)   /* the pre-SCOPE reply, byte for byte in shape: 256 × (L + R) / 2, ×4 */
+                {
+                    int8_t buf[256];
+                    bb::ScopeExtractOld(gScopeRing[0], gScopeRing[1], wpos, buf);
+                    w.U8(0u); w.U16(256u); w.Bytes((const uint8_t*)buf, 256u);
+                    return;
+                }
+                bb::ScopeReq q;
+                if(!bb::ScopeParse(f.body, (int)f.len, (int)hostlink::kMaxBody, q)) { w.U8(2u); return; }   /* BAD_ARGS */
+                uint8_t fl = 0u;
+                const uint32_t start = bb::ScopeWindow(gScopeRing[bb::ScopeFirstChan(q.mask)], wpos, (int)q.n * (int)q.decim, q, fl);
+                w.U8(0u); w.U8(q.mask); w.U8(q.decim); w.U16(q.n); w.U8(fl); w.U32(start);
+                for(int c = 0; c < bb::kScopeChans; c++)
+                {
+                    if(!(q.mask & (1u << c))) continue;
+                    int8_t buf[bb::kScopeMaxN];
+                    bb::ScopeExtract(gScopeRing[c], start, q.n, q.decim, (q.flags & bb::kScopePeak) != 0u, buf);
+                    w.Bytes((const uint8_t*)buf, (size_t)q.n);
+                }
                 return;
             }
             case 0x63u:
