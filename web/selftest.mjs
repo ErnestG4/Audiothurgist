@@ -167,7 +167,7 @@ await link.start();
   check('descriptor crc+json', desc && desc.dv === 1);
   const opts = HL.optionsInfo(desc);
   const wantIds = DEMO.OPTION_FIELDS.map(f => f[0]);
-  check('options block: 17 enum fields with the firmware ids (Key Plays included)', opts && opts.fields.length === DEMO.OPTION_FIELDS.length && opts.fields.length === 17 && wantIds.every(id => opts.fields.some(f => f.id === id)) && opts.fields.some(f => f.id === 'key.plays'));
+  check('options block: 18 enum fields with the firmware ids (Key Plays and Tap Allowance included)', opts && opts.fields.length === DEMO.OPTION_FIELDS.length && opts.fields.length === 18 && opts.fields.some(f => f.id === 'tap.allow') && wantIds.every(id => opts.fields.some(f => f.id === id)) && opts.fields.some(f => f.id === 'key.plays'));
   const gl = HL.fieldLabels(desc, 'grammar.mode');
   check('labels from disp', gl[3] === 'Euclid' && HL.fieldLabels(desc, 'sample.idx').length === DEMO.FILES.length);
   check('grammar has five labels, index 4 = Camp', gl.length === 5 && gl[4] === 'Camp' && opts.fields.find(f => f.id === 'grammar.mode').zones === 5);

@@ -33,6 +33,8 @@ const OPTION_FIELDS = [
   ['swing', 'Swing', ['Straight 16ths', 'Auto (the material\'s swing)']],
   ['onsets', 'Onsets', ['Spectral flux', 'Log-filtered flux (Böck 2012)']],
   ['key.plays', 'Key Plays', ['One-shot (the slice)', 'Held (read on until the gate falls)']],
+  /* EDIT-UI: the firmware's byte 22 (Tap Allowance, default 40 ms) sits at 17 here; the page reads it by the descriptor's offset */
+  ['tap.allow', 'Tap Allowance', ['0 ms', '20 ms', '40 ms', '60 ms', '80 ms']],
 ];
 /* The card's list as the firmware labels it: loose WAVs, then the sets of sets/ as "<name> [set]". */
 const FILES = ['amen_170.wav', 'apache_120.wav', 'funky_drummer_100.wav', 'think_110.wav', 'amen_kit [set]'];
@@ -52,10 +54,10 @@ const KNOBS = [
    ['lang.rot', 'Rotation', '**Rotation** — Euclid: rotates every class\'s hits together.']],
 ];
 
-/* Blob layout, in Manage() order: pager 48 · locks 64 · sample 1 · options 17 · settings 2. */
-const OFF = { pager: 0, locks: 48, sample: 112, options: 113, settings: 130 };
-const N_OPTIONS = OPTION_FIELDS.length;   /* 17: the firmware's byte 16 (Jacks) is not modelled; Key Plays sits at 16 here */
-const LIVE_SIZE = 132;
+/* Blob layout, in Manage() order: pager 48 · locks 64 · sample 1 · options 18 · settings 2. */
+const OFF = { pager: 0, locks: 48, sample: 112, options: 113, settings: 131 };
+const N_OPTIONS = OPTION_FIELDS.length;   /* 18: the firmware's byte 16 (Jacks) is not modelled; Key Plays sits at 16 here, Tap Allowance at 17 */
+const LIVE_SIZE = 133;
 const SCHEMA = 0x0a0d1072;
 /* The fake material: 48 kHz, one plane, 16 s of capacity; the break fills
  * nSlices × 6000 samples (32 slices = 4 s = two bars at 120 BPM). */
@@ -123,7 +125,7 @@ class FakeDevice {
      * the body capped at 255 (no tableGen / srcPos tail), ACTION 16.. unknown (BAD_ARGS). */
     this.opts = Object.assign({ tail: 262, bpm: 120, nSlices: 32, latencyMs: 8, swing: false, kit: false, maxBody: MAX_BODY, inputs: true, edit: true }, opts);
     if (!this.opts.edit && this.opts.tail > 255) this.opts.tail = 255;
-    this.live = new Uint8Array(LIVE_SIZE); this.live.fill(0x80, OFF.pager, OFF.pager + 48);
+    this.live = new Uint8Array(LIVE_SIZE); this.live.fill(0x80, OFF.pager, OFF.pager + 48); this.live[OFF.options + 17] = 2;   /* Tap Allowance 40 ms */
     this.desc = new TextEncoder().encode(JSON.stringify(buildDescriptor(this.opts.edit)));
     /* EDIT: the table generation (never 0), the audition voice's last request, its rate window and the request held
      * for it (ten a second; a later one replaces), and how many went out. */
