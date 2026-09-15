@@ -48,6 +48,11 @@ endif
 # The SDK sizes its CDC rings and frame buffers from this, all in DTCM (.bss):
 # 1024 costs ~6 KB there, 2048 would cost ~18 KB and leave the stack ~17 KB.
 C_DEFS += -DALCHEMY_HOSTLINK_MAX_BODY=1024
+# Stamp the build so the module can say which one it is (Kyklophoria's rule:
+# without it every flash reported the same string). HELLO's git field carries it.
+GIT_HASH := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+GIT_DIRTY := $(shell git diff --quiet 2>/dev/null || echo -dirty)
+C_DEFS += -DBB_GIT_HASH=\"$(GIT_HASH)$(GIT_DIRTY)\"
 
 APP_TYPE = BOOT_SRAM
 # Local linker adds .axi_bss in AXI SRAM — upstream's SRAM linker leaves it
@@ -73,3 +78,9 @@ USBPID ?= df11
 program-live: all
 	node $(ALCHEMY_DIR)/tools/hostlink-cli/hostlink.mjs reboot bootloader
 	dfu-util -w -a 0 -s $(FLASH_ADDRESS):leave -D $(BUILD_DIR)/$(TARGET_BIN) -d ,0483:$(USBPID)
+
+# Boot-path check the desktop build cannot do: no unexpected static initialiser
+# stores into SDRAM (docs/sdk-quirks.md). Run after adding an SDRAM object.
+sdramcheck: build/audiothurgist.elf
+	tools/sdramcheck.sh $<
+.PHONY: sdramcheck

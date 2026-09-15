@@ -1,0 +1,13 @@
+# tools/sdramcheck.sh: objects whose static initialiser is KNOWN to store into
+# SDRAM before main(), with the reason each is tolerated. Everything else fails.
+# gVerb: daisysp::ReverbSc has a user-provided constructor; it has been placed
+#        in .sdram_bss since v0.1 and boots — under the Daisy bootloader
+#        (APP_TYPE BOOT_SRAM) the FMC is already configured when the app's
+#        static initialisers run. A no-bootloader build would fault here.
+gVerb
+gDet
+# gLockArena, gStage: plain arrays whose ADDRESS a constructor stores elsewhere
+#        (the ParamLock bank and the load staging pointer); the pool literal
+#        is a value, not a store target. Arrays cannot have initialisers.
+gLockArena
+gStage

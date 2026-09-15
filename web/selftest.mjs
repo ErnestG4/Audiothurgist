@@ -21,6 +21,9 @@ const check = (name, ok, detail = '') => { if (ok) pass++; else { fail++; consol
 const hex = b => Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
 const unhex = h => Uint8Array.from((h.match(/../g) || []).map(x => parseInt(x, 16)));
 
+/* canvas geometry calls the DOM stub (section 9) watches for NaN / Infinity arguments */
+const GEOM = new Set(['arc', 'arcTo', 'ellipse', 'moveTo', 'lineTo', 'rect', 'fillRect', 'strokeRect', 'clearRect', 'quadraticCurveTo', 'bezierCurveTo', 'fillText', 'strokeText', 'translate', 'scale', 'rotate', 'setTransform', 'drawImage', 'roundRect']);
+const nanDraws = [];
 /* ── 1. golden vectors (the SDK's hostlink_golden.json) ── */
 const gArg = process.argv.indexOf('--golden');
 const goldenPath = gArg > 0 ? process.argv[gArg + 1] : path.resolve(here, '..', '..', 'alchemy-sdk', 'tests', 'host', 'golden', 'hostlink_golden.json');
@@ -155,6 +158,24 @@ function stateBody(len) {
   { const h = new Uint8Array(3 + 8); h[0] = 0; h[1] = 130; h[2] = 128; new DataView(h.buffer).setUint32(3, 1, true); new DataView(h.buffer).setUint32(7, 0xfffffffe, true);
     const hc = HL.parseHitsChunk(h); check('hits chunk', hc.total === 130 && hc.first === 128 && hc.positions.length === 2 && hc.positions[1] === 0xfffffffe); }
   check('key names: two octaves from C', HL.keyName(0) === 'C1' && HL.keyName(11) === 'B1' && HL.keyName(12) === 'C2' && HL.keyName(23) === 'B2' && HL.keyName(1) === 'C♯1');
+}
+
+/* ── 2b. Link hygiene (Kyklophoria's two fixes): the accumulator cap, and the lone zero that resyncs a
+ *        module left holding half a frame ── */
+{
+  const fp = new HL.FrameParser(); let got = 0;
+  for (let i = 0; i < 5000; i++) fp.push(1, () => got++);
+  check('accumulator capped', fp.acc.length <= HL.kMaxFrameBytes && fp.dropped === 1 && fp.over === true);
+  fp.push(0, () => got++);                                              /* the delimiter ends the junk */
+  for (const b of HL.buildFrame(HL.CMD.hello, 7, new Uint8Array(0))) fp.push(b, f => { got++; check('frame after resync parses', f.ok && f.seq === 7); });
+  check('junk produced no frame', got === 1);
+  /* a module holding half a frame: write half a HELLO into the fake port before the link starts */
+  const half = new DEMO.FakeDevice({ tail: 170, latencyMs: 2 }); const hp = new DEMO.FakePort(half);
+  const w0 = hp.writable.getWriter(); const fr = HL.buildFrame(HL.CMD.hello, 1, new Uint8Array(0)); await w0.write(fr.subarray(0, fr.length >> 1)); w0.releaseLock();
+  const hl = new HL.Link(hp); await hl.start();
+  const t0 = Date.now(); const info = await HL.hello(hl); const dt = Date.now() - t0;
+  check('hello answers first time after a half frame', info && info.name && hl.stats.timeouts === 0, `timeouts ${hl.stats.timeouts} in ${dt} ms`);
+  await hl.close();
 }
 
 /* ── 3. The Link end to end over the fake module: priority, coalescing, RTT, live blob ── */
@@ -958,7 +979,9 @@ function domStub(html) {
     closest(sel) { for (let e = this; e; e = e._parent) if (e.classList.contains(sel.replace(/^\./, ''))) return e; return null; }
     getBoundingClientRect() { return { left: 0, top: 0, width: this._w, height: this._h, right: this._w, bottom: this._h }; }
     setPointerCapture() {} releasePointerCapture() {} focus() {} blur() {}
-    getContext() { const el = this; return new Proxy({}, { get: (o, k) => { if (k === 'measureText') return () => ({ width: 10 }); if (typeof k === 'string' && k in o) return o[k]; return (...a) => { el._calls++; }; }, set: (o, k, v) => { o[k] = v; return true; } }); }
+    /* The NaN-draw watch (Kyklophoria): arc(NaN, …) is not an error on any canvas, it draws nothing,
+     * indistinguishable from an off-screen mark. Every geometry call is checked for finite numbers. */
+    getContext() { const el = this; return new Proxy({}, { get: (o, k) => { if (k === 'measureText') return () => ({ width: 10 }); if (typeof k === 'string' && k in o) return o[k]; return (...a) => { el._calls++; if (GEOM.has(k)) for (const v of a) if (typeof v === 'number' && !Number.isFinite(v)) { nanDraws.push(k + '(' + a.map(x => String(x)).join(',') + ')'); } }; }, set: (o, k, v) => { o[k] = v; return true; } }); }
   }
   const byId = new Map();
   const document = {
@@ -1078,5 +1101,6 @@ async function loadPage(search) {
   check('page has the Scope tab wired to scope2', /id="tab_scope"/.test(html) && /id="bigscope"/.test(html) && /desc\.audiothurgist\.scope2/.test(html) && /fetchScopeFrame\(/.test(html) && /SCOPE_TAB_STATE_MS/.test(html) && /id="sc_cvchans"/.test(html) && /id="sc_p_gates"/.test(html) && /scope2 >= 2/.test(html));
 }
 
+check('no canvas call ever received NaN/Infinity', nanDraws.length === 0, nanDraws.slice(0, 5).join(' · '));
 console.log(`${fail ? 'FAIL' : 'OK'}: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -1181,9 +1181,17 @@ function setDisconnected() {
   $('connect').textContent = 'Connect'; $('demo').disabled = false; setPill('modpill', 'not connected', ''); setPill('linkpill', 'link: —', ''); setPill('kit_status', '—', '');
   invalidate(D.kit | D.kitwave);
 }
+/* Two connects in flight must not leave you with neither: the loser's catch
+ * used to tear down the winner's link. Each attempt takes a generation and
+ * only cleans up if it is still the current one. */
+let connectGen = 0;
 async function connectPort(port, isDemo) {
+  const gen = ++connectGen;
   try {
     await port.open({ baudRate: 115200 });
+    /* DTR up: some CDC stacks hold the port half-open until the host asserts it. */
+    if (!isDemo) { try { await port.setSignals?.({ dataTerminalReady: true }); } catch {} }
+    if (gen !== connectGen) { try { await port.close(); } catch {} return; }
     link = new Link(port); link.onError = e => notice('Serial read error: ' + e.message); await link.start();
     info = await hello(link);
     setPill('modpill', `${info.name} ${info.fw}${isDemo ? ' (demo)' : transportName() === 'WebUSB' ? ' · WebUSB' : ''}`, 'ok'); $('connect').textContent = 'Disconnect'; $('demo').disabled = true;
@@ -1206,7 +1214,7 @@ async function connectPort(port, isDemo) {
     if (opts) { try { live = await getLive(link, info); } catch (e) { notice('Options unreadable: ' + e.message); } }
     buildOptions(); setPill('opt_status', live ? 'live' : '—', live ? 'ok' : '');
     startPolling(); if (scopeShown) scopeKick(); invalidate(D.bigscope);
-  } catch (e) { notice('Connect failed: ' + e.message); if (link) await link.close(); setDisconnected(); }
+  } catch (e) { if (gen !== connectGen) return; notice('Connect failed: ' + e.message); if (link) await link.close(); setDisconnected(); }
 }
 /* EDIT-UI: with "edit" the Kit waveform grows its handle row and strip and the Edit panel shows; without it the tab is
  * the view-only one (no handles, no pad, no field — `?demo=noedit`). */

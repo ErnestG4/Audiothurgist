@@ -64,6 +64,10 @@
 #include "bb_sample.h"   /* SAMPLE: TrimRegion, AnalyseRegion (a key take, control thread) */
 #include "bb_record.h"   /* RECORD: record input, kit map, take length, markers → cues, TakeRecorder */
 #include "bb_sets.h"     /* SETS: set naming, engine ↔ SetInfo, the load plan (docs/packages/sample-sets.md) */
+#ifndef BB_GIT_HASH
+#define BB_GIT_HASH "local"
+#endif
+#include <type_traits>
 #include "bb_scope.h"    /* SCOPE: four-channel rings, trigger, decimation behind 0x62 (pure, host-tested) */
 #include "bb_panel_edit.h" /* EDIT-PANEL: the Edit page's walker, pickup, nudge plan, ring states (pure, host-tested) */
 #include <new>           /* SETS: placement-new for the NOLOAD SDRAM objects */
@@ -218,7 +222,7 @@ static bb::bardetail::BarScratch ALCHEMY_SDRAM_BSS gBarScratchMem;
 Settings           settings(hw, &pager);
 void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.12.2-edit", "web");
+                           "0.12.3-harden", BB_GIT_HASH);   /* the git field = the build stamp (Makefile) */
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -605,9 +609,36 @@ alignas(8)  static uint8_t ALCHEMY_SDRAM_BSS gSetLooperMem[sizeof(bb::Looper)];
  * in flight, 28.6 KB, NOLOAD in SDRAM; a POD the engine clears through SetUndoJournal at boot. The audio thread
  * alone writes it (inside ApplyEdit); the tail reads the two depths. */
 static bb::UndoJournal ALCHEMY_SDRAM_BSS gUndoJournal;
+
+/* Nothing in .sdram_bss may need a constructor or a default member initialiser:
+ * that makes the object non-trivially constructible, .init_array then stores
+ * into SDRAM before hw.Init() has configured the FMC, and the module hard-faults
+ * on every boot (Kyklophoria bricked a build this way — docs/sdk-quirks.md).
+ * tools/sdramcheck.sh is the backstop that reads the ELF for the same thing. */
+#define BB_SDRAM_POD(x) static_assert(std::is_trivially_default_constructible<decltype(x)>::value, #x " lives in .sdram_bss and must be a POD")
+BB_SDRAM_POD(gBufA);
+BB_SDRAM_POD(gBufB);
+BB_SDRAM_POD(gStage);
+BB_SDRAM_POD(gBufAR);
+BB_SDRAM_POD(gBufBR);
+BB_SDRAM_POD(gStageR);
+BB_SDRAM_POD(gFiles);
+BB_SDRAM_POD(gEnv);
+BB_SDRAM_POD(gPendEnv);
+BB_SDRAM_POD(gScopeRing);
+BB_SDRAM_POD(gScopeCv);
+BB_SDRAM_POD(gLockArena);
+BB_SDRAM_POD(gBarScratchMem);
+BB_SDRAM_POD(gSampleDisp);
+BB_SDRAM_POD(gMarkers);
+BB_SDRAM_POD(gSetJson);
+BB_SDRAM_POD(gSetInfoMem);
+BB_SDRAM_POD(gSetLooperMem);
+BB_SDRAM_POD(gUndoJournal);
 static bb::SetInfo*  gSet       = nullptr;   /* the set being saved / loaded */
 static bb::Looper*   gSetLooper = nullptr;   /* looper staging, audio ↔ control, whole copies (Looper::Adopt) */
 static bb::SetPlan   ALCHEMY_SDRAM_BSS gSetPlan;   /* trivially constructible; PlanSet clears it */
+BB_SDRAM_POD(gSetPlan);
 static volatile uint8_t gSetState      = 0;      /* 0 idle · 1 saving · 2 loading (state tail 219) */
 static volatile uint8_t gSetProgress   = 0;      /* 0..255 of the current op (220) */
 static volatile uint8_t gSetResult     = 0;      /* last op: 0 ok · 1 no card · 2 card full · 3 write failed · 4 bad name · 5 not found · 6 busy · 7 bad file (221) */

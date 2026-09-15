@@ -80,10 +80,22 @@ function buildFrame(type, seq, body) {
 }
 /* Byte-at-a-time frame scanner: collects up to each 0x00 delimiter, COBS-
  * decodes, validates header + CRC and hands the frame to onFrame. */
+/* The cap is not optional (Kyklophoria, 2026-09): a frame is at most maxBody
+ * plus header, CRC and COBS overhead, so anything longer is not a frame — a
+ * device that died mid-transmit, a wrong transport, line noise — and the answer
+ * to all three is to drop the chunk at the next delimiter and resync. Without
+ * it 4 MB of undelimited input took a tab's heap to 96 MB. 2048 covers a
+ * 1024-byte body with room; `dropped` counts resyncs for the link pill. */
+const kMaxFrameBytes = 2048;
 class FrameParser {
-  constructor() { this.acc = []; }
+  constructor() { this.acc = []; this.over = false; this.dropped = 0; }
   push(byte, onFrame) {
-    if (byte !== 0) { this.acc.push(byte); return; }
+    if (byte !== 0) {
+      if (this.over) return;
+      if (this.acc.length >= kMaxFrameBytes) { this.over = true; this.acc.length = 0; this.dropped++; return; }
+      this.acc.push(byte); return;
+    }
+    if (this.over) { this.over = false; this.acc.length = 0; return; }
     const chunk = Uint8Array.from(this.acc); this.acc = [];
     if (chunk.length === 0) return;
     const dec = cobsDecode(chunk); if (!dec || dec.length < 10) return;
@@ -115,7 +127,16 @@ class Link {
     this._win = { t0: 0, n: 0, max: 0 };
     this.onError = null;
   }
-  async start() { this.writer = this.port.writable.getWriter(); this.readLoop(); }
+  /* A link that did not close tidily leaves the module's parser holding half
+   * a frame; our HELLO gets appended to it, delimited into one malformed frame
+   * and dropped — correctly — so nothing answers and the FIRST connect times
+   * out while the second works (its delimiter is what cleared the module).
+   * A lone zero is the documented "throw away what you have": one byte, and
+   * the parser has always known what to do with it (Kyklophoria's fix). */
+  async start() {
+    this.writer = this.port.writable.getWriter(); this.readLoop();
+    try { await this.writer.write(Uint8Array.of(0)); } catch { /* the first request will report it */ }
+  }
   /* Web Serial pattern: a non-fatal read error (overrun, framing) closes the
    * reader but leaves `port.readable` — reacquire and carry on; `done` or a
    * fatal error ends the loop. */
@@ -178,8 +199,23 @@ class Link {
 const _now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
 /* ───────────── standard commands ───────────── */
-async function hello(link) {
-  const b = await link.request(CMD.hello, new Uint8Array(0), { urgent: true }); let at = 5;
+/* HELLO is asked up to three times, a lone zero between attempts: a reset, a
+ * half-sent reply or a buffer the driver held across the close all look like
+ * silence, and one 400 ms retry is cheaper than a second click. */
+async function hello(link, tries = 3) {
+  let last = null;
+  for (let i = 0; i < tries; i++) {
+    try { return await helloOnce(link, i === 0 ? 1500 : 400); }
+    catch (e) {
+      last = e; if (link.closed) break;
+      await new Promise(r => setTimeout(r, 120));
+      try { await link.writer.write(Uint8Array.of(0)); } catch {}
+    }
+  }
+  throw last || new Error('no answer');
+}
+async function helloOnce(link, timeoutMs) {
+  const b = await link.request(CMD.hello, new Uint8Array(0), { urgent: true, timeoutMs }); let at = 5;
   const uid = Array.from(b.subarray(at, at + 12)).map(x => x.toString(16).padStart(2, '0')).join(''); at += 12;
   const schema = u32(b, at); at += 4; const cap = u32(b, at); at += 4; const dlen = u32(b, at); at += 4; const dcrc = u32(b, at); at += 4;
   const maxBody = u16(b, at); at += 2; const liveSize = u16(b, at); at += 2;
@@ -511,7 +547,7 @@ function manualInfo(desc) {
            presetsHelp: (m && m.presets && m.presets.help) || '', jacks: desc.jacks || [] };
 }
 
-const api = { PROTO, CMD, ACT, REC, NOTE_NAMES, keyName, STATUS, statusName, crc32, cobsEncode, cobsDecode, buildFrame, FrameParser, Link,
+const api = { PROTO, CMD, ACT, REC, NOTE_NAMES, keyName, STATUS, statusName, crc32, cobsEncode, cobsDecode, buildFrame, FrameParser, kMaxFrameBytes, Link,
   u16, u32, f32, readStr, hello, getDescriptor, getLive, setLive, concat,
   STATE_MIN, ZONE_MULT, parseState, fetchEnv, parseScope, SCOPE, SCOPE_CH, SCOPE_JACK_ROLE, SCOPE_JACK_IN, scopeVolts, scopeCvCode, scopeAge, scopeReq, parseScope2, scopePlan, fetchScopeFrame, allFields, findField, fieldLabels, pagerInfo, optionsInfo, manualInfo,
   TABLE_ENTRY, TABLE_ENTRY_EDIT, TABLE_CHUNK, fetchWave, parseWave, fetchTable, parseTableChunk, fetchHits, parseHitsChunk,

@@ -137,6 +137,10 @@ Close `/program` first (one page holds the port). Press **Demo** to try it
 without the module. `node web/selftest.mjs` checks the protocol against
 the SDK's golden vectors.
 
+Platform gotchas live in `docs/sdk-quirks.md`; `make sdramcheck` reads the
+ELF for static initialisers touching SDRAM; the module's HELLO carries the
+git hash it was built from, so a flashed binary can identify itself.
+
 ## Building
 
 Siblings expected next to this repo: [`alchemy-sdk`](https://github.com/hermetic-modular/alchemy-sdk)
