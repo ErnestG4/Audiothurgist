@@ -26,7 +26,11 @@ const GEOM = new Set(['arc', 'arcTo', 'ellipse', 'moveTo', 'lineTo', 'rect', 'fi
 const nanDraws = [];
 /* ── 1. golden vectors (the SDK's hostlink_golden.json) ── */
 const gArg = process.argv.indexOf('--golden');
-const goldenPath = gArg > 0 ? process.argv[gArg + 1] : path.resolve(here, '..', '..', 'alchemy-sdk', 'tests', 'host', 'golden', 'hostlink_golden.json');
+/* ../alchemy-sdk beside the repo — or beside any directory above it, so a git worktree under .claude/ finds it too */
+const goldenPath = gArg > 0 ? process.argv[gArg + 1] : (() => {
+  const rel = ['alchemy-sdk', 'tests', 'host', 'golden', 'hostlink_golden.json']; let dir = path.resolve(here, '..', '..');
+  for (;;) { const p = path.join(dir, ...rel); if (existsSync(p)) return p; const up = path.dirname(dir); if (up === dir) return path.resolve(here, '..', '..', ...rel); dir = up; }
+})();
 if (!existsSync(goldenPath)) { console.log('golden: skipped (no ' + goldenPath + ')'); }
 else {
   const g = JSON.parse(readFileSync(goldenPath, 'utf8'));
@@ -64,6 +68,7 @@ function stateBody(len) {
   if (len >= 258) { b[255] = 77; b[256] = 3; b[257] = 255; }              /* EDIT: tableGen 77, undo depth 3, no selection */
   if (len >= 262) dv.setUint32(258, 123456, true);                        /* EDIT: srcPos */
   if (len >= 263) b[262] = 2;                                             /* EDIT-UNDO: redo depth 2 */
+  if (len >= 276) { b[263] = 3; dv.setUint16(264, 412, true); dv.setUint16(266, 905, true); dv.setInt16(268, -250, true); b[270] = 0; b[271] = 255; b[272] = 255; b[273] = 17; b[274] = 12; b[275] = 5; }   /* KEYS v0.13 */
   return b;
 }
 {
@@ -178,6 +183,28 @@ function stateBody(len) {
   await hl.close();
 }
 
+/* ── 2c. Transports (Kyklophoria's split): Link(transport), bytesIn / kbps, and unplug detection — the read loop
+ *        ending without a close() is onClose, which the page turns into a disconnect ── */
+{
+  const nap = ms => new Promise(res => setTimeout(res, ms));
+  const dv = new DEMO.FakeDevice({ latencyMs: 1 }), port = new DEMO.FakePort(dv);
+  const l = new HL.Link(new HL.SerialTransport(port)); let closed = 0; l.onClose = () => closed++;
+  await l.start(); const info = await HL.hello(l);
+  check('Link over an explicit SerialTransport (the fake port), kind serial, the port reachable', l.kind === 'serial' && l.port === port && info.name === 'Audiothurgist');
+  check('Link given a bare port wraps it in a SerialTransport', new HL.Link(new DEMO.FakePort(dv)).t instanceof HL.SerialTransport);
+  check('bytesIn counts what arrived', l.stats.bytesIn > 60);
+  l._win.t0 -= 1000; await l.request(HL.CMD.state); check('kbps from the last one-second window', l.stats.kbps > 0 && l.stats.rate > 0);
+  port.unplug(); await nap(30);
+  check('the cable pulled: the read loop ends and onClose fires, once', closed === 1);
+  const p2 = new DEMO.FakePort(dv), l2 = new HL.Link(p2); let closed2 = 0; l2.onClose = () => closed2++;
+  await l2.start(); await HL.hello(l2); await l2.close(); await nap(20);
+  check('a close() the page asked for is not an unplug', closed2 === 0 && l2.closed);
+  const ws = { sent: null, send(b) { this.sent = b; }, close() { this.shut = true; } }, wt = new HL.WsTransport(ws); let got = null, wc = 0;
+  wt.onClose = () => wc++; await wt.start(b => { got = b; }); await wt.write(Uint8Array.of(9));
+  ws.onmessage({ data: Uint8Array.of(1, 2, 3).buffer }); ws.onclose();
+  check('WsTransport: bytes in, bytes out, a socket that closes by itself is onClose', got && got.length === 3 && ws.sent[0] === 9 && wc === 1 && wt.kind === 'bridge');
+}
+
 /* ── 3. The Link end to end over the fake module: priority, coalescing, RTT, live blob ── */
 const dev = new DEMO.FakeDevice({ tail: 170, latencyMs: 3 });
 const link = new HL.Link(new DEMO.FakePort(dev));
@@ -189,12 +216,12 @@ await link.start();
   check('descriptor crc+json', desc && desc.dv === 1);
   const opts = HL.optionsInfo(desc);
   const wantIds = DEMO.OPTION_FIELDS.map(f => f[0]);
-  check('options block: 18 enum fields with the firmware ids (Key Plays and Tap Allowance included)', opts && opts.fields.length === DEMO.OPTION_FIELDS.length && opts.fields.length === 18 && opts.fields.some(f => f.id === 'tap.allow') && wantIds.every(id => opts.fields.some(f => f.id === id)) && opts.fields.some(f => f.id === 'key.plays'));
+  check('options block: 24 enum fields with the firmware ids (OPT8: Jacks, Key Plays, the record trio, Quantize, Tap Allowance, Autosave)', opts && opts.fields.length === DEMO.OPTION_FIELDS.length && opts.fields.length === 24 && opts.comp.hash === 0x4F505438 && ['jacks', 'sampling', 'rec.src', 'record', 'quantize', 'autosave'].every(id => opts.fields.some(f => f.id === id)) && opts.fields.some(f => f.id === 'tap.allow') && wantIds.every(id => opts.fields.some(f => f.id === id)) && opts.fields.some(f => f.id === 'key.plays'));
   const gl = HL.fieldLabels(desc, 'grammar.mode');
   check('labels from disp', gl[3] === 'Euclid' && HL.fieldLabels(desc, 'sample.idx').length === DEMO.FILES.length);
-  check('grammar has five labels, index 4 = Camp', gl.length === 5 && gl[4] === 'Camp' && opts.fields.find(f => f.id === 'grammar.mode').zones === 5);
+  check('grammar has seven labels: Camp at 4, Play at 5, Pads at 6', gl.length === 7 && gl[4] === 'Camp' && /^Play/.test(gl[5]) && /^Pads/.test(gl[6]) && opts.fields.find(f => f.id === 'grammar.mode').zones === 7);
   const pg = HL.pagerInfo(desc); check('pager: 2 pages × 6 knobs with help', pg && pg.pages === 2 && Object.keys(pg.knobs).length === 12 && /Grids/.test(pg.knobs['1:0'].help));
-  const man = HL.manualInfo(desc); check('manual block', man && man.sections.length === 3 && man.sections.some(s => s.id === 'camp') && man.jacks.length === 10 && man.tagline);
+  const man = HL.manualInfo(desc); check('manual block', man && man.sections.length >= 5 && man.sections.some(s => s.id === 'keymap') && man.sections.some(s => s.id === 'transport') && man.jacks.length === 10 && man.tagline);
 
   /* Priority: queue five polls, then an urgent action → the action reaches the device before the polls still queued. */
   dev.log.length = 0;
@@ -473,7 +500,7 @@ await link.start();
   const info = await HL.hello(l); const desc = await HL.getDescriptor(l, info);
   const state = async () => HL.parseState(await l.request(HL.CMD.state));
   const table = () => HL.fetchTable(l, { edit: true });
-  check('demo advertises edit', desc.audiothurgist.edit === 1 && desc.audiothurgist.sets === 1);
+  check('demo advertises edit 2 and keys 1 (v0.13)', desc.audiothurgist.edit === 2 && desc.audiothurgist.keys === 1 && desc.audiothurgist.sets === 1 && HL.caps(desc).keys === 1);
   const s0 = await state();
   check('tail: tableGen ≥ 1, undoDepth 0, redoDepth 0, selSlice −1, srcPos inside the material', s0.tableGen >= 1 && s0.undoDepth === 0 && s0.redoDepth === 0 && s0.selSlice === -1 && s0.srcPos >= 0 && s0.srcPos < s0.bufLen && s0.nTable === 35);
   const t0 = await table();
@@ -581,7 +608,10 @@ await link.start();
   r = await HL.release(l);
   check('RELEASE: the voice and the held request go', r.ok && d.audition === null && d.auditionHeld === null);
   check('AUDITION BAD_ARGS: flags 4, start past freePos, lenMs 0 (under 64 samples)', (await HL.audition(l, 0, 100, 4)).status === 2 && (await HL.audition(l, s.freePos + 1, 100)).status === 2 && (await HL.editOp(l, HL.ACT.audition, [0, 0, 0, 0, 0, 0, 0])).status === 2);
-  /* TAP_MARK: the fake's position snapshot pinned — allowance, onset snap, the length to the next onset, orange */
+  /* TAP_MARK: the fake's position snapshot pinned — allowance, onset snap, the length to the next onset, orange. The
+   * onsets above left a marker on every kick; v0.13 would select those instead of stacking, so clear them first. */
+  r = await HL.clearMarkers(l); t = await table();
+  check('CLEAR_MARKERS: every live marker (grey and orange) tombstoned, the count answered, recordings kept', r.ok && r.count >= 16 && !t.entries.some((e, i) => i >= 32 && e.len > 0 && e.key < 0) && t.entries.filter((e, i) => i >= 32 && e.len > 0 && e.key >= 0).length === 3);
   d.srcPos = () => 8 * SL + 1000;
   r = await HL.tapMark(l, 10, 20, (await state()).tableGen);
   t = await table();
@@ -593,6 +623,13 @@ await link.start();
   r = await HL.tapMark(l, 10, 0); t = await table();
   check('TAP_MARK at 4 SL + 100: snaps to the kick; slice 5 is silent, so the next onset is 6 SL = the 250 ms cap', r.ok && t.entries[r.newIdx].start === 4 * SL && t.entries[r.newIdx].len === 12000);
   check('TAP_MARK BAD_ARGS: a short body', (await HL.editOp(l, HL.ACT.tapMark, [10])).status === 2);
+  /* v0.13: a tap within 10 ms of a live marker selects it — no new entry, no gen bump, flags b0, the panel selection */
+  { const m8 = t.entries.findIndex((e, i) => i >= 32 && e.start === 8 * SL && e.len > 0 && e.key < 0), g0 = (await state()).tableGen, n0 = t.nTable;
+    d.srcPos = () => 8 * SL + 1000 + 200; r = await HL.tapMark(l, 10, 20); s = await state();
+    check('TAP_MARK v0.13: a tap on the kick again reuses marker ' + m8 + ' (flags b0), nothing added, the gen unchanged, selSlice says it', r.ok && r.reused && r.flags === 1 && r.newIdx === m8 && s.tableGen === g0 && s.nTable === n0 && s.selSlice === m8);
+    d.srcPos = DEMO.FakeDevice.prototype.srcPos; d.muted = true; d.voice = null; s = await state(); r = await HL.tapMark(l, 10, 20);
+    check('TAP_MARK v0.13: nothing sounds (stopped) → srcValid clear in the tail, BAD_STATE, and srcPos holds still', s.srcValid === false && r.status === 3 && (await state()).srcPos === s.srcPos);
+    d.muted = false; }
   /* BAD_STATE during a take (the audition is not gated), during a set op */
   await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.recArm, 2), { urgent: true });
   s = await state();
@@ -697,6 +734,106 @@ await link.start();
     await ul.close();
   }
   void os;
+  await ol.close();
+}
+
+/* ── 7b. KEYS (v0.13): the tail from 263, ACTION 32..36 and the v0.13 TAP_MARK over the fake module — the transport
+ *        (SET_MUTE), the pads (PLAY_KEY), markers → keys, clear markers, the autoslice count (nested draws, re-roll,
+ *        undo), Pads' keys following the markers, Play's loop, the jack map following the grammar, and a 0.12 firmware ── */
+{
+  const k0 = HL.parseState(stateBody(263)); check('state 263: no KEYS tail', k0.srcValid === undefined && k0.loadAvg === undefined && k0.keyFlash === undefined);
+  check('state 275: one short of the KEYS tail', HL.parseState(stateBody(275)).srcValid === undefined);
+  const k1 = HL.parseState(stateBody(276));
+  check('state 276: flags2 (srcValid, keys follow), load avg / max ‰, J4 −250 mV → key 0, J5 255 → −1 (Brain map), no key flash, keySeq, autoK, nMarkers',
+    k1.srcValid === true && k1.keysFollow === true && k1.loadAvg === 412 && k1.loadMax === 905 && k1.j4mV === -250 && k1.j4Key === 0 && k1.j5Style === -1 && k1.keyFlash === -1 && k1.keySeq === 17 && k1.autoK === 12 && k1.nMarkers === 5 && k1.redoDepth === 2);
+  { const b = stateBody(276); b[263] = 0; b[272] = 9; b[271] = 4; const s = HL.parseState(b); check('state 276: flags clear, key 9 flashed, style 4', s.srcValid === false && s.keysFollow === false && s.keyFlash === 9 && s.j5Style === 4); }
+  check('state 300: a longer body still parses the KEYS tail', HL.parseState(stateBody(300)).nMarkers === 5);
+  check('ACT: the KEYS ops 32..36', HL.ACT.playKey === 32 && HL.ACT.keysFromMarkers === 33 && HL.ACT.clearMarkers === 34 && HL.ACT.setMute === 35 && HL.ACT.autoslice === 36 && HL.KEYS.styles.length === 9);
+
+  const SL = DEMO.SLICE_LEN;
+  const d = new DEMO.FakeDevice({ kit: true, nSlices: 32, latencyMs: 1 });
+  const l = new HL.Link(new DEMO.FakePort(d)); await l.start();
+  const info = await HL.hello(l); const desc = await HL.getDescriptor(l, info);
+  const state = async () => HL.parseState(await l.request(HL.CMD.state));
+  const table = () => HL.fetchTable(l, { edit: true });
+  const nap = ms => new Promise(res => setTimeout(res, ms));
+  let s = await state(), r, t;
+  check('hello: the beta version, a 276-byte body, caps edit 2 + keys 1', info.fw === DEMO.FW && info.fw === '0.13.0-beta-demo' && HL.caps(desc).keys === 1 && HL.caps(desc).edit === 2 && s.nMarkers === 0 && s.srcValid === true && s.loadAvg > 0 && s.loadMax >= s.loadAvg);
+  /* the transport */
+  r = await HL.setMute(l, true); s = await state();
+  check('SET_MUTE 1: stopped (flags b0), nothing sounds → srcValid clear', r.ok && s.muted === true && s.srcValid === false);
+  const held = s.srcPos; await nap(60); s = await state();
+  check('…and srcPos holds still while nothing sounds', s.srcPos === held);
+  r = await HL.setMute(l, true); s = await state(); check('SET_MUTE is idempotent (not a toggle)', r.ok && s.muted === true);
+  check('SET_MUTE 2 → BAD_ARGS', (await HL.editOp(l, HL.ACT.setMute, [2])).status === 2);
+  /* the pads: a key sounds while stopped, so a tap is taken */
+  const seq0 = s.keySeq; r = await HL.playKey(l, 3, true); s = await state();
+  check('PLAY_KEY(3, down) while stopped: the flash names key 3, keySeq bumps, callFlash is its entry (the recording, 32), srcValid while it sounds', r.ok && s.keyFlash === 3 && s.keySeq === ((seq0 + 1) & 255) && s.callFlash === 32 && s.srcValid === true && s.muted === true);
+  r = await HL.tapMark(l, 10, 0); check('TAP_MARK is taken while a pad sounds (stopped)', r.ok && r.newIdx >= 35 && r.reused === false && r.flags === 0);
+  check('PLAY_KEY BAD_ARGS: key 24, a short body', (await HL.playKey(l, 24, true)).status === 2 && (await HL.editOp(l, HL.ACT.playKey, [3])).status === 2);
+  await HL.editUndo(l);
+  /* Key Plays = Held: the voice lasts until the up */
+  d.options[DEMO.O['key.plays']] = 1; await HL.playKey(l, 0, true); await nap(250);
+  check('Held: the voice still sounds 250 ms on (slice 0 is 125 ms)', d.voiceOn() === true);
+  await HL.playKey(l, 0, false); check('…and the up releases it', d.voiceOn() === false);
+  d.options[DEMO.O['key.plays']] = 0; await HL.setMute(l, false);
+  /* the autoslice count: a seeded weighted draw, nested in k, a re-roll draws again, 0 clears the greys, orange stays */
+  const greys = tb => tb.entries.map((e, i) => [e, i]).filter(([e, i]) => i >= tb.nSlices && e.len > 0 && e.key < 0 && !(e.flags & HL.EDIT.orange)).map(([e]) => e.start).sort((a, b) => a - b);
+  r = await HL.autoslice(l, 8); t = await table(); s = await state(); const g8 = greys(t);
+  check('AUTOSLICE(8): eight grey markers inside the break, the count answered, autoK 8, nMarkers 8', r.ok && r.count === 8 && g8.length === 8 && g8.every(p => p > 0 && p < s.bufLen) && s.autoK === 8 && s.nMarkers === 8);
+  r = await HL.autoslice(l, 12); t = await table(); const g12 = greys(t);
+  check('AUTOSLICE(12), same seed: the 8 are a subset of the 12 (turning up adds onsets)', r.ok && g12.length === 12 && g8.every(p => g12.includes(p)));
+  r = await HL.autoslice(l, 5); t = await table(); const g5 = greys(t);
+  check('AUTOSLICE(5): a subset of the 8 (turning down removes the last drawn)', r.ok && g5.length === 5 && g5.every(p => g8.includes(p)));
+  r = await HL.autoslice(l, 8, true); t = await table(); const r8 = greys(t);
+  check('AUTOSLICE(8, re-roll): a new seed, a different chop', r.ok && r8.length === 8 && r8.join() !== g8.join());
+  const gBefore = r8.join(); r = await HL.editUndo(l); t = await table();
+  check('one undo step: the re-roll undone gives the 5 back', r.ok && greys(t).join() === g5.join());
+  await HL.editRedo(l); t = await table(); check('…redo gives the re-roll back', greys(t).join() === gBefore);
+  check('AUTOSLICE BAD_ARGS: k 65 on the wire (the helper clamps to 64); a stale gen → BAD_STATE', (await HL.editOp(l, HL.ACT.autoslice, [65, 0])).status === 2 && (await HL.autoslice(l, 4, false, ((await state()).tableGen + 7) % 255 + 1)).status === 3);
+  /* markers → keys: in time order onto keys 0.., the recording keys (3, 7, 14) skipped */
+  s = await state(); r = await HL.keysFromMarkers(l, s.tableGen); s = await state(); t = await table();
+  const ms = t.entries.map((e, i) => [e, i]).filter(([e, i]) => i >= 32 && e.len > 0 && e.key < 0).sort((a, b) => a[0].start - b[0].start).map(([, i]) => i);
+  const freeKeys = [0, 1, 2, 4, 5, 6, 8, 9];
+  check('KEYS_FROM_MARKERS: 8 markers → keys 0 1 2 4 5 6 8 9 in time order; the recordings keep keys 3, 7, 14', r.ok && r.count === 8 && freeKeys.every((k, j) => s.keySlice[k] === ms[j]) && s.keySlice[3] === 32 && s.keySlice[7] === 33 && s.keySlice[14] === 34);
+  r = await HL.editUndo(l); s = await state(); check('…one undo step puts the keys back on the grid', r.ok && s.keySlice[0] === 0 && s.keySlice[1] === 1);
+  await HL.editRedo(l);
+  /* an orange marker survives the autoslice and is cleared by CLEAR_MARKERS with the rest */
+  await HL.editAdd(l, null, 20 * SL, SL, HL.EDIT.orange); r = await HL.autoslice(l, 0); t = await table(); s = await state();
+  check('AUTOSLICE(0): the grey markers go, the orange one stays', r.ok && r.count === 0 && greys(t).length === 0 && s.nMarkers === 1 && s.autoK === 0);
+  r = await HL.clearMarkers(l); t = await table(); s = await state();
+  check('CLEAR_MARKERS: the count, every key off a marker back to its grid slice, the recordings untouched', r.ok && r.count === 1 && s.nMarkers === 0 && Array.from(s.keySlice).every((tt, k) => [3, 7, 14].includes(k) ? tt === { 3: 32, 7: 33, 14: 34 }[k] : tt < 32));
+  r = await HL.clearMarkers(l); check('CLEAR_MARKERS with none: OK, count 0, the gen unchanged', r.ok && r.count === 0 && r.tableGen === (await state()).tableGen);
+  /* the grammars: the jack map follows (Follow grammar: Play and Pads → Voice), J5 reads a style there, 255 in Brain */
+  const gram = g => { d.setGrammar(g, d.grammar); d.options[DEMO.O['grammar.mode']] = g; };
+  gram(DEMO.GRAM.grids); s = await state(); check('Grids: the Brain map (175 = 0), J5 is a gate (style −1)', s.jackMap === 0 && s.j5Style === -1 && s.j4Key >= 0 && s.j4Key <= 23);
+  gram(DEMO.GRAM.pads); s = await state(); check('Pads: the Voice map, J5 a style 0..8, the pattern silent (nothing sounds)', s.jackMap === 1 && s.j5Style >= 0 && s.j5Style <= 8 && s.srcValid === false);
+  d.options[DEMO.O.jacks] = 1; s = await state(); check('Jacks = Brain overrides the grammar', s.jackMap === 0); d.options[DEMO.O.jacks] = 0;
+  check('Pads: TAP_MARK with nothing sounding → BAD_STATE', (await HL.tapMark(l, 10, 0)).status === 3);
+  r = await HL.autoslice(l, 6); s = await state(); t = await table();
+  const pm = t.entries.map((e, i) => [e, i]).filter(([e, i]) => i >= 32 && e.len > 0 && e.key < 0).sort((a, b) => a[0].start - b[0].start).map(([, i]) => i);
+  check('Pads: AUTOSLICE(6) puts the markers on keys by itself (keys follow markers, tail 263 b1)', r.ok && s.keysFollow === true && pm.length === 6 && [0, 1, 2, 4, 5, 6].every((k, j) => s.keySlice[k] === pm[j]));
+  r = await HL.editUndo(l); s = await state(); check('…and one undo takes the markers and the keys back together', r.ok && s.nMarkers === 0 && s.keySlice[0] === 0 && s.keysFollow === false);
+  const ev0 = s.looperEvents; await HL.playKey(l, 5, true); s = await state();
+  check('Pads: a pad sounds and writes nothing', s.keyFlash === 5 && s.looperEvents === ev0 && s.srcValid === true);
+  gram(DEMO.GRAM.play); s = await state();
+  check('Play: an empty loop to start (every step a rest, no events), the Voice map', s.looperEvents === 0 && Array.from(s.src).slice(0, 32).every(x => x === -1) && s.jackMap === 1);
+  await HL.playKey(l, 2, true); s = await state(); const wrote = Array.from(s.src).findIndex(x => x === s.keySlice[2]);
+  check('Play: a pad writes the loop — one event, its entry on a step', s.looperEvents === 1 && wrote >= 0);
+  await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.looperUndo), { urgent: true }); s = await state();
+  check('Play: ACTION 12 takes it back (B2\'s undo)', s.looperEvents === 0 && Array.from(s.src).slice(0, 32).every(x => x === -1));
+  await HL.playKey(l, 2, true); await HL.playKey(l, 4, true); await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.looperClear), { urgent: true }); s = await state();
+  check('Play: ACTION 13 clears the loop', s.looperEvents === 0 && Array.from(s.src).slice(0, 32).every(x => x === -1));
+  gram(DEMO.GRAM.classic); await l.close();
+
+  /* a 0.12 firmware: no "keys", edit 1, the 263-byte body, ACTION 32..36 unknown, TAP_MARK taken whatever sounds */
+  const o = new DEMO.FakeDevice({ kit: true, nSlices: 32, latencyMs: 1, keys: false });
+  const ol = new HL.Link(new DEMO.FakePort(o)); await ol.start();
+  const oi = await HL.hello(ol), od = await HL.getDescriptor(ol, oi), ob = await ol.request(HL.CMD.state); const os = HL.parseState(ob);
+  check('0.12 firmware: edit 1, no keys, its version, the 263-byte body (no KEYS tail)', HL.caps(od).keys === 0 && HL.caps(od).edit === 1 && oi.fw === '0.12.3-demo' && ob.length === 263 && os.srcValid === undefined && os.redoDepth === 0);
+  check('0.12 firmware: ACTION 32..36 → BAD_ARGS', (await HL.playKey(ol, 1, true)).status === 2 && (await HL.keysFromMarkers(ol)).status === 2 && (await HL.clearMarkers(ol)).status === 2 && (await HL.setMute(ol, true)).status === 2 && (await HL.autoslice(ol, 4)).status === 2);
+  o.muted = true; r = await HL.tapMark(ol, 10, 0); const r2 = await HL.tapMark(ol, 10, 0);
+  check('0.12 firmware: TAP_MARK taken while stopped, and two taps stack (the old behaviour), a three-byte reply', r.ok && r2.ok && r2.newIdx !== r.newIdx && r.flags === 0);
   await ol.close();
 }
 
@@ -922,7 +1059,7 @@ const ED = require('./edit.js');
   check('FROM_ONSETS(210, 35 ms): the preview\'s count is the module\'s, grey markers made, labelled', ro.ok && ro.count === prev.count && prev.count >= 6 && Hh.table.entries.filter((e, i) => i >= Hh.table.nSlices && ED.isLive(e) && !ED.isOrange(e) && e.key < 0 && e.start < Hh.st.bufLen).length === ro.count && ed.history.list()[0].label === `onsets ≥ 82 % → ${ro.count}`);
   const b5 = Hh.table.entries[5].start; await ed.nudge(5, HL.EDIT.grid); await settle();
   check('nudge all +5 ms (grid)', Hh.table.entries[5].start === b5 + 240 && ed.history.list()[0].label === 'nudge grid +5 ms');
-  d.srcPos = () => 8 * SL + 1000; sent.length = 0; const rt = await ed.tapMark(); await settle();
+  d.srcPos = () => 10 * SL + 1000; sent.length = 0; const rt = await ed.tapMark(); await settle();   /* 10 SL: a snare, no marker there (the kicks have them) */
   check('the Chop pad: TAP_MARK(60, 40 ms from the option), gen unchecked, an orange marker, "tap → marker N"', rt.ok && sent.some(b => b[0] === 29 && b[1] === 60 && b[2] === 40 && b.length === 3) && Hh.table.entries[rt.newIdx].flags === HL.EDIT.orange && ed.history.list()[0].label === `tap → marker ${rt.newIdx}`);
   Hh.status.length = 0; const nBefore = Hh.table.nTable; const ru = await ed.undo(); await settle(); ed.noteState(Hh.st);
   check('undo through the editor: the tap marker is gone, the label is struck through, the tail says redo 1', ru.ok && Hh.table.nTable === nBefore - 1 && ed.history.list()[0].undone === true && /tap → marker/.test(ed.history.list()[0].label) && Hh.st.redoDepth === 1 && ed.history.redoDepth === 1);
@@ -956,6 +1093,86 @@ const ED = require('./edit.js');
   check('noedit: a tap inside a marker selects, never splits', ed.selT === m1 && !sent.some(b => b[0] === 19));
   check('noedit: no handles are offered from the wave', ed.tagAt(px(5 * SL), 170, W, 180).h === null);
   await l.close();
+}
+
+/* ── 10. Descriptor parity: demo.js against the firmware's own source. The fake is only worth its tests while it
+ *        says what the module says, and it had drifted far (five grammars of seven, an 18-byte Options block of 24,
+ *        every default 0). This reads src/audiothurgist.cpp — the Options block's Describe (ids, names, offsets,
+ *        zones, the enum labels from each k…Disp string), its size and schema hash, the live defaults (Serialize's
+ *        byte → struct, the struct's initialiser), the jacks, the pager's knobs and the descriptor root's
+ *        capabilities — and fails on any difference. String parsing, deliberately: no build step. ── */
+function firmwareDescriptor(cpp) {
+  const unC = lit => lit.replace(/\\(["\\])/g, '$1');
+  const disp = {};
+  for (const m of cpp.matchAll(/static\s+const\s+char\s*\*\s*(k\w+Disp)\s*=\s*(?:\/\*[\s\S]*?\*\/\s*)?((?:"(?:[^"\\]|\\.)*"\s*)+);/g))
+    disp[m[1]] = JSON.parse(unC([...m[2].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(x => x[1]).join('')));
+  const a = cpp.indexOf('struct Options : Serializable'), b = cpp.indexOf('static Options gOptions;');
+  const block = a >= 0 && b > a ? cpp.slice(a, b) : '';
+  const fields = [...block.matchAll(/w\.Field\("([^"]+)",\s*"([^"]+)",\s*(\d+),\s*FieldType::Enum,\s*([\d.]+)f,\s*(k\w+Disp),\s*(\d+)u/g)]
+    .map(m => ({ id: m[1], name: m[2], off: +m[3], def: +m[4], disp: m[5], zones: +m[6], labels: disp[m[5]] ? disp[m[5]].labels : null }));
+  const size = +((block.match(/kBytes\s*=\s*(\d+)u/) || [])[1]);
+  const hash = parseInt((block.match(/SchemaHash\(\)\s*const\s*override\s*\{\s*return\s*(0x[0-9A-Fa-f]+)u/) || [])[1], 16);
+  /* the live defaults: Serialize says which struct holds byte i; its declaration's `= {N}` (or the struct's member initialiser) the value */
+  const defaults = [];
+  for (const m of block.matchAll(/o\[(\d+)\]\s*=\s*(g\w+)\.(sel|mode)/g)) {
+    const decl = cpp.match(new RegExp('static\\s+(\\w+)\\s+' + m[2] + '\\s*(?:=\\s*\\{\\s*(\\d+)\\s*\\})?\\s*;'));
+    let v = decl && decl[2] != null ? +decl[2] : null;
+    if (v == null && decl) { const st = cpp.match(new RegExp('struct\\s+' + decl[1] + '\\s*\\{[^}]*?\\b' + m[3] + '\\s*=\\s*(\\d+)')); v = st ? +st[1] : 0; }
+    defaults[+m[1]] = v;
+  }
+  const jacks = [...cpp.matchAll(/^Jack\s+jk\d+\s*\(\s*"([^"]+)",\s*"([^"]+)"/gm)].map(m => ({ id: m[1], name: m[2] }));
+  const knob = {}; for (const m of cpp.matchAll(/VirtualKnob\s+(\w+)\s*=\s*VirtualKnob\(\w+,\s*"([^"]+)"\)[\s\S]*?\.Ident\("([^"]+)"\)/g)) knob[m[1]] = { name: m[2], id: m[3] };
+  const pages = [...cpp.matchAll(/Page\s+\w+\s*=\s*Page\((\d+)\)\.Name\("([^"]+)"\)[\s\S]*?\.Knobs\(([^)]*)\)/g)].map(m => ({ page: +m[1], name: m[2], knobs: m[3].split(',').map(x => knob[x.trim()] || null) }));
+  const root = cpp.match(/return\s+"(\\"audiothurgist\\":\{(?:[^"\\]|\\.)*\})";/);
+  const caps = root ? JSON.parse('{' + unC(root[1]) + '}').audiothurgist : null;
+  return { fields, size, hash, defaults, jacks, pages, caps };
+}
+function parityDiffs(fw, demoDesc, demoDefaults) {
+  const out = [], opt = demoDesc.components.find(c => c.id === 'options'), pager = demoDesc.components.find(c => c.kind === 'pager');
+  if (!fw.fields.length) out.push('no Options fields parsed from the firmware');
+  if (opt.size !== fw.size) out.push(`Options size: demo ${opt.size}, firmware ${fw.size}`);
+  if (opt.hash !== fw.hash) out.push(`Options schema hash: demo 0x${opt.hash.toString(16)}, firmware 0x${(fw.hash || 0).toString(16)}`);
+  if (opt.fields.length !== fw.fields.length) out.push(`Options fields: demo ${opt.fields.length}, firmware ${fw.fields.length}`);
+  fw.fields.forEach((f, i) => {
+    const d = opt.fields.find(x => x.id === f.id);
+    if (!d) { out.push(`field ${f.id}: missing from the demo`); return; }
+    for (const k of ['name', 'off', 'zones', 'def']) if (d[k] !== f[k]) out.push(`field ${f.id}.${k}: demo ${JSON.stringify(d[k])}, firmware ${JSON.stringify(f[k])}`);
+    if (!f.labels) out.push(`field ${f.id}: the firmware's ${f.disp} did not parse`);
+    else if (JSON.stringify(d.disp.labels) !== JSON.stringify(f.labels)) out.push(`field ${f.id} labels: demo ${JSON.stringify(d.disp.labels)}, firmware ${JSON.stringify(f.labels)}`);
+    if (f.labels && f.labels.length !== f.zones) out.push(`field ${f.id}: the firmware's own zones ${f.zones} ≠ its ${f.labels.length} labels`);
+    if (opt.fields[i] && opt.fields[i].id !== f.id) out.push(`field order at ${i}: demo ${opt.fields[i].id}, firmware ${f.id}`);
+    if (demoDefaults[f.off] !== fw.defaults[f.off]) out.push(`live default of ${f.id} (byte ${f.off}): demo ${demoDefaults[f.off]}, firmware ${fw.defaults[f.off]}`);
+  });
+  if (JSON.stringify(demoDesc.jacks.map(j => [j.id, j.name])) !== JSON.stringify(fw.jacks.map(j => [j.id, j.name]))) out.push('jacks: ' + JSON.stringify(demoDesc.jacks.map(j => j.id)) + ' vs ' + JSON.stringify(fw.jacks.map(j => j.id)));
+  for (const pg of fw.pages) {
+    if (pager.pageNames[pg.page] !== pg.name) out.push(`page ${pg.page}: demo ${pager.pageNames[pg.page]}, firmware ${pg.name}`);
+    pg.knobs.forEach((k, pot) => { const d = pager.fields.find(f => f.page === pg.page && f.pot === pot); if (!k || !d || d.id !== k.id || d.name !== k.name) out.push(`knob ${pg.page}:${pot}: demo ${d && d.id + '/' + d.name}, firmware ${k && k.id + '/' + k.name}`); });
+  }
+  /* capabilities: every one the firmware declares, at least as high in the demo (the demo may run ahead of a firmware
+   * still being built — v0.13's "keys" and "edit": 2 — and says so below; behind it, or different, is drift) */
+  for (const [k, v] of Object.entries(fw.caps || {})) { const dv = demoDesc.audiothurgist[k]; if (dv == null || (k === 'edit' || k === 'keys' || k === 'scope2' ? dv < v : dv !== v)) out.push(`capability ${k}: demo ${dv}, firmware ${v}`); }
+  if (!fw.caps) out.push('the descriptor root (DescriptorRootJson) did not parse');
+  return out;
+}
+{
+  const cppPath = path.resolve(here, '..', 'src', 'audiothurgist.cpp');
+  if (!existsSync(cppPath)) console.log('parity: skipped (no ' + cppPath + ')');
+  else {
+    const cpp = readFileSync(cppPath, 'utf8'), fw = firmwareDescriptor(cpp), dd = DEMO.buildDescriptor(true, true), defs = DEMO.OPTION_FIELDS.map(f => f[3]);
+    check('parity: the firmware source parses — 24 Options fields with labels, size, hash, defaults, ten jacks, two pages of six knobs, the root caps',
+      fw.fields.length === 24 && fw.fields.every(f => Array.isArray(f.labels)) && fw.size === 24 && fw.hash === 0x4F505438 && fw.defaults.length === 24 && fw.defaults.every(v => Number.isInteger(v)) && fw.jacks.length === 10 && fw.pages.length === 2 && fw.pages.every(p => p.knobs.length === 6 && p.knobs.every(Boolean)) && !!fw.caps,
+      JSON.stringify({ n: fw.fields.length, size: fw.size, hash: fw.hash, d: fw.defaults, j: fw.jacks.length, p: fw.pages.length, caps: fw.caps }).slice(0, 300));
+    const diffs = parityDiffs(fw, dd, defs);
+    check('parity: demo.js = the firmware (fields, labels, offsets, zones, defaults, jacks, knobs, caps)', diffs.length === 0, diffs.slice(0, 6).join(' · '));
+    const ahead = Object.keys(dd.audiothurgist).filter(k => fw.caps && JSON.stringify(dd.audiothurgist[k]) !== JSON.stringify(fw.caps[k]));
+    if (ahead.length) console.log('parity: the demo runs ahead of this firmware on ' + ahead.map(k => `${k} (${fw.caps[k] ?? 'absent'} → ${dd.audiothurgist[k]})`).join(', ') + ' — v0.13, being built beside it');
+    const live = new DEMO.FakeDevice({ latencyMs: 1 }).options;
+    check('parity: the fake\'s live blob starts at the firmware\'s defaults', Array.from(live).join() === fw.defaults.join());
+    /* the check must bite: one changed label, one moved byte, one default, one missing jack each fail it */
+    const bite = [['Zoom (read on, BreakFix)', 'Zoom (read on)'], ['"quantize", "Quantize", 21', '"quantize", "Quantize", 22'], ['static Sel gTail = {3};', 'static Sel gTail = {2};'], ['Jack jk10("out_r"', 'Jack jk10("out_x"']]
+      .map(([x, y]) => cpp.includes(x) ? parityDiffs(firmwareDescriptor(cpp.replace(x, y)), dd, defs).length : -1);
+    check('parity: the check bites — a changed label, a moved byte, a changed default and a renamed jack each fail it', bite.every(n => n > 0), JSON.stringify(bite));
+  }
 }
 
 /* ── 9. EDIT-UI, the page itself: index.html's inline script under a DOM stub, connected to the fake module through
