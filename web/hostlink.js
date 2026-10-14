@@ -31,7 +31,7 @@ const ACT = { dice: 0, reslice: 1, mute: 2, punch: 3, flow: 4, scrub: 5, load: 6
   playKey: 32, keysFromMarkers: 33, clearMarkers: 34, setMute: 35, autoslice: 36 };
 /* v0.13 "keys": the J5 style the Voice map reads (state byte 271; 255 = the Brain map, where J5 is the gate) and the
  * autoslice count's range (ACTION 36's k). TAP_MARK's fourth reply byte: b0 = an existing marker was reused. */
-const KEYS = { n: 24, autoMax: 64, reroll: 1, reused: 1,
+const KEYS = { n: 24, autoMax: 64, reroll: 1, join: 2, reused: 1,
   styles: ['plain', 'reverse', 'half speed', 'double', 'ratchet', 'staccato', 'punch / choke flip', 'record', 'clear'] };
 /* EDIT: flag bits and constants. Table flags (GET_TABLE's 14-byte form, ADD_ENTRY's flags): orange = user-placed
  * or user-moved, tomb = deleted (len 0, skipped by everything). AUDITION flags: fromEnd = `start` is the region's
@@ -486,8 +486,9 @@ const keysFromMarkers = (link, gen = 0)                    => editOp(link, ACT.k
 const clearMarkers   = (link, gen = 0)                     => editOp(link, ACT.clearMarkers, [], gen);
 /* stopped = true → the pattern stops (the clock runs on, keys still play) */
 const setMute        = (link, stopped)                     => editOp(link, ACT.setMute, [stopped ? 1 : 0]);
-/* k 0..64 markers from the seeded weighted draw (0 removes the grey ones); reroll draws a new seed */
-const autoslice      = (link, k, reroll = false, gen = 0)  => editOp(link, ACT.autoslice, [Math.max(0, Math.min(KEYS.autoMax, Math.round(k))) & 0xff, reroll ? KEYS.reroll : 0], gen);
+/* k 0..64 markers from the seeded draw (0 removes the grey ones); reroll draws a new seed; join folds this apply into the
+ * previous AUTOSLICE's undo step (every send of one slider drag after the first: a whole drag is one undo step) */
+const autoslice      = (link, k, reroll = false, gen = 0, join = false) => editOp(link, ACT.autoslice, [Math.max(0, Math.min(KEYS.autoMax, Math.round(k))) & 0xff, (reroll ? KEYS.reroll : 0) | (join ? KEYS.join : 0)], gen);
 /* What the descriptor's "audiothurgist" object says the firmware can do (each 0 when absent). */
 function caps(desc) {
   const a = (desc && desc.audiothurgist) || {};

@@ -149,6 +149,9 @@ function histLabel(op, a = {}) {
     case 'tap': return a.newIdx == null ? 'tap' : `tap → marker ${a.newIdx}`;
     case 'promote': return `promote ${a.t} → boundary ${a.i}`;
     case 'follow': return 'keys follow the grid';
+    case 'mkeys': return a.count == null ? 'markers → keys' : `markers → keys (${a.count})`;
+    case 'mclear': return a.count == null ? 'clear markers' : `clear markers (${a.count})`;
+    case 'auto': return `autoslice ${a.k}${a.reroll ? ' (re-roll)' : ''}` + (a.count == null ? '' : ` → ${a.count}`);
     case 'undo': return 'undo'; case 'redo': return 'redo';
     case 'module': return 'changed on the module';
     default: return op;
@@ -162,6 +165,8 @@ function histLabel(op, a = {}) {
 class History {
   constructor(max = K.histMax) { this.max = max; this.items = []; this.gen = null; this.undoDepth = 0; this.redoDepth = 0; }
   push(gen, label) { this.items = this.items.filter(x => !x.undone); this.items.push({ gen, label, undone: false }); if (this.items.length > this.max) this.items.shift(); this.gen = gen; }
+  /* the newest live line, if its label matches, takes the new gen and label (a continued drag) */
+  joinTop(gen, label, re) { const t = this.items[this.items.length - 1]; if (!t || t.undone || !re.test(t.label)) return false; t.gen = gen; t.label = label; this.gen = gen; return true; }
   undo(gen) { for (let i = this.items.length - 1; i >= 0; i--) if (!this.items[i].undone) { this.items[i].undone = true; break; } this.gen = gen; }
   redo(gen) { for (let i = 0; i < this.items.length; i++) if (this.items[i].undone) { this.items[i].undone = false; break; } this.gen = gen; }
   /* the state's tail: a gen the page has not labelled is the module's; a redo depth of 0 means nothing is undone */
@@ -440,7 +445,7 @@ class Editor {
   async _commit(op, args, fn, gen, stillValid) {
     const l = this.d.link(); if (!l) return null;
     if (this.busy) { this.cb.status('one edit at a time — ' + this.busy + ' is still going', 'warn'); return null; }
-    const label = histLabel(op, args); this.busy = label; this.cb.status(label + '…', '');
+    const label = histLabel(op, args); this.busy = label; this.busyOp = op; this.cb.status(label + '…', '');
     try {
       let r = await fn(gen), retried = false, why = '';
       if (!r.ok && r.status === 3) {
@@ -453,8 +458,12 @@ class Editor {
       }
       this.busy = null;   /* the link is free: what follows is a poll */
       if (r.ok) {
-        this.stats.commits++; const full = op === 'split' || op === 'copy' || op === 'tap' ? histLabel(op, Object.assign({}, args, { newIdx: r.newIdx })) : op === 'onsets' ? histLabel(op, Object.assign({}, args, { count: r.count })) : label;
-        if (op === 'undo') this.history.undo(r.tableGen); else if (op === 'redo') this.history.redo(r.tableGen); else this.history.push(r.tableGen, full);
+        this.stats.commits++;
+        /* v0.13: a tap within 10 ms of a live marker selects it — nothing changed, nothing to label (the gen is the same) */
+        if (op === 'tap' && r.reused) { this.select(r.newIdx); this.cb.status(`tap: marker ${r.newIdx} is already there — selected it`, 'ok'); this.cb.redraw(); return r; }
+        const full = op === 'split' || op === 'copy' || op === 'tap' ? histLabel(op, Object.assign({}, args, { newIdx: r.newIdx })) : op === 'onsets' || op === 'mkeys' || op === 'mclear' || op === 'auto' ? histLabel(op, Object.assign({}, args, { count: r.count })) : label;
+        if ((op === 'mkeys' || op === 'mclear') && !r.count) { this.cb.status(op === 'mkeys' ? 'no markers to put on keys' : 'no markers to clear', ''); this.cb.redraw(); return r; }
+        if (op === 'undo') this.history.undo(r.tableGen); else if (op === 'redo') this.history.redo(r.tableGen); else if (op === 'auto' && args.join && this.history.joinTop(r.tableGen, full, /^autoslice /)) { /* one line per drag */ } else this.history.push(r.tableGen, full);
         this.cb.status(full + (retried ? ' (after a refetch)' : ''), 'ok');
         await this.cb.refetch(); this.local = null; this.cb.redraw();
       } else {
@@ -469,6 +478,7 @@ class Editor {
   }
   whyBadState(gen) {
     const s = this.d.ctx().st || {};
+    if (this.busyOp === 'tap' && s.srcValid === false) return 'nothing is sounding — press ▶ (or hold a pad): a tap needs the playhead';
     if (s.recState) return 'a take is in flight (' + (HL.REC[s.recState] || s.recState) + ') — edits wait for it';
     if (s.setState) return 'a set is ' + (HL.SET_STATE[s.setState] || 'busy') + ' — edits wait for it';
     if (gen && s.tableGen != null && s.tableGen !== gen) return 'stale';
@@ -495,6 +505,12 @@ class Editor {
   fromOnsets(thresh, minGapMs = K.minGapMs) { return this.commit('onsets', { thresh }, g => HL.editFromOnsets(this.d.link(), thresh, minGapMs, g), this.gen(), null, true); }
   /* the Chop pad: taps queue behind a pending edit rather than being refused — the module timestamps each at receipt */
   tapMark() { const c = this.d.ctx(); const allow = c.tapAllowMs != null ? c.tapAllowMs : K.tapAllowDefault; return this.commit('tap', {}, () => HL.tapMark(this.d.link(), K.tapSnapMs, allow, 0), 0, null, true); }
+  /* KEYS (v0.13): the marker ops — each one undo step on the module, queued like the panel's other buttons */
+  keysFromMarkers() { return this.commit('mkeys', {}, g => HL.keysFromMarkers(this.d.link(), g), this.gen(), null, true); }
+  clearMarkers() { if (this.selT >= 0 && isMarker(this.d.ctx().table, this.selT)) this.select(-1); return this.commit('mclear', {}, g => HL.clearMarkers(this.d.link(), g), this.gen(), null, true); }
+  /* join: this send continues the last one's drag — the module folds it into that AUTOSLICE's undo step, and the history
+   * relabels its line instead of adding one */
+  autoslice(k, reroll = false, join = false) { return this.commit('auto', { k, reroll, join }, g => HL.autoslice(this.d.link(), k, reroll, g, join), this.gen(), null, true); }
   setKey(key, t) { return this.commit('key', { key, t }, g => HL.editSetKey(this.d.link(), key, t, g), this.gen(), null, true); }
   swapKeys(a, b) { return this.commit('swap', { a, b }, g => HL.editSwapKeys(this.d.link(), a, b, g), this.gen(), null, true); }
   undo() { return this.commit('undo', {}, () => HL.editUndo(this.d.link()), 0, null, true); }
