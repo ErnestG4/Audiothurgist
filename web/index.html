@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Audiothurgist</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon-192.png">
@@ -20,183 +20,304 @@
   Append ?demo to the URL to drive the page from the fake module in demo.js.
 -->
 <style>
-  :root{--bg:#0e0e10;--panel:#161618;--line:#26262a;--ink:#e8e6df;--mute:#8a887f;--dim:#5e5c55;
-        --accent:#eb7414;--brain:#3a9fe0;--kick:#eb4614;--snare:#28c878;--hat:#e6c828;--other:#3c78e6;--call:#78a0ff;--lock:#ffd54a}
-  *{box-sizing:border-box} [hidden]{display:none!important} body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-  header{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line)}
-  h1{font-size:18px;margin:0 6px 0 0;letter-spacing:.02em} h1 span{color:var(--accent)}
-  .pill{padding:3px 9px;border:1px solid var(--line);border-radius:999px;color:var(--mute);font-size:12px;white-space:nowrap}
-  .pill.ok{color:#9be0b0;border-color:#2c5d3b} .pill.warn{color:#ffcf80;border-color:#6b4a12} .pill.brain{color:#9fd0f5;border-color:#245a80}
-  button{background:#1f1f24;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:8px 12px;font:inherit;cursor:pointer;touch-action:manipulation}
-  button:hover{border-color:#3a3a42} button:disabled{opacity:.45;cursor:default}
-  button.on{background:var(--accent);color:#111;border-color:var(--accent)}
-  button.primary{background:var(--accent);color:#111;border-color:var(--accent);font-weight:600}
-  button.mini{padding:4px 9px;font-size:12px;border-radius:6px}
-  nav{display:flex;gap:4px;padding:8px 14px 0} nav button{border-radius:8px 8px 0 0;border-bottom:none;color:var(--mute)} nav button.on{background:var(--panel);color:var(--ink);border-color:var(--line)}
-  main{display:none;gap:12px;padding:12px 14px;max-width:1200px;margin:0 auto} main.show{display:grid}
-  @media(min-width:900px){main{grid-template-columns:1fr 1fr}.wide{grid-column:1/-1}}
-  section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px;min-width:0}
-  section h2{font-size:12px;text-transform:uppercase;letter-spacing:.12em;color:var(--mute);margin:0 0 8px;display:flex;justify-content:space-between;align-items:center;gap:8px}
-  canvas{width:100%;display:block;border-radius:8px;background:#0a0a0c;touch-action:manipulation}
+  /* ── Colour tokens. Every colour on the page is one of these: the CSS uses var(--…), the canvases read them
+   * through getComputedStyle (readTokens in the script), so a theme is just a second set of values. The text
+   * tokens are measured by the self-test against every surface they sit on: ≥ 4.5:1 in both themes. The
+   * displays (canvases) stay dark in the light theme too — a lit display behind glass, as on the module. ── */
+  :root{color-scheme:dark;
+    --bg:#0e0e10;--panel:#161618;--raise:#1b1b1f;--btn:#1f1f24;--btn-hi:#2a2a31;--line:#2a2a30;--line-hi:#3d3d46;--sep:#202025;--pad:#1c1c21;--pad-hi:#2b2b33;
+    --ink:#e8e6df;--ink2:#aeaca3;--ink3:#918f87;
+    --accent:#eb7414;--on-accent:#111111;--accent-ink:#f28f43;
+    --ok-ink:#9be0b0;--ok-line:#2c5d3b;--warn-ink:#ffcf80;--warn-line:#6b4a12;--warn-bg:#2a1c10;--bad-ink:#ff8577;--bad-line:#6b2a24;--bad-bg:#2a1414;
+    --brain-ink:#9fd0f5;--brain-line:#245a80;--call-ink:#8fb0ff;--lock:#ffd54a;--on-lock:#111111;--shadow:rgba(0,0,0,.45);
+    --cv-bg:#0a0a0c;--cv-grid:#2a2a30;--cv-grid2:#1c1c21;--cv-ink:#e8e6df;--cv-ink2:#9a988f;--cv-rest:#18181b;--cv-play:#ffffff;--cv-call:#78a0ff;--cv-sel:#ffd54a;
+    --cv-orange:#eb7414;--cv-marker:#9a988f;--cv-rec:#ffd54a;--cv-ok:#9be0b0;--cv-end:#3a3a42;--cv-strip:#121214;--cv-strip-line:#34343a;--cv-handles:#0e0e10;--cv-handle-line:#1d1d21;
+    --cv-bar:#3a3a42;--cv-bar-hi:#3a4a6a;--cv-lane:#141418;--cv-warn:#ffcf80;
+    --kick:#eb4614;--snare:#28c878;--hat:#e6c828;--other:#3c78e6;
+    --sc0:#9be0b0;--sc1:#5ad0e0;--sc2:#78a0ff;--sc3:#ff9bd0;--sc4:#eb7414;--sc5:#c07cf0;--sc6:#e8e6df;--sc7:#eb4614;--sc8:#28c878;--sc9:#e6c828}
+  @media (prefers-color-scheme: light){:root:not([data-theme="dark"]){color-scheme:light;
+    --bg:#f3f1eb;--panel:#ffffff;--raise:#f8f6f1;--btn:#ebe8e0;--btn-hi:#dfdbd0;--line:#d6d2c7;--line-hi:#b9b4a8;--sep:#ebe8e1;--pad:#f1eee7;--pad-hi:#e2ded3;
+    --ink:#1d1c19;--ink2:#4f4d47;--ink3:#625f57;
+    --accent:#e06a0c;--on-accent:#111111;--accent-ink:#994600;
+    --ok-ink:#1d6b3a;--ok-line:#8cc6a0;--warn-ink:#744800;--warn-line:#e0b56a;--warn-bg:#fff4e0;--bad-ink:#a3261a;--bad-line:#e2a49c;--bad-bg:#fde9e6;
+    --brain-ink:#1d5a88;--brain-line:#94c0e0;--call-ink:#2f55b8;--lock:#e9b800;--on-lock:#111111;--shadow:rgba(40,30,10,.18);
+    --cv-bg:#16161a;--cv-grid:#2c2c33;--cv-grid2:#1f1f25;--cv-rest:#1c1c20;--cv-strip:#141418;--cv-handles:#121216;--cv-lane:#19191e}}
+  :root[data-theme="light"]{color-scheme:light;
+    --bg:#f3f1eb;--panel:#ffffff;--raise:#f8f6f1;--btn:#ebe8e0;--btn-hi:#dfdbd0;--line:#d6d2c7;--line-hi:#b9b4a8;--sep:#ebe8e1;--pad:#f1eee7;--pad-hi:#e2ded3;
+    --ink:#1d1c19;--ink2:#4f4d47;--ink3:#625f57;
+    --accent:#e06a0c;--on-accent:#111111;--accent-ink:#994600;
+    --ok-ink:#1d6b3a;--ok-line:#8cc6a0;--warn-ink:#744800;--warn-line:#e0b56a;--warn-bg:#fff4e0;--bad-ink:#a3261a;--bad-line:#e2a49c;--bad-bg:#fde9e6;
+    --brain-ink:#1d5a88;--brain-line:#94c0e0;--call-ink:#2f55b8;--lock:#e9b800;--on-lock:#111111;--shadow:rgba(40,30,10,.18);
+    --cv-bg:#16161a;--cv-grid:#2c2c33;--cv-grid2:#1f1f25;--cv-rest:#1c1c20;--cv-strip:#141418;--cv-handles:#121216;--cv-lane:#19191e}
+  /* ── the frame ── */
+  *{box-sizing:border-box} [hidden]{display:none!important}
+  html{-webkit-text-size-adjust:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow-x:hidden}
+  .num{font-variant-numeric:tabular-nums}
+  header{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;padding:8px 14px;border-bottom:1px solid var(--line)}
+  .brand{font-size:18px;margin:0;letter-spacing:.02em;white-space:nowrap;font-weight:700} .brand span{color:var(--accent-ink)}
+  .hact{display:flex;gap:6px;align-items:center;margin-left:auto;order:2}
+  /* one status line: the segments run on with dots between them and the line ends in an ellipsis; a tap shows it all */
+  .status{order:1;flex:1 1 300px;min-width:0;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:none;border:0;border-radius:6px;padding:4px 2px;color:var(--ink2);font-size:12px;text-align:left;min-height:32px;cursor:pointer}
+  .status:hover{border-color:transparent;background:var(--raise)} .status.open{white-space:normal}
+  .status .pill{display:inline;padding:0;border:0;color:var(--ink2);font-size:12px} .status .pill+.pill::before{content:"·";margin:0 7px;color:var(--ink3)}
+  .status .pill.ok{color:var(--ok-ink)} .status .pill.warn{color:var(--warn-ink)} .status .pill.brain{color:var(--brain-ink)}
+  .pill{display:inline-block;padding:3px 9px;border:1px solid var(--line);border-radius:999px;color:var(--ink2);font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
+  .pill.ok{color:var(--ok-ink);border-color:var(--ok-line)} .pill.warn{color:var(--warn-ink);border-color:var(--warn-line)} .pill.brain{color:var(--brain-ink);border-color:var(--brain-line)}
+  .msg{padding:6px 14px;font-size:13px;color:var(--ink2);border-bottom:1px solid var(--line)} .msg:empty{display:none} .msg.bad{color:var(--bad-ink)}
+  #notice{background:var(--warn-bg);border:1px solid var(--warn-line);color:var(--warn-ink);padding:10px 12px;border-radius:10px;margin:12px 14px 0;display:none}
+  button{background:var(--btn);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:8px 12px;font:inherit;cursor:pointer;touch-action:manipulation;min-height:40px}
+  button:hover{border-color:var(--line-hi)} button:disabled{opacity:.45;cursor:default} button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  button.on,button.primary{background:var(--accent);color:var(--on-accent);border-color:var(--accent)} button.primary{font-weight:600}
+  button.mini{padding:6px 10px;font-size:13px;min-height:36px;border-radius:7px} button.ghost{background:none}
+  button.danger{color:var(--bad-ink)}
+  select,input[type=text],input:not([type]),input[type=number]{background:var(--btn);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font:inherit;max-width:100%;min-height:36px}
+  select.inline{padding:2px 6px;font-size:13px}
+  input[type=range]{width:100%;accent-color:var(--accent);min-height:32px}
+  nav{display:flex;gap:4px;padding:8px 14px 0;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch} nav::-webkit-scrollbar{display:none}
+  nav button{flex:none;border-radius:8px 8px 0 0;border-bottom:none;color:var(--ink2);min-height:44px;padding:8px 16px;background:var(--bg)} nav button.on{background:var(--panel);color:var(--ink);border-color:var(--line)}
+  main{display:none;gap:12px;padding:12px 14px;max-width:1200px;margin:0 auto} main.show{display:grid;grid-template-columns:minmax(0,1fr)}
+  @media(min-width:900px){main.show{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.wide{grid-column:1/-1}}
+  section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;min-width:0}
+  section h2{font-size:12px;text-transform:uppercase;letter-spacing:.12em;color:var(--ink2);margin:0 0 10px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+  section h2 .pill{white-space:normal;max-width:100%;text-transform:none;letter-spacing:.02em;font-weight:500}
+  canvas{width:100%;display:block;border-radius:8px;background:var(--cv-bg);touch-action:manipulation}
   .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
-  .kv{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:13px;color:var(--mute)} .kv b{color:var(--ink);font-weight:500}
-  label.ctl{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--mute);min-width:140px}
-  input[type=range]{width:100%} select{background:#1f1f24;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font:inherit;max-width:100%}
-  select.inline{padding:2px 6px;font-size:12px}
-  #notice{background:#2a1c10;border:1px solid #6b4a12;color:#ffcf80;padding:10px 12px;border-radius:10px;margin:12px 14px 0;display:none}
-  .legend{display:flex;flex-wrap:wrap;gap:10px;font-size:12px;color:var(--mute)} .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
-  footer{color:var(--mute);font-size:12px;padding:8px 14px 20px}
-  /* Controls panel */
-  .btns{display:grid;grid-template-columns:auto 1fr;gap:6px 10px;font-size:13px;align-items:start}
+  .kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:2px 10px;font-size:13px;color:var(--ink2)} .kv b{color:var(--ink);font-weight:500;overflow-wrap:anywhere}
+  label.ctl{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--ink2);min-width:140px} label.ctl.inl{min-width:0;flex-direction:row;align-items:center;gap:6px}
+  .note{font-size:12px;color:var(--ink2);margin:8px 0 0} .note b{color:var(--ink)} .note .bad{color:var(--bad-ink)}
+  .legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;color:var(--ink2)} .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+  .sw-kick{background:var(--kick)} .sw-snare{background:var(--snare)} .sw-hat{background:var(--hat)} .sw-other{background:var(--other)} .sw-play{background:var(--cv-play);outline:1px solid var(--line-hi)} .sw-call{background:var(--cv-call)}
+  .sw-grid{background:var(--cv-play);outline:1px solid var(--line-hi)} .sw-rec{background:var(--cv-rec)} .sw-mark{background:var(--cv-marker)} .sw-orange{background:var(--cv-orange)} .sw-ok{background:var(--cv-ok)} .sw-end{background:var(--cv-end)}
+  footer{color:var(--ink2);font-size:12px;padding:8px 14px 24px;max-width:1200px;margin:0 auto} footer b{color:var(--ink)}
+  code{background:var(--btn);padding:1px 4px;border-radius:4px;font-size:12px}
+  /* ── the transport: on every tab, sticky under the tabs; at the bottom of a phone, under the thumb ── */
+  .transport{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:12px;padding:8px 14px;background:var(--panel);border-bottom:1px solid var(--line);box-shadow:0 4px 14px var(--shadow)}
+  .tplay{width:56px;height:56px;min-height:56px;border-radius:50%;font-size:22px;line-height:1;padding:0;flex:none;display:grid;place-items:center;border-width:2px}
+  .tplay.run{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
+  .tinfo{display:flex;flex-direction:column;min-width:0;line-height:1.2}
+  .t-bpm{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap} .t-bpm small{font-size:12px;font-weight:500;color:var(--ink2);margin-left:3px}
+  .t-sub{font-size:12px;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis} .t-sub b{color:var(--ink);font-weight:600} .t-sub .lk{color:var(--ok-ink)}
+  .cpu{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink2);white-space:nowrap}
+  .meter{width:70px;height:9px;border:1px solid var(--line-hi);border-radius:3px;position:relative;overflow:hidden;background:var(--btn)}
+  .meter i{position:absolute;left:0;top:0;bottom:0;width:0;background:var(--ink3)} .meter u{position:absolute;top:0;bottom:0;width:2px;left:0;background:var(--warn-ink)}
+  .cpu.warn #cpuText{color:var(--warn-ink)} .cpu.warn .meter i{background:var(--accent)}
+  .tbtns{display:flex;gap:6px;margin-left:auto}
+  .tbtn{min-width:76px;min-height:48px;font-weight:600;padding:6px 10px;touch-action:none;user-select:none;-webkit-user-select:none}
+  .tbtn.held{background:var(--accent);color:var(--on-accent);border-color:var(--accent)} .tbtn.warn{color:var(--bad-ink)}
+  @media(max-width:640px){
+    header{padding:6px 10px} .status{order:3;flex-basis:100%;padding:2px}
+    nav{padding:6px 10px 0}
+    main{padding:10px 8px} section{padding:10px} footer{padding:8px 10px}
+    .transport{position:fixed;left:0;right:0;bottom:0;top:auto;gap:6px;padding:8px 8px calc(8px + env(safe-area-inset-bottom,0px));border-top:1px solid var(--line);border-bottom:0;box-shadow:0 -4px 14px var(--shadow)}
+    body{padding-bottom:calc(76px + env(safe-area-inset-bottom,0px))}
+    .tplay{width:52px;height:52px;min-height:52px;font-size:20px}
+    .t-bpm{font-size:17px} .tinfo{flex:0 0 auto;max-width:96px} .t-sub .xs{display:none}
+    .status{min-height:44px} .hact .tl{display:none}
+    .chip{flex:1 1 40%;min-height:48px;font-size:16px} .chip small{display:none} .mode-what{font-size:12px;margin-top:8px}
+    .cpu{position:absolute;left:0;right:0;top:0;height:3px;gap:0} .cpu .lbl,.cpu #cpuText{display:none} .cpu .meter{width:100%;height:3px;border:0;border-radius:0}
+    .tbtns{flex:1 1 auto;min-width:0;margin-left:0;justify-content:flex-end} .tbtn{min-width:0;flex:1 1 0;max-width:84px;padding:4px 2px;font-size:12px}
+  }
+  @media (max-width:700px),(pointer:coarse){button,button.mini,select,input:not([type=checkbox]){min-height:44px} button.mini{padding:8px 12px}}
+  /* ── Play: the modes, the pads, the jacks ── */
+  .modes{display:flex;flex-wrap:wrap;gap:8px}
+  .chip{flex:1 1 130px;min-height:56px;padding:8px 14px;border-radius:12px;font-size:17px;font-weight:700;display:flex;flex-direction:column;align-items:flex-start;justify-content:center;line-height:1.15;text-align:left}
+  .chip small{font-size:11px;font-weight:500;color:var(--ink2);margin-top:2px} .chip.on small{color:var(--on-accent)}
+  .chip.minor{flex:0 1 auto;min-height:44px;font-size:14px;font-weight:600} .chip.more{flex:0 0 auto;min-height:44px;font-size:13px;font-weight:500;color:var(--ink2)}
+  .mode-what{margin:10px 0 0;font-size:13px;color:var(--ink2);line-height:1.5} .mode-what b{color:var(--ink)}
+  .pads{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:6px}
+  @media(max-width:900px){.pads{grid-template-columns:repeat(6,minmax(0,1fr))}}
+  .padk{position:relative;min-height:62px;border-radius:10px;background:var(--pad);border:1px solid var(--line);border-bottom:4px solid var(--line-hi);display:flex;flex-direction:column;justify-content:space-between;align-items:flex-start;padding:6px 7px;touch-action:none;user-select:none;-webkit-user-select:none;font-weight:700;color:var(--ink);text-align:left;min-width:0;transition:background .08s}
+  .padk small{font-size:11px;font-weight:500;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+  .padk.sh{background:var(--raise)} .padk.down{background:var(--pad-hi);transform:translateY(1px)} .padk.flash{box-shadow:inset 0 0 0 2px var(--accent)}
+  .padk.c0{border-bottom-color:var(--kick)} .padk.c1{border-bottom-color:var(--snare)} .padk.c2{border-bottom-color:var(--hat)} .padk.c3{border-bottom-color:var(--other)}
+  #play.m-pads .padk{min-height:88px} #padsCard{order:1} .late{order:2} #play.m-pads #padsCard,#play.m-play #padsCard{order:-1} #modesCard{order:-2}
+  .jk{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px 12px;font-size:13px;align-items:baseline}
+  .jk .j{font-weight:700;color:var(--ink)} .jk .r{color:var(--ink2)} .jk .r b{color:var(--ink)}
+  .j4{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap} .j4 .big{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums} .j4 .v{font-variant-numeric:tabular-nums;color:var(--ink2);min-width:7ch}
+  .keystrip{display:grid;grid-template-columns:repeat(24,minmax(0,1fr));gap:2px;margin-top:6px} .keystrip i{height:12px;background:var(--btn);border-radius:2px} .keystrip i.oct{background:var(--btn-hi)} .keystrip i.on{background:var(--accent)}
+  /* ── Controls ── */
+  .btns{display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px 10px;font-size:13px;align-items:start}
   .btns .b{font-weight:700;color:var(--ink);padding-top:2px} .btns .g{display:grid;gap:4px}
-  .gest{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;color:var(--mute)} .gest em{color:var(--ink);font-style:normal} .gest .how{color:var(--dim);font-size:12px;min-width:90px}
-  .gest.live em{color:#9be0b0}
-  .knobs{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:10px}
-  .knob{border:1px solid var(--line);border-radius:10px;padding:6px 8px;min-height:58px;background:#121214}
-  .knob.inert{opacity:.5} .knob .n{display:flex;align-items:center;gap:6px;font-weight:600} .knob .n .p{color:var(--mute);font-weight:500;font-size:12px}
-  .knob .m{font-size:12px;color:var(--mute);margin-top:2px} .knob .v{font-size:12px;color:var(--ink)}
-  .knob .lk{margin-left:auto;font-size:11px;color:#111;background:var(--lock);border-radius:6px;padding:1px 6px;font-weight:600}
-  .zones{display:inline-flex;gap:2px} .zones span{padding:0 5px;border-radius:5px;background:#1f1f24;color:var(--mute)} .zones span.on{background:var(--accent);color:#111;font-weight:600} .zones span.pend{outline:1px dashed var(--accent);color:var(--accent)}
-  .page-perform .knob{border-color:#3a2a1a} .page-brain .knob{border-color:#1a2e3f}
-  /* Options */
-  .grp{margin-bottom:8px} .grp h3{font-size:12px;color:var(--mute);margin:8px 0 4px;text-transform:uppercase;letter-spacing:.1em}
-  .opt{display:grid;grid-template-columns:minmax(110px,1fr) 2fr;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid #1d1d21;font-size:13px}
+  .gest{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;color:var(--ink2)} .gest em{color:var(--ink);font-style:normal} .gest .how{color:var(--ink3);font-size:12px;min-width:90px}
+  .gest.live em{color:var(--ok-ink)}
+  .knobs{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px;margin-top:10px}
+  .knob{border:1px solid var(--line);border-radius:10px;padding:6px 8px;min-height:58px;background:var(--raise)}
+  .knob.inert .m,.knob.inert .name{color:var(--ink3)} .knob .n{display:flex;align-items:center;gap:6px;font-weight:600} .knob .n .p{color:var(--ink2);font-weight:500;font-size:12px}
+  .knob .m{font-size:12px;color:var(--ink2);margin-top:2px} .knob .v{font-size:12px;color:var(--ink)} .knob.locked{border-color:var(--lock)}
+  .knob .lk{margin-left:auto;font-size:11px;color:var(--on-lock);background:var(--lock);border-radius:6px;padding:1px 6px;font-weight:600}
+  .zones{display:inline-flex;gap:2px} .zones span{padding:0 5px;border-radius:5px;background:var(--btn);color:var(--ink2)} .zones span.on{background:var(--accent);color:var(--on-accent);font-weight:600} .zones span.pend{outline:1px dashed var(--accent);color:var(--accent-ink)}
+  .page-perform .knob{border-left:3px solid var(--accent)} .page-brain .knob{border-left:3px solid var(--brain-line)}
+  /* ── Options ── */
+  .grp{margin-bottom:8px} .grp h3{font-size:12px;color:var(--ink2);margin:12px 0 4px;text-transform:uppercase;letter-spacing:.1em}
+  .opt{display:grid;grid-template-columns:minmax(110px,1fr) minmax(0,2fr);gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid var(--sep);font-size:13px}
   .opt:last-child{border-bottom:none} .opt.busy{opacity:.5}
-  /* Manual */
-  .man{max-width:760px;font-size:14px;line-height:1.55} .man h3{margin:14px 0 6px;font-size:15px} .man h4{margin:10px 0 4px;font-size:13px;color:var(--mute);text-transform:uppercase;letter-spacing:.08em}
-  .man p{margin:6px 0} .man code{background:#1f1f24;padding:1px 4px;border-radius:4px;font-size:12px} .man .tag{color:var(--mute);font-style:italic}
-  .man dl{margin:4px 0} .man dt{font-weight:600;margin-top:6px} .man dd{margin:0 0 4px 0;color:#c9c7bf}
-  /* Kit */
-  .keys{display:grid;grid-template-columns:repeat(12,1fr);gap:4px} @media(max-width:700px){.keys{grid-template-columns:repeat(6,1fr)}}
-  .key{border:1px solid var(--line);border-left-width:4px;border-radius:8px;padding:5px 6px;min-height:78px;background:#121214;cursor:pointer;font-size:11px;color:var(--mute);display:flex;flex-direction:column;gap:2px;min-width:0}
-  .key:hover{border-color:#3a3a42} .key.sel{outline:2px solid var(--lock);outline-offset:-1px} .key.rec{background:#17171b} .key .nm{font-weight:700;color:var(--ink);font-size:13px;display:flex;justify-content:space-between;align-items:center}
-  .key .nm i{font-style:normal;font-size:10px;color:var(--dim);font-weight:500} .key .info{color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis} .key .meta{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .key .kb{display:flex;gap:3px;margin-top:auto} .key .kb button{padding:1px 6px;font-size:11px;border-radius:5px;line-height:1.4} .key .kb .rec{color:#ff6a5a} .key .kb .rec:disabled{color:var(--mute)}
-  .key.armed{animation:arm 1s ease-in-out infinite;border-color:#ff6a5a} .key.taking{animation:arm .4s ease-in-out infinite;border-color:#ff6a5a;background:#2a1414} .key.pending{border-color:#ffcf80}
-  @keyframes arm{0%,100%{box-shadow:0 0 0 0 rgba(255,106,90,0)}50%{box-shadow:0 0 0 3px rgba(255,106,90,.45)}}
-  .bar{position:relative;height:14px;border-radius:7px;background:#0a0a0c;overflow:hidden;border:1px solid var(--line)} .bar i{position:absolute;top:0;bottom:0;left:0}
-  .meter{width:160px} .meter i{background:#9be0b0;transition:width .08s linear} .meter.hot i{background:#ff6a5a}
-  .usage i.mat{background:#3c78e6} .usage i.rec{background:#28c878}
+  @media(max-width:520px){.opt{grid-template-columns:minmax(0,1fr)}}
+  /* ── Manual ── */
+  .man{max-width:760px;font-size:14px;line-height:1.55} .man h3{margin:14px 0 6px;font-size:15px} .man h4{margin:10px 0 4px;font-size:13px;color:var(--ink2);text-transform:uppercase;letter-spacing:.08em}
+  .man p{margin:6px 0} .man .tag{color:var(--ink2);font-style:italic}
+  .man dl{margin:4px 0} .man dt{font-weight:600;margin-top:6px} .man dt span{color:var(--ink2);font-weight:400} .man dd{margin:0 0 4px 0;color:var(--ink2)}
+  /* ── Kit ── */
+  .keys{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:4px} @media(max-width:900px){.keys{grid-template-columns:repeat(6,minmax(0,1fr))}}
+  .key{border:1px solid var(--line);border-left-width:4px;border-radius:8px;padding:5px 6px;min-height:78px;background:var(--raise);cursor:pointer;font-size:11px;color:var(--ink2);display:flex;flex-direction:column;gap:2px;min-width:0}
+  .key:hover{border-color:var(--line-hi)} .key.sel{outline:2px solid var(--lock);outline-offset:-1px} .key.rec{background:var(--pad)} .key .nm{font-weight:700;color:var(--ink);font-size:13px;display:flex;justify-content:space-between;align-items:center}
+  .key .nm i{font-style:normal;font-size:10px;color:var(--ink3);font-weight:500} .key .info{color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis} .key .meta{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .key .kb{display:flex;gap:3px;margin-top:auto} .key .kb button{padding:1px 6px;font-size:12px;border-radius:5px;line-height:1.4;min-height:30px;flex:1 1 0;min-width:0} .key .kb .rec{color:var(--bad-ink)}
+  @media (max-width:700px),(pointer:coarse){.key .kb button{min-height:44px}} @media(max-width:640px){.key .kb{display:none}.key{min-height:60px}}
+  .key.armed{animation:arm 1s ease-in-out infinite;border-color:var(--bad-ink)} .key.taking{animation:arm .4s ease-in-out infinite;border-color:var(--bad-ink);background:var(--bad-bg)} .key.pending{border-color:var(--warn-ink)}
+  @keyframes arm{0%,100%{box-shadow:0 0 0 0 transparent}50%{box-shadow:0 0 0 3px var(--bad-line)}}
+  .bar{position:relative;height:14px;border-radius:7px;background:var(--cv-bg);overflow:hidden;border:1px solid var(--line)} .bar i{position:absolute;top:0;bottom:0;left:0}
+  .meterbar{width:160px} .meterbar i{background:var(--ok-ink);transition:width .08s linear} .meterbar.hot i{background:var(--bad-ink)} .meterbar.idle{opacity:.45}
+  .usage i.mat{background:var(--other)} .usage i.rec{background:var(--snare)}
   .wvbtns{display:flex;gap:4px;align-items:center;font-weight:400;text-transform:none;letter-spacing:0;flex-wrap:wrap}
-  /* Kit: the editor (EDIT-UI). Colour is state: the selected entry and its key cells pulse orange together; a drop
-   * target is dashed green, red when the drop would orphan a recording; a key armed for a copy is dashed orange. */
+  /* the editor (EDIT-UI): colour is state — the selected entry and its key cells pulse orange together; a drop target is dashed green, red when the drop would orphan a recording */
   .key{touch-action:none;user-select:none;-webkit-user-select:none}
   .key.pulse{animation:pulse 1.2s ease-in-out infinite;outline:2px solid var(--accent);outline-offset:-1px}
-  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(235,116,20,0)}50%{box-shadow:0 0 0 4px rgba(235,116,20,.45)}}
-  .key.drop{outline:2px dashed #9be0b0;outline-offset:-1px;background:#14201a} .key.drop.red{outline-color:#ff6a5a;background:#2a1414}
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 transparent}50%{box-shadow:0 0 0 4px var(--warn-line)}}
+  .key.drop{outline:2px dashed var(--ok-ink);outline-offset:-1px} .key.drop.red{outline-color:var(--bad-ink);background:var(--bad-bg)}
   .key.arm{outline:2px dashed var(--accent);outline-offset:-1px}
   #kitwave,#onsethist{touch-action:none}
-  .edmenu{position:absolute;z-index:5;background:#1f1f24;border:1px solid #3a3a42;border-radius:10px;padding:6px;display:flex;flex-direction:column;gap:4px;min-width:200px;box-shadow:0 6px 24px rgba(0,0,0,.5)}
-  .edmenu .t{font-size:12px;color:var(--mute);padding:2px 6px;max-width:260px} .edmenu.red .t{color:#ff6a5a} .edmenu button{text-align:left;min-height:44px} .edmenu button.danger{color:#ff6a5a}
-  .edghost{position:fixed;z-index:6;pointer-events:none;background:var(--accent);color:#111;font-size:12px;font-weight:600;padding:4px 8px;border-radius:6px;transform:translate(-50%,-160%);white-space:nowrap}
-  .edfield{font-size:12px;color:var(--mute);gap:6px 10px} .edfield input{width:104px;background:#1f1f24;color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 6px;font:inherit;font-size:13px;font-variant-numeric:tabular-nums;min-height:36px}
-  .edfield b{color:var(--ink);font-weight:600} .edfield label{display:inline-flex;align-items:center;gap:4px;min-height:36px} .edfield .by{color:var(--call)}
-  .chop{min-height:88px;min-width:150px;font-size:20px;font-weight:700;background:#2a1c10;border-color:#6b4a12;color:#ffcf80;touch-action:none;user-select:none;-webkit-user-select:none} .chop:active,.chop.hit{background:var(--accent);color:#111}
-  .hist{list-style:none;margin:6px 0 0;padding:0;font-size:12px;max-height:150px;overflow:auto;font-variant-numeric:tabular-nums} .hist li{display:flex;gap:8px;padding:3px 0;border-bottom:1px solid #1d1d21;color:var(--mute)} .hist li:first-child{color:var(--ink)} .hist li i{font-style:normal;color:var(--dim);min-width:40px} .hist li.undone{text-decoration:line-through;opacity:.5}
-  .edpanel{display:grid;gap:12px} @media(min-width:900px){.edpanel{grid-template-columns:1fr 1fr 1fr}}
-  .edpanel h3{font-size:12px;color:var(--mute);margin:0 0 6px;text-transform:uppercase;letter-spacing:.1em}
-  .edpanel input[type=number]{width:64px;background:#1f1f24;color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px;font:inherit;min-height:36px}
-  /* Scope */
-  .sc-ch{display:inline-flex;align-items:center;gap:6px;padding:4px 9px;font-size:12px;color:var(--mute)} .sc-ch i{width:10px;height:10px;border-radius:2px;display:inline-block;opacity:.3;flex:none}
-  .sc-ch.on{color:var(--ink);border-color:#3a3a42} .sc-ch.on i{opacity:1} .sc-ch.auto{border-style:dashed}
-  .sc-ch .role{color:var(--dim);font-size:11px} .sc-ch.on .role{color:var(--mute)} .sc-ch .dc{font-variant-numeric:tabular-nums;min-width:52px;text-align:right;color:var(--ink)} .sc-ch:not(.on) .dc{color:var(--dim)}
-  .sc-grp{display:flex;flex-wrap:wrap;gap:4px;align-items:center} .sc-grp .lbl{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin-right:2px}
-  #sc_clip{color:#ff6a5a;border-color:#6b2a24;font-weight:600}
+  .edmenu{position:absolute;z-index:5;background:var(--btn);border:1px solid var(--line-hi);border-radius:10px;padding:6px;display:flex;flex-direction:column;gap:4px;min-width:200px;box-shadow:0 6px 24px var(--shadow)}
+  .edmenu .t{font-size:12px;color:var(--ink2);padding:2px 6px;max-width:260px} .edmenu.red .t{color:var(--bad-ink)} .edmenu button{text-align:left;min-height:44px}
+  .edghost{position:fixed;z-index:6;pointer-events:none;background:var(--accent);color:var(--on-accent);font-size:12px;font-weight:600;padding:4px 8px;border-radius:6px;transform:translate(-50%,-160%);white-space:nowrap}
+  .edfield{font-size:12px;color:var(--ink2);gap:6px 10px} .edfield input{width:104px;font-size:13px;font-variant-numeric:tabular-nums}
+  .edfield b{color:var(--ink);font-weight:600} .edfield label{display:inline-flex;align-items:center;gap:4px;min-height:36px} .edfield .by{color:var(--call-ink)}
+  .chop{min-height:88px;min-width:150px;font-size:20px;font-weight:700;background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn-ink);touch-action:none;user-select:none;-webkit-user-select:none} .chop:active,.chop.hit{background:var(--accent);color:var(--on-accent)}
+  .why{font-size:12px;color:var(--warn-ink);margin:6px 0 0}
+  .hist{list-style:none;margin:6px 0 0;padding:0;font-size:12px;max-height:150px;overflow:auto;font-variant-numeric:tabular-nums} .hist li{display:flex;gap:8px;padding:3px 0;border-bottom:1px solid var(--sep);color:var(--ink2)} .hist li:first-child{color:var(--ink)} .hist li i{font-style:normal;color:var(--ink3);min-width:40px} .hist li.undone{text-decoration:line-through;opacity:.6}
+  .edpanel{display:grid;gap:14px} @media(min-width:900px){.edpanel{grid-template-columns:repeat(4,minmax(0,1fr))}}
+  .edpanel h3{font-size:12px;color:var(--ink2);margin:0 0 6px;text-transform:uppercase;letter-spacing:.1em}
+  .edpanel input[type=number]{width:72px}
+  .askn{display:flex;align-items:center;gap:10px} .askn b{font-size:20px;min-width:2.5ch;text-align:right;font-variant-numeric:tabular-nums}
+  /* ── Scope ── */
+  .sc-ch{display:inline-flex;align-items:center;gap:6px;padding:4px 9px;font-size:12px;color:var(--ink2)} .sc-ch i{width:10px;height:10px;border-radius:2px;display:inline-block;opacity:.3;flex:none}
+  .sc-ch.on{color:var(--ink);border-color:var(--line-hi)} .sc-ch.on i{opacity:1} .sc-ch.auto{border-style:dashed}
+  .sc-ch .role{color:var(--ink3);font-size:11px} .sc-ch.on .role{color:var(--ink2)} .sc-ch .dc{font-variant-numeric:tabular-nums;min-width:52px;text-align:right;color:var(--ink)} .sc-ch:not(.on) .dc{color:var(--ink3)}
+  .sc-grp{display:flex;flex-wrap:wrap;gap:4px;align-items:center} .sc-grp .lbl{font-size:11px;color:var(--ink3);text-transform:uppercase;letter-spacing:.08em;margin-right:2px}
+  #sc_clip{color:var(--bad-ink);border-color:var(--bad-line);font-weight:600}
 </style>
 </head>
 <body>
 <header>
-  <h1><span>Audio</span>thurgist</h1>
-  <button id="connect" class="primary">Connect</button>
-  <button id="demo" class="mini" title="drive the page from a fake module (demo.js) — no hardware needed">Demo</button>
-  <button id="usbscan" class="mini" style="display:none" title="WebUSB: list every USB device the phone can see, to tell a cable problem from a filter problem">Scan USB</button>
-  <span id="modpill" class="pill">not connected</span>
-  <span id="pagepill" class="pill">page: —</span>
-  <span id="syncpill" class="pill">clock: —</span>
-  <span id="bpmpill" class="pill">— BPM</span>
-  <span id="linkpill" class="pill" title="request round-trip (last / worst in the last second) · requests per second · queued">link: —</span>
-  <span id="jackpill" class="pill" title="which jack map is applied: Brain = J3 clock · J4 v/oct · J5 gate · J6/J7/J8 class gates out; Voice = J3 clock · J4 slice v/oct · J5 style v/oct · J6 gate in · J7 hit trigger out · J8 velocity out">jacks: —</span>
-  <span id="diagpill" class="pill" title="worst control-loop gap and audio callback in the last second; playhead jumps > 1.5 steps and pattern regenerations since boot">diag: —</span>
+  <h1 class="brand"><span>Audio</span>thurgist</h1>
+  <button id="status" class="status" title="tap for the whole line">
+    <span id="modpill" class="pill">not connected</span><span id="pagepill" class="pill">page —</span><span id="syncpill" class="pill">clock —</span><span id="linkpill" class="pill" title="request round-trip (last / worst in the last second) · requests per second · KB/s in · queued">link —</span><span id="jackpill" class="pill">jacks —</span><span id="diagpill" class="pill" title="worst control-loop gap and audio callback in the last second; playhead jumps > 1.5 steps and pattern regenerations since boot">diag —</span>
+  </button>
+  <div class="hact">
+    <button id="theme" class="mini ghost" title="theme: follows the system — tap for light, again for dark">◐</button>
+    <button id="usbscan" class="mini" hidden title="WebUSB: list every USB device the phone can see, to tell a cable problem from a filter problem">Scan USB</button>
+    <button id="demo" class="mini" title="drive the page from a fake module (demo.js) — no hardware needed">Demo</button>
+    <button id="connect" class="primary">Connect</button>
+  </div>
 </header>
+<div id="msg" class="msg" role="status" aria-live="polite"></div>
 <div id="notice"></div>
-<nav><button id="tab_play" class="on">Play</button><button id="tab_kit">Kit</button><button id="tab_scope">Scope</button><button id="tab_opts">Options</button><button id="tab_man">Manual</button></nav>
+<nav id="tabs"><button id="tab_play" class="on">Play</button><button id="tab_kit">Kit</button><button id="tab_scope">Scope</button><button id="tab_opts">Options</button><button id="tab_man">Manual</button></nav>
+
+<div id="transport" class="transport">
+  <button id="t_play" class="tplay" title="start / stop the pattern — the clock runs on, the keys still play (B1 held on the panel)" aria-label="start or stop">▶</button>
+  <div class="tinfo">
+    <span class="t-bpm"><span id="t_bpm">—</span><small id="t_mult">BPM</small></span>
+    <span id="t_sub" class="t-sub">not connected</span>
+  </div>
+  <div id="cpu" class="cpu" title="the module's audio callback, once a second: the bar is the average, the tick the peak, against the 24-sample block (orange past 70 % or an overrun)"><span class="lbl">CPU</span><span class="meter"><i id="cpuAvg"></i><u id="cpuMax"></u></span><span id="cpuText" class="num">—</span></div>
+  <div class="tbtns">
+    <button id="t_dice" class="tbtn" title="B2 tap: a new fill">Dice</button>
+    <button id="t_flow" class="tbtn" title="B2 held: a new fill every bar for as long as you hold it">Flow</button>
+    <button id="t_reslice" class="tbtn" title="B3 tap: re-splice the burst centres">Reslice</button>
+  </div>
+</div>
 
 <main id="play" class="show">
+  <section id="modesCard" class="wide">
+    <h2>Mode <span id="mode_jacks" class="pill">—</span></h2>
+    <div id="modes" class="modes"><span class="note">Connect (or press Demo) to see the module's grammars.</span></div>
+    <p id="mode_what" class="mode-what"></p>
+  </section>
+  <section id="padsCard" class="wide" hidden>
+    <h2>Pads — the 24 keys <span class="wvbtns"><span id="pads_follow" class="pill" hidden>keys follow markers</span><span id="pads_plays" class="pill">one-shot</span></span></h2>
+    <div id="pads" class="pads"></div>
+    <p id="pads_help" class="note">Press to play a key as a CV note would (several fingers at once). In <b>Play</b> what you play is written into the loop; in <b>Pads</b> nothing is written. A pad lights whenever its key is called — from here, the CV jacks or the panel.</p>
+  </section>
   <section class="wide">
     <h2>The bar</h2>
     <div class="row" style="align-items:flex-start;gap:14px">
-      <canvas id="ring" style="width:180px;height:180px;flex:0 0 180px"></canvas>
-      <div style="flex:1;min-width:220px">
+      <canvas id="ring" style="width:170px;height:170px;flex:0 0 170px"></canvas>
+      <div style="flex:1;min-width:200px">
         <canvas id="strip" style="height:56px"></canvas>
         <div class="legend" style="margin-top:6px">
-          <span><i style="background:var(--kick)"></i>kick</span><span><i style="background:var(--snare)"></i>snare</span>
-          <span><i style="background:var(--hat)"></i>hat</span><span><i style="background:var(--other)"></i>other</span>
-          <span><i style="background:#fff"></i>playhead</span><span><i style="background:var(--call)"></i>call/punch</span>
+          <span><i class="sw-kick"></i>kick</span><span><i class="sw-snare"></i>snare</span><span><i class="sw-hat"></i>hat</span><span><i class="sw-other"></i>other</span><span><i class="sw-play"></i>playhead</span><span><i class="sw-call"></i>call / punch</span>
         </div>
         <div class="kv" style="margin-top:8px">
-          <span>grammar</span><b id="k_gram">—</b><span>classifier</span><b id="k_cls">—</b>
-          <span>chop</span><b id="k_chop">—</b><span>history</span><b id="k_hist">—</b>
-          <span>sample</span><b id="k_file">—</b><span>page</span><b id="k_page">—</b>
-          <span>native</span><b id="k_native">—</b><span>grid</span><b id="k_grid">—</b>
+          <span>classifier</span><b id="k_cls">—</b><span>chop</span><b id="k_chop">—</b><span>history</span><b id="k_hist">—</b>
+          <span>sample</span><b id="k_file">—</b><span>native</span><b id="k_native">—</b><span>grid</span><b id="k_grid">—</b>
           <span>bars</span><b id="k_bars">—</b><span>clock</span><b id="k_clock">—</b>
         </div>
       </div>
     </div>
   </section>
   <section class="wide">
-    <h2>Slices — click a slice to select it, then click a step above to punch it in</h2>
-    <canvas id="wave" style="height:160px"></canvas>
+    <h2 id="wave_title">Slices — click a slice to select it, then click a step above to punch it in</h2>
+    <canvas id="wave" style="height:150px"></canvas>
   </section>
-  <section id="controls">
+  <section id="jacksCard" class="late">
+    <h2>Jacks <span id="jk_map" class="pill">—</span></h2>
+    <p id="jk_why" class="note" style="margin:0 0 10px">—</p>
+    <div class="jk">
+      <span class="j">J4</span><div><div class="j4"><span id="jk_key" class="big">—</span><span id="jk_mv" class="v">—</span></div><div id="jk_strip" class="keystrip"></div></div>
+      <span class="j">J5</span><span id="jk_j5" class="r">—</span>
+      <span class="j">J6</span><span id="jk_j6" class="r">—</span>
+      <span class="j">J7 · J8</span><span id="jk_j78" class="r">—</span>
+      <span class="j">J3</span><span class="r">clock in (Options → Clock In sets the PPQN)</span>
+    </div>
+    <p class="note"><b>One keymap:</b> J4 = the key. 0 V is key 0 (C1), one key per semitone up to key 23 (B2); anything below 0 V plays key 0. The keys are the Kit tab's table — a key plays its slice of the break, its marker or its recording.</p>
+  </section>
+  <section id="controls" class="late">
     <h2>Controls <span id="ctl_page" class="pill">—</span></h2>
     <div class="btns">
       <div class="b">B1</div><div class="g">
         <div class="gest"><span class="how">tap</span><em id="g_b1tap">page Perform ↔ Brain</em><button id="b_page" class="mini">Switch page</button></div>
-        <div class="gest"><span class="how">hold 300 ms + turn a pot</span><em>record a motion lock on that pot</em><span>· hold + nudge again clears it</span><button id="b_clear" class="mini">Clear locks</button></div>
-        <div class="gest"><span class="how">LED</span><span>white flash per clock pulse · green while locked to the clock</span></div>
+        <div class="gest"><span class="how">hold + turn a pot</span><em>record a motion lock on that pot</em><span>· hold + nudge again clears it</span><button id="b_clear" class="mini">Clear locks</button></div>
+        <div class="gest"><span class="how">hold 600 ms alone</span><em>start / stop — the ▶ / ■ above</em></div>
       </div>
       <div class="b">B2</div><div class="g">
-        <div class="gest"><span class="how">tap</span><em id="g_b2tap">Dice — a new fill</em><button id="b_dice" class="mini">🎲 Dice</button></div>
-        <div class="gest" id="g_flow"><span class="how">hold &gt; 300 ms</span><em id="g_b2hold">Flow — a new fill every bar while held</em><button id="b_flow" class="mini">Flow</button></div>
+        <div class="gest"><span class="how">tap</span><em id="g_b2tap">Dice — a new fill</em></div>
+        <div class="gest" id="g_flow"><span class="how">hold &gt; 300 ms</span><em id="g_b2hold">Flow — a new fill every bar while held</em></div>
       </div>
       <div class="b">B3</div><div class="g">
-        <div class="gest"><span class="how">tap</span><em>Reslice — re-splice the burst centres</em><button id="b_reslice" class="mini">✂ Reslice</button></div>
+        <div class="gest"><span class="how">tap</span><em id="g_b3tap">Reslice — re-splice the burst centres</em></div>
         <div class="gest"><span class="how">hold &gt; 400 ms</span><em>Load the file highlighted by P5 (Sample)</em><button id="b_load" class="mini">Load selected</button></div>
       </div>
       <div class="b">B2+B3</div><div class="g">
-        <div class="gest"><span class="how">hold 2 s</span><em>Settings — brightness, preset save/load</em><span>· B2 or B3 leaves · no host action</span></div>
-      </div>
-      <div class="b">host</div><div class="g">
-        <div class="gest"><span class="how">no button</span><button id="b_mute" class="mini">Mute</button><span>the J4/J5 mute key does the same</span></div>
+        <div class="gest"><span class="how">hold 2 s</span><em>Settings — brightness, preset save / load</em></div>
       </div>
     </div>
     <div id="knobs" class="knobs"></div>
   </section>
-  <section>
-    <h2>Scope — output</h2>
-    <canvas id="scope" style="height:120px"></canvas>
-    <h2 style="margin-top:12px">Play</h2>
-    <div class="row">
+  <section class="late">
+    <h2>Output</h2>
+    <canvas id="outscope" style="height:110px"></canvas>
+    <div class="row" style="margin-top:12px">
       <label class="ctl">History (older ← → now)<input id="hist" type="range" min="0" max="0" value="0"></label>
       <label class="ctl">Sample<select id="sample"><option>—</option></select></label>
     </div>
-    <p style="font-size:12px;color:var(--mute);margin:8px 0 0">Picking a file here loads it at once (ACTION 6); on the panel P5 highlights and B3-hold loads.</p>
+    <p class="note">Picking a file here loads it at once (ACTION 6); on the panel P5 highlights and B3-hold loads.</p>
   </section>
 </main>
 
 <main id="kit">
   <section class="wide">
-    <h2>Kit — the 24 Voice-map keys <span id="kit_status" class="pill">—</span></h2>
+    <h2>Kit — the 24 keys <span id="kit_status" class="pill">—</span></h2>
     <div id="keys" class="keys"></div>
     <div class="row" style="margin-top:8px;gap:12px">
       <button id="k_rec" class="mini" title="arm a take into the selected key (ACTION 9); the panel's record gesture does the same">● Record into —</button>
       <button id="k_clr" class="mini" title="clear the selected key's recording (ACTION 10)">✕ Clear —</button>
-      <label class="ctl" style="min-width:0;flex-direction:row;align-items:center;gap:6px">Key plays<select id="k_plays" class="inline" title="Options → Key Plays (ACTION 11): one-shot plays the slice; held reads on until the gate falls"><option value="0">One-shot (the slice)</option><option value="1">Held (until the gate falls)</option></select></label>
-      <span id="k_recstate" class="pill">record: —</span>
-      <div class="bar meter" id="k_meterbox" title="input peak, last audio block"><i id="k_meter" style="width:0"></i></div>
+      <label class="ctl inl">Key plays<select id="k_plays" class="inline" title="Options → Key Plays (ACTION 11): one-shot plays the slice; held reads on until the gate falls"><option value="0">One-shot (the slice)</option><option value="1">Held (until the gate falls)</option></select></label>
+      <span id="k_recstate" class="pill">record —</span>
+      <div class="bar meterbar idle" id="k_meterbox" title="input peak, last audio block"><i id="k_meter"></i></div>
     </div>
-    <p id="kit_help" style="font-size:12px;color:var(--mute);margin:8px 0 0">Click a key to see its material below. An empty key plays its span of the break; a recorded key plays its take. ● arms a take into that key (the next gate on J6 / the panel gesture starts it); ✕ clears a recording. Class colours: kick, snare, hat, other.</p>
-    <p id="kit_help_edit" style="font-size:12px;color:var(--mute);margin:8px 0 0" hidden><b>Keys:</b> tap one to hear it and see it below · drag a key onto another to <b>swap</b> (a prompt when the target is taken; <span style="color:#ff6a5a">red</span> when a recording would lose its only key) · long-press a key, then drop or tap another, to <b>copy</b> it there (many keys may play one entry) · drag a slice up from the waveform onto a key to assign it. ● and ✕ as before.</p>
+    <p id="kit_help" class="note">Click a key to see its material below (on a phone, ● and ✕ act on the selected key). An empty key plays its span of the break; a recorded key plays its take. ● arms a take into that key (the next gate on J6 / the panel gesture starts it); ✕ clears a recording.</p>
+    <p id="kit_help_edit" class="note" hidden><b>Keys:</b> tap one to hear it and see it below · drag a key onto another to <b>swap</b> (a prompt when the target is taken; <span class="bad">red</span> when a recording would lose its only key) · long-press a key, then drop or tap another, to <b>copy</b> it there · drag a slice up from the waveform onto a key to assign it.</p>
   </section>
   <section class="wide">
     <h2><span id="wv_title">Waveform</span><span class="wvbtns"><span id="ed_status" class="pill" hidden>ready</span><button id="wv_fit" class="mini" title="fit the selected key's material">fit</button><button id="wv_all" class="mini" title="the whole buffer up to freePos">all</button><button id="wv_out" class="mini" title="zoom out (wheel on the waveform also zooms; drag pans)">−</button><button id="wv_in" class="mini" title="zoom in">+</button><select id="wv_plane" class="inline" title="which plane to read (GET_WAVE)" hidden><option value="0">L</option><option value="1">R</option><option value="2">L+R</option></select></span></h2>
@@ -213,31 +334,38 @@
       <label title="a dragged grid boundary snaps to the nearest zero crossing within ±2 ms (after the ±12 ms onset magnet)"><input type="checkbox" id="ed_zgrid" checked> 0-snap grid</label>
       <label title="a dragged marker edge snaps to the nearest zero crossing within ±2 ms"><input type="checkbox" id="ed_zmark"> 0-snap markers</label>
     </div>
-    <div class="legend" style="margin-top:6px"><span><i style="background:#fff"></i>grid boundary (table — swung where the material swings)</span><span><i style="background:var(--lock)"></i>recording</span><span id="lg_mark"><i style="background:#8a887f"></i>marker</span><span id="lg_orange"><i style="background:var(--accent)"></i>placed / moved by you</span><span><i style="background:var(--call)"></i>onset (hits)</span><span id="lg_play"><i style="background:#9be0b0"></i>playhead</span><span><i style="background:#3a3a42"></i>end of the break</span><span id="wv_range"></span></div>
-    <p id="wv_help" style="font-size:12px;color:var(--mute);margin:8px 0 0" hidden><b>Waveform:</b> tap inside a marker to <b>split</b> it there (snapped to an onset within 12 ms); tap a grid slice to select it (the grid never splits) · drag a lollipop below the wave to move a grid boundary (linked, ≥ 64 samples each side) or a marker's start — the selected marker has a square <b>end</b> handle too; it plays from the new point as you go and the whole slice once you let go · a second finger or Shift turns the magnets off · double-tap a marker's handle to <b>merge</b> it with the one ending where it starts · long-press a handle or a slice for delete / copy / promote · hold a marker's end handle still to <b>loop</b> its tail · the strip at the bottom pans, zooms (drag up/down, pinch, wheel) and fits the selection on a double-tap.</p>
+    <div class="legend" style="margin-top:6px"><span><i class="sw-grid"></i>grid boundary (top lane)</span><span><i class="sw-rec"></i>recording</span><span id="lg_mark"><i class="sw-mark"></i>marker (bottom lane)</span><span id="lg_orange"><i class="sw-orange"></i>placed / moved by you</span><span><i class="sw-call"></i>onset</span><span id="lg_play"><i class="sw-ok"></i>playhead</span><span><i class="sw-end"></i>end of the break</span><span id="wv_range"></span></div>
+    <p id="wv_help" class="note" hidden><b>Waveform:</b> the grid's boundaries run along the top lane, the markers along the bottom one. Tap inside a marker to <b>split</b> it there (snapped to an onset within 12 ms); tap a grid slice to select it · drag a lollipop below the wave to move a grid boundary or a marker's start (the selected marker has a square <b>end</b> handle too); it plays from the new point as you go · a second finger or Shift turns the magnets off · double-tap a marker's handle to <b>merge</b> · long-press a handle or a slice for delete / copy / promote · hold a marker's end handle still to <b>loop</b> its tail · the strip at the bottom pans and zooms.</p>
   </section>
   <section class="wide" id="editor" hidden>
-    <h2>Edit — the other ways to get markers, and the history <span id="ed_gen" class="pill">—</span></h2>
+    <h2>Edit — markers, keys and the history <span id="ed_gen" class="pill">—</span></h2>
     <div class="edpanel">
       <div>
         <h3>Chop while it plays</h3>
         <div class="row" style="align-items:flex-start">
-          <button id="chop" class="chop" title="TAP_MARK (ACTION 29): an orange marker at the playhead minus the Tap Allowance, snapped to an onset within ±60 ms; the marker runs to the next onset (≤ 250 ms)">Chop</button>
-          <div style="flex:1;min-width:140px"><span id="chop_pos" class="pill">playhead —</span><p style="font-size:12px;color:var(--mute);margin:6px 0 0">Tap on the hit. The module timestamps from its own playhead, backs off the <b>Tap Allowance</b> (Options; <span id="chop_allow">40 ms</span>) and snaps to the nearest onset.</p></div>
+          <button id="chop" class="chop" title="TAP_MARK (ACTION 29): an orange marker at the playhead minus the Tap Allowance, snapped to an onset within ±60 ms; a tap on a marker that is already there selects it">Chop</button>
+          <div style="flex:1;min-width:140px"><span id="chop_pos" class="pill">playhead —</span><p class="note">Tap on the hit. The module timestamps from its own playhead, backs off the <b>Tap Allowance</b> (Options; <span id="chop_allow">40 ms</span>) and snaps to the nearest onset.</p><p id="chop_why" class="why" hidden>Nothing is sounding — press ▶ (the loop must be playing) or hold a pad.</p></div>
         </div>
-        <h3 style="margin-top:10px">Nudge all</h3>
-        <div class="row"><select id="ed_nudge_which" class="inline"><option value="0">grid boundaries</option><option value="1">markers</option></select><button id="ed_nudge_m" class="mini" title="NUDGE_ALL earlier">−</button><input id="ed_nudge" type="number" value="5" min="1" max="500" step="1"> ms<button id="ed_nudge_p" class="mini" title="NUDGE_ALL later">+</button></div>
-        <div class="row" style="margin-top:8px"><button id="ed_follow" class="mini" title="SET_KEY every key back to its span of the grid (the takes stay in the table, keyless)">keys follow the grid</button></div>
+      </div>
+      <div id="mk_box">
+        <h3>Markers <span id="mk_n" class="pill">—</span></h3>
+        <label class="ctl" title="AUTOSLICE (ACTION 36): this many markers from a weighted draw over the onsets — the strong ones first; turning up adds, turning down removes; re-roll draws again">Autoslice count
+          <span class="askn"><input id="as_k" type="range" min="0" max="64" value="8"><b id="as_n" class="num">8</b></span></label>
+        <div class="row"><button id="as_go" class="mini primary">Autoslice</button><button id="as_reroll" class="mini" title="the same count, a new draw">Re-roll</button></div>
+        <div class="row" style="margin-top:8px"><button id="mk_keys" class="mini" title="KEYS_FROM_MARKERS (ACTION 33): the markers in time order onto keys 0, 1, 2… (keys holding a recording are skipped); one undo step">Markers → keys</button><button id="mk_clear" class="mini danger" title="CLEAR_MARKERS (ACTION 34): every marker (grey and orange) deleted, their keys back to the grid; one undo step">Clear markers</button></div>
+        <p class="note"><span id="mk_follow" class="pill" hidden>keys follow markers</span> <span id="mk_note">In Pads the keys follow the markers by themselves.</span></p>
       </div>
       <div>
         <h3>Onsets → markers</h3>
-        <div class="row" style="justify-content:space-between"><span style="font-size:12px;color:var(--mute)">drag the line · <b id="ed_onsets_n" style="color:var(--ink)">—</b></span><button id="ed_onsets" class="mini primary" title="FROM_ONSETS(threshold, 35 ms): every grey marker inside the break is replaced by one per onset above the line (orange ones and recordings stay)">Make markers</button></div>
+        <div class="row" style="justify-content:space-between"><span class="note" style="margin:0">drag the line · <b id="ed_onsets_n">—</b></span><button id="ed_onsets" class="mini primary" title="FROM_ONSETS(threshold, 35 ms): every grey marker inside the break is replaced by one per onset above the line (orange ones and recordings stay)">Make markers</button></div>
         <canvas id="onsethist" style="height:96px;margin-top:6px"></canvas>
-        <p style="font-size:12px;color:var(--mute);margin:6px 0 0">Bar height = the salience of the grid slice the onset falls in (the module's strength proxy).</p>
+        <h3 style="margin-top:12px">Nudge all</h3>
+        <div class="row"><select id="ed_nudge_which" class="inline"><option value="0">grid boundaries</option><option value="1">markers</option></select><button id="ed_nudge_m" class="mini" title="NUDGE_ALL earlier">−</button><input id="ed_nudge" type="number" value="5" min="1" max="500" step="1"> ms<button id="ed_nudge_p" class="mini" title="NUDGE_ALL later">+</button></div>
+        <div class="row" style="margin-top:8px"><button id="ed_follow" class="mini" title="SET_KEY every key back to its span of the grid (the takes stay in the table, keyless)">Keys follow the grid</button></div>
       </div>
       <div>
         <h3>History</h3>
-        <div class="row"><button id="ed_undo" class="mini" disabled title="UNDO (ACTION 30): one step back through the module's journal (64 deep; a take, a set load or new material ends it)">Undo</button><button id="ed_redo" class="mini" disabled title="REDO (ACTION 31): one step forward (a new edit clears the redo half)">Redo</button><span id="ed_depth" style="font-size:12px;color:var(--mute)"></span></div>
+        <div class="row"><button id="ed_undo" class="mini" disabled title="UNDO (ACTION 30): one step back through the module's journal (64 deep; a take, a set load or new material ends it)">Undo</button><button id="ed_redo" class="mini" disabled title="REDO (ACTION 31): one step forward (a new edit clears the redo half)">Redo</button><span id="ed_depth" class="note" style="margin:0"></span></div>
         <ol id="ed_hist" class="hist"></ol>
       </div>
     </div>
@@ -245,26 +373,26 @@
   <div id="ed_ghost" class="edghost" hidden></div>
   <section>
     <h2>Buffer</h2>
-    <div class="bar usage" id="k_usage"><i class="mat" id="u_mat" style="width:0"></i><i class="rec" id="u_rec" style="width:0"></i></div>
+    <div class="bar usage" id="k_usage"><i class="mat" id="u_mat"></i><i class="rec" id="u_rec"></i></div>
     <div class="kv" style="margin-top:8px">
       <span>break</span><b id="u_break">—</b><span>recordings</span><b id="u_recs">—</b><span>free</span><b id="u_free">—</b><span>planes</span><b id="u_planes">—</b><span>table</span><b id="u_table">—</b>
     </div>
   </section>
   <section>
     <h2>Looper</h2>
-    <div class="row"><b id="l_count" style="font-size:20px">—</b><span id="l_label" style="color:var(--mute)">events on the bar</span><button id="l_undo" class="mini" title="undo the last looper event (ACTION 12)">Undo</button><button id="l_clear" class="mini" title="clear every looper event (ACTION 13)">Clear</button></div>
-    <p style="font-size:12px;color:var(--mute);margin:8px 0 0">Loop-record writes performance events onto the bar; the count comes from the state (byte 176). Undo and Clear take the same path as the panel gestures.</p>
+    <div class="row"><b id="l_count" class="num" style="font-size:20px">—</b><span id="l_label" class="note" style="margin:0">events on the bar</span><button id="l_undo" class="mini" title="undo the last looper event (ACTION 12)">Undo</button><button id="l_clear" class="mini" title="clear every looper event (ACTION 13)">Clear</button></div>
+    <p class="note">Play's loop-record writes what you play onto the bar; the count comes from the state (byte 176). Undo and Clear take the same path as the panel's B2 / B3 in Play.</p>
   </section>
   <section class="wide">
     <h2>Set — the break, its recorded keys, the options and the loop, on the card <span id="s_status" class="pill">—</span></h2>
     <div class="row">
-      <label class="ctl" style="min-width:0;flex-direction:row;align-items:center;gap:6px">Name<input id="s_name" list="s_list" maxlength="31" pattern="[A-Za-z0-9_-]{1,31}" placeholder="letters, digits, _ -" spellcheck="false" style="background:#1f1f24;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font:inherit;width:180px"><datalist id="s_list"></datalist></label>
-      <button id="s_save" class="mini" title="write sets/&lt;name&gt;.wav + sets/&lt;name&gt;.json (ACTION 14) — the material with its recordings, the table, keys, options and looper events">💾 Save set</button>
-      <button id="s_load" class="mini" title="load sets/&lt;name&gt; (ACTION 15): the WAV, then the table, keys, options and loop from its JSON">📂 Load set</button>
-      <div class="bar meter" id="s_barbox" title="progress of the save" style="opacity:.45"><i id="s_bar" style="width:0"></i></div>
-      <span id="s_cur" style="color:var(--mute);font-size:12px"></span>
+      <label class="ctl inl">Name<input id="s_name" list="s_list" maxlength="31" pattern="[A-Za-z0-9_-]{1,31}" placeholder="letters, digits, _ -" spellcheck="false" style="width:180px"><datalist id="s_list"></datalist></label>
+      <button id="s_save" class="mini" title="write sets/&lt;name&gt;.wav + sets/&lt;name&gt;.json (ACTION 14) — the material with its recordings, the table, keys, options and looper events">Save set</button>
+      <button id="s_load" class="mini" title="load sets/&lt;name&gt; (ACTION 15): the WAV, then the table, keys, options and loop from its JSON">Load set</button>
+      <div class="bar meterbar idle" id="s_barbox" title="progress of the save"><i id="s_bar"></i></div>
+      <span id="s_cur" class="note" style="margin:0"></span>
     </div>
-    <p style="font-size:12px;color:var(--mute);margin:8px 0 0">A set is <code>sets/&lt;name&gt;.wav</code> (PCM16, both planes when the material is stereo, the slice starts as cue points) beside <code>sets/&lt;name&gt;.json</code>. Sets also appear in the Sample list as “name [set]” and load from P5 + B3 like any file; a set saved just now joins that list at the next connect. Saving refuses while a take runs; the panel flashes the buttons red when the card is missing or full.</p>
+    <p class="note">A set is <code>sets/&lt;name&gt;.wav</code> (PCM16, both planes when the material is stereo, the slice starts as cue points) beside <code>sets/&lt;name&gt;.json</code>. Sets also appear in the Sample list as “name [set]” and load from P5 + B3 like any file. Saving refuses while a take runs.</p>
   </section>
 </main>
 
@@ -275,33 +403,33 @@
     <div class="sc-grp" style="margin-top:8px"><span class="lbl">audio</span><span id="sc_chans" class="sc-grp"></span></div>
     <div class="sc-grp" style="margin-top:4px"><span class="lbl">cv</span><span id="sc_cvchans" class="sc-grp"></span></div>
     <div class="row" style="margin-top:8px;gap:10px">
-      <span class="sc-grp"><span class="lbl">preset</span><button id="sc_p_audio" class="mini" title="out L and out R at ×4 (21 ms), triggered on out L">Audio</button><button id="sc_p_cv" class="mini" title="the jacks in input mode under the current jack map (J3 clock, J4, J5 — and J6 in the Voice map), 1 s window, free-running">CV</button><button id="sc_p_gates" class="mini" title="J6 / J7 / J8 with out L under them: ~250 ms of gates over ~85 ms of audio (four channels share the 1024-byte frame), triggered on J6 at 1 V">Gates</button></span>
-      <label class="ctl" style="min-width:0;flex-direction:row;align-items:center;gap:6px">Audio time<select id="sc_decim" class="inline" title="audio samples per point: ×1 shows every sample (≤ 10.7 ms for 512 points), ×16 one in sixteen (≤ 171 ms); the pill says the window a frame really got"><option value="1">×1 · ≤ 11 ms</option><option value="2">×2 · ≤ 21 ms</option><option value="4" selected>×4 · ≤ 43 ms</option><option value="8">×8 · ≤ 85 ms</option><option value="16">×16 · ≤ 171 ms</option></select></label>
-      <label class="ctl" style="min-width:0;flex-direction:row;align-items:center;gap:6px">CV time<select id="sc_cvdecim" class="inline" title="cv samples (2 kHz) per point: ×1 is ≤ 256 ms for 512 points, ×32 ≤ 8 s — the cv ring holds 8.2 s; the pill says the window a frame really got"><option value="1">×1 · ≤ 256 ms</option><option value="2">×2 · ≤ 512 ms</option><option value="4" selected>×4 · ≤ 1 s</option><option value="8">×8 · ≤ 2 s</option><option value="16">×16 · ≤ 4 s</option><option value="32">×32 · ≤ 8 s</option></select></label>
-      <label class="ctl" style="min-width:0;flex-direction:row;align-items:center;gap:6px">Gain<select id="sc_gain" class="inline" title="display gain for the audio traces; a trace pinned to the edge lights the clip pill"><option value="1">×1</option><option value="2">×2</option><option value="4">×4</option><option value="8">×8</option></select></label>
-      <button id="sc_trig" class="mini on" title="start each window on the most recent rising crossing of the trigger level on the trigger channel (Schmitt, ±3 %), leaving room for every shown tier — a stable trace; off = free-running">Trigger</button>
-      <label class="ctl" style="min-width:0;flex-direction:row;align-items:center;gap:6px">on<select id="sc_trigsrc" class="inline" title="the trigger channel: auto = the first shown (audio before cv); it need not be shown. Level: 0 for audio, 1 V for a jack"><option value="-1">auto</option></select></label>
+      <span class="sc-grp"><span class="lbl">preset</span><button id="sc_p_audio" class="mini" title="out L and out R at ×4 (21 ms), triggered on out L">Audio</button><button id="sc_p_cv" class="mini" title="the jacks in input mode under the current jack map (J3 clock, J4, J5 — and J6 in the Voice map), 1 s window, free-running">CV</button><button id="sc_p_gates" class="mini" title="J6 / J7 / J8 with out L under them: ~250 ms of gates over ~85 ms of audio, triggered on J6 at 1 V">Gates</button></span>
+      <label class="ctl inl">Audio time<select id="sc_decim" class="inline" title="audio samples per point: ×1 shows every sample (≤ 10.7 ms for 512 points), ×16 one in sixteen (≤ 171 ms)"><option value="1">×1 · ≤ 11 ms</option><option value="2">×2 · ≤ 21 ms</option><option value="4" selected>×4 · ≤ 43 ms</option><option value="8">×8 · ≤ 85 ms</option><option value="16">×16 · ≤ 171 ms</option></select></label>
+      <label class="ctl inl">CV time<select id="sc_cvdecim" class="inline" title="cv samples (2 kHz) per point: ×1 is ≤ 256 ms for 512 points, ×32 ≤ 8 s"><option value="1">×1 · ≤ 256 ms</option><option value="2">×2 · ≤ 512 ms</option><option value="4" selected>×4 · ≤ 1 s</option><option value="8">×8 · ≤ 2 s</option><option value="16">×16 · ≤ 4 s</option><option value="32">×32 · ≤ 8 s</option></select></label>
+      <label class="ctl inl">Gain<select id="sc_gain" class="inline" title="display gain for the audio traces; a trace pinned to the edge lights the clip pill"><option value="1">×1</option><option value="2">×2</option><option value="4">×4</option><option value="8">×8</option></select></label>
+      <button id="sc_trig" class="mini on" title="start each window on the most recent rising crossing of the trigger level on the trigger channel (Schmitt, ±3 %); off = free-running">Trigger</button>
+      <label class="ctl inl">on<select id="sc_trigsrc" class="inline" title="the trigger channel: auto = the first shown (audio before cv). Level: 0 for audio, 1 V for a jack"><option value="-1">auto</option></select></label>
       <button id="sc_peak" class="mini" title="each point is the largest-magnitude sample of its group instead of the first — clicks, hats and short gates survive a long window">Peak</button>
       <button id="sc_glow" class="mini" title="draw the previous frames dimmer behind the current one">Afterglow</button>
       <button id="sc_freeze" class="mini" title="stop polling and keep the last frame (the other tabs keep their own polls)">Freeze</button>
     </div>
-    <p id="sc_help" style="font-size:12px;color:var(--mute);margin:8px 0 0">Ten channels on one sample clock from the firmware's rings: out L/R and in L/R (J1/J2, AC-coupled) at 48 kHz, and the six jacks J3–J8 DC-coupled at ±5 V, 2 kHz — LFOs, envelopes, sequences and gates, in or out (an output jack reads back what it drives). One snapshot per frame, so every trace starts at the same instant; each tier keeps its own window length, drawn over the shared time axis. Polled as fast as the link allows while this tab shows (≤ 30 frames/s, the state poll eased to 4 Hz). Click a channel to show or hide it — J1/J2 show themselves while a signal is present. A jack's label is its role under the current jack map, with its present voltage. Needs firmware with <code>scope2</code> (2 for the jacks); older firmware shows its mono output trace here.</p>
+    <p id="sc_help" class="note">Ten channels on one sample clock from the firmware's rings: out L/R and in L/R (J1/J2, AC-coupled) at 48 kHz, and the six jacks J3–J8 DC-coupled at ±5 V, 2 kHz — in or out (an output jack reads back what it drives). One snapshot per frame, so every trace starts at the same instant. Click a channel to show or hide it — J1/J2 show themselves while a signal is present. A jack's label is its role under the current jack map, with its present voltage. Needs firmware with <code>scope2</code> (2 for the jacks); older firmware shows its mono output trace here.</p>
   </section>
 </main>
 
 <main id="opts">
   <section class="wide">
     <h2>Options <span id="opt_status" class="pill">—</span></h2>
-    <p style="font-size:12px;color:var(--mute);margin:0 0 8px">Labels come from the module's descriptor; a change is written live (GET_LIVE → BLOB to <code>live</code>) and is not saved until a preset is saved from Settings or <code>/program</code>.</p>
-    <div id="optgroups"><p style="color:var(--mute)">Connect to read the options.</p></div>
+    <p class="note" style="margin:0 0 8px">Labels come from the module's descriptor; a change is written live (GET_LIVE → BLOB to <code>live</code>) and is not saved until a preset is saved from Settings or <code>/program</code>.</p>
+    <div id="optgroups"><p class="note">Connect to read the options.</p></div>
   </section>
 </main>
 
 <main id="man">
-  <section class="wide"><h2>Manual</h2><div id="manual" class="man"><p style="color:var(--mute)">Connect to read the module's manual from its descriptor.</p></div></section>
+  <section class="wide"><h2>Manual</h2><div id="manual" class="man"><p class="note">Connect to read the module's manual from its descriptor.</p></div></section>
 </main>
 
-<footer>Runs over the module's front USB-C. Hermetic's <code>/program</code> keeps flashing, presets and settings; this page is the instrument's window. Sources: codeberg.org/combust/Audiothurgist</footer>
+<footer>Runs over the module's front USB-C. Hermetic's <code>/program</code> keeps flashing, presets and settings; this page is the instrument's window. <span title="the commit this page was published from (web/publish-pages.sh stamps it); local when opened from the repo">page <!--page-build--><b>local</b></span> · codeberg.org/combust/Audiothurgist</footer>
 
 <script src="hostlink.js"></script>
 <script src="edit.js"></script>
@@ -318,24 +446,52 @@
 <script src="demo.js"></script>
 <script>
 'use strict';
-const { CMD, ACT, REC, ZONE_MULT, keyName, Link, hello, getDescriptor, getLive, setLive, parseState, fetchEnv, parseScope, SCOPE, SCOPE_CH, SCOPE_JACK_ROLE, SCOPE_JACK_IN, scopeVolts, scopePlan, fetchScopeFrame, fetchWave, fetchTable, fetchHits, fieldLabels, pagerInfo, optionsInfo, manualInfo, SET_STATE, SET_RESULT, setNameOk, setLabelName, saveSet, loadSet } = HL;
+const { CMD, ACT, REC, KEYS, ZONE_MULT, keyName, Link, hello, getDescriptor, getLive, setLive, parseState, fetchEnv, parseScope, SCOPE, SCOPE_CH, SCOPE_JACK_ROLE, SCOPE_JACK_IN, scopeVolts, scopePlan, fetchScopeFrame, fetchWave, fetchTable, fetchHits, fieldLabels, pagerInfo, optionsInfo, manualInfo, SET_STATE, SET_RESULT, setNameOk, setLabelName, saveSet, loadSet, caps, playKey, setMute } = HL;
 const $ = id => document.getElementById(id);
-const COL = ['#eb4614', '#28c878', '#e6c828', '#3c78e6'];
 const CLS_NAME = ['kick', 'snare', 'hat', 'other'];
 const SR = 48000;   /* the engine's rate: lengths and positions are shown in seconds */
+/* The grammars the page has opinions about (Options byte 5, labels from the descriptor) */
+const GR = { classic: 0, collins: 1, grids: 2, euclid: 3, camp: 4, play: 5, pads: 6 };
+const BUDGET_US = 500;   /* the audio callback's budget: 24 samples at 48 kHz */
+
+/* ───────────── Theme: colour tokens ─────────────
+ * Every colour lives in the CSS (:root, and the light set under prefers-color-scheme / data-theme). The canvases
+ * read the same tokens here, once per theme change — no colour is written in this script. */
+const TOKENS = ['kick', 'snare', 'hat', 'other', 'cv-bg', 'cv-grid', 'cv-grid2', 'cv-ink', 'cv-ink2', 'cv-rest', 'cv-play', 'cv-call', 'cv-sel', 'cv-orange', 'cv-marker', 'cv-rec', 'cv-ok',
+  'cv-end', 'cv-strip', 'cv-strip-line', 'cv-handles', 'cv-handle-line', 'cv-bar', 'cv-bar-hi', 'cv-lane', 'cv-warn', 'accent', 'sc0', 'sc1', 'sc2', 'sc3', 'sc4', 'sc5', 'sc6', 'sc7', 'sc8', 'sc9'];
+const TOK = {};
+let COL = [], SC_COL = [];   /* the class colours (kick · snare · hat · other) and the scope's ten channels */
+function readTokens() {
+  const cs = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null;
+  for (const k of TOKENS) TOK[k] = (cs && cs.getPropertyValue('--' + k) || '').trim() || 'gray';
+  COL = [TOK.kick, TOK.snare, TOK.hat, TOK.other]; SC_COL = Array.from({ length: 10 }, (_, i) => TOK['sc' + i]);
+}
+/* auto (the system's) → light → dark; remembered per browser, a convenience only */
+const THEMES = { auto: ['◐', 'auto', 'theme: follows the system — tap for light'], light: ['○', 'light', 'theme: light — tap for dark'], dark: ['●', 'dark', 'theme: dark — tap to follow the system'] };
+let theme = 'auto';
+try { const t = localStorage.getItem('audiothurgist.theme'); if (t && THEMES[t]) theme = t; } catch {}
+function applyTheme() {
+  const r = document.documentElement; if (theme === 'auto') r.removeAttribute('data-theme'); else r.setAttribute('data-theme', theme);
+  $('theme').innerHTML = `${THEMES[theme][0]}<span class="tl"> ${THEMES[theme][1]}</span>`; $('theme').title = THEMES[theme][2];
+  readTokens(); invalidate(D.all);
+}
+$('theme').onclick = () => { theme = theme === 'auto' ? 'light' : theme === 'light' ? 'dark' : 'auto'; try { localStorage.setItem('audiothurgist.theme', theme); } catch {} applyTheme(); };
+if (typeof window.matchMedia === 'function') { try { window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => { if (theme === 'auto') applyTheme(); }); } catch {} }
 
 /* ───────────── App state ───────────── */
 let link = null, info = null, desc = null, live = null;
 let st = null, env = null, envGen = -1, scope = null, selSlice = -1;
 let labels = { grammar: [], classifier: [], sample: [] };
 let pager = null, opts = null, manual = null;
-let demoDevice = null;
+let demoDevice = null, demoPort = null;
 /* Kit: the slice table (grid + recorded entries, real boundaries), the onset
  * table, the selected key, the waveform view and its window cache. */
 let table = null, tableSig = '', bufSig = '', hits = null, hitsGen = -1, selKey = 0, kitOk = false, kitShown = false;
-/* EDIT-UI: the editor is on when the descriptor says "edit": 1 — otherwise the Kit tab is the view-only one. The onset
+/* EDIT-UI: the editor is on when the descriptor says "edit" — otherwise the Kit tab is the view-only one. The onset
  * threshold for the histogram, the key armed for a copy (long-press), the cell lit as a drop target. */
 let editOk = false, edThresh = 128, copyArm = -1;
+/* KEYS (v0.13, "keys": 1): the pads, SET_MUTE, the marker ops, the autoslice count, the tail from 263 */
+let keysOk = false;
 /* Sets: advertised by the descriptor ("sets":1); the last op's sequence the page has shown, and the op it asked for. */
 let setsOk = false, setSeqShown = -1, setAsked = null;
 const view = { a: 0, b: 1 };
@@ -346,8 +502,18 @@ const sc = { on: [true, true, null, null, false, false, false, false, false, fal
              frames: [], busy: false, timer: null, seen: [0, 0, 0, 0], fps: 0, rps: 0, bps: 0, fpsN: 0, bytes: 0, reqs: 0, fpsT: 0, lastMs: 0, err: '' };
 let scopeShown = false, scope2Ok = false, scopeCvOk = false;
 
-/* ───────────── Notice / tabs ───────────── */
+/* ───────────── Messages ─────────────
+ * notice: the standing explanation (no USB API here, a descriptor error). say: one line for what just happened —
+ * a message that is not a fault clears itself after eight seconds unless another replaced it; a fault stays
+ * until something replaces it (Kyklophoria's A5: "saved x" read as current an hour later). */
 function notice(msg) { const n = $('notice'); n.style.display = msg ? 'block' : 'none'; n.textContent = msg || ''; }
+let sayTimer = 0;
+function say(s, bad) {
+  const m = $('msg'); m.textContent = s || ''; m.className = 'msg' + (bad ? ' bad' : '');
+  clearTimeout(sayTimer);
+  if (s && !bad) sayTimer = setTimeout(() => { if (m.textContent === s) m.textContent = ''; }, 8000);
+}
+$('status').onclick = () => $('status').classList.toggle('open');
 const TABS = { tab_play: 'play', tab_kit: 'kit', tab_scope: 'scope', tab_opts: 'opts', tab_man: 'man' };
 function showTab(t) { for (const k in TABS) { $(k).classList.toggle('on', k === t); $(TABS[k]).classList.toggle('show', k === t); } kitShown = t === 'tab_kit'; scopeShown = t === 'tab_scope'; if (scopeShown) scopeKick(); }
 for (const t in TABS) $(t).onclick = () => { showTab(t); history.replaceState(null, '', '#' + TABS[t]); if (kitShown) invalidate(D.kit | D.kitwave); if (scopeShown) invalidate(D.bigscope); };
@@ -357,10 +523,10 @@ for (const t in TABS) $(t).onclick = () => { showTab(t); history.replaceState(nu
  * Nothing draws on arrival; frames flag what changed and a single
  * requestAnimationFrame draws only those parts. Canvas backing stores are
  * sized by ResizeObserver, never measured in the draw loop. */
-const D = { bar: 1, wave: 2, scope: 4, text: 8, controls: 16, kit: 32, kitwave: 64, bigscope: 128, all: 255 };
+const D = { bar: 1, wave: 2, scope: 4, text: 8, controls: 16, kit: 32, kitwave: 64, bigscope: 128, transport: 256, pads: 512, jacks: 1024, all: 2047 };
 let dirty = 0, rafPending = false;
 function invalidate(m) { dirty |= m; if (!rafPending) { rafPending = true; requestAnimationFrame(draw); } }
-const canvases = ['ring', 'strip', 'wave', 'scope', 'kitwave', 'bigscope', 'onsethist'].map($);
+const canvases = ['ring', 'strip', 'wave', 'outscope', 'kitwave', 'bigscope', 'onsethist'].map($);
 function sizeCanvas(c) {
   const r = c.getBoundingClientRect(), d = window.devicePixelRatio || 1;
   const w = Math.max(1, Math.round(r.width * d)), h = Math.max(1, Math.round(r.height * d));
@@ -371,61 +537,108 @@ if ('ResizeObserver' in window) { const ro = new ResizeObserver(es => { for (con
 else window.addEventListener('resize', () => { canvases.forEach(sizeCanvas); invalidate(D.all); });
 canvases.forEach(sizeCanvas);
 function ctx(c) { if (!c._cw) sizeCanvas(c); const g = c.getContext('2d'); g.setTransform(c._d, 0, 0, c._d, 0, 0); return [g, c._cw, c._ch]; }
-function stepColor(s) { if (!st || s >= st.nSlices) return '#141416'; const src = st.src[s]; return src < 0 ? '#141416' : COL[st.stepClass[src] & 3]; }
+/* the play grammars: Play (the loop is what you play in) and Pads (nothing is written) — the bar there is the kit's */
+const playish = s => !!s && (s.grammar === GR.play || s.grammar === GR.pads);
+function stepColor(s) { if (!st || s >= st.nSlices) return TOK['cv-rest']; const src = st.src[s]; return src < 0 ? TOK['cv-rest'] : COL[(src < st.stepClass.length ? st.stepClass[src] : srcClass(src)) & 3]; }
+/* a step may play a marker or a recording in Play (its source past the grid): its class from the table */
+function srcClass(t) { return table && t >= 0 && t < table.entries.length ? table.entries[t].cls : 3; }
+/* callFlash is a SLICE (the entry a call played), not a step: light the steps that play it */
+const calledStep = s => st.callFlash !== 255 && st.src[s] === st.callFlash;
 /* Slice geometry on the Play tab: the table's real boundaries (swung where the
  * material swings) when GET_TABLE has answered for this grid, else i·step. */
 const gridTable = () => table && st && table.nSlices === st.nSlices && st.bufLen > 0 ? table : null;
 function sliceX(s, w) { const ns = st.nSlices, t = gridTable(); if (s >= ns) return w; return t ? t.entries[s].start / st.bufLen * w : s / ns * w; }
 function sliceAt(x, w) { const ns = st.nSlices, t = gridTable(); if (!t) return Math.max(0, Math.min(ns - 1, Math.floor(x / w * ns))); const p = x / w * st.bufLen; let s = 0; while (s + 1 < ns && t.entries[s + 1].start <= p) s++; return s; }
-/* Scope polls only while its canvas is on screen. */
+/* The Play tab's output trace polls only while its canvas is on screen. (It was id="scope" beside main#scope until
+ * v0.13: getElementById found the canvas first, so the Scope tab never showed.) */
 let scopeVisible = true;
-if ('IntersectionObserver' in window) new IntersectionObserver(es => { scopeVisible = es[0].isIntersecting; }).observe($('scope'));
+if ('IntersectionObserver' in window) new IntersectionObserver(es => { scopeVisible = es[0].isIntersecting; }).observe($('outscope'));
 
+/* A drawing bug should cost one frame, not the session (Kyklophoria): the error goes to the message line, once per
+ * distinct message, and the next frame tries again. */
+let lastDrawError = '';
 function draw() {
   rafPending = false; const m = dirty; dirty = 0;
+  try { drawAll(m); }
+  catch (e) { const msg = (e && e.message) || String(e); if (msg !== lastDrawError) { lastDrawError = msg; say('draw: ' + msg, true); console.error(e); } }
+}
+function drawAll(m) {
   if (m & D.bigscope) drawBigScope();
+  if (m & D.transport) drawTransport();
   if (!st) return;
-  const ns = Math.max(1, st.nSlices), cur = Math.min(st.cur, ns - 1), base = Math.floor(cur / 16) * 16;
+  const ns = Math.max(1, st.nSlices), cur = Math.min(st.cur, ns - 1), base = Math.floor(cur / 16) * 16, pads = st.grammar === GR.pads;
   if (m & D.bar) {
     const [g, w, h] = ctx($('ring')); g.clearRect(0, 0, w, h); const cx = w / 2, cy = h / 2, R = Math.min(w, h) * 0.42;
     for (let i = 0; i < 16; i++) { const s = base + i, a = -Math.PI / 2 + i * Math.PI * 2 / 16; let col = stepColor(s);
-      if (st.callFlash !== 255 && s === st.callFlash) col = '#78a0ff'; else if (s === cur) col = '#ffffff';
-      g.beginPath(); g.arc(cx + Math.cos(a) * R, cy + Math.sin(a) * R, Math.max(4, R * 0.11), 0, Math.PI * 2); g.fillStyle = col; g.globalAlpha = st.muted ? 0.35 : 1; g.fill(); g.globalAlpha = 1; }
-    g.fillStyle = '#e8e6df'; g.textAlign = 'center'; g.font = '600 20px system-ui'; g.fillText(st.bpm.toFixed(0), cx, cy + 6);
-    g.font = '11px system-ui'; g.fillStyle = '#8a887f'; g.fillText(st.muted ? 'MUTED' : (st.mult !== 1 ? multLabel(st.mult) : 'BPM'), cx, cy + 22);
+      if (calledStep(s)) col = TOK['cv-call']; else if (s === cur) col = TOK['cv-play'];
+      g.beginPath(); g.arc(cx + Math.cos(a) * R, cy + Math.sin(a) * R, Math.max(4, R * 0.11), 0, Math.PI * 2); g.fillStyle = col; g.globalAlpha = st.muted || pads ? 0.35 : 1; g.fill(); g.globalAlpha = 1; }
+    g.fillStyle = TOK['cv-ink']; g.textAlign = 'center'; g.font = '600 20px system-ui'; g.fillText(st.bpm.toFixed(0), cx, cy + 6);
+    g.font = '11px system-ui'; g.fillStyle = TOK['cv-ink2']; g.fillText(st.muted ? 'STOPPED' : pads ? 'PADS' : (st.mult !== 1 ? multLabel(st.mult) : 'BPM'), cx, cy + 22);
     const c = $('strip'); const [g2, w2, h2] = ctx(c); g2.clearRect(0, 0, w2, h2);
-    for (let s = 0; s < ns; s++) { const x0 = sliceX(s, w2), x1 = sliceX(s + 1, w2); g2.fillStyle = stepColor(s); g2.globalAlpha = st.muted ? 0.35 : 1; g2.fillRect(x0 + 1, 6, Math.max(1, x1 - x0 - 2), h2 - 12); g2.globalAlpha = 1;
-      if (s % 16 === 0) { g2.fillStyle = '#2a2a30'; g2.fillRect(x0, 0, 1, h2); } }
-    if (st.callFlash !== 255) { const x0 = sliceX(st.callFlash, w2), x1 = sliceX(st.callFlash + 1, w2); g2.strokeStyle = '#78a0ff'; g2.lineWidth = 2; g2.strokeRect(x0 + 1, 2, x1 - x0 - 2, h2 - 4); }
-    { const x0 = sliceX(cur, w2), x1 = sliceX(cur + 1, w2); g2.strokeStyle = '#fff'; g2.lineWidth = 2; g2.strokeRect(x0 + 1, 2, x1 - x0 - 2, h2 - 4); }
+    for (let s = 0; s < ns; s++) { const x0 = sliceX(s, w2), x1 = sliceX(s + 1, w2); g2.fillStyle = stepColor(s); g2.globalAlpha = st.muted || pads ? 0.35 : 1; g2.fillRect(x0 + 1, 6, Math.max(1, x1 - x0 - 2), h2 - 12); g2.globalAlpha = 1;
+      if (s % 16 === 0) { g2.fillStyle = TOK['cv-grid']; g2.fillRect(x0, 0, 1, h2); }
+      if (calledStep(s)) { g2.strokeStyle = TOK['cv-call']; g2.lineWidth = 2; g2.strokeRect(x0 + 1, 2, Math.max(1, x1 - x0 - 2), h2 - 4); } }
+    { const x0 = sliceX(cur, w2), x1 = sliceX(cur + 1, w2); g2.strokeStyle = TOK['cv-play']; g2.lineWidth = 2; g2.strokeRect(x0 + 1, 2, Math.max(1, x1 - x0 - 2), h2 - 4); }
   }
-  if (m & D.wave) {
-    const [g, w, h] = ctx($('wave')); g.clearRect(0, 0, w, h); const mid = h / 2; const playing = st.src[cur];
-    for (let s = 0; s < ns; s++) { const cls = st.stepClass[s] & 3, x0 = sliceX(s, w), cw = sliceX(s + 1, w) - x0; g.fillStyle = COL[cls]; g.globalAlpha = 0.18; g.fillRect(x0, 0, cw, h); g.globalAlpha = 1;
-      if (env) { g.fillStyle = COL[cls]; for (let p = 0; p < 8; p++) { const mn = (env[s * 16 + p * 2] - 128) / 127, mx = (env[s * 16 + p * 2 + 1] - 128) / 127; const px = x0 + p * cw / 8; g.fillRect(px, mid - mx * mid * 0.92, Math.max(1, cw / 8 - 0.5), Math.max(1, (mx - mn) * mid * 0.92)); } }
-      g.fillStyle = '#2a2a30'; g.fillRect(x0, 0, 1, h); }
-    if (hits && gridTable()) { g.fillStyle = '#78a0ff'; for (const p of hits) { if (p >= st.bufLen) break; const x = p / st.bufLen * w; g.fillRect(x - 1, 0, 3, 6); } }
-    if (playing >= 0) { const x0 = sliceX(playing, w), x1 = sliceX(playing + 1, w); g.strokeStyle = '#fff'; g.lineWidth = 2; g.strokeRect(x0 + 1, 1, x1 - x0 - 2, h - 2); }
-    if (selSlice >= 0) { const x0 = sliceX(selSlice, w), x1 = sliceX(selSlice + 1, w); g.strokeStyle = '#ffd54a'; g.lineWidth = 2; g.setLineDash([4, 3]); g.strokeRect(x0 + 1, 1, x1 - x0 - 2, h - 2); g.setLineDash([]); }
-  }
+  if (m & D.wave) { const [g, w, h] = ctx($('wave')); g.clearRect(0, 0, w, h); if (playish(st)) drawKeySlices(g, w, h); else drawGridSlices(g, w, h, ns, cur); }
   if (m & D.kit) drawKit();
   if (m & D.kitwave) { drawKitWave(); drawHist(); }
   if (m & D.scope) {
-    const [g, w, h] = ctx($('scope')); g.clearRect(0, 0, w, h); g.strokeStyle = '#2a2a30'; g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
-    if (scope) { g.strokeStyle = '#9be0b0'; g.lineWidth = 1.5; g.beginPath(); for (let i = 0; i < scope.length; i++) { const x = i / (scope.length - 1) * w, y = h / 2 - scope[i] / 127 * h / 2 * 0.95; i ? g.lineTo(x, y) : g.moveTo(x, y); } g.stroke(); }
+    const [g, w, h] = ctx($('outscope')); g.clearRect(0, 0, w, h); g.strokeStyle = TOK['cv-grid']; g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
+    if (scope) { g.strokeStyle = TOK['cv-ok']; g.lineWidth = 1.5; g.beginPath(); for (let i = 0; i < scope.length; i++) { const x = i / (scope.length - 1) * w, y = h / 2 - scope[i] / 127 * h / 2 * 0.95; i ? g.lineTo(x, y) : g.moveTo(x, y); } g.stroke(); }
   }
   if (m & D.text) drawText();
   if (m & D.controls) drawControls();
+  if (m & D.pads) drawPads();
+  if (m & D.jacks) drawJacks();
+}
+/* The pattern grammars: the grid's slices with their envelopes, the playing one framed, the punch selection dashed. */
+function drawGridSlices(g, w, h, ns, cur) {
+  const mid = h / 2, playing = st.src[cur];
+  for (let s = 0; s < ns; s++) { const cls = st.stepClass[s] & 3, x0 = sliceX(s, w), cw = sliceX(s + 1, w) - x0; g.fillStyle = COL[cls]; g.globalAlpha = 0.18; g.fillRect(x0, 0, cw, h); g.globalAlpha = 1;
+    if (env) { g.fillStyle = COL[cls]; for (let p = 0; p < 8; p++) { const mn = (env[s * 16 + p * 2] - 128) / 127, mx = (env[s * 16 + p * 2 + 1] - 128) / 127; const px = x0 + p * cw / 8; g.fillRect(px, mid - mx * mid * 0.92, Math.max(1, cw / 8 - 0.5), Math.max(1, (mx - mn) * mid * 0.92)); } }
+    g.fillStyle = TOK['cv-grid']; g.fillRect(x0, 0, 1, h); }
+  if (hits && gridTable()) { g.fillStyle = TOK['cv-call']; for (const p of hits) { if (p >= st.bufLen) break; const x = p / st.bufLen * w; g.fillRect(x - 1, 0, 3, 6); } }
+  if (playing >= 0 && playing < ns) { const x0 = sliceX(playing, w), x1 = sliceX(playing + 1, w); g.strokeStyle = TOK['cv-play']; g.lineWidth = 2; g.strokeRect(x0 + 1, 1, Math.max(1, x1 - x0 - 2), h - 2); }
+  if (selSlice >= 0) { const x0 = sliceX(selSlice, w), x1 = sliceX(selSlice + 1, w); g.strokeStyle = TOK['cv-sel']; g.lineWidth = 2; g.setLineDash([4, 3]); g.strokeRect(x0 + 1, 1, Math.max(1, x1 - x0 - 2), h - 2); g.setLineDash([]); }
+}
+/* Play and Pads: no grid ghosts. The kit instead — one column per key with what it plays (a slice's envelope, a
+ * marker, a recording), lit as the key fires from any source (keyFlash / keySeq, else the callFlash entry). */
+const flashAt = new Float64Array(24);
+function drawKeySlices(g, w, h) {
+  const cw = w / 24, now = performance.now(), top = 16, mid = top + (h - top - 18) / 2, amp = (h - top - 18) / 2 * 0.9;
+  for (let k = 0; k < 24; k++) {
+    const x0 = k * cw, t = st.keySlice ? st.keySlice[k] : -1, e = table && t >= 0 && t < table.entries.length ? table.entries[t] : null, cls = e ? e.cls & 3 : 3;
+    const lit = Math.max(0, 1 - (now - flashAt[k]) / 400);
+    g.fillStyle = COL[cls]; g.globalAlpha = 0.14 + 0.5 * lit; g.fillRect(x0 + 1, top, cw - 2, h - top - 16); g.globalAlpha = 1;
+    if (env && e && t < (table ? table.nSlices : 0)) { g.fillStyle = COL[cls]; for (let p = 0; p < 8; p++) { const mn = (env[t * 16 + p * 2] - 128) / 127, mx = (env[t * 16 + p * 2 + 1] - 128) / 127; g.fillRect(x0 + 2 + p * (cw - 4) / 8, mid - mx * amp, Math.max(1, (cw - 4) / 8 - 0.5), Math.max(1, (mx - mn) * amp)); } }
+    else if (e) { g.fillStyle = COL[cls]; g.globalAlpha = 0.8; g.fillRect(x0 + 3, mid - amp * 0.5, cw - 6, amp); g.globalAlpha = 1; }
+    if (lit > 0) { g.strokeStyle = TOK['cv-call']; g.globalAlpha = lit; g.lineWidth = 2; g.strokeRect(x0 + 1, top, cw - 2, h - top - 16); g.globalAlpha = 1; }
+    g.fillStyle = k % 12 === 0 ? TOK['cv-ink'] : TOK['cv-ink2']; g.font = '10px system-ui'; g.textAlign = 'center';
+    if (cw >= 22 || k % 2 === 0) g.fillText(keyName(k), x0 + cw / 2, 11);
+    if (cw >= 26) g.fillText(!e ? '—' : t < table.nSlices ? String(t) : e.key >= 0 ? 'rec' : 'm' + t, x0 + cw / 2, h - 4);
+  }
+  if (flashAt.some(t => now - t < 400)) invalidate(D.wave);   /* the flashes fade */
 }
 /* Text nodes only touched when the string changes (no layout for equal text). */
 const lastText = new Map();
 function setText(id, s) { if (lastText.get(id) !== s) { lastText.set(id, s); $(id).textContent = s; } }
 function setPill(id, s, cls) { setText(id, s); const el = $(id); const c = 'pill ' + (cls || ''); if (el.className !== c) el.className = c; }
 const multLabel = m => m >= 1 ? '×' + m : '÷' + Math.round(1 / m);
+/* Steady readouts (Kyklophoria 67e13d60): a number that moves every poll by noise shakes the row it sits in. The
+ * shown value follows a short average (0.08 per update) and moves only when that average is `show` away from it;
+ * a step of `jump` or more (a new tempo, a stall) is taken at once. */
+function steady(sv, v, show, jump) {
+  if (v == null || !Number.isFinite(v)) { sv.avg = sv.shown = null; return null; }
+  if (sv.avg == null || Math.abs(v - sv.avg) >= jump) sv.avg = sv.shown = v;
+  else { sv.avg += 0.08 * (v - sv.avg); if (Math.abs(sv.avg - sv.shown) >= show) sv.shown = sv.avg; }
+  return sv.shown;
+}
+const sBpm = {}, sJit = {}, sJitR = {}, sLoad = {}, sLoadMax = {};
 function drawText() {
-  setText('k_gram', labels.grammar[st.grammar] ?? String(st.grammar)); setText('k_cls', labels.classifier[st.cls] ?? String(st.cls));
+  setText('k_cls', labels.classifier[st.cls] ?? String(st.cls));
   setText('k_chop', Math.round(st.chop / 2.55) + '%'); setText('k_hist', st.histN ? `${st.histN - st.histDepth}/${st.histN}` : '—');
-  setText('k_file', st.file === 255 ? 'synth break' : (labels.sample[st.file] ?? String(st.file))); setText('k_page', st.brain ? 'Brain' : 'Perform');
+  setText('k_file', st.file === 255 ? 'synth break / a take' : (labels.sample[st.file] ?? String(st.file)));
   setText('k_native', st.nativeBpm != null ? st.nativeBpm.toFixed(1) + ' BPM' : '— (needs v0.8.0)');
   setText('k_grid', st.gridBars != null ? `${st.gridBars} bar${st.gridBars === 1 ? '' : 's'} · ${st.nSlices} steps` : st.nSlices + ' steps');
   const barsSel = $('k_bars').firstElementChild;
@@ -439,20 +652,198 @@ function drawText() {
     else if (st.multZone != null && st.clkFlags == null) clk += ` (zone ${st.multZone})`;
     if (st.p2Engaged === false) clk += ' · P2 not engaged';
     if (st.aligned) clk += ' · aligned';
-    if (st.jitterUs != null) clk += ` · jitter ${st.jitterUs}` + (st.jitterRmsUs != null ? ` / ${st.jitterRmsUs} rms` : '') + ' µs';
+    const j = steady(sJit, st.jitterUs, 20, 400), jr = steady(sJitR, st.jitterRmsUs, 10, 200);
+    if (j != null) clk += ` · jitter ${Math.round(j)}` + (jr != null ? ` / ${Math.round(jr)} rms` : '') + ' µs';
   }
   if (st.extTrans != null) clk += ` · ext ${st.extTrans}`;
   setText('k_clock', clk);
-  $('b_mute').classList.toggle('on', st.muted); $('b_flow').classList.toggle('on', st.flowing); $('g_flow').classList.toggle('live', st.flowing);
-  setPill('bpmpill', st.bpm.toFixed(1) + ' BPM' + (st.mult !== 1 ? ' ' + multLabel(st.mult) : ''), '');
-  setPill('pagepill', 'page: ' + (st.brain ? 'Brain' : 'Perform'), st.brain ? 'brain' : '');
-  if (st.jackMap != null) setPill('jackpill', st.jackMap ? 'jacks: Voice (J4 slice · J5 style · J6 gate · J7 trig · J8 vel)' : 'jacks: Brain (J4 v/oct · J5 gate · J6–8 gates out)', st.jackMap ? 'brain' : '');
-  if (st.diag) { const d = st.diag; const ph = ['—','poll','sdk/host','frame','sdk/frame','render','sdk/leds','handlers','load','analysis'];
+  setPill('pagepill', 'page ' + (st.brain ? 'Brain' : 'Perform'), st.brain ? 'brain' : '');
+  if (st.jackMap != null) setPill('jackpill', 'jacks ' + (st.jackMap ? 'Voice' : 'Brain'), st.jackMap ? 'brain' : '');
+  if (st.diag) { const d = st.diag; const ph = ['—', 'poll', 'sdk/host', 'frame', 'sdk/frame', 'render', 'sdk/leds', 'handlers', 'load', 'analysis'];
     const extra = st.stallPhase != null ? ` · stall in ${ph[st.stallPhase] || st.stallPhase} · gate late ${(st.gateLateUs / 1000).toFixed(1)} ms · overruns ${st.overruns}` : '';
     setPill('diagpill', `poll gap ${(d.gap / 1000).toFixed(1)} ms · audio ${d.audio} µs · jumps ${d.jumps} · regens ${d.regens}${extra}`, d.gap > 4000 || d.audio > 400 || (st.overruns > 0) ? 'warn' : 'ok'); }
-  setPill('syncpill', st.ext ? (st.locked ? 'clock: locked' : 'clock: following') : 'clock: internal', st.ext ? (st.locked ? 'ok' : 'warn') : '');
+  setPill('syncpill', st.ext ? (st.locked ? 'clock locked' : 'clock following') : 'clock internal', st.ext ? (st.locked ? 'ok' : 'warn') : '');
   const hs = $('hist'); if (document.activeElement !== hs) { const mx = Math.max(0, st.histN - 1), v = Math.max(0, st.histN - 1 - st.histDepth); if (+hs.max !== mx) hs.max = mx; if (+hs.value !== v) hs.value = v; }
   const sel = $('sample'); if (document.activeElement !== sel && st.file !== 255 && sel.value !== String(st.file)) sel.value = String(st.file);
+  drawCpu();
+}
+/* The CPU meter: the audio callback's mean (the bar) and peak (the tick) over the last second against the block's
+ * budget — from the v0.13 tail (‰), else the old diag's worst callback in µs (a tick, no average). Orange on an
+ * overrun or a peak past 70 %. */
+function drawCpu() {
+  let avg = null, max = null;
+  if (st && st.loadAvg != null) { avg = steady(sLoad, st.loadAvg / 10, 1, 15); max = steady(sLoadMax, st.loadMax / 10, 2, 15); }
+  else if (st && st.diag) max = steady(sLoadMax, st.diag.audio / BUDGET_US * 100, 2, 15);
+  if (max == null) { clearCpu(); return; }
+  $('cpuAvg').style.width = (avg == null ? 0 : Math.min(100, avg)).toFixed(0) + '%'; $('cpuMax').style.left = Math.min(98, max).toFixed(0) + '%';
+  setText('cpuText', avg != null ? `${avg.toFixed(0)}% · max ${max.toFixed(0)}%` : `max ${max.toFixed(0)}%`);
+  const hot = (st.overruns > 0) || max > 70, c = 'cpu' + (hot ? ' warn' : ''); if ($('cpu').className !== c) $('cpu').className = c;
+}
+function clearCpu() { $('cpuAvg').style.width = '0%'; $('cpuMax').style.left = '0%'; setText('cpuText', '—'); $('cpu').className = 'cpu'; }
+applyTheme();
+
+/* ───────────── The transport: on every tab ─────────────
+ * ▶ / ■ is the mute — Combust's call, 2026-10-14: the pattern stops, the clock runs on (a restart lands on the beat),
+ * keys still play; on the panel, B1 held 600 ms alone. SET_MUTE (35) on a v0.13 module, the toggle (2) before it.
+ * The three buttons follow the grammar: in Play, B2's tap is the looper's undo and B3's clears the loop (asked
+ * first — it cannot be undone); Pads has no pattern, so no dice and no flow; Camp's B2 rings the next change. Flow is
+ * held: on while the button is down, off when it comes up, as B2's hold. */
+const tpMode = () => st ? st.grammar : -1;
+function drawTransport() {
+  const on = !!(link && st), run = on && !st.muted, g = tpMode();
+  const tp = $('t_play'); tp.disabled = !on; tp.textContent = run ? '■' : '▶'; tp.className = 'tplay' + (run ? ' run' : ''); tp.setAttribute('aria-pressed', run ? 'true' : 'false');
+  tp.title = run ? 'stop the pattern — the clock runs on and the keys still play (B1 held on the panel)' : 'start the pattern (B1 held on the panel)';
+  if (!on) { setText('t_bpm', '—'); setText('t_mult', 'BPM'); setText('t_sub', link ? 'connecting…' : 'not connected'); }
+  else {
+    const bpm = steady(sBpm, st.bpm, 0.1, 2);
+    setText('t_bpm', bpm.toFixed(1)); setText('t_mult', st.mult !== 1 ? 'BPM ' + multLabel(st.mult) : 'BPM');
+    const gname = modeName(g), clock = st.ext ? (st.locked ? 'locked' : 'following') : 'internal clock';
+    const sub = `${st.muted ? 'stopped' : 'playing'} · ${gname} · ${clock}`;
+    if (lastText.get('t_sub') !== sub) { lastText.set('t_sub', sub); $('t_sub').innerHTML = `<b>${esc(st.muted ? 'stopped' : 'playing')}</b><span class="xs"> · ${esc(gname)} · <span class="${st.locked ? 'lk' : ''}">${esc(clock)}</span></span>`; }
+  }
+  const dice = $('t_dice'), flow = $('t_flow'), rs = $('t_reslice');
+  const play = g === GR.play, pads = g === GR.pads, camp = g === GR.camp;
+  setText('t_dice', play ? 'Undo' : camp ? 'Ring' : 'Dice'); setText('t_reslice', play ? 'Clear' : 'Reslice');
+  dice.title = play ? 'B2 tap in Play: undo the last overdub (ACTION 12)' : camp ? 'B2 tap in Camp: ring the next change' : pads ? 'Pads has no pattern to dice' : 'B2 tap: a new fill (ACTION 0)';
+  rs.title = play ? 'B3 tap in Play: clear the loop (ACTION 13) — asks first' : 'B3 tap: re-splice the burst centres (ACTION 1)';
+  flow.title = play || pads ? 'no flow in ' + modeName(g) + ' — there is no pattern to refill' : 'B2 held: a new fill every bar while you hold this';
+  dice.disabled = !on || pads || (play && st.looperEvents === 0); flow.disabled = !on || play || pads; rs.disabled = !on;
+  rs.classList.toggle('warn', play); flow.classList.toggle('held', on && st.flowing);
+}
+async function transportPlay() {
+  if (!link || !st) return;
+  const stop = !st.muted;
+  if (keysOk) { const r = await setMute(link, stop); if (!r.ok) say('start / stop refused: ' + HL.statusName(r.status), true); poll.tState = 0; }
+  else await action(ACT.mute);   /* 0.12: the toggle */
+}
+$('t_play').onclick = transportPlay;
+$('t_dice').onclick = () => { if (!st) return; if (st.grammar === GR.play) action(ACT.looperUndo); else action(ACT.dice); };
+$('t_reslice').onclick = () => {
+  if (!st) return;
+  if (st.grammar === GR.play) { const n = st.looperEvents; if (confirm(`Clear the loop${n ? ` (${n} event${n === 1 ? '' : 's'})` : ''}? This cannot be undone.`)) action(ACT.looperClear); return; }
+  action(ACT.reslice);
+};
+{ /* Flow is held: down → on, up / cancel / leaving the button → off */
+  const f = $('t_flow'); let held = false;
+  const off = () => { if (!held) return; held = false; f.classList.remove('held'); action(ACT.flow, 0); };
+  f.addEventListener('pointerdown', e => { if (f.disabled || !st) return; e.preventDefault(); try { f.setPointerCapture(e.pointerId); } catch {} held = true; f.classList.add('held'); action(ACT.flow, 1); });
+  f.addEventListener('pointerup', off); f.addEventListener('pointercancel', off); f.addEventListener('lostpointercapture', off);
+  f.addEventListener('keydown', e => { if ((e.key === ' ' || e.key === 'Enter') && !held && st) { held = true; action(ACT.flow, 1); } });
+  f.addEventListener('keyup', e => { if (e.key === ' ' || e.key === 'Enter') off(); });
+}
+
+/* ───────────── Modes: the grammars, front and centre ─────────────
+ * One chip per grammar label the descriptor carries; Classic · Grids · Loop (= Play) · Pads big, the rest under
+ * "more". A chip writes grammar.mode through the Options path (GET_LIVE → one byte → BLOB). The line under them
+ * says what the mode means here: the jack map it brings (with Jacks = Follow grammar), what B2 and B3 do. */
+const MODE_SHORT = { Play: 'Loop' };
+const MODE_SUB = { Classic: 'the cell grammar', Collins: 'breakbeat science', Grids: 'the drum map', Euclid: 'even hits', Camp: 'change ringing', Play: 'play it in, looped', Pads: 'free play' };
+const MAIN_MODES = ['Classic', 'Grids', 'Play', 'Pads'];
+const baseLabel = l => String(l || '').split(' (')[0].trim();
+const modeName = g => { const l = baseLabel(labels.grammar[g]); return l ? (MODE_SHORT[l] || l) : (g >= 0 ? 'grammar ' + g : '—'); };
+let modeChips = [], modesMore = false;
+function buildModes() {
+  const host = $('modes'); host.innerHTML = ''; modeChips = [];
+  if (!labels.grammar.length) { host.innerHTML = '<span class="note">This firmware\'s descriptor names no grammars.</span>'; return; }
+  const order = labels.grammar.map((l, i) => i).sort((a, b) => { const ia = MAIN_MODES.indexOf(baseLabel(labels.grammar[a])), ib = MAIN_MODES.indexOf(baseLabel(labels.grammar[b])); return (ia < 0 ? 99 + a : ia) - (ib < 0 ? 99 + b : ib); });
+  for (const i of order) {
+    const b = baseLabel(labels.grammar[i]), main = MAIN_MODES.includes(b), el = document.createElement('button');
+    el.className = 'chip' + (main ? '' : ' minor'); el.dataset.g = i; el.title = labels.grammar[i];
+    el.innerHTML = `${esc(MODE_SHORT[b] || b)}${main && MODE_SUB[b] ? `<small>${esc(MODE_SUB[b])}</small>` : ''}`;
+    el.onclick = () => setMode(i); el.hidden = !main && !modesMore;
+    host.appendChild(el); modeChips.push({ el, g: i, main });
+  }
+  if (modeChips.some(c => !c.main)) { const m = document.createElement('button'); m.className = 'chip more'; m.id = 'modes_more'; m.textContent = modesMore ? 'fewer' : 'more…'; m.onclick = () => { modesMore = !modesMore; buildModes(); drawModes(); }; host.appendChild(m); }
+  drawModes();
+}
+async function setMode(g) {
+  const f = opts && opts.fields.find(x => x.id === 'grammar.mode'); if (!f || !link) return;
+  if (st && st.grammar === g) return;
+  modeChips.forEach(c => c.el.classList.toggle('on', c.g === g));
+  await writeOption(f, g);
+}
+/* what a mode brings: the jack map (Options → Jacks: Follow grammar puts Play and Pads on the Voice map) and the buttons */
+function modeLine(g) {
+  const jacks = optByte('jacks'), follow = jacks == null || jacks === 0, voice = follow ? g >= GR.play : jacks === 2;
+  const map = voice ? '<b>Voice map</b> — J4 the key, J5 the style, J6 the gate in' : '<b>Brain map</b> — J4 the key on a J5 gate, class gates out on J6–J8';
+  const why = jacks == null ? '' : follow ? ' (Jacks = Follow grammar)' : ' (Options → Jacks pins it)';
+  const what = {
+    [GR.classic]: 'BreakFix\'s cell grammar: P1 travels from the record verbatim to rolls and rubble. <b>B2</b> dice · <b>B3</b> reslice.',
+    [GR.collins]: 'Classic with the breakbeat-science moves: odd cuts, fills that snap back, stutters. <b>B2</b> dice · <b>B3</b> reslice.',
+    [GR.grids]: 'Mutable\'s drum map through the break\'s own hits — Map X/Y and the densities on the Brain page. <b>B2</b> dice · <b>B3</b> reslice.',
+    [GR.euclid]: 'Each class spread evenly, densities and Rotation on the Brain page. <b>B2</b> dice · <b>B3</b> reslice.',
+    [GR.camp]: 'Change ringing over the bar\'s cells — deterministic. <b>B2</b> rings the next change · <b>B3</b> reslice.',
+    [GR.play]: 'No pattern of its own: what you play (pads, CV, the panel) is written into the loop. <b>B2</b> undoes the last overdub · <b>B3</b> clears the loop.',
+    [GR.pads]: 'The instrument with no looper: hits sound as you play them, nothing is written, the beat is yours. The keys follow the markers.',
+  }[g] || '';
+  return `${what} Jacks: ${map}${why}.`;
+}
+function drawModes() {
+  const g = st ? st.grammar : -1;
+  for (const c of modeChips) { c.el.classList.toggle('on', c.g === g); c.el.disabled = !link || !opts; if (!c.main) c.el.hidden = !modesMore && c.g !== g; }
+  const html = g >= 0 ? `<b>${esc(modeName(g))}</b> — ${modeLine(g)}` : '';
+  if (lastText.get('mode_what') !== html) { lastText.set('mode_what', html); $('mode_what').innerHTML = html; }
+  if (st && st.jackMap != null) setPill('mode_jacks', st.jackMap ? 'Voice map' : 'Brain map', st.jackMap ? 'brain' : ''); else setPill('mode_jacks', '—', '');
+  const cls = 'show' + (g === GR.pads ? ' m-pads' : g === GR.play ? ' m-play' : ''), pl = $('play');
+  if (pl.classList.contains('show')) { const want = cls; if (pl.className !== want) pl.className = want; }
+  else pl.className = cls.replace('show', '').trim();
+  setText('wave_title', playish(st) ? 'The kit — each key and what it plays, lit as it fires' : 'Slices — click a slice to select it, then click a step above to punch it in');
+}
+
+/* ───────────── Pads: the 24 keys on screen ─────────────
+ * PLAY_KEY (32) down on pointerdown, up on pointerup / cancel — each pad tracks its own pointer, so several fingers
+ * play at once. A pad lights on any key call (keyFlash / keySeq from the tail: CV, the panel, this page). */
+const padEls = [], padDown = new Map();
+(function buildPads() {
+  const host = $('pads');
+  for (let k = 0; k < 24; k++) {
+    const el = document.createElement('button'); el.className = 'padk' + ([1, 3, 6, 8, 10].includes(k % 12) ? ' sh' : ''); el.dataset.k = k;
+    el.innerHTML = `<span>${keyName(k)}</span><small>—</small>`; el.title = `key ${k} (${keyName(k)}) — PLAY_KEY`;
+    const up = e => { if (padDown.get(e.pointerId) !== k) return; padDown.delete(e.pointerId); el.classList.remove('down'); if (link && keysOk) playKey(link, k, false).catch(() => {}); };
+    el.addEventListener('pointerdown', e => {
+      e.preventDefault(); if (!link || !keysOk) return; try { el.setPointerCapture(e.pointerId); } catch {}
+      padDown.set(e.pointerId, k); el.classList.add('down'); flashKey(k);
+      playKey(link, k, true).then(r => { if (r && !r.ok) say(`${keyName(k)}: ${r.status === 3 ? 'nothing loaded to play' : HL.statusName(r.status)}`, true); }, () => {});
+    });
+    el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up); el.addEventListener('lostpointercapture', up);
+    host.appendChild(el); padEls.push({ el, sub: el.querySelector('small'), sig: '' });
+  }
+})();
+const padFlash = new Array(24).fill(0);
+function flashKey(k) { if (k < 0 || k > 23) return; flashAt[k] = performance.now(); const p = padEls[k]; p.el.classList.add('flash'); clearTimeout(padFlash[k]); padFlash[k] = setTimeout(() => p.el.classList.remove('flash'), 220); invalidate(D.wave | D.jacks); }
+function drawPads() {
+  $('padsCard').hidden = !keysOk;
+  if (!keysOk || !st) return;
+  for (let k = 0; k < 24; k++) {
+    const p = padEls[k], t = st.keySlice ? st.keySlice[k] : -1, e = table && t >= 0 && t < table.entries.length ? table.entries[t] : null;
+    const what = !e ? (t >= 0 ? `slice ${t}` : '—') : t < table.nSlices ? `slice ${t}` : e.key >= 0 ? 'recording' : `marker ${t}`, cls = e ? e.cls & 3 : -1;
+    const sig = what + '|' + cls; if (sig === p.sig) continue; p.sig = sig;
+    p.sub.textContent = what; p.el.className = p.el.className.replace(/\s*c\d/g, '') + (cls >= 0 ? ' c' + cls : '');
+  }
+  $('pads_follow').hidden = !st.keysFollow;
+  setPill('pads_plays', (st.keyPlays != null ? st.keyPlays : optByte('key.plays')) === 1 ? 'held until you let go' : 'one-shot', '');
+}
+
+/* ───────────── Jacks: what the map is, why, and what J4 is saying ───────────── */
+const jkStrip = [];
+(function buildJackStrip() { const host = $('jk_strip'); for (let k = 0; k < 24; k++) { const i = document.createElement('i'); if (k % 12 === 0) i.className = 'oct'; i.title = `${keyName(k)} · key ${k} · ${(k / 12).toFixed(2)} V`; host.appendChild(i); jkStrip.push(i); } })();
+let jkLit = -1;
+function drawJacks() {
+  if (!st || st.jackMap == null) return;
+  const voice = st.jackMap === 1, jacks = optByte('jacks'), g = st.grammar;
+  setPill('jk_map', voice ? 'Voice map' : 'Brain map', voice ? 'brain' : '');
+  setText('jk_why', jacks == null ? (voice ? 'The Voice map is applied.' : 'The Brain map is applied.')
+    : jacks === 0 ? `Options → Jacks = Follow grammar, and ${modeName(g)} ${g >= GR.play ? 'is a play grammar — the Voice map' : 'is a pattern grammar — the Brain map'}.`
+    : `Options → Jacks pins the ${voice ? 'Voice' : 'Brain'} map, whatever the grammar.`);
+  if (st.j4mV != null) {
+    const k = st.j4Key; setText('jk_key', `${keyName(k)} · key ${k}`);
+    setText('jk_mv', `${st.j4mV >= 0 ? '+' : '−'}${(Math.abs(st.j4mV) / 1000).toFixed(3)} V${st.j4mV < 0 ? ' (below 0 V → key 0)' : ''}`);
+    if (k !== jkLit) { if (jkLit >= 0) jkStrip[jkLit].classList.remove('on'); jkStrip[k].classList.add('on'); jkLit = k; }
+  } else { setText('jk_key', '—'); setText('jk_mv', 'the live J4 reading needs v0.13 firmware'); if (jkLit >= 0) { jkStrip[jkLit].classList.remove('on'); jkLit = -1; } }
+  const sty = st.j5Style;
+  setText('jk_j5', voice ? `style v/oct — now ${sty != null && sty >= 0 ? `${sty} ${KEYS.styles[sty] || ''}` : '—'} (0 plain · 1 reverse · 2 half · 3 double · 4 ratchet · 5 staccato · 6 punch/choke · 7 record · 8 clear)` : 'gate in — each rising edge plays the J4 key');
+  setText('jk_j6', voice ? 'gate in — plays the J4 key (and starts a loop take while Record is armed)' : 'kick gate out');
+  setText('jk_j78', voice ? 'J7 hit trigger out (10 ms per call) · J8 velocity out (1.5–5 V)' : 'J7 snare gate out · J8 hat gate out (Gate Fires / Lanes / Length / Level in Options)');
 }
 
 /* ───────────── Controls panel: what the buttons and knobs do right now ─────────────
@@ -473,10 +864,11 @@ const knobCells = [];
  * the norm ≥1 → rounds (the bar verbatim), ≥0.5 → 4, ≥0.25 → 8, else 16. */
 const campBells = chop => chop >= 255 ? 'rounds' : chop >= 128 ? '4 bells' : chop >= 64 ? '8 bells' : '16 bells';
 function knobMeaning(page, pot) {
-  const gram = st.grammar, gname = labels.grammar[gram] ?? ('grammar ' + gram), gridsLike = gram === 2 || gram === 3, camp = gram === 4;
+  const gram = st.grammar, gname = modeName(gram), gridsLike = gram === GR.grids || gram === GR.euclid, camp = gram === GR.camp;
   if (page === 0) switch (pot) {
     case 0: return camp ? ['number of bells rung: full right = rounds (the bar verbatim), then 4 · 8 · 16 bells; B2 rings the next change', campBells(st.chop)]
                  : gridsLike ? ['slice-choice faithfulness: full right = each class plays its own nearest hit, lower = swaps within the class', `${Math.round(st.chop / 2.55)}%`]
+                 : playish(st) ? [`the journey — it shapes the pattern grammars; ${gname} plays what you play`, `${Math.round(st.chop / 2.55)}%`]
                              : ['the journey: verbatim (right) → beat swaps → chops → rolls → cluster + reverb (left)', `${Math.round(st.chop / 2.55)}%`];
     case 1: if (st.ext) {
               /* The applied multiplier lights its zone; while a beat-aligned switch is pending the requested zone is outlined. */
@@ -493,9 +885,9 @@ function knobMeaning(page, pot) {
   }
   const inert = camp ? 'unused in Camp (the bells are set by P1 on the Perform page)' : !gridsLike ? `inert in ${gname} (Brain knobs are live in Grids and Euclid)` : null;
   switch (pot) {
-    case 0: case 1: return inert ? [inert, '', false, true] : gram === 2 ? ['Grids drum-map coordinate', ''] : ['unused in Euclid', '', false, true];
-    case 2: case 3: case 4: return inert ? [inert, '', false, true] : gram === 2 ? ['Grids density threshold for this class', ''] : ['Euclid hits per bar for this class', ''];
-    case 5: return inert ? [inert, '', false, true] : gram === 3 ? ['rotates every class\'s hits together', ''] : ['unused in Grids', '', false, true];
+    case 0: case 1: return inert ? [inert, '', false, true] : gram === GR.grids ? ['Grids drum-map coordinate', ''] : ['unused in Euclid', '', false, true];
+    case 2: case 3: case 4: return inert ? [inert, '', false, true] : gram === GR.grids ? ['Grids density threshold for this class', ''] : ['Euclid hits per bar for this class', ''];
+    case 5: return inert ? [inert, '', false, true] : gram === GR.euclid ? ['rotates every class\'s hits together', ''] : ['unused in Grids', '', false, true];
   }
 }
 let ctlSig = '';
@@ -503,9 +895,12 @@ function drawControls() {
   const page = st.brain ? 1 : 0;
   const sig = [page, st.grammar, st.ext, st.locked, st.mult, st.multZone, st.clkFlags, st.lockMask, st.flowing, st.muted, st.file, st.histN, st.histDepth, st.chop, Math.round(st.bpm), st.nSlices, labels.sample.length].join('|');
   if (sig === ctlSig) return; ctlSig = sig;
-  const camp = st.grammar === 4;   /* Camp: B2 steps the ringing method instead of drawing a fill */
-  setText('g_b2tap', camp ? 'Ring the next change (deterministic — nothing is drawn)' : 'Dice — a new fill');
-  setText('g_b2hold', camp ? 'Flow — ring a change every bar while held (walks the method)' : 'Flow — a new fill every bar while held');
+  drawModes();
+  const g = st.grammar, camp = g === GR.camp, play = g === GR.play, pads = g === GR.pads;
+  setText('g_b2tap', camp ? 'Ring the next change (deterministic — nothing is drawn)' : play ? 'Undo the last overdub (the transport\'s Undo)' : pads ? 'Dice — nothing to dice in Pads' : 'Dice — a new fill (the transport\'s Dice)');
+  setText('g_b2hold', play || pads ? 'Flow — no pattern to refill here' : camp ? 'Flow — ring a change every bar while held (walks the method)' : 'Flow — a new fill every bar while held');
+  setText('g_b3tap', play ? 'Clear the loop (the transport\'s Clear)' : 'Reslice — re-splice the burst centres');
+  $('g_flow').classList.toggle('live', st.flowing);
   $('knobs').className = 'knobs page-' + (page ? 'brain' : 'perform');
   const pname = (pager && pager.names[page]) || (page ? 'Brain' : 'Perform');
   setPill('ctl_page', pname + ' page', page ? 'brain' : '');
@@ -517,13 +912,11 @@ function drawControls() {
     cell.el.title = f && f.help ? f.help.replace(/\*\*?/g, '') : '';
     const [meaning, value, html, inert] = knobMeaning(page, p);
     cell.m.textContent = meaning; if (html) cell.v.innerHTML = '<span class="zones">' + value + '</span>'; else cell.v.textContent = value;
-    cell.el.classList.toggle('inert', !!inert);
     const locked = st.lockMask != null && (st.lockMask & (1 << (page * 6 + p)));
-    cell.lk.hidden = !locked; cell.el.style.borderColor = locked ? 'var(--lock)' : '';
+    cell.lk.hidden = !locked; cell.el.className = 'knob' + (inert ? ' inert' : '') + (locked ? ' locked' : '');
   }
   const anyLock = st.lockMask != null && st.lockMask !== 0;
   $('b_clear').disabled = !anyLock; $('b_clear').textContent = anyLock ? `Clear locks (${popcount(st.lockMask)})` : 'Clear locks';
-  $('b_flow').textContent = st.flowing ? 'Flow: on' : 'Flow';
 }
 const popcount = n => { let c = 0; while (n) { c += n & 1; n >>= 1; } return c; };
 
@@ -556,13 +949,16 @@ function warn(what, e) { if (e && e.message === 'link closed') return; if (warne
 const arrEq = (a, b) => { for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false; return true; };
 function onState(b) {
   const s = parseState(b); if (!s) return; const p = st; st = s;
-  let m = 0;
+  let m = D.transport | D.jacks;
   if (!p) m = D.all;
   else {
-    if (p.cur !== s.cur || p.callFlash !== s.callFlash || p.muted !== s.muted || p.nSlices !== s.nSlices || Math.round(p.bpm) !== Math.round(s.bpm) || p.mult !== s.mult || !arrEq(p.src, s.src) || !arrEq(p.stepClass, s.stepClass)) m |= D.bar | D.wave;
-    m |= D.text | D.controls;   /* cheap: both bail when their strings are unchanged */
+    if (p.cur !== s.cur || p.callFlash !== s.callFlash || p.muted !== s.muted || p.nSlices !== s.nSlices || Math.round(p.bpm) !== Math.round(s.bpm) || p.mult !== s.mult || p.grammar !== s.grammar || !arrEq(p.src, s.src) || !arrEq(p.stepClass, s.stepClass)) m |= D.bar | D.wave;
+    m |= D.text | D.controls | D.pads;   /* cheap: they bail when their strings are unchanged */
     if (kitShown) m |= D.kit;   /* cheap too: cells re-render only when their strings change */
+    if (p.grammar !== s.grammar) { ctlSig = ''; selSlice = -1; }
   }
+  /* KEYS: a key call from anywhere (CV, the panel, a pad) — keySeq bumps, keyFlash names the key */
+  if (s.keySeq != null && p && p.keySeq != null && s.keySeq !== p.keySeq && s.keyFlash >= 0) flashKey(s.keyFlash);
   if (s.matGen !== envGen && !poll.pEnv) { const gen = s.matGen; poll.pEnv = fetchEnv(link, s.nSlices).then(e => { env = e; envGen = gen; selSlice = -1; invalidate(D.wave); }, e => warn('env', e)).finally(() => { poll.pEnv = null; }); }
   syncKit(s);
   /* EDIT-PANEL: the module's Edit page publishes its selection (tail byte 257); the editor follows the knobs */
@@ -573,7 +969,7 @@ function onState(b) {
 }
 function drawLink() {
   if (!link) return; const s = link.stats;
-  setPill('linkpill', s.reqs ? `link ${s.rtt.toFixed(0)} ms · max ${Math.max(s.rttMax, s.rtt).toFixed(0)} · ${s.rate.toFixed(0)} req/s · q${link.queued}${s.timeouts ? ' · ' + s.timeouts + ' timeouts' : ''}` : 'link: —',
+  setPill('linkpill', s.reqs ? `link ${s.rtt.toFixed(0)} ms · max ${Math.max(s.rttMax, s.rtt).toFixed(0)} · ${s.rate.toFixed(0)} req/s · ${(s.kbps || 0).toFixed(1)} KB/s · q${link.queued}${s.timeouts ? ' · ' + s.timeouts + ' timeouts' : ''}` : 'link —',
     s.timeouts ? 'warn' : (s.rttAvg > 60 ? 'warn' : 'ok'));
 }
 
@@ -581,18 +977,21 @@ function drawLink() {
 async function action(op, ...args) {
   if (!link) return;
   try { await link.request(CMD.action, Uint8Array.of(op, ...args), { urgent: true }); poll.tState = 0; }
-  catch (e) { notice('Action failed: ' + e.message); }
+  catch (e) { say('Action ' + op + ' failed: ' + e.message, true); }
 }
-$('b_dice').onclick = () => action(ACT.dice); $('b_reslice').onclick = () => action(ACT.reslice); $('b_mute').onclick = () => action(ACT.mute);
-$('b_flow').onclick = () => action(ACT.flow, st && st.flowing ? 0 : 1);
 $('b_page').onclick = () => action(ACT.page, st && st.brain ? 0 : 1);
 $('b_clear').onclick = () => action(ACT.clearLocks);
 $('b_load').onclick = () => { const v = +$('sample').value; if (Number.isInteger(v) && v >= 0) action(ACT.load, v); };
 $('hist').addEventListener('change', e => { if (!st) return; action(ACT.scrub, Math.max(0, st.histN - 1 - +e.target.value)); });
 $('sample').addEventListener('change', e => { const v = +e.target.value; if (Number.isInteger(v) && v >= 0) action(ACT.load, v); });
-$('wave').addEventListener('click', e => { if (!st) return; const r = e.currentTarget.getBoundingClientRect(); const s = sliceAt(e.clientX - r.left, r.width); selSlice = (selSlice === s) ? -1 : s; invalidate(D.wave); });
-$('strip').addEventListener('click', e => { if (!st) return; const r = e.currentTarget.getBoundingClientRect(); const step = sliceAt(e.clientX - r.left, r.width); if (selSlice >= 0) action(ACT.punch, step, selSlice); });
-
+/* the slice view: in the pattern grammars a click selects a slice to punch; in Play / Pads it is the kit, and a click plays that key */
+$('wave').addEventListener('click', e => {
+  if (!st) return; const r = e.currentTarget.getBoundingClientRect();
+  if (playish(st)) { const k = Math.max(0, Math.min(23, Math.floor((e.clientX - r.left) / r.width * 24))); if (link && keysOk) { flashKey(k); playKey(link, k, true).catch(() => {}); } return; }
+  const s = sliceAt(e.clientX - r.left, r.width); selSlice = (selSlice === s) ? -1 : s; invalidate(D.wave);
+});
+/* a click on the strip punches the selected slice into that step (ACTION 3) — never in Pads, which writes nothing */
+$('strip').addEventListener('click', e => { if (!st || st.grammar === GR.pads || playish(st)) return; const r = e.currentTarget.getBoundingClientRect(); const step = sliceAt(e.clientX - r.left, r.width); if (selSlice >= 0) action(ACT.punch, step, selSlice); });
 /* ───────────── Kit tab ─────────────
  * 24 key cells (two octaves from C) from the state's key table + GET_TABLE;
  * the selected key's material from GET_WAVE windows, fetched on demand at
@@ -699,8 +1098,8 @@ function drawKit() {
   const e = entryOfKey(selKey), rec = keyRecorded(e), kn = keyName(selKey);
   $('k_rec').textContent = `● Record into ${kn}`; $('k_rec').disabled = !kitOk || rs !== 0;
   $('k_clr').textContent = `✕ Clear ${kn}`; $('k_clr').disabled = !kitOk || !rec;
-  setPill('k_recstate', rs ? `record: ${REC[rs]} · ${rk >= 0 ? keyName(rk) : '—'}` : 'record: idle', rs === 2 ? 'warn' : rs ? 'ok' : '');
-  const lvl = st.inLevel || 0; $('k_meter').style.width = Math.round(lvl / 2.55) + '%'; $('k_meterbox').classList.toggle('hot', lvl > 230); $('k_meterbox').style.opacity = rs ? 1 : 0.45;
+  setPill('k_recstate', rs ? `record ${REC[rs]} · ${rk >= 0 ? keyName(rk) : '—'}` : 'record idle', rs === 2 ? 'warn' : rs ? 'ok' : '');
+  const lvl = st.inLevel || 0; $('k_meter').style.width = Math.round(lvl / 2.55) + '%'; $('k_meterbox').classList.toggle('hot', lvl > 230); $('k_meterbox').classList.toggle('idle', !rs);
   const kp = st.keyPlays != null ? st.keyPlays : optByte('key.plays'); const ks = $('k_plays'); if (kp != null && document.activeElement !== ks && ks.value !== String(kp)) ks.value = String(kp); ks.disabled = !kitOk;
   if (st.bufCap) {
     const recs = Math.max(0, st.freePos - st.bufLen);
@@ -726,10 +1125,11 @@ function drawSet() {
   const busy = !!(st.setState), name = $('s_name').value.trim();
   $('s_save').disabled = !setsOk || busy || !setNameOk(name) || (st.recState || 0) !== 0; $('s_load').disabled = !setsOk || busy || !setNameOk(name);
   $('s_name').disabled = !setsOk;
-  $('s_bar').style.width = busy && st.setState === 1 ? Math.round((st.setProgress || 0) / 2.55) + '%' : (busy ? '100%' : '0'); $('s_barbox').style.opacity = busy ? 1 : 0.45;
+  $('s_bar').style.width = busy && st.setState === 1 ? Math.round((st.setProgress || 0) / 2.55) + '%' : (busy ? '100%' : '0'); $('s_barbox').classList.toggle('idle', !busy);
   setText('s_cur', st.setName ? `material: set “${st.setName}”` : (st.file === 255 ? 'material: a take / the synth break' : 'material: a loose file'));
   if (!setsOk) { setPill('s_status', st.setState == null ? 'needs sets firmware (state byte 219)' : '—', 'warn'); return; }
   if (busy) { setPill('s_status', `${SET_STATE[st.setState] || 'busy'}${setAsked ? ' ' + setAsked.name : ''}${st.setState === 1 ? ' ' + Math.round(st.setProgress / 2.55) + '%' : '…'}`, 'warn'); return; }
+  if (st.setSeq != null && setSeqShown < 0 && !setAsked) setSeqShown = st.setSeq;   /* the last result before this page came is not news */
   if (st.setSeq != null && st.setSeq !== setSeqShown) {
     setSeqShown = st.setSeq; const r = st.setResult || 0, what = setAsked ? `${setAsked.op === ACT.saveSet ? 'saved' : 'loaded'} ${setAsked.name}` : 'set';
     setPill('s_status', r ? `${what}: ${SET_RESULT[r] || ('error ' + r)}` : what, r ? 'warn' : 'ok');
@@ -748,15 +1148,15 @@ $('s_save').onclick = () => setOp(ACT.saveSet); $('s_load').onclick = () => setO
 $('s_name').addEventListener('input', () => { if (st) drawSet(); });
 function drawKitWave() {
   const c = $('kitwave'), [g, w, h] = ctx(c); g.clearRect(0, 0, w, h);
-  if (!kitOk || !st || !st.freePos) { g.fillStyle = '#5e5c55'; g.font = '12px system-ui'; g.textAlign = 'center'; g.fillText(st && !st.keySlice ? 'this firmware sends no sample-mode state tail' : 'connect to read the material', w / 2, h / 2); setText('wv_title', 'Waveform'); return; }
+  if (!kitOk || !st || !st.freePos) { g.fillStyle = TOK['cv-ink2']; g.font = '12px system-ui'; g.textAlign = 'center'; g.fillText(st && !st.keySlice ? 'this firmware sends no sample-mode state tail' : 'connect to read the material', w / 2, h / 2); setText('wv_title', 'Waveform'); return; }
   wavePlan(w);
   const L = ed.layout(w, h), hw = L.wave[1];
   const a = view.a, span = Math.max(1, view.b - a), mid = hw / 2, step = wave.step, win = WAVE_N * step, xOf = p => (p - a) / span * w;
   const ke = entryOfKey(selKey), rec = keyRecorded(ke);
   const selT = L.edit ? ed.selT : (ke ? ke.t : -1), selE = selT >= 0 && table ? table.entries[selT] : null;
-  const col = selE ? COL[selE.cls & 3] : '#9be0b0';
+  const col = selE ? COL[selE.cls & 3] : TOK['cv-ok'];
   if (selE) { const s0 = drawPos(selT, 'start', selE.start), s1 = drawPos(selT, 'end', selE.start + selE.len); g.fillStyle = col; g.globalAlpha = 0.12; g.fillRect(xOf(s0), 0, xOf(s1) - xOf(s0), hw); g.globalAlpha = 1; }
-  if (st.bufLen > a && st.bufLen < view.b) { g.fillStyle = '#3a3a42'; g.fillRect(xOf(st.bufLen), 0, 2, hw); }
+  if (st.bufLen > a && st.bufLen < view.b) { g.fillStyle = TOK['cv-end']; g.fillRect(xOf(st.bufLen), 0, 2, hw); }
   g.fillStyle = col; let have = 0, want = 0;
   for (let x = 0; x < w; x++) {
     const p = a + x / w * span; if (p >= st.freePos) break; want++;
@@ -764,42 +1164,46 @@ function drawKitWave() {
     const i = Math.floor((p - s0) / step); if (i >= r.n) continue; have++;
     const v = Math.abs(r.data[i]) / 127, bh = Math.max(0.5, v * mid * 0.92); g.fillRect(x, mid - bh, 1, bh * 2);
   }
-  g.fillStyle = '#2a2a30'; g.fillRect(0, mid, w, 1);
+  g.fillStyle = TOK['cv-grid']; g.fillRect(0, mid, w, 1);
   if (table) {
-    const pxPer = w / span; g.font = '10px system-ui'; g.textAlign = 'left';
+    /* two tracks: the grid along a lane at the top, the markers and recordings (the kit's own spans) along a lane at
+     * the bottom of the wave — each edge a faint line through the audio, its tick and label in its own lane */
+    const pxPer = w / span, LANE = 13, mt = hw - LANE; g.font = '10px system-ui'; g.textAlign = 'left';
+    g.fillStyle = TOK['cv-lane']; g.globalAlpha = 0.85; g.fillRect(0, 0, w, LANE); g.fillRect(0, mt, w, LANE); g.globalAlpha = 1;
     table.entries.forEach((en, i) => {
       const grid = i < table.nSlices; if (!grid && ED.isTomb(en)) return;   /* tombstones are not drawn */
       const pos = drawPos(i, 'start', en.start), end = drawPos(i, 'end', en.start + en.len);
       if (end < a || pos > view.b) return; const x = xOf(pos), colr = entryColor(i, en);
-      if (pos >= a) { g.fillStyle = colr; g.globalAlpha = grid ? 0.55 : 0.85; g.fillRect(x, 0, 1, hw); g.globalAlpha = 1; }
-      if (!grid) { const x0 = Math.max(0, x), x1 = xOf(Math.min(view.b, end)); g.fillStyle = colr; g.globalAlpha = 0.35; g.fillRect(x0, 0, Math.max(1, x1 - x0), 3); g.globalAlpha = 1; }
-      if ((end - pos) * pxPer > 28 && pos >= a) { g.fillStyle = grid ? '#8a887f' : colr; g.fillText(grid ? String(i) : en.key >= 0 ? keyName(en.key) : 'm' + i, x + 3, hw - 4); }
+      if (pos >= a) { g.fillStyle = colr; g.globalAlpha = grid ? 0.3 : 0.45; g.fillRect(x, LANE, 1, mt - LANE); g.globalAlpha = 1; g.fillRect(x, grid ? 0 : mt, grid ? 1 : 2, LANE); }
+      if (!grid) { const x0 = Math.max(0, x), x1 = xOf(Math.min(view.b, end)); g.fillStyle = colr; g.globalAlpha = 0.45; g.fillRect(x0, mt + 3, Math.max(1, x1 - x0 - 1), LANE - 6); g.globalAlpha = 1; }
+      if ((end - pos) * pxPer > 28 && pos >= a) { g.fillStyle = grid ? TOK['cv-ink2'] : TOK['cv-ink']; g.fillText(grid ? String(i) : en.key >= 0 ? keyName(en.key) : 'm' + i, x + 3, grid ? LANE - 3 : hw - 3); }
     });
+    g.fillStyle = TOK['cv-ink2']; g.textAlign = 'right'; g.fillText('grid', w - 4, LANE - 3); g.fillText('markers', w - 4, hw - 3); g.textAlign = 'left';
   }
-  if (hits) { g.fillStyle = '#78a0ff'; for (const p of hits) { if (p < a || p > view.b) continue; const x = xOf(p); g.fillRect(x - 1, 0, 3, 8); g.fillRect(x, 8, 1, hw * 0.22); } }
-  if (L.edit && st.srcPos != null && st.srcPos >= a && st.srcPos <= view.b) { g.fillStyle = '#9be0b0'; g.globalAlpha = 0.6; g.fillRect(xOf(st.srcPos), 0, 1, hw); g.globalAlpha = 1; }
-  if (ed.drag && ed.drag.kind === 'handle') { const x = xOf(ed.drag.pos); g.fillStyle = ed.drag.by ? '#78a0ff' : '#ffffff'; g.fillRect(x - 1, 0, 2, hw); }
+  if (hits) { g.fillStyle = TOK['cv-call']; for (const p of hits) { if (p < a || p > view.b) continue; const x = xOf(p); g.fillRect(x - 1, 13, 3, 6); g.fillRect(x, 19, 1, hw * 0.18); } }
+  if (L.edit && st.srcPos != null && st.srcPos >= a && st.srcPos <= view.b) { g.fillStyle = TOK['cv-ok']; g.globalAlpha = 0.6; g.fillRect(xOf(st.srcPos), 0, 1, hw); g.globalAlpha = 1; }
+  if (ed.drag && ed.drag.kind === 'handle') { const x = xOf(ed.drag.pos); g.fillStyle = ed.drag.by ? TOK['cv-call'] : TOK['cv-play']; g.fillRect(x - 1, 0, 2, hw); }
   if (L.edit) {
     /* the handle row: a lollipop per movable start (a square for the selected marker's end), the selection ringed */
     const hy = L.handles[0] + ED.K.handlePx / 2, pulse = 0.5 + 0.5 * Math.sin(performance.now() / 180);
-    g.fillStyle = '#0e0e10'; g.fillRect(0, L.handles[0], w, ED.K.handlePx); g.fillStyle = '#1d1d21'; g.fillRect(0, L.handles[0], w, 1);
+    g.fillStyle = TOK['cv-handles']; g.fillRect(0, L.handles[0], w, ED.K.handlePx); g.fillStyle = TOK['cv-handle-line']; g.fillRect(0, L.handles[0], w, 1);
     for (const hd of ed.handles()) {
-      const pos = ed.handlePos(hd); if (pos < a || pos > view.b) continue; const x = xOf(pos), en = table.entries[hd.t], colr = hd.kind === 'grid' ? '#ffffff' : entryColor(hd.t, en), sel = hd.t === selT;
+      const pos = ed.handlePos(hd); if (pos < a || pos > view.b) continue; const x = xOf(pos), en = table.entries[hd.t], colr = hd.kind === 'grid' ? TOK['cv-play'] : entryColor(hd.t, en), sel = hd.t === selT;
       g.strokeStyle = colr; g.globalAlpha = 0.55; g.lineWidth = 1; g.beginPath(); g.moveTo(x, hw); g.lineTo(x, hy - 8); g.stroke(); g.globalAlpha = 1;
       g.fillStyle = colr; g.beginPath(); if (hd.kind === 'end') g.rect(x - 7, hy - 7, 14, 14); else g.arc(x, hy, sel ? 8 : 6.5, 0, Math.PI * 2); g.fill();
-      if (sel) { g.strokeStyle = '#eb7414'; g.globalAlpha = 0.35 + 0.55 * pulse; g.lineWidth = 3; g.beginPath(); g.arc(x, hy, 13, 0, Math.PI * 2); g.stroke(); g.lineWidth = 1; g.globalAlpha = 1; }
+      if (sel) { g.strokeStyle = TOK['cv-orange']; g.globalAlpha = 0.35 + 0.55 * pulse; g.lineWidth = 3; g.beginPath(); g.arc(x, hy, 13, 0, Math.PI * 2); g.stroke(); g.lineWidth = 1; g.globalAlpha = 1; }
     }
     /* the strip: the whole buffer with the view's window — drag = pan, drag up / down = zoom, pinch, double-tap = fit */
     const sy = L.strip[0], sh = h - sy, ox = p => p / st.freePos * w;
-    g.fillStyle = '#121214'; g.fillRect(0, sy, w, sh); g.fillStyle = '#26262a'; g.fillRect(0, sy, w, 1);
-    if (table) for (let i = 0; i < table.entries.length; i++) { const en = table.entries[i]; if (i >= table.nSlices && ED.isTomb(en)) continue; g.fillStyle = i < table.nSlices ? '#34343a' : entryColor(i, en); g.globalAlpha = i < table.nSlices ? 1 : 0.6; g.fillRect(ox(en.start), sy + 6, 1, sh - 12); g.globalAlpha = 1; }
-    if (st.bufLen < st.freePos) { g.fillStyle = '#3a3a42'; g.fillRect(ox(st.bufLen), sy + 3, 2, sh - 6); }
+    g.fillStyle = TOK['cv-strip']; g.fillRect(0, sy, w, sh); g.fillStyle = TOK['cv-grid']; g.fillRect(0, sy, w, 1);
+    if (table) for (let i = 0; i < table.entries.length; i++) { const en = table.entries[i]; if (i >= table.nSlices && ED.isTomb(en)) continue; g.fillStyle = i < table.nSlices ? TOK['cv-strip-line'] : entryColor(i, en); g.globalAlpha = i < table.nSlices ? 1 : 0.6; g.fillRect(ox(en.start), sy + 6, 1, sh - 12); g.globalAlpha = 1; }
+    if (st.bufLen < st.freePos) { g.fillStyle = TOK['cv-end']; g.fillRect(ox(st.bufLen), sy + 3, 2, sh - 6); }
     if (selE) { g.fillStyle = col; g.globalAlpha = 0.35; g.fillRect(ox(selE.start), sy + 6, Math.max(2, ox(selE.start + selE.len) - ox(selE.start)), sh - 12); g.globalAlpha = 1; }
-    g.strokeStyle = '#e8e6df'; g.globalAlpha = 0.8; g.strokeRect(Math.max(0.5, ox(a) + 0.5), sy + 3.5, Math.max(4, ox(Math.min(view.b, st.freePos)) - ox(Math.max(0, a))), sh - 7); g.globalAlpha = 1;
-    g.fillStyle = '#5e5c55'; g.font = '10px system-ui'; g.textAlign = 'right'; g.fillText('pan · ↕ zoom · pinch · double-tap fits', w - 6, sy + sh - 5);
-    if (ed.drag && ed.drag.kind === 'toKey') { g.fillStyle = '#eb7414'; g.font = '600 12px system-ui'; g.textAlign = 'center'; g.fillText(`${entryLabel(ed.drag.t)} → drop it on a key`, Math.max(60, Math.min(w - 60, ed.drag.x)), Math.max(14, ed.drag.y - 14)); }
+    g.strokeStyle = TOK['cv-ink']; g.globalAlpha = 0.8; g.strokeRect(Math.max(0.5, ox(a) + 0.5), sy + 3.5, Math.max(4, ox(Math.min(view.b, st.freePos)) - ox(Math.max(0, a))), sh - 7); g.globalAlpha = 1;
+    g.fillStyle = TOK['cv-ink2']; g.font = '10px system-ui'; g.textAlign = 'right'; g.fillText('pan · ↕ zoom · pinch · double-tap fits', w - 6, sy + sh - 5);
+    if (ed.drag && ed.drag.kind === 'toKey') { g.fillStyle = TOK['cv-orange']; g.font = '600 12px system-ui'; g.textAlign = 'center'; g.fillText(`${entryLabel(ed.drag.t)} → drop it on a key`, Math.max(60, Math.min(w - 60, ed.drag.x)), Math.max(14, ed.drag.y - 14)); }
   }
-  if (have < want) { g.fillStyle = '#8a887f'; g.font = '11px system-ui'; g.textAlign = 'right'; g.fillText(`loading… ${wave.queue.length} window${wave.queue.length === 1 ? '' : 's'} to go`, w - 6, 14); }
+  if (have < want) { g.fillStyle = TOK['cv-ink2']; g.font = '11px system-ui'; g.textAlign = 'right'; g.fillText(`loading… ${wave.queue.length} window${wave.queue.length === 1 ? '' : 's'} to go`, w - 6, 14); }
   let what;
   if (L.edit && selE) { const ks = ED.keysOn(st.keySlice, selT).map(keyName).join(' '); what = `${entryLabel(selT)}${ks ? ' · ' + ks : ''} · ${secs(selE.len)} · ${CLS_NAME[selE.cls & 3]}${selE.hit ? ' · hit' : ''}${ED.isOrange(selE) ? ' · yours' : ''}`; }
   else what = ke ? (rec ? `${keyName(selKey)} · recording · ${secs(ke.len)} · ${CLS_NAME[ke.cls & 3]}${ke.hit ? ' · hit' : ''}` : `${keyName(selKey)} · slice ${ke.t} of the break · ${secs(ke.len)}`) : keyName(selKey);
@@ -807,7 +1211,7 @@ function drawKitWave() {
   if (L.edit) updateField();
 }
 /* Colour is state: grid white, a recording yellow, a marker grey until touched, orange once placed or moved by the user. */
-function entryColor(i, en) { return i < table.nSlices ? '#ffffff' : en.key >= 0 ? '#ffd54a' : ED.isOrange(en) ? '#eb7414' : '#8a887f'; }
+function entryColor(i, en) { return i < table.nSlices ? TOK['cv-play'] : en.key >= 0 ? TOK['cv-rec'] : ED.isOrange(en) ? TOK['cv-orange'] : TOK['cv-marker']; }
 /* Where an edge is drawn: the drag's local position while a handle moves, the landed position until the refetch confirms it. */
 function drawPos(t, edge, pos) {
   const dr = ed.drag; if (dr && dr.kind === 'handle') {
@@ -834,10 +1238,10 @@ function drawHist() {
   if (!st || !st.bufLen || !table || !hits) { $('ed_onsets').disabled = true; setText('ed_onsets_n', '—'); return; }
   const bars = ED.onsetBars(hits, table), acc = ED.onsetAccept(bars, edThresh, ED.K.minGapMs * 48, st.bufLen), accSet = new Set(acc.positions);
   const yT = h - 10 - (h - 14) * edThresh / 255;
-  g.fillStyle = '#2a2a30'; g.fillRect(0, h - 10, w, 1);
-  if (table) for (let i = 1; i < table.nSlices; i++) { g.fillStyle = '#1d1d21'; g.fillRect(table.entries[i].start / st.bufLen * w, 0, 1, h - 10); }
-  for (const b of bars) { if (b.pos >= st.bufLen) continue; const x = b.pos / st.bufLen * w, bh = Math.max(2, (h - 14) * b.strength / 255), on = accSet.has(b.pos); g.fillStyle = on ? '#78a0ff' : b.strength >= edThresh ? '#3a4a6a' : '#3a3a42'; g.fillRect(x - 1.5, h - 10 - bh, 3, bh); }
-  g.fillStyle = '#eb7414'; g.fillRect(0, yT, w, 2); g.fillStyle = '#eb7414'; g.font = '10px system-ui'; g.textAlign = 'left'; g.fillText(`${Math.round(edThresh / 2.55)} %`, 4, yT - 3);
+  g.fillStyle = TOK['cv-grid']; g.fillRect(0, h - 10, w, 1);
+  if (table) for (let i = 1; i < table.nSlices; i++) { g.fillStyle = TOK['cv-grid2']; g.fillRect(table.entries[i].start / st.bufLen * w, 0, 1, h - 10); }
+  for (const b of bars) { if (b.pos >= st.bufLen) continue; const x = b.pos / st.bufLen * w, bh = Math.max(2, (h - 14) * b.strength / 255), on = accSet.has(b.pos); g.fillStyle = on ? TOK['cv-call'] : b.strength >= edThresh ? TOK['cv-bar-hi'] : TOK['cv-bar']; g.fillRect(x - 1.5, h - 10 - bh, 3, bh); }
+  g.fillStyle = TOK['cv-orange']; g.fillRect(0, yT, w, 2); g.font = '10px system-ui'; g.textAlign = 'left'; g.fillText(`${Math.round(edThresh / 2.55)} %`, 4, yT - 3);
   const n = acc.count; setText('ed_onsets_n', `${n} marker${n === 1 ? '' : 's'} above the line`); $('ed_onsets').textContent = `Make ${n} marker${n === 1 ? '' : 's'}`; $('ed_onsets').disabled = !n || !link;
 }
 $('wv_in').onclick = () => zoomView(0.5); $('wv_out').onclick = () => zoomView(2); $('wv_fit').onclick = () => { fitView(); }; $('wv_all').onclick = () => { if (st) setView(0, st.freePos); };
@@ -927,8 +1331,10 @@ function drawEditor() {
   setText('ed_depth', st.undoDepth == null ? '' : !journal ? 'no journal on this firmware (EDIT-UNDO) — the list is what this page did' : ud || rd ? `undo ${ud} · redo ${rd}` : 'nothing to undo');
   setPill('ed_gen', st.tableGen != null ? `table gen ${st.tableGen}` : '—', '');
   setText('chop_pos', st.srcPos != null && st.bufLen ? `playhead ${ED.fmtBbs(st.srcPos, ed.posCtx())} · ${ED.fmtMs(st.srcPos)}` : 'playhead —'); setText('chop_allow', tapAllowMs() + ' ms');
-  $('chop').disabled = !link || !st.bufLen;
-  const list = ed.history.list(), sig = list.map(x => x.gen + x.label + (x.undone ? '~' : '')).join('|'); if (sig !== histSig) { histSig = sig; $('ed_hist').innerHTML = list.map(x => `<li${x.undone ? ' class="undone"' : ''}><i>gen ${x.gen}</i>${esc(x.label)}</li>`).join('') || '<li style="color:var(--dim)">nothing yet</li>'; }
+  /* v0.13: the module refuses a tap while nothing sounds (tail 263 b0) — say so on the pad instead of after the tap */
+  const silent = keysOk && st.srcValid === false; $('chop').disabled = !link || !st.bufLen || silent; $('chop_why').hidden = !silent;
+  drawMarkers();
+  const list = ed.history.list(), sig = list.map(x => x.gen + x.label + (x.undone ? '~' : '')).join('|'); if (sig !== histSig) { histSig = sig; $('ed_hist').innerHTML = list.map(x => `<li${x.undone ? ' class="undone"' : ''}><i>gen ${x.gen}</i>${esc(x.label)}</li>`).join('') || '<li>nothing yet</li>'; }
 }
 $('k_rec').onclick = () => action(ACT.recArm, selKey); $('k_clr').onclick = () => action(ACT.recClear, selKey);
 $('k_plays').onchange = async e => { await action(ACT.keyPlays, +e.target.value); refreshLive(); };
@@ -952,6 +1358,37 @@ function syncKit(s) {
   if (s.matGen !== hitsGen && !poll.pHits) { const gen = s.matGen; poll.pHits = fetchHits(link).then(hh => { hits = hh; hitsGen = gen; invalidate(D.kitwave | D.wave); }, e => warn('hits', e)).finally(() => { poll.pHits = null; }); }
 }
 
+/* ── KEYS (v0.13): the markers box — the autoslice count with its re-roll, markers → keys, clear markers ── */
+function drawMarkers() {
+  $('mk_box').hidden = !keysOk; if (!keysOk) return;
+  const n = st.nMarkers, busy = !link || !st.bufLen;
+  setPill('mk_n', n == null ? '—' : `${n} marker${n === 1 ? '' : 's'}`, '');
+  $('mk_keys').disabled = busy || !n; $('mk_clear').disabled = busy || !n; $('as_go').disabled = busy; $('as_reroll').disabled = busy;
+  $('mk_follow').hidden = !st.keysFollow;
+  setText('mk_note', st.grammar === GR.pads ? (st.keysFollow ? 'Pads: every change to the markers puts them on the keys.' : 'Pads: the keys follow the markers once there are some.') : 'In Pads the keys follow the markers by themselves.');
+  /* the count follows the module when the panel's P5 moved it — not while this page's own sends are on their way */
+  const k = $('as_k'), ak = st.autoK;
+  if (ak !== asSeen && !asTouched && !asBusy && asWant == null && document.activeElement !== k) { asSeen = ak; if (ak && +k.value !== ak) { k.value = ak; setText('as_n', String(ak)); } }
+}
+/* the slider plays live, as P5 does on the panel: each value goes out while you drag (one at a time — the newest
+ * waits for the last reply), every send after the drag's first with JOIN, so the whole drag is one undo step */
+let asTouched = false, asDrag = false, asSent = 0, asBusy = false, asWant = null, asLast = -1, asSeen = null;
+function asQueue(k) {
+  if (!link || !editOk || !keysOk) return;
+  if (asBusy) { asWant = k; return; }
+  if (k === asLast && asSent) return;
+  asBusy = true; asLast = k; const join = asSent++ > 0;
+  Promise.resolve(ed.autoslice(k, false, join)).catch(() => {}).finally(() => { asBusy = false; if (asWant != null) { const w = asWant; asWant = null; asQueue(w); } else if (!asDrag) asSent = 0; });
+}
+$('as_k').addEventListener('input', e => { if (!asDrag) { asDrag = true; asSent = 0; asLast = -1; } asTouched = true; setText('as_n', e.target.value); asQueue(+e.target.value); });
+$('as_k').addEventListener('change', e => { asTouched = false; if (!asDrag) { asSent = 0; asLast = -1; } asDrag = false; asQueue(+e.target.value); if (!asBusy) asSent = 0; });
+$('as_go').onclick = () => { if (link && editOk && keysOk) ed.autoslice(+$('as_k').value, false); };
+$('as_reroll').onclick = () => { if (link && editOk && keysOk) ed.autoslice(+$('as_k').value, true); };
+$('mk_keys').onclick = () => { if (link && editOk && keysOk) ed.keysFromMarkers(); };
+$('mk_clear').onclick = () => {
+  if (!link || !editOk || !keysOk || !st) return; const n = st.nMarkers || 0;
+  if (confirm(`Delete all ${n} marker${n === 1 ? '' : 's'} (grey and orange)? Their keys go back to the grid. One undo step brings them back.`)) ed.clearMarkers();
+};
 /* ───────────── Scope tab ─────────────
  * The ten-channel scope: 0x62 with a body (descriptor "scope2": 1 audio,
  * 2 with the jacks). Two tiers on one sample clock in the firmware — out L ·
@@ -968,7 +1405,7 @@ function syncKit(s) {
  * requests pinned to the first one's pos (scopePlan / fetchScopeFrame in
  * hostlink.js). Old firmware without "scope2" answers the empty body only:
  * one mono trace here, at the Play tab's 256 × ×4. */
-const SC_COL = ['#9be0b0', '#5ad0e0', '#78a0ff', '#ff9bd0', '#eb7414', '#c07cf0', '#e8e6df', '#eb4614', '#28c878', '#e6c828'];   /* out L · out R · in L · in R · J3..J8 (J6/J7/J8 = the class colours) */
+/* the channel colours are tokens --sc0..--sc9 (out L · out R · in L · in R · J3..J8; J6/J7/J8 = the class colours), read into SC_COL */
 const SCOPE_MIN_MS = 33, SCOPE_GLOW = 3, SCOPE_SEEN_MS = 3000;
 const scChanBtns = [];
 const jackRole = j => (SCOPE_JACK_ROLE[st && st.jackMap ? 1 : 0] || SCOPE_JACK_ROLE[0])[j];
@@ -977,7 +1414,7 @@ const jackIsIn = j => (SCOPE_JACK_IN[st && st.jackMap ? 1 : 0] || SCOPE_JACK_IN[
   for (let c = 0; c < 10; c++) {
     const host = $(c < 4 ? 'sc_chans' : 'sc_cvchans');
     const b = document.createElement('button'); b.className = 'mini sc-ch';
-    b.innerHTML = c < 4 ? `<i style="background:${SC_COL[c]}"></i>${SCOPE_CH[c]}` : `<i style="background:${SC_COL[c]}"></i>${SCOPE_CH[c]}<span class="role"></span><span class="dc">—</span>`;
+    b.innerHTML = c < 4 ? `<i style="background:var(--sc${c})"></i>${SCOPE_CH[c]}` : `<i style="background:var(--sc${c})"></i>${SCOPE_CH[c]}<span class="role"></span><span class="dc">—</span>`;
     b.title = c < 2 ? `${SCOPE_CH[c]} — click to hide / show` : c < 4 ? `${SCOPE_CH[c]} (J${c - 1}, AC-coupled) — shows itself while a signal is present; click to force it on or off` : `${SCOPE_CH[c]} — DC-coupled, ±5 V; the label is its role under the current jack map, the number its present voltage`;
     b.onclick = () => { sc.on[c] = !scShown(c); invalidate(D.bigscope); scopeKick(); };
     host.appendChild(b); scChanBtns.push({ el: b, role: b.querySelector('.role'), dc: b.querySelector('.dc') });
@@ -1028,18 +1465,18 @@ function drawBigScope() {
   const winA = cur && hasAudio ? cur.n * cur.decim / SR * 1000 : 0, winC = cur && hasCv ? cur.n * cur.cvDecim * (cur.cvDiv || SCOPE.cvDiv) / SR * 1000 : 0;
   const winMs = Math.max(winA, winC) || (sc.decim * 512 / SR * 1000), mid = h / 2, padL = hasCv ? 34 : 0, pw = w - padL;
   /* grid: ten divisions of time; level in quarters — or, with a jack shown, 1 V per division over ±5 V with the audio's ±1 on the same height */
-  g.strokeStyle = '#1c1c21'; g.lineWidth = 1; g.beginPath();
+  g.strokeStyle = TOK['cv-grid2']; g.lineWidth = 1; g.beginPath();
   for (let i = 1; i < 10; i++) { const x = Math.round(padL + i * pw / 10) + 0.5; g.moveTo(x, 0); g.lineTo(x, h); }
   const rows = hasCv ? 10 : 4;
   for (let i = 1; i < rows; i++) { if (i * 2 === rows) continue; const y = Math.round(i * h / rows) + 0.5; g.moveTo(padL, y); g.lineTo(w, y); }
-  g.stroke(); g.strokeStyle = '#2a2a30'; g.beginPath(); g.moveTo(padL, Math.round(mid) + 0.5); g.lineTo(w, Math.round(mid) + 0.5); g.stroke();
-  g.fillStyle = '#5e5c55'; g.font = '11px system-ui';
+  g.stroke(); g.strokeStyle = TOK['cv-grid']; g.beginPath(); g.moveTo(padL, Math.round(mid) + 0.5); g.lineTo(w, Math.round(mid) + 0.5); g.stroke();
+  g.fillStyle = TOK['cv-ink2']; g.font = '11px system-ui';
   if (hasCv) { g.textAlign = 'right'; for (let v = 5; v >= -5; v -= 1) { const y = mid - v / 5 * mid * 0.96; g.fillText((v > 0 ? '+' : '') + v + (v === 5 || v === -5 || v === 0 ? ' V' : ''), padL - 4, y + 4); } }
   g.textAlign = 'left';
   g.fillText(`${fmtMs(winMs / 10)} / div${hasAudio && hasCv && winA !== winC ? ` · audio ${fmtMs(winA)} · cv ${fmtMs(winC)}` : ` · ${fmtMs(winMs)} window`}${hasAudio ? ` · gain ×${sc.gain}` : ''}`, padL + 6, h - 6);
   if (hasAudio) { g.textAlign = 'right'; g.fillText(`audio ±${(1 / sc.gain).toFixed(sc.gain > 1 ? 3 : 0).replace(/0+$/, '').replace(/\.$/, '')}${hasCv ? ' = ±5 V' : ' full scale'}`, w - 6, 12); }
   if (!cur) {
-    g.textAlign = 'center'; g.fillStyle = '#8a887f'; g.font = '12px system-ui';
+    g.textAlign = 'center'; g.fillStyle = TOK['cv-ink2']; g.font = '12px system-ui';
     g.fillText(!link ? 'connect (or press Demo) to see the channels' : sc.freeze ? 'frozen — nothing captured yet' : sc.err ? 'scope: ' + sc.err : 'waiting for the first frame…', padL + pw / 2, mid - 10);
     setPill('sc_fps', '—', ''); setPill('sc_win', '—', ''); $('sc_clip').hidden = true; drawScopeChans(null); return;
   }
@@ -1056,8 +1493,8 @@ function drawBigScope() {
   const frames = sc.glow ? sc.frames : [cur];
   frames.forEach((f, k) => { const last = f === cur; const fA = f.n * f.decim / SR * 1000, fC = f.n * f.cvDecim * (f.cvDiv || SCOPE.cvDiv) / SR * 1000;
     for (let ch = 0; ch < 10; ch++) { if (!f.ch[ch] || !scShown(ch)) continue; trace(f.ch[ch], f.mono ? SC_COL[0] : SC_COL[ch], last ? 1 : 0.15 + 0.15 * k, last ? 1.5 : 1, ch < 4 ? sc.gain : 1, ch < 4 ? fA : fC); } });
-  if (cur.triggered) { g.fillStyle = cur.trigSrc < 10 ? SC_COL[cur.trigSrc] : '#e8e6df'; g.beginPath(); g.moveTo(padL, mid - 6); g.lineTo(padL + 7, mid); g.lineTo(padL, mid + 6); g.fill(); }
-  if (cur.detached) { g.fillStyle = '#ffcf80'; g.font = '11px system-ui'; g.textAlign = 'right'; g.fillText('audio tier detached: its window starts after the cv one (the audio ring holds 1.4 s)', w - 6, 26); }
+  if (cur.triggered) { g.fillStyle = cur.trigSrc < 10 ? SC_COL[cur.trigSrc] : TOK['cv-ink']; g.beginPath(); g.moveTo(padL, mid - 6); g.lineTo(padL + 7, mid); g.lineTo(padL, mid + 6); g.fill(); }
+  if (cur.detached) { g.fillStyle = TOK['cv-warn']; g.font = '11px system-ui'; g.textAlign = 'right'; g.fillText('audio tier detached: its window starts after the cv one (the audio ring holds 1.4 s)', w - 6, 26); }
   $('sc_clip').hidden = !clipped;
   drawScopeChans(cur);
   const t = scTrig();
@@ -1097,21 +1534,25 @@ $('sc_p_gates').onclick = () => scopePreset([true, false, false, false, false, f
  * Values live in the running blob: read it fresh, change one byte, write it
  * back as a live audition. The read happens right before the write so the
  * pager's stored knob positions are current, not a stale snapshot. */
+/* every field of the firmware's 24-byte block has a home (the selftest checks nothing lands in "Other") */
 const GROUPS = [
-  ['Sound', ['voice.mode', 'key.plays', 'fades', 'tail', 'rests', 'swing']],
-  ['Brain & gates', ['grammar.mode', 'swaps', 'flow.dejavu', 'gate.mode', 'gate.len', 'gate.lvl', 'gate.lanes']],
-  ['Clock', ['clock.ppqn', 'bars']],
-  ['Analysis', ['class.mode', 'onsets']],
+  ['Pattern', ['grammar.mode', 'swaps', 'flow.dejavu', 'rests']],
+  ['Sound', ['voice.mode', 'key.plays', 'fades', 'tail', 'swing']],
+  ['Looper', ['quantize']],
+  ['Jacks & CV', ['jacks', 'clock.ppqn', 'gate.mode', 'gate.lanes', 'gate.len', 'gate.lvl']],
+  ['Recording', ['sampling', 'rec.src', 'record']],
+  ['Editing', ['tap.allow', 'autosave']],
+  ['Analysis', ['class.mode', 'onsets', 'bars']],
 ];
 const optSelects = new Map();   /* field id → [select…] (the Bars option also sits next to the grid readout) */
 const optByte = id => { const f = opts && opts.fields.find(f => f.id === id); return f && live ? live.bytes[opts.comp.off + f.off] : null; };
 const optLabel = (id, v) => { const f = opts && opts.fields.find(f => f.id === id); return f && f.disp && f.disp.labels ? f.disp.labels[v] : null; };
 function buildOptions() {
   const host = $('optgroups'); host.innerHTML = ''; optSelects.clear(); $('k_bars').textContent = '';
-  if (!opts) { host.innerHTML = '<p style="color:var(--mute)">This firmware\'s descriptor carries no Options block.</p>'; return; }
+  if (!opts) { host.innerHTML = '<p class="note">This firmware\'s descriptor carries no Options block.</p>'; return; }
   const placed = new Set();
   const groups = GROUPS.map(([name, ids]) => [name, ids.map(id => opts.fields.find(f => f.id === id)).filter(Boolean)]);
-  groups.push(['Other', opts.fields.filter(f => !GROUPS.some(g => g[1].includes(f.id)))]);
+  groups.push(['Other', opts.fields.filter(f => !GROUPS.some(g => g[1].includes(f.id)))]);   /* a field a newer firmware adds */
   for (const [name, fields] of groups) {
     if (!fields.length) continue;
     const g = document.createElement('div'); g.className = 'grp'; g.innerHTML = `<h3>${esc(name)}</h3>`;
@@ -1133,8 +1574,8 @@ async function writeOption(f, value) {
   if (!link || !opts || optBusy) return; optBusy = true; setPill('opt_status', 'writing…', 'warn'); document.querySelectorAll('.opt').forEach(r => r.classList.add('busy'));
   try {
     const fresh = await getLive(link, info); const bytes = Uint8Array.from(fresh.bytes); bytes[opts.comp.off + f.off] = value;
-    await setLive(link, info, bytes); live = { bytes, schema: fresh.schema }; setPill('opt_status', 'written', 'ok'); poll.tState = 0;
-  } catch (e) { setPill('opt_status', 'failed: ' + e.message, 'warn'); await refreshLive(); }
+    await setLive(link, info, bytes); live = { bytes, schema: fresh.schema }; setPill('opt_status', 'written', 'ok'); poll.tState = 0; ctlSig = ''; invalidate(D.controls | D.jacks);
+  } catch (e) { setPill('opt_status', 'failed: ' + e.message, 'warn'); say('option write failed: ' + e.message, true); await refreshLive(); }
   finally { optBusy = false; document.querySelectorAll('.opt').forEach(r => r.classList.remove('busy')); syncOptions(); }
 }
 async function refreshLive() {
@@ -1149,7 +1590,7 @@ const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(
 function md(s) { return String(s).split(/\n\s*\n/).map(p => '<p>' + esc(p).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/\*(.+?)\*/g, '<i>$1</i>').replace(/`(.+?)`/g, '<code>$1</code>') + '</p>').join(''); }
 function buildManual() {
   const host = $('manual');
-  if (!manual) { host.innerHTML = '<p style="color:var(--mute)">This firmware\'s descriptor carries no manual block (no <code>manual</code> / <code>jacks</code> / pager help). Hermetic\'s /program shows the manual when the firmware attaches one.</p>'; return; }
+  if (!manual) { host.innerHTML = '<p class="note">This firmware\'s descriptor carries no manual block (no <code>manual</code> / <code>jacks</code> / pager help). Hermetic\'s /program shows the manual when the firmware attaches one.</p>'; return; }
   let h = '';
   if (manual.tagline) h += `<p class="tag">${esc(manual.tagline)}</p>`;
   if (manual.preamble) h += md(manual.preamble);
@@ -1161,60 +1602,87 @@ function buildManual() {
       h += '<dl>'; for (let p = 0; p < pager.pots; p++) { const f = pager.knobs[pg + ':' + p]; if (f) h += `<dt>P${p + 1} · ${esc(f.name)}</dt><dd>${f.help ? md(f.help) : ''}</dd>`; } h += '</dl>';
     }
   }
-  h += '<h3>Buttons</h3><dl><dt>B1</dt><dd>tap: page Perform ↔ Brain · hold 300 ms + turn a pot: record a motion lock (hold + nudge again clears it) · LED: clock pulse / lock</dd>'
-     + '<dt>B2</dt><dd>tap: dice (new fill; in Camp, ring the next change) · hold &gt; 300 ms: flow (a new fill every bar while held)</dd>'
-     + '<dt>B3</dt><dd>tap: reslice · hold &gt; 400 ms: load the file highlighted by P5</dd>'
+  h += '<h3>Buttons</h3><dl><dt>B1</dt><dd>tap: page Perform ↔ Brain · hold + turn a pot: record a motion lock (hold + nudge again clears it) · hold 600 ms alone and release: start / stop (v0.13) · LED: clock pulse / lock</dd>'
+     + '<dt>B2</dt><dd>tap: dice (a new fill; in Camp, ring the next change; in Play, undo the last overdub) · hold &gt; 300 ms: flow (a new fill every bar while held)</dd>'
+     + '<dt>B3</dt><dd>tap: reslice (in Play: clear the loop) · hold &gt; 400 ms: load the file highlighted by P5</dd>'
      + '<dt>B2 + B3</dt><dd>held 2 s: Settings (brightness, preset save/load); B2 or B3 leaves</dd></dl>'
-     + '<p style="font-size:12px;color:var(--mute)">Button gestures are read from the firmware source (OnPoll), not the descriptor — this module declares its pots through a Pager, which carries no button metadata.</p>';
-  if (manual.jacks.length) { h += '<h3>Jacks</h3><dl>'; manual.jacks.forEach((j, i) => { h += `<dt>J${i + 1} · ${esc(j.name || j.id)} <span style="color:var(--mute);font-weight:400">${esc(j.sig || '')}</span></dt><dd>${j.help ? md(j.help) : ''}</dd>`; }); h += '</dl>'; }
+     + '<p class="note">Button gestures are read from the firmware source (OnPoll), not the descriptor — this module declares its pots through a Pager, which carries no button metadata.</p>';
+  if (manual.jacks.length) { h += '<h3>Jacks</h3><dl>'; manual.jacks.forEach((j, i) => { h += `<dt>J${i + 1} · ${esc(j.name || j.id)} <span>${esc(j.sig || '')}</span></dt><dd>${j.help ? md(j.help) : ''}</dd>`; }); h += '</dl>'; }
   if (manual.presetsHelp) h += '<h3>Presets</h3>' + md(manual.presetsHelp);
   host.innerHTML = h;
 }
 
 /* ───────────── Connect ───────────── */
+/* The readouts are readouts of the module: after it goes they must not keep its last values (Kyklophoria's
+ * 2026-09-13 review — block, link, cpu all read as live with nothing connected). */
+function clearReadouts() {
+  for (const id of ['k_cls', 'k_chop', 'k_hist', 'k_file', 'k_native', 'k_grid', 'k_clock', 'jk_key', 'jk_j5', 'jk_j6', 'jk_j78', 'jk_why', 'l_count', 'u_break', 'u_recs', 'u_free', 'u_planes', 'u_table', 'cpuText', 'chop_pos']) setText(id, '—');
+  if (!$('k_bars').firstElementChild) setText('k_bars', '—');
+  setText('jk_mv', ''); setText('mode_what', ''); lastText.delete('mode_what'); $('mode_what').innerHTML = '';
+  for (const [id, s] of [['modpill', 'not connected'], ['pagepill', 'page —'], ['syncpill', 'clock —'], ['linkpill', 'link —'], ['jackpill', 'jacks —'], ['diagpill', 'diag —'], ['kit_status', '—'], ['ctl_page', '—'], ['jk_map', '—'], ['mode_jacks', '—'], ['mk_n', '—'], ['ed_gen', '—'], ['k_recstate', 'record —']]) setPill(id, s, '');
+  clearCpu(); for (const sv of [sBpm, sJit, sJitR, sLoad, sLoadMax]) sv.avg = sv.shown = null;
+  if (jkLit >= 0) { jkStrip[jkLit].classList.remove('on'); jkLit = -1; }
+  padEls.forEach(p => { p.sig = ''; p.sub.textContent = '—'; p.el.classList.remove('down', 'flash'); }); padDown.clear(); flashAt.fill(0);
+  modeChips.forEach(c => { c.el.classList.remove('on'); c.el.disabled = true; });
+  $('chop_why').hidden = true; $('mk_follow').hidden = true; $('pads_follow').hidden = true;
+  for (const id of ['ring', 'strip', 'wave', 'outscope']) { const [g, w, h] = ctx($(id)); g.clearRect(0, 0, w, h); }
+  invalidate(D.transport);
+}
 function setDisconnected() {
-  stopPolling(); link = null; info = null; desc = null; live = null; st = null; env = null; envGen = -1; scope = null; demoDevice = null; ctlSig = '';
+  stopPolling(); link = null; info = null; desc = null; live = null; st = null; env = null; envGen = -1; scope = null; demoDevice = null; demoPort = null; ctlSig = '';
   table = null; tableSig = ''; bufSig = ''; hits = null; hitsGen = -1; kitOk = false; wave.cache.clear(); wave.queue.length = 0; wave.planSig = ''; keyCells.forEach(c => { c.sig = ''; });
-  editOk = false; copyArm = -1; ed.selT = -1; ed.drag = null; ed.local = null; ed.history = new ED.History(); histSig = fieldSig = ''; closeMenu(); ghost(null); dropHi(-1); setEditorShown(false);
+  editOk = false; keysOk = false; copyArm = -1; ed.selT = -1; ed.drag = null; ed.local = null; ed.history = new ED.History(); histSig = fieldSig = ''; closeMenu(); ghost(null); dropHi(-1); setEditorShown(false);
   setsOk = false; setSeqShown = -1; setAsked = null; setPill('s_status', '—', ''); $('s_save').disabled = $('s_load').disabled = true;
   scope2Ok = scopeCvOk = false; clearTimeout(sc.timer); sc.timer = null; sc.frames.length = 0; sc.fps = sc.rps = sc.bps = 0; sc.err = ''; invalidate(D.bigscope);
-  $('connect').textContent = 'Connect'; $('demo').disabled = false; setPill('modpill', 'not connected', ''); setPill('linkpill', 'link: —', ''); setPill('kit_status', '—', '');
-  invalidate(D.kit | D.kitwave);
+  $('connect').textContent = 'Connect'; $('connect').disabled = !serialApi(); $('demo').disabled = false; $('demo').hidden = false; $('padsCard').hidden = true;
+  clearReadouts();
+  invalidate(D.kit | D.kitwave | D.transport);
 }
 /* Two connects in flight must not leave you with neither: the loser's catch
  * used to tear down the winner's link. Each attempt takes a generation and
- * only cleans up if it is still the current one. */
+ * only cleans up if it is still the current one. The handshake is several round
+ * trips, up to a couple of seconds over serial: the button says so meanwhile and
+ * cannot start another (Kyklophoria A1). */
 let connectGen = 0;
 async function connectPort(port, isDemo) {
   const gen = ++connectGen;
+  $('connect').disabled = true; $('connect').textContent = 'Connecting…'; $('demo').disabled = true; invalidate(D.transport);
   try {
     await port.open({ baudRate: 115200 });
     /* DTR up: some CDC stacks hold the port half-open until the host asserts it. */
     if (!isDemo) { try { await port.setSignals?.({ dataTerminalReady: true }); } catch {} }
     if (gen !== connectGen) { try { await port.close(); } catch {} return; }
-    link = new Link(port); link.onError = e => notice('Serial read error: ' + e.message); await link.start();
-    info = await hello(link);
-    setPill('modpill', `${info.name} ${info.fw}${isDemo ? ' (demo)' : transportName() === 'WebUSB' ? ' · WebUSB' : ''}`, 'ok'); $('connect').textContent = 'Disconnect'; $('demo').disabled = true;
-    desc = await getDescriptor(link, info).catch(e => { notice('Descriptor unreadable: ' + e.message); return null; });
+    const l = new Link(port); link = l;
+    l.onError = e => say('serial read error: ' + e.message, true);
+    /* the read loop ended by itself: the cable came out, the module reset — the page lets go instead of polling a dead port */
+    l.onClose = () => { if (link !== l) return; say('the module went away (unplugged or reset) — disconnected', true); setDisconnected(); l.close().catch(() => {}); };
+    await l.start();
+    info = await hello(l);
+    setPill('modpill', `${info.name} ${info.fw}${isDemo ? ' (demo)' : transportName() === 'WebUSB' ? ' · WebUSB' : ''}`, 'ok');
+    desc = await getDescriptor(l, info).catch(e => { notice('Descriptor unreadable: ' + e.message); return null; });
     labels = { grammar: fieldLabels(desc, 'grammar.mode'), classifier: fieldLabels(desc, 'class.mode'), sample: fieldLabels(desc, 'sample.idx') };
     pager = pagerInfo(desc); opts = optionsInfo(desc); manual = manualInfo(desc);
     const sel = $('sample'); sel.innerHTML = labels.sample.length ? labels.sample.map((n, i) => `<option value="${i}">${esc(n)}</option>`).join('') : '<option value="-1">—</option>';
     $('b_load').disabled = !labels.sample.length;
     if (desc && desc.error) notice('The module reports a descriptor build error: ' + desc.error);
     else if (!desc || !desc.audiothurgist) notice('Connected, but this firmware does not advertise the Audiothurgist state extension (0x60). Flash v0.7.0+ for the live view.');
-    kitOk = !!(desc && desc.audiothurgist && desc.audiothurgist.table);   /* GET_TABLE / GET_WAVE / GET_HITS advertised */
-    editOk = kitOk && !!(desc && desc.audiothurgist && desc.audiothurgist.edit === 1);   /* EDIT-UI: ACTION 16.., the flags form, the tail */
+    const cp = caps(desc);
+    kitOk = cp.table;                         /* GET_TABLE / GET_WAVE / GET_HITS advertised */
+    editOk = kitOk && cp.edit >= 1;           /* EDIT-UI: ACTION 16.., the flags form, the tail */
+    keysOk = editOk && cp.keys >= 1;          /* v0.13: the pads, SET_MUTE, the marker ops, the autoslice count, the 263.. tail */
     setEditorShown(editOk);
-    setsOk = !!(desc && desc.audiothurgist && desc.audiothurgist.sets);    /* ACTION 14 / 15 + the 219.. tail */
-    scope2Ok = !!(desc && desc.audiothurgist && desc.audiothurgist.scope2); /* SCOPE: the 0x62 body (audio channels) */
-    scopeCvOk = !!(desc && desc.audiothurgist && desc.audiothurgist.scope2 >= 2);   /* SCOPE: … with the J3..J8 ext */
+    setsOk = !!cp.sets;                       /* ACTION 14 / 15 + the 219.. tail */
+    scope2Ok = cp.scope2 >= 1;                /* SCOPE: the 0x62 body (audio channels) */
+    scopeCvOk = cp.scope2 >= 2;               /* SCOPE: … with the J3..J8 ext */
     fillSetList();
     setPill('kit_status', kitOk ? 'reading…' : 'this firmware has no sample-mode commands (0x64–0x66)', kitOk ? '' : 'warn');
-    buildManual();
-    if (opts) { try { live = await getLive(link, info); } catch (e) { notice('Options unreadable: ' + e.message); } }
+    buildManual(); buildModes(); $('padsCard').hidden = !keysOk;
+    if (opts) { try { live = await getLive(l, info); } catch (e) { notice('Options unreadable: ' + e.message); } }
     buildOptions(); setPill('opt_status', live ? 'live' : '—', live ? 'ok' : '');
-    startPolling(); if (scopeShown) scopeKick(); invalidate(D.bigscope);
-  } catch (e) { if (gen !== connectGen) return; notice('Connect failed: ' + e.message); if (link) await link.close(); setDisconnected(); }
+    $('connect').textContent = 'Disconnect'; $('connect').disabled = false; $('demo').hidden = true;
+    say(`connected — ${info.name} ${info.fw}${isDemo ? ' (the demo module)' : ''}${keysOk ? '' : ' · older firmware: no pads, start / stop is the toggle'}`);
+    startPolling(); if (scopeShown) scopeKick(); invalidate(D.all);
+  } catch (e) { if (gen !== connectGen) return; say('connect failed: ' + e.message, true); const l = link; setDisconnected(); if (l) await l.close(); }
 }
 /* EDIT-UI: with "edit" the Kit waveform grows its handle row and strip and the Edit panel shows; without it the tab is
  * the view-only one (no handles, no pad, no field — `?demo=noedit`). */
@@ -1257,35 +1725,38 @@ async function scanUsb() {
   }
 }
 $('usbscan').onclick = scanUsb;
-document.addEventListener('serial-polyfill', () => { if (!navigator.serial) $('usbscan').style.display = ''; });
+document.addEventListener('serial-polyfill', () => { if (!navigator.serial) { $('usbscan').hidden = false; $('connect').disabled = false; } });
 async function connect() {
   notice('');
-  if (link) { const l = link; setDisconnected(); await l.close(); return; }
+  if (link) { const l = link; connectGen++; setDisconnected(); await l.close(); say('disconnected'); return; }
   const api = serialApi();
   if (!api) { notice(describeNoSerial()); return; }
   try { const port = await api.requestPort({ filters: [{ usbVendorId: 0x0483 }] }); await connectPort(port, false); }
   catch (e) {
+    $('connect').disabled = false; $('connect').textContent = link ? 'Disconnect' : 'Connect'; $('demo').disabled = !!link;
     if (e.name === 'NotFoundError') { if (transportName() === 'WebUSB') notice('No module chosen. If Chrome\'s list was empty, press Scan USB to see whether the phone enumerates anything on this cable.'); return; }
     let m = 'Connect failed: ' + e.message;
     if (transportName() === 'WebUSB' && /(claim|busy|access|denied|LIBUSB|unable to claim)/i.test(e.message)) m += ' — another app or the system may hold the USB interface; unplug and replug the OTG cable, and make sure no other page is connected.';
     notice(m);
   }
 }
-/* ?demo[=brain,ext,pending,grids,euclid,camp,locks,kit,swing,old,short,v099,nosets,noedit,scope,cv,gates,noin,body512]
+/* ?demo[=brain,ext,pending,grids,euclid,camp,play,pads,locks,kit,swing,old,short,v099,nosets,noedit,noundo,old12,scope,cv,gates,noin,body512]
  * — the fake module, optionally started on the Brain page, following a
- * clock (with a multiplier switch left pending), in a grammar, with locks,
- * with three keys recorded and a swung grid (kit: opens the Kit tab), with
- * a pre-v0.8.0 state body (no tails), the 167-byte CLOCK body (no flags),
- * the 176-byte v0.9.9 body (no sample-mode tail) or the 219-byte sample body
- * (no sets tail), `noedit` a firmware without slice editing (no "edit"
- * capability, the 255-byte body, the 13-byte table); `scope` opens the Scope tab (`cv` / `gates` press that
- * preset), `noin` leaves J1/J2 silent (the input traces stay hidden),
- * `body512` announces the protocol's default max_body so a frame takes
- * two requests. */
+ * clock (with a multiplier switch left pending), in a grammar (play / pads
+ * are v0.13's play grammars; pads also lays six autoslice markers on the
+ * keys), with locks, with three keys recorded and a swung grid (kit: opens
+ * the Kit tab), with a pre-v0.8.0 state body (no tails), the 167-byte CLOCK
+ * body (no flags), the 176-byte v0.9.9 body (no sample-mode tail) or the
+ * 219-byte sample body (no sets tail), `noedit` a firmware without slice
+ * editing, `noundo` one without the journal, `old12` a 0.12 firmware (no
+ * "keys": no pads, the mute toggle, TAP_MARK taken whatever sounds);
+ * `scope` opens the Scope tab (`cv` / `gates` press that preset), `noin`
+ * leaves J1/J2 silent, `body512` announces the protocol's default max_body. */
 async function connectDemo(flags = '') {
   if (link) return; notice('');
   const f = new Set(flags.split(',').filter(Boolean));
-  demoDevice = new DEMO.FakeDevice({ tail: f.has('old') ? 148 : f.has('short') ? 167 : f.has('v099') ? 176 : f.has('nosets') ? 219 : f.has('noedit') ? 255 : f.has('noundo') ? 262 : 263, latencyMs: 6, kit: f.has('kit'), swing: f.has('kit') || f.has('swing'), inputs: !f.has('noin'), maxBody: f.has('body512') ? 512 : DEMO.MAX_BODY, edit: !(f.has('noedit') || f.has('nosets') || f.has('v099') || f.has('short') || f.has('old')) });
+  const tail = f.has('old') ? 148 : f.has('short') ? 167 : f.has('v099') ? 176 : f.has('nosets') ? 219 : f.has('noedit') ? 255 : f.has('noundo') ? 262 : f.has('old12') ? 263 : 276;
+  demoDevice = new DEMO.FakeDevice({ tail, latencyMs: 6, kit: f.has('kit') || f.has('pads'), swing: f.has('kit') || f.has('swing'), inputs: !f.has('noin'), maxBody: f.has('body512') ? 512 : DEMO.MAX_BODY, edit: !(f.has('noedit') || f.has('nosets') || f.has('v099') || f.has('short') || f.has('old')) });
   const d = demoDevice;
   if (f.has('scope')) showTab('tab_scope');
   if (f.has('cv')) $('sc_p_cv').onclick(); if (f.has('gates')) $('sc_p_gates').onclick();
@@ -1293,13 +1764,18 @@ async function connectDemo(flags = '') {
   if (f.has('brain')) d.brain = true;
   if (f.has('ext')) { d.ext = true; d.locked = true; d.mult = 2; d.multZone = 3; d.p2Engaged = true; }
   if (f.has('pending')) { d.multZone = 4; d.pending = true; }
-  if (f.has('grids')) d.options[5] = 2; if (f.has('euclid')) d.options[5] = 3; if (f.has('camp')) d.options[5] = 4;
+  const G = DEMO.O['grammar.mode'];
+  if (f.has('grids')) d.options[G] = 2; if (f.has('euclid')) d.options[G] = 3; if (f.has('camp')) d.options[G] = 4;
+  if (f.has('play')) { d.setGrammar(DEMO.GRAM.play, d.grammar); d.options[G] = DEMO.GRAM.play; }
+  if (f.has('pads')) { d.options[G] = DEMO.GRAM.pads; d.applyEdit(36, Uint8Array.of(36, 6, 0)); }
   if (f.has('locks')) d.lockMask = 0x0049;
-  await connectPort(new DEMO.FakePort(d), true);
+  demoPort = new DEMO.FakePort(d);
+  await connectPort(demoPort, true);
   if (!f.size && demoDevice) setInterval(() => { if (!demoDevice) return; const d = demoDevice; d.ext = !d.ext; d.locked = d.ext; d.lockMask = d.ext ? 0x0009 : 0; d.mult = d.ext ? 2 : 1; d.multZone = d.ext ? 3 : 2; d.p2Engaged = d.ext; d.aligned = d.ext; }, 12000);
 }
 $('connect').onclick = connect; $('demo').onclick = () => connectDemo();
-if (!('serial' in navigator)) { notice('Web Serial is not available here. Use Chrome/Edge/Opera on https:// or http://localhost — file:// will not work. The Demo button works anywhere.'); $('connect').disabled = true; }
+if (!serialApi()) { notice('Web Serial is not available here (yet: on Android the WebUSB polyfill may still be loading). Use Chrome/Edge/Opera on https:// or http://localhost — file:// will not work. The Demo button works anywhere.'); $('connect').disabled = !(navigator.usb); }
+invalidate(D.transport);
 { const m = /[?&]demo(?:=([^&#]*))?/.exec(location.search); if (m) connectDemo(decodeURIComponent(m[1] || '')); }
 </script>
 </body>

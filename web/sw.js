@@ -2,8 +2,10 @@
  * (home-screen icon on Android, and the requirement for a Trusted Web
  * Activity). Network first, cache as the fallback, so a republished page
  * is picked up on the next load and the last good copy opens when the
- * phone is offline. Serial traffic never goes through here. */
-const CACHE = 'audiothurgist-v1';
+ * phone is offline. Serial traffic never goes through here. The published
+ * page loads its scripts as name.js?v=<commit> (publish-pages.sh); the
+ * fallback matches ignoring the query, so the precached copies still serve. */
+const CACHE = 'audiothurgist-v2';   /* v0.13.0-beta's page: bumped so an installed copy drops the old shell */
 const SHELL = ['./', './index.html', './hostlink.js', './edit.js', './demo.js', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './vendor/web-serial-polyfill/serial.js'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).catch(() => {})); self.skipWaiting(); });
 self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k))))); self.clients.claim(); });

@@ -26,7 +26,13 @@ const ACT = { dice: 0, reslice: 1, mute: 2, punch: 3, flow: 4, scrub: 5, load: 6
   setBoundary: 16, setEntry: 17, addEntry: 18, split: 19, merge: 20, tombstone: 21, setKey: 22, swapKeys: 23,
   nudgeAll: 24, promote: 25, fromOnsets: 26, audition: 27, release: 28, tapMark: 29,
   /* EDIT-UNDO: the journal's two ops (no fields) — the page enables Undo / Redo from the tail's undoDepth / redoDepth */
-  undoEdit: 30, redoEdit: 31 };
+  undoEdit: 30, redoEdit: 31,
+  /* KEYS (v0.13, capability "keys": 1): the on-screen pads, the two marker ops, the transport and the autoslice count */
+  playKey: 32, keysFromMarkers: 33, clearMarkers: 34, setMute: 35, autoslice: 36 };
+/* v0.13 "keys": the J5 style the Voice map reads (state byte 271; 255 = the Brain map, where J5 is the gate) and the
+ * autoslice count's range (ACTION 36's k). TAP_MARK's fourth reply byte: b0 = an existing marker was reused. */
+const KEYS = { n: 24, autoMax: 64, reroll: 1, join: 2, reused: 1,
+  styles: ['plain', 'reverse', 'half speed', 'double', 'ratchet', 'staccato', 'punch / choke flip', 'record', 'clear'] };
 /* EDIT: flag bits and constants. Table flags (GET_TABLE's 14-byte form, ADD_ENTRY's flags): orange = user-placed
  * or user-moved, tomb = deleted (len 0, skipped by everything). AUDITION flags: fromEnd = `start` is the region's
  * END (the last lenMs up to it), loop = repeat until RELEASE. NUDGE_ALL's `which`: grid or markers. */
@@ -112,21 +118,75 @@ const f32 = (b, at) => new DataView(b.buffer, b.byteOffset + at, 4).getFloat32(0
 function readStr(b, at) { const n = b[at]; return [new TextDecoder('ascii').decode(b.subarray(at + 1, at + 1 + n)), at + 1 + n]; }
 const statusName = s => STATUS[s] || ('device error ' + s);
 
+/* ───────────── transports ─────────────
+ * Kyklophoria's split (2026-09): the Link speaks frames, a transport moves
+ * bytes. A transport has start(onBytes) → Promise, write(Uint8Array) →
+ * Promise, close() → Promise, a `kind` label, and calls its `onError(e)` for
+ * a read error it survived and `onClose()` when the byte stream ENDED without
+ * close() being asked for — the cable pulled, the module reset, the bridge
+ * gone. That one callback is the page's unplug detection: before it, a pulled
+ * cable left the page polling a dead port with every readout frozen as if live. */
+
+/* Web Serial (and the WebUSB polyfill, and demo.js's FakePort, which has the same
+ * surface): a port already open()ed. A non-fatal read error (overrun, framing)
+ * closes the reader but leaves port.readable — reacquire and carry on; `done`
+ * or a fatal error ends the loop, and an end nobody asked for is onClose. */
+class SerialTransport {
+  constructor(port) { this.port = port; this.kind = 'serial'; this.closed = false; this.onError = null; this.onClose = null; }
+  async start(onBytes) { this.writer = this.port.writable.getWriter(); this.readLoop(onBytes); }
+  async readLoop(onBytes) {
+    let ended = false;
+    while (this.port.readable && !this.closed && !ended) {
+      const reader = this.port.readable.getReader(); this.reader = reader;
+      try { for (;;) { const { value, done } = await reader.read(); if (done) { ended = true; break; } onBytes(value); } }
+      catch (e) { if (!this.closed && this.onError) this.onError(e); }
+      finally { try { reader.releaseLock(); } catch {} }
+    }
+    if (!this.closed && this.onClose) this.onClose();
+  }
+  write(bytes) { return this.writer.write(bytes); }
+  async close() {
+    this.closed = true;
+    try { await this.reader?.cancel(); } catch {} try { this.writer?.releaseLock(); } catch {} try { await this.port.close(); } catch {}
+  }
+}
+/* A WebSocket carrying raw wire bytes (a bridge on this machine, as Kyklophoria's
+ * tools/bridge). Nothing in Audiothurgist serves one yet; the class costs nothing. */
+class WsTransport {
+  constructor(ws) { this.ws = ws; this.kind = 'bridge'; this.closed = false; this.onError = null; this.onClose = null; }
+  start(onBytes) {
+    this.ws.binaryType = 'arraybuffer';
+    this.ws.onmessage = ev => { if (ev.data instanceof ArrayBuffer) onBytes(new Uint8Array(ev.data)); };
+    this.ws.onerror = e => { if (this.onError) this.onError(e); };
+    this.ws.onclose = () => { if (!this.closed && this.onClose) this.onClose(); this.closed = true; };
+    return Promise.resolve();
+  }
+  write(bytes) { try { this.ws.send(bytes); return Promise.resolve(); } catch (e) { return Promise.reject(e); } }
+  close() { this.closed = true; try { this.ws.close(); } catch {} return Promise.resolve(); }
+}
+/* What the Link was given: a transport, or a SerialPort-shaped object (open, with readable / writable) to wrap. */
+const asTransport = x => x && typeof x.start === 'function' && typeof x.write === 'function' ? x : new SerialTransport(x);
+
 /* ───────────── Link ─────────────
  * HostLink is stop-and-wait: one request in flight, answers matched by seq.
  * Two queues feed the wire — `urgent` (anything the user did) drains before
  * `normal` (polls) — so a click never waits behind queued telemetry. A
  * request may carry a `key`: while a request with that key is queued or in
  * flight, the next one with the same key joins it instead of queuing again,
- * which keeps a slow link from piling up polls. Round-trips are timed per request. */
+ * which keeps a slow link from piling up polls. Round-trips are timed per
+ * request; bytesIn / kbps count what arrives. */
 class Link {
-  constructor(port) {
-    this.port = port; this.seq = 1; this.parser = new FrameParser(); this.pending = null;
+  constructor(transport) {
+    this.t = asTransport(transport); this.seq = 1; this.parser = new FrameParser(); this.pending = null;
     this.urgent = []; this.normal = []; this.keyed = new Map(); this.closed = false;
-    this.stats = { rtt: 0, rttAvg: 0, rttMax: 0, reqs: 0, rate: 0, errors: 0, timeouts: 0 };
-    this._win = { t0: 0, n: 0, max: 0 };
-    this.onError = null;
+    this.stats = { rtt: 0, rttAvg: 0, rttMax: 0, reqs: 0, rate: 0, bytesIn: 0, kbps: 0, errors: 0, timeouts: 0 };
+    this._win = { t0: _now(), n: 0, max: 0, bytes: 0 };
+    this.onError = null; this.onClose = null;
+    this.t.onError = e => { this.stats.errors++; if (this.onError) this.onError(e); };
+    this.t.onClose = () => { if (!this.closed && this.onClose) this.onClose(); };
   }
+  get kind() { return this.t.kind; }
+  get port() { return this.t.port; }
   /* A link that did not close tidily leaves the module's parser holding half
    * a frame; our HELLO gets appended to it, delimited into one malformed frame
    * and dropped — correctly — so nothing answers and the FIRST connect times
@@ -134,26 +194,19 @@ class Link {
    * A lone zero is the documented "throw away what you have": one byte, and
    * the parser has always known what to do with it (Kyklophoria's fix). */
   async start() {
-    this.writer = this.port.writable.getWriter(); this.readLoop();
-    try { await this.writer.write(Uint8Array.of(0)); } catch { /* the first request will report it */ }
+    await this.t.start(bytes => {
+      this.stats.bytesIn += bytes.length; this._win.bytes += bytes.length;
+      for (let i = 0; i < bytes.length; i++) this.parser.push(bytes[i], f => this.onFrame(f));
+    });
+    try { await this.t.write(Uint8Array.of(0)); } catch { /* the first request will report it */ }
   }
-  /* Web Serial pattern: a non-fatal read error (overrun, framing) closes the
-   * reader but leaves `port.readable` — reacquire and carry on; `done` or a
-   * fatal error ends the loop. */
-  async readLoop() {
-    let ended = false;
-    while (this.port.readable && !this.closed && !ended) {
-      const reader = this.port.readable.getReader(); this.reader = reader;
-      try { for (;;) { const { value, done } = await reader.read(); if (done) { ended = true; break; } for (let i = 0; i < value.length; i++) this.parser.push(value[i], f => this.onFrame(f)); } }
-      catch (e) { if (!this.closed) { this.stats.errors++; if (this.onError) this.onError(e); } }
-      finally { try { reader.releaseLock(); } catch {} }
-    }
-  }
+  /* raw bytes on the wire (hello's lone-zero resync between attempts) */
+  writeRaw(bytes) { return this.t.write(bytes); }
   _measure(t0) {
     const now = _now(), rtt = now - t0, s = this.stats, w = this._win;
     s.rtt = rtt; s.rttAvg = s.rttAvg ? s.rttAvg * 0.8 + rtt * 0.2 : rtt; s.reqs++;
     if (rtt > w.max) w.max = rtt; w.n++;
-    if (now - w.t0 >= 1000) { s.rate = w.n * 1000 / Math.max(1, now - w.t0); s.rttMax = w.max; w.t0 = now; w.n = 0; w.max = 0; }
+    if (now - w.t0 >= 1000) { const dt = Math.max(1, now - w.t0); s.rate = w.n * 1000 / dt; s.kbps = w.bytes / dt; s.rttMax = w.max; w.t0 = now; w.n = 0; w.max = 0; w.bytes = 0; }
   }
   onFrame(f) {
     const p = this.pending; if (!p || f.seq !== p.seq) return;
@@ -186,14 +239,14 @@ class Link {
     const done = () => { if (q.key && this.keyed.get(q.key) === q) this.keyed.delete(q.key); };
     const p = this.pending = { seq, type: q.type, resolve: v => { done(); q.resolve(v); }, reject: e => { done(); q.reject(e); }, t0: _now(), timer: null };
     p.timer = setTimeout(() => { if (this.pending === p) { this.pending = null; this.stats.timeouts++; p.reject(new Error('timeout')); this.pump(); } }, q.timeoutMs);
-    this.writer.write(buildFrame(q.type, seq, q.body)).catch(e => { if (this.pending === p) { clearTimeout(p.timer); this.pending = null; p.reject(e); this.pump(); } });
+    this.t.write(buildFrame(q.type, seq, q.body)).catch(e => { if (this.pending === p) { clearTimeout(p.timer); this.pending = null; p.reject(e); this.pump(); } });
   }
   async close() {
     this.closed = true;
     for (const q of [...this.urgent, ...this.normal]) q.reject(new Error('link closed'));
     this.urgent.length = this.normal.length = 0; this.keyed.clear();
     if (this.pending) { clearTimeout(this.pending.timer); this.pending.reject(new Error('link closed')); this.pending = null; }
-    try { await this.reader?.cancel(); } catch {} try { this.writer?.releaseLock(); } catch {} try { await this.port.close(); } catch {}
+    await this.t.close();
   }
 }
 const _now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -209,7 +262,7 @@ async function hello(link, tries = 3) {
     catch (e) {
       last = e; if (link.closed) break;
       await new Promise(r => setTimeout(r, 120));
-      try { await link.writer.write(Uint8Array.of(0)); } catch {}
+      try { await link.writeRaw(Uint8Array.of(0)); } catch {}
     }
   }
   throw last || new Error('no answer');
@@ -309,6 +362,17 @@ function parseState(b) {
   if (b.length >= 258) { st.tableGen = b[255]; st.undoDepth = b[256]; st.selSlice = b[257] === 255 ? -1 : b[257]; }
   if (b.length >= 262) st.srcPos = u32(b, 258);
   if (b.length >= 263) st.redoDepth = b[262];
+  /* KEYS tail (v0.13, → 276): 263 flags2 (b0 srcValid: a voice sounds, so TAP_MARK will be taken · b1 keys follow
+   * markers: Pads with markers), 264 loadAvg / 266 loadMax (the audio callback, ‰ of the block budget, mean and peak
+   * over the last second), 268 j4mV (i16, J4 now), 270 j4Key (the key J4 would play), 271 j5Style (0..8; 255 in the
+   * Brain map → -1), 272 keyFlash (the last key called by any source, 255 none → -1), 273 keySeq (bumps per call),
+   * 274 autoK (the autoslice count last applied, 0 none), 275 nMarkers. An older body leaves them all undefined. */
+  if (b.length >= 276) {
+    st.flags2 = b[263]; st.srcValid = !!(b[263] & 1); st.keysFollow = !!(b[263] & 2);
+    st.loadAvg = u16(b, 264); st.loadMax = u16(b, 266);
+    const mv = u16(b, 268); st.j4mV = mv > 0x7fff ? mv - 0x10000 : mv; st.j4Key = b[270]; st.j5Style = b[271] === 255 ? -1 : b[271];
+    st.keyFlash = b[272] === 255 ? -1 : b[272]; st.keySeq = b[273]; st.autoK = b[274]; st.nMarkers = b[275];
+  }
   return st;
 }
 /* GET_WAVE: one window of the material buffer — n ≤ 480 output bytes, each
@@ -384,10 +448,11 @@ async function editOp(link, op, fields, gen = 0) {
   try {
     const b = await link.request(CMD.action, body, { urgent: true });
     const third = b.length > 2 ? b[2] : null;
-    return { status: 0, ok: true, tableGen: b.length > 1 ? b[1] : null, newIdx: third === 255 ? -1 : third, count: third };
+    const flags = b.length > 3 ? b[3] : 0;   /* v0.13 TAP_MARK: b0 = an existing marker was reused (selected, nothing added) */
+    return { status: 0, ok: true, tableGen: b.length > 1 ? b[1] : null, newIdx: third === 255 ? -1 : third, count: third, flags, reused: !!(flags & KEYS.reused) };
   } catch (e) {
     const s = STATUS.indexOf(e.message); if (s < 0) throw e;
-    return { status: s, ok: false, tableGen: null, newIdx: null, count: null };
+    return { status: s, ok: false, tableGen: null, newIdx: null, count: null, flags: 0, reused: false };
   }
 }
 const editBoundary   = (link, i, pos, gen = 0)             => editOp(link, ACT.setBoundary, [i & 0xff, ...u32b(pos)], gen);
@@ -412,6 +477,23 @@ const tapMark        = (link, snapMs, allowMs, gen = 0)    => editOp(link, ACT.t
 /* EDIT-UNDO: one journal step either way → { ok, tableGen }; BAD_ARGS = nothing to undo / redo (or a firmware without the journal) */
 const editUndo       = link                                => editOp(link, ACT.undoEdit, []);
 const editRedo       = link                                => editOp(link, ACT.redoEdit, []);
+/* ───────────── KEYS (ACTION 32..36, capability "keys": 1, v0.13) ─────────────
+ * Same reply shape as the edit ops. PLAY_KEY and SET_MUTE answer a bare status; the marker ops and AUTOSLICE answer
+ * status, tableGen, count (one undo step each). An older firmware answers BAD_ARGS (unknown op) — the page hides
+ * them unless the descriptor says "keys". */
+const playKey        = (link, key, down)                   => editOp(link, ACT.playKey, [key & 0xff, down ? 1 : 0]);
+const keysFromMarkers = (link, gen = 0)                    => editOp(link, ACT.keysFromMarkers, [], gen);
+const clearMarkers   = (link, gen = 0)                     => editOp(link, ACT.clearMarkers, [], gen);
+/* stopped = true → the pattern stops (the clock runs on, keys still play) */
+const setMute        = (link, stopped)                     => editOp(link, ACT.setMute, [stopped ? 1 : 0]);
+/* k 0..64 markers from the seeded draw (0 removes the grey ones); reroll draws a new seed; join folds this apply into the
+ * previous AUTOSLICE's undo step (every send of one slider drag after the first: a whole drag is one undo step) */
+const autoslice      = (link, k, reroll = false, gen = 0, join = false) => editOp(link, ACT.autoslice, [Math.max(0, Math.min(KEYS.autoMax, Math.round(k))) & 0xff, (reroll ? KEYS.reroll : 0) | (join ? KEYS.join : 0)], gen);
+/* What the descriptor's "audiothurgist" object says the firmware can do (each 0 when absent). */
+function caps(desc) {
+  const a = (desc && desc.audiothurgist) || {};
+  return { ext: a.ext | 0, table: !!a.table, sets: a.sets | 0, scope2: a.scope2 | 0, edit: a.edit | 0, keys: a.keys | 0 };
+}
 
 /* GET_ENV: fetch nSlices × 16 envelope bytes in ≤30-slice chunks. */
 async function fetchEnv(link, n) {
@@ -547,11 +629,12 @@ function manualInfo(desc) {
            presetsHelp: (m && m.presets && m.presets.help) || '', jacks: desc.jacks || [] };
 }
 
-const api = { PROTO, CMD, ACT, REC, NOTE_NAMES, keyName, STATUS, statusName, crc32, cobsEncode, cobsDecode, buildFrame, FrameParser, kMaxFrameBytes, Link,
+const api = { PROTO, CMD, ACT, REC, NOTE_NAMES, keyName, STATUS, statusName, crc32, cobsEncode, cobsDecode, buildFrame, FrameParser, kMaxFrameBytes, Link, SerialTransport, WsTransport, asTransport,
   u16, u32, f32, readStr, hello, getDescriptor, getLive, setLive, concat,
   STATE_MIN, ZONE_MULT, parseState, fetchEnv, parseScope, SCOPE, SCOPE_CH, SCOPE_JACK_ROLE, SCOPE_JACK_IN, scopeVolts, scopeCvCode, scopeAge, scopeReq, parseScope2, scopePlan, fetchScopeFrame, allFields, findField, fieldLabels, pagerInfo, optionsInfo, manualInfo,
   TABLE_ENTRY, TABLE_ENTRY_EDIT, TABLE_CHUNK, fetchWave, parseWave, fetchTable, parseTableChunk, fetchHits, parseHitsChunk,
   SET_STATE, SET_RESULT, setNameOk, setLabelName, nameBytes, saveSet, loadSet,
-  EDIT, editOp, editBoundary, editEntry, editAdd, editSplit, editMerge, editTombstone, editSetKey, editSwapKeys, editNudgeAll, editPromote, editFromOnsets, audition, release, tapMark, editUndo, editRedo };
+  EDIT, editOp, editBoundary, editEntry, editAdd, editSplit, editMerge, editTombstone, editSetKey, editSwapKeys, editNudgeAll, editPromote, editFromOnsets, audition, release, tapMark, editUndo, editRedo,
+  KEYS, playKey, keysFromMarkers, clearMarkers, setMute, autoslice, caps };
 if (typeof module === 'object' && module.exports) module.exports = api; else root.HL = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

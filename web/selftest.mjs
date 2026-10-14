@@ -26,7 +26,11 @@ const GEOM = new Set(['arc', 'arcTo', 'ellipse', 'moveTo', 'lineTo', 'rect', 'fi
 const nanDraws = [];
 /* ── 1. golden vectors (the SDK's hostlink_golden.json) ── */
 const gArg = process.argv.indexOf('--golden');
-const goldenPath = gArg > 0 ? process.argv[gArg + 1] : path.resolve(here, '..', '..', 'alchemy-sdk', 'tests', 'host', 'golden', 'hostlink_golden.json');
+/* ../alchemy-sdk beside the repo — or beside any directory above it, so a git worktree under .claude/ finds it too */
+const goldenPath = gArg > 0 ? process.argv[gArg + 1] : (() => {
+  const rel = ['alchemy-sdk', 'tests', 'host', 'golden', 'hostlink_golden.json']; let dir = path.resolve(here, '..', '..');
+  for (;;) { const p = path.join(dir, ...rel); if (existsSync(p)) return p; const up = path.dirname(dir); if (up === dir) return path.resolve(here, '..', '..', ...rel); dir = up; }
+})();
 if (!existsSync(goldenPath)) { console.log('golden: skipped (no ' + goldenPath + ')'); }
 else {
   const g = JSON.parse(readFileSync(goldenPath, 'utf8'));
@@ -64,6 +68,7 @@ function stateBody(len) {
   if (len >= 258) { b[255] = 77; b[256] = 3; b[257] = 255; }              /* EDIT: tableGen 77, undo depth 3, no selection */
   if (len >= 262) dv.setUint32(258, 123456, true);                        /* EDIT: srcPos */
   if (len >= 263) b[262] = 2;                                             /* EDIT-UNDO: redo depth 2 */
+  if (len >= 276) { b[263] = 3; dv.setUint16(264, 412, true); dv.setUint16(266, 905, true); dv.setInt16(268, -250, true); b[270] = 0; b[271] = 255; b[272] = 255; b[273] = 17; b[274] = 12; b[275] = 5; }   /* KEYS v0.13 */
   return b;
 }
 {
@@ -178,6 +183,28 @@ function stateBody(len) {
   await hl.close();
 }
 
+/* ── 2c. Transports (Kyklophoria's split): Link(transport), bytesIn / kbps, and unplug detection — the read loop
+ *        ending without a close() is onClose, which the page turns into a disconnect ── */
+{
+  const nap = ms => new Promise(res => setTimeout(res, ms));
+  const dv = new DEMO.FakeDevice({ latencyMs: 1 }), port = new DEMO.FakePort(dv);
+  const l = new HL.Link(new HL.SerialTransport(port)); let closed = 0; l.onClose = () => closed++;
+  await l.start(); const info = await HL.hello(l);
+  check('Link over an explicit SerialTransport (the fake port), kind serial, the port reachable', l.kind === 'serial' && l.port === port && info.name === 'Audiothurgist');
+  check('Link given a bare port wraps it in a SerialTransport', new HL.Link(new DEMO.FakePort(dv)).t instanceof HL.SerialTransport);
+  check('bytesIn counts what arrived', l.stats.bytesIn > 60);
+  l._win.t0 -= 1000; await l.request(HL.CMD.state); check('kbps from the last one-second window', l.stats.kbps > 0 && l.stats.rate > 0);
+  port.unplug(); await nap(30);
+  check('the cable pulled: the read loop ends and onClose fires, once', closed === 1);
+  const p2 = new DEMO.FakePort(dv), l2 = new HL.Link(p2); let closed2 = 0; l2.onClose = () => closed2++;
+  await l2.start(); await HL.hello(l2); await l2.close(); await nap(20);
+  check('a close() the page asked for is not an unplug', closed2 === 0 && l2.closed);
+  const ws = { sent: null, send(b) { this.sent = b; }, close() { this.shut = true; } }, wt = new HL.WsTransport(ws); let got = null, wc = 0;
+  wt.onClose = () => wc++; await wt.start(b => { got = b; }); await wt.write(Uint8Array.of(9));
+  ws.onmessage({ data: Uint8Array.of(1, 2, 3).buffer }); ws.onclose();
+  check('WsTransport: bytes in, bytes out, a socket that closes by itself is onClose', got && got.length === 3 && ws.sent[0] === 9 && wc === 1 && wt.kind === 'bridge');
+}
+
 /* ── 3. The Link end to end over the fake module: priority, coalescing, RTT, live blob ── */
 const dev = new DEMO.FakeDevice({ tail: 170, latencyMs: 3 });
 const link = new HL.Link(new DEMO.FakePort(dev));
@@ -189,12 +216,12 @@ await link.start();
   check('descriptor crc+json', desc && desc.dv === 1);
   const opts = HL.optionsInfo(desc);
   const wantIds = DEMO.OPTION_FIELDS.map(f => f[0]);
-  check('options block: 18 enum fields with the firmware ids (Key Plays and Tap Allowance included)', opts && opts.fields.length === DEMO.OPTION_FIELDS.length && opts.fields.length === 18 && opts.fields.some(f => f.id === 'tap.allow') && wantIds.every(id => opts.fields.some(f => f.id === id)) && opts.fields.some(f => f.id === 'key.plays'));
+  check('options block: 24 enum fields with the firmware ids (OPT8: Jacks, Key Plays, the record trio, Quantize, Tap Allowance, Autosave)', opts && opts.fields.length === DEMO.OPTION_FIELDS.length && opts.fields.length === 24 && opts.comp.hash === 0x4F505438 && ['jacks', 'sampling', 'rec.src', 'record', 'quantize', 'autosave'].every(id => opts.fields.some(f => f.id === id)) && opts.fields.some(f => f.id === 'tap.allow') && wantIds.every(id => opts.fields.some(f => f.id === id)) && opts.fields.some(f => f.id === 'key.plays'));
   const gl = HL.fieldLabels(desc, 'grammar.mode');
   check('labels from disp', gl[3] === 'Euclid' && HL.fieldLabels(desc, 'sample.idx').length === DEMO.FILES.length);
-  check('grammar has five labels, index 4 = Camp', gl.length === 5 && gl[4] === 'Camp' && opts.fields.find(f => f.id === 'grammar.mode').zones === 5);
+  check('grammar has seven labels: Camp at 4, Play at 5, Pads at 6', gl.length === 7 && gl[4] === 'Camp' && /^Play/.test(gl[5]) && /^Pads/.test(gl[6]) && opts.fields.find(f => f.id === 'grammar.mode').zones === 7);
   const pg = HL.pagerInfo(desc); check('pager: 2 pages × 6 knobs with help', pg && pg.pages === 2 && Object.keys(pg.knobs).length === 12 && /Grids/.test(pg.knobs['1:0'].help));
-  const man = HL.manualInfo(desc); check('manual block', man && man.sections.length === 3 && man.sections.some(s => s.id === 'camp') && man.jacks.length === 10 && man.tagline);
+  const man = HL.manualInfo(desc); check('manual block (v0.13.0-beta text)', man && man.sections.length >= 5 && man.sections.some(s => s.id === 'keymap' && /0 V = key 0/.test(s.body)) && man.sections.some(s => s.id === 'buttons' && /start \/ stop/.test(s.body)) && man.jacks.length === 10 && man.tagline);
 
   /* Priority: queue five polls, then an urgent action → the action reaches the device before the polls still queued. */
   dev.log.length = 0;
@@ -473,7 +500,7 @@ await link.start();
   const info = await HL.hello(l); const desc = await HL.getDescriptor(l, info);
   const state = async () => HL.parseState(await l.request(HL.CMD.state));
   const table = () => HL.fetchTable(l, { edit: true });
-  check('demo advertises edit', desc.audiothurgist.edit === 1 && desc.audiothurgist.sets === 1);
+  check('demo advertises edit 2 and keys 1 (v0.13)', desc.audiothurgist.edit === 2 && desc.audiothurgist.keys === 1 && desc.audiothurgist.sets === 1 && HL.caps(desc).keys === 1);
   const s0 = await state();
   check('tail: tableGen ≥ 1, undoDepth 0, redoDepth 0, selSlice −1, srcPos inside the material', s0.tableGen >= 1 && s0.undoDepth === 0 && s0.redoDepth === 0 && s0.selSlice === -1 && s0.srcPos >= 0 && s0.srcPos < s0.bufLen && s0.nTable === 35);
   const t0 = await table();
@@ -581,7 +608,10 @@ await link.start();
   r = await HL.release(l);
   check('RELEASE: the voice and the held request go', r.ok && d.audition === null && d.auditionHeld === null);
   check('AUDITION BAD_ARGS: flags 4, start past freePos, lenMs 0 (under 64 samples)', (await HL.audition(l, 0, 100, 4)).status === 2 && (await HL.audition(l, s.freePos + 1, 100)).status === 2 && (await HL.editOp(l, HL.ACT.audition, [0, 0, 0, 0, 0, 0, 0])).status === 2);
-  /* TAP_MARK: the fake's position snapshot pinned — allowance, onset snap, the length to the next onset, orange */
+  /* TAP_MARK: the fake's position snapshot pinned — allowance, onset snap, the length to the next onset, orange. The
+   * onsets above left a marker on every kick; v0.13 would select those instead of stacking, so clear them first. */
+  r = await HL.clearMarkers(l); t = await table();
+  check('CLEAR_MARKERS: every live marker (grey and orange) tombstoned, the count answered, recordings kept', r.ok && r.count >= 16 && !t.entries.some((e, i) => i >= 32 && e.len > 0 && e.key < 0) && t.entries.filter((e, i) => i >= 32 && e.len > 0 && e.key >= 0).length === 3);
   d.srcPos = () => 8 * SL + 1000;
   r = await HL.tapMark(l, 10, 20, (await state()).tableGen);
   t = await table();
@@ -593,6 +623,13 @@ await link.start();
   r = await HL.tapMark(l, 10, 0); t = await table();
   check('TAP_MARK at 4 SL + 100: snaps to the kick; slice 5 is silent, so the next onset is 6 SL = the 250 ms cap', r.ok && t.entries[r.newIdx].start === 4 * SL && t.entries[r.newIdx].len === 12000);
   check('TAP_MARK BAD_ARGS: a short body', (await HL.editOp(l, HL.ACT.tapMark, [10])).status === 2);
+  /* v0.13: a tap within 10 ms of a live marker selects it — no new entry, no gen bump, flags b0, the panel selection */
+  { const m8 = t.entries.findIndex((e, i) => i >= 32 && e.start === 8 * SL && e.len > 0 && e.key < 0), g0 = (await state()).tableGen, n0 = t.nTable;
+    d.srcPos = () => 8 * SL + 1000 + 200; r = await HL.tapMark(l, 10, 20); s = await state();
+    check('TAP_MARK v0.13: a tap on the kick again reuses marker ' + m8 + ' (flags b0), nothing added, the gen unchanged, selSlice says it', r.ok && r.reused && r.flags === 1 && r.newIdx === m8 && s.tableGen === g0 && s.nTable === n0 && s.selSlice === m8);
+    d.srcPos = DEMO.FakeDevice.prototype.srcPos; d.muted = true; d.voice = null; s = await state(); r = await HL.tapMark(l, 10, 20);
+    check('TAP_MARK v0.13: nothing sounds (stopped) → srcValid clear in the tail, BAD_STATE, and srcPos holds still', s.srcValid === false && r.status === 3 && (await state()).srcPos === s.srcPos);
+    d.muted = false; }
   /* BAD_STATE during a take (the audition is not gated), during a set op */
   await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.recArm, 2), { urgent: true });
   s = await state();
@@ -697,6 +734,123 @@ await link.start();
     await ul.close();
   }
   void os;
+  await ol.close();
+}
+
+/* ── 7b. KEYS (v0.13): the tail from 263, ACTION 32..36 and the v0.13 TAP_MARK over the fake module — the transport
+ *        (SET_MUTE), the pads (PLAY_KEY), markers → keys, clear markers, the autoslice count (nested draws, re-roll,
+ *        undo), Pads' keys following the markers, Play's loop, the jack map following the grammar, and a 0.12 firmware ── */
+{
+  const k0 = HL.parseState(stateBody(263)); check('state 263: no KEYS tail', k0.srcValid === undefined && k0.loadAvg === undefined && k0.keyFlash === undefined);
+  check('state 275: one short of the KEYS tail', HL.parseState(stateBody(275)).srcValid === undefined);
+  const k1 = HL.parseState(stateBody(276));
+  check('state 276: flags2 (srcValid, keys follow), load avg / max ‰, J4 −250 mV → key 0, J5 255 → −1 (Brain map), no key flash, keySeq, autoK, nMarkers',
+    k1.srcValid === true && k1.keysFollow === true && k1.loadAvg === 412 && k1.loadMax === 905 && k1.j4mV === -250 && k1.j4Key === 0 && k1.j5Style === -1 && k1.keyFlash === -1 && k1.keySeq === 17 && k1.autoK === 12 && k1.nMarkers === 5 && k1.redoDepth === 2);
+  { const b = stateBody(276); b[263] = 0; b[272] = 9; b[271] = 4; const s = HL.parseState(b); check('state 276: flags clear, key 9 flashed, style 4', s.srcValid === false && s.keysFollow === false && s.keyFlash === 9 && s.j5Style === 4); }
+  check('state 300: a longer body still parses the KEYS tail', HL.parseState(stateBody(300)).nMarkers === 5);
+  check('ACT: the KEYS ops 32..36', HL.ACT.playKey === 32 && HL.ACT.keysFromMarkers === 33 && HL.ACT.clearMarkers === 34 && HL.ACT.setMute === 35 && HL.ACT.autoslice === 36 && HL.KEYS.styles.length === 9);
+
+  const SL = DEMO.SLICE_LEN;
+  const d = new DEMO.FakeDevice({ kit: true, nSlices: 32, latencyMs: 1 });
+  const l = new HL.Link(new DEMO.FakePort(d)); await l.start();
+  const info = await HL.hello(l); const desc = await HL.getDescriptor(l, info);
+  const state = async () => HL.parseState(await l.request(HL.CMD.state));
+  const table = () => HL.fetchTable(l, { edit: true });
+  const nap = ms => new Promise(res => setTimeout(res, ms));
+  let s = await state(), r, t;
+  check('hello: the beta version, a 276-byte body, caps edit 2 + keys 1', info.fw === DEMO.FW && info.fw === '0.13.0-beta-demo' && HL.caps(desc).keys === 1 && HL.caps(desc).edit === 2 && s.nMarkers === 0 && s.srcValid === true && s.loadAvg > 0 && s.loadMax >= s.loadAvg);
+  /* the transport */
+  r = await HL.setMute(l, true); s = await state();
+  check('SET_MUTE 1: stopped (flags b0), nothing sounds → srcValid clear', r.ok && s.muted === true && s.srcValid === false);
+  const held = s.srcPos; await nap(60); s = await state();
+  check('…and srcPos holds still while nothing sounds', s.srcPos === held);
+  r = await HL.setMute(l, true); s = await state(); check('SET_MUTE is idempotent (not a toggle)', r.ok && s.muted === true);
+  check('SET_MUTE 2 → BAD_ARGS', (await HL.editOp(l, HL.ACT.setMute, [2])).status === 2);
+  /* the pads: a key sounds while stopped, so a tap is taken */
+  const seq0 = s.keySeq; r = await HL.playKey(l, 3, true); s = await state();
+  check('PLAY_KEY(3, down) while stopped: the flash names key 3, keySeq bumps, callFlash is its entry (the recording, 32), srcValid while it sounds', r.ok && s.keyFlash === 3 && s.keySeq === ((seq0 + 1) & 255) && s.callFlash === 32 && s.srcValid === true && s.muted === true);
+  r = await HL.tapMark(l, 10, 0); check('TAP_MARK is taken while a pad sounds (stopped)', r.ok && r.newIdx >= 35 && r.reused === false && r.flags === 0);
+  check('PLAY_KEY BAD_ARGS: key 24, a short body', (await HL.playKey(l, 24, true)).status === 2 && (await HL.editOp(l, HL.ACT.playKey, [3])).status === 2);
+  await HL.editUndo(l);
+  /* Key Plays = Held: the voice lasts until the up */
+  d.options[DEMO.O['key.plays']] = 1; await HL.playKey(l, 0, true); await nap(250);
+  check('Held: the voice still sounds 250 ms on (slice 0 is 125 ms)', d.voiceOn() === true);
+  await HL.playKey(l, 0, false); check('…and the up releases it', d.voiceOn() === false);
+  d.options[DEMO.O['key.plays']] = 0; await HL.setMute(l, false);
+  /* the autoslice count: a seeded weighted draw, nested in k, a re-roll draws again, 0 clears the greys, orange stays */
+  const greys = tb => tb.entries.map((e, i) => [e, i]).filter(([e, i]) => i >= tb.nSlices && e.len > 0 && e.key < 0 && !(e.flags & HL.EDIT.orange)).map(([e]) => e.start).sort((a, b) => a - b);
+  r = await HL.autoslice(l, 8); t = await table(); s = await state(); const g8 = greys(t);
+  check('AUTOSLICE(8): eight grey markers inside the break, the count answered, autoK 8, nMarkers 8', r.ok && r.count === 8 && g8.length === 8 && g8.every(p => p > 0 && p < s.bufLen) && s.autoK === 8 && s.nMarkers === 8);
+  r = await HL.autoslice(l, 12); t = await table(); const g12 = greys(t);
+  check('AUTOSLICE(12), same seed: the 8 are a subset of the 12 (turning up adds onsets)', r.ok && g12.length === 12 && g8.every(p => g12.includes(p)));
+  r = await HL.autoslice(l, 5); t = await table(); const g5 = greys(t);
+  check('AUTOSLICE(5): a subset of the 8 (turning down removes the last drawn)', r.ok && g5.length === 5 && g5.every(p => g8.includes(p)));
+  r = await HL.autoslice(l, 8, true); t = await table(); const r8 = greys(t);
+  check('AUTOSLICE(8, re-roll): a new seed, a different chop', r.ok && r8.length === 8 && r8.join() !== g8.join());
+  const gBefore = r8.join(); r = await HL.editUndo(l); t = await table();
+  check('one undo step: the re-roll undone gives the 5 back', r.ok && greys(t).join() === g5.join());
+  await HL.editRedo(l); t = await table(); check('…redo gives the re-roll back', greys(t).join() === gBefore);
+  check('AUTOSLICE BAD_ARGS: k 65 on the wire (the helper clamps to 64); a stale gen → BAD_STATE', (await HL.editOp(l, HL.ACT.autoslice, [65, 0])).status === 2 && (await HL.autoslice(l, 4, false, ((await state()).tableGen + 7) % 255 + 1)).status === 3);
+  /* markers → keys: in time order onto keys 0.., the recording keys (3, 7, 14) skipped */
+  s = await state(); r = await HL.keysFromMarkers(l, s.tableGen); s = await state(); t = await table();
+  const ms = t.entries.map((e, i) => [e, i]).filter(([e, i]) => i >= 32 && e.len > 0 && e.key < 0).sort((a, b) => a[0].start - b[0].start).map(([, i]) => i);
+  const freeKeys = [0, 1, 2, 4, 5, 6, 8, 9];
+  check('KEYS_FROM_MARKERS: 8 markers → keys 0 1 2 4 5 6 8 9 in time order; the recordings keep keys 3, 7, 14', r.ok && r.count === 8 && freeKeys.every((k, j) => s.keySlice[k] === ms[j]) && s.keySlice[3] === 32 && s.keySlice[7] === 33 && s.keySlice[14] === 34);
+  check('KEYS_FROM_MARKERS: the keys past the last marker are on their span slices', [10, 11, 15, 23].every(k => s.keySlice[k] === d.spanSlice(k)));
+  r = await HL.editUndo(l); s = await state(); check('…one undo step puts the keys back on the grid', r.ok && s.keySlice[0] === 0 && s.keySlice[1] === 1);
+  await HL.editRedo(l);
+  /* re-spanned in place: a key on a grey marker keeps playing a marker after the count moves */
+  { const t0 = (await state()).keySlice[0]; r = await HL.autoslice(l, 10); s = await state(); t = await table();
+    check('AUTOSLICE re-spans the grey markers in place — key 0 still on a live marker, its index kept', r.ok && s.keySlice[0] === t0 && t.entries[t0].len > 0 && t.entries[t0].key < 0);
+    await HL.autoslice(l, 8); }
+  /* JOIN (flags b1): a drag's sends after the first fold into one undo step */
+  { const u0 = (await state()).undoDepth; await HL.autoslice(l, 9); await HL.autoslice(l, 11, false, 0, true); await HL.autoslice(l, 13, false, 0, true); s = await state(); t = await table();
+    check('AUTOSLICE JOIN: three sends of one drag are one undo step (flags b1 on the wire after the first)', s.undoDepth === u0 + 1 && greys(t).length === 13);
+    r = await HL.editUndo(l); t = await table(); check('…and one undo takes the whole drag back (to the 8)', r.ok && greys(t).length === 8); }
+  /* an orange marker's onset is not drawn again (10 ms) */
+  { const o = d.hits.find(p => p > 4 * DEMO.SLICE_LEN && d.onsetStrength(p) >= 200); await HL.editAdd(l, null, o, 2400, HL.EDIT.orange); await HL.autoslice(l, 30); t = await table();
+    check('AUTOSLICE skips an onset within 10 ms of an orange marker', !greys(t).some(p => Math.abs(p - o) <= 480));
+    await HL.editUndo(l); await HL.editUndo(l); await HL.autoslice(l, 8); }
+  /* an orange marker survives the autoslice and is cleared by CLEAR_MARKERS with the rest */
+  await HL.editAdd(l, null, 20 * SL, SL, HL.EDIT.orange); r = await HL.autoslice(l, 0); t = await table(); s = await state();
+  check('AUTOSLICE(0): the grey markers go, the orange one stays', r.ok && r.count === 0 && greys(t).length === 0 && s.nMarkers === 1 && s.autoK === 0);
+  r = await HL.clearMarkers(l); t = await table(); s = await state();
+  check('CLEAR_MARKERS: the count, every key off a marker back to its grid slice, the recordings untouched', r.ok && r.count === 1 && s.nMarkers === 0 && Array.from(s.keySlice).every((tt, k) => [3, 7, 14].includes(k) ? tt === { 3: 32, 7: 33, 14: 34 }[k] : tt < 32));
+  r = await HL.clearMarkers(l); check('CLEAR_MARKERS with none: OK, count 0, the gen unchanged', r.ok && r.count === 0 && r.tableGen === (await state()).tableGen);
+  /* the grammars: the jack map follows (Follow grammar: Play and Pads → Voice), J5 reads a style there, 255 in Brain */
+  const gram = g => { d.setGrammar(g, d.grammar); d.options[DEMO.O['grammar.mode']] = g; };
+  gram(DEMO.GRAM.grids); s = await state(); check('Grids: the Brain map (175 = 0), J5 is a gate (style −1)', s.jackMap === 0 && s.j5Style === -1 && s.j4Key >= 0 && s.j4Key <= 23);
+  { await HL.autoslice(l, 4); await HL.keysFromMarkers(l); for (let k = 0; k < 24; k++) if (![3, 7, 14].includes(k)) await HL.editSetKey(l, k, d.spanSlice(k)); const u0 = (await state()).undoDepth;
+    gram(DEMO.GRAM.pads); s = await state();
+    check('entering Pads puts the markers on the keys once, as its own undo step', s.undoDepth === u0 + 1 && s.keySlice[0] >= 32 && s.keysFollow === true);
+    await HL.editUndo(l); await HL.clearMarkers(l); gram(DEMO.GRAM.grids); }
+  gram(DEMO.GRAM.pads); s = await state(); check('Pads: the Voice map, J5 a style 0..8, the pattern silent (nothing sounds)', s.jackMap === 1 && s.j5Style >= 0 && s.j5Style <= 8 && s.srcValid === false);
+  d.options[DEMO.O.jacks] = 1; s = await state(); check('Jacks = Brain overrides the grammar', s.jackMap === 0); d.options[DEMO.O.jacks] = 0;
+  check('Pads: TAP_MARK with nothing sounding → BAD_STATE', (await HL.tapMark(l, 10, 0)).status === 3);
+  r = await HL.autoslice(l, 6); s = await state(); t = await table();
+  const pm = t.entries.map((e, i) => [e, i]).filter(([e, i]) => i >= 32 && e.len > 0 && e.key < 0).sort((a, b) => a[0].start - b[0].start).map(([, i]) => i);
+  check('Pads: AUTOSLICE(6) puts the markers on keys by itself (keys follow markers, tail 263 b1)', r.ok && s.keysFollow === true && pm.length === 6 && [0, 1, 2, 4, 5, 6].every((k, j) => s.keySlice[k] === pm[j]));
+  r = await HL.editUndo(l); s = await state(); check('…and one undo takes the markers and the keys back together', r.ok && s.nMarkers === 0 && s.keySlice[0] === 0 && s.keysFollow === false);
+  const ev0 = s.looperEvents; await HL.playKey(l, 5, true); s = await state();
+  check('Pads: a pad sounds and writes nothing', s.keyFlash === 5 && s.looperEvents === ev0 && s.srcValid === true);
+  gram(DEMO.GRAM.play); s = await state();
+  check('Play: an empty loop to start (every step a rest, no events), the Voice map', s.looperEvents === 0 && Array.from(s.src).slice(0, 32).every(x => x === -1) && s.jackMap === 1);
+  await HL.playKey(l, 2, true); s = await state(); const wrote = Array.from(s.src).findIndex(x => x === s.keySlice[2]);
+  check('Play: a pad writes the loop — one event, its entry on a step', s.looperEvents === 1 && wrote >= 0);
+  await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.looperUndo), { urgent: true }); s = await state();
+  check('Play: ACTION 12 takes it back (B2\'s undo)', s.looperEvents === 0 && Array.from(s.src).slice(0, 32).every(x => x === -1));
+  await HL.playKey(l, 2, true); await HL.playKey(l, 4, true); await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.looperClear), { urgent: true }); s = await state();
+  check('Play: ACTION 13 clears the loop', s.looperEvents === 0 && Array.from(s.src).slice(0, 32).every(x => x === -1));
+  gram(DEMO.GRAM.classic); await l.close();
+
+  /* a 0.12 firmware: no "keys", edit 1, the 263-byte body, ACTION 32..36 unknown, TAP_MARK taken whatever sounds */
+  const o = new DEMO.FakeDevice({ kit: true, nSlices: 32, latencyMs: 1, keys: false });
+  const ol = new HL.Link(new DEMO.FakePort(o)); await ol.start();
+  const oi = await HL.hello(ol), od = await HL.getDescriptor(ol, oi), ob = await ol.request(HL.CMD.state); const os = HL.parseState(ob);
+  check('0.12 firmware: edit 1, no keys, its version, the 263-byte body (no KEYS tail)', HL.caps(od).keys === 0 && HL.caps(od).edit === 1 && oi.fw === '0.12.3-demo' && ob.length === 263 && os.srcValid === undefined && os.redoDepth === 0);
+  check('0.12 firmware: ACTION 32..36 → BAD_ARGS', (await HL.playKey(ol, 1, true)).status === 2 && (await HL.keysFromMarkers(ol)).status === 2 && (await HL.clearMarkers(ol)).status === 2 && (await HL.setMute(ol, true)).status === 2 && (await HL.autoslice(ol, 4)).status === 2);
+  o.muted = true; r = await HL.tapMark(ol, 10, 0); const r2 = await HL.tapMark(ol, 10, 0);
+  check('0.12 firmware: TAP_MARK taken while stopped, and two taps stack (the old behaviour), a three-byte reply', r.ok && r2.ok && r2.newIdx !== r.newIdx && r.flags === 0);
   await ol.close();
 }
 
@@ -922,7 +1076,7 @@ const ED = require('./edit.js');
   check('FROM_ONSETS(210, 35 ms): the preview\'s count is the module\'s, grey markers made, labelled', ro.ok && ro.count === prev.count && prev.count >= 6 && Hh.table.entries.filter((e, i) => i >= Hh.table.nSlices && ED.isLive(e) && !ED.isOrange(e) && e.key < 0 && e.start < Hh.st.bufLen).length === ro.count && ed.history.list()[0].label === `onsets ≥ 82 % → ${ro.count}`);
   const b5 = Hh.table.entries[5].start; await ed.nudge(5, HL.EDIT.grid); await settle();
   check('nudge all +5 ms (grid)', Hh.table.entries[5].start === b5 + 240 && ed.history.list()[0].label === 'nudge grid +5 ms');
-  d.srcPos = () => 8 * SL + 1000; sent.length = 0; const rt = await ed.tapMark(); await settle();
+  d.srcPos = () => 10 * SL + 1000; sent.length = 0; const rt = await ed.tapMark(); await settle();   /* 10 SL: a snare, no marker there (the kicks have them) */
   check('the Chop pad: TAP_MARK(60, 40 ms from the option), gen unchecked, an orange marker, "tap → marker N"', rt.ok && sent.some(b => b[0] === 29 && b[1] === 60 && b[2] === 40 && b.length === 3) && Hh.table.entries[rt.newIdx].flags === HL.EDIT.orange && ed.history.list()[0].label === `tap → marker ${rt.newIdx}`);
   Hh.status.length = 0; const nBefore = Hh.table.nTable; const ru = await ed.undo(); await settle(); ed.noteState(Hh.st);
   check('undo through the editor: the tap marker is gone, the label is struck through, the tail says redo 1', ru.ok && Hh.table.nTable === nBefore - 1 && ed.history.list()[0].undone === true && /tap → marker/.test(ed.history.list()[0].label) && Hh.st.redoDepth === 1 && ed.history.redoDepth === 1);
@@ -958,16 +1112,103 @@ const ED = require('./edit.js');
   await l.close();
 }
 
+/* ── 10. Descriptor parity: demo.js against the firmware's own source. The fake is only worth its tests while it
+ *        says what the module says, and it had drifted far (five grammars of seven, an 18-byte Options block of 24,
+ *        every default 0). This reads src/audiothurgist.cpp — the Options block's Describe (ids, names, offsets,
+ *        zones, the enum labels from each k…Disp string), its size and schema hash, the live defaults (Serialize's
+ *        byte → struct, the struct's initialiser), the jacks, the pager's knobs and the descriptor root's
+ *        capabilities — and fails on any difference. String parsing, deliberately: no build step. ── */
+function firmwareDescriptor(cpp) {
+  const unC = lit => lit.replace(/\\(["\\])/g, '$1');
+  const disp = {};
+  for (const m of cpp.matchAll(/static\s+const\s+char\s*\*\s*(k\w+Disp)\s*=\s*(?:\/\*[\s\S]*?\*\/\s*)?((?:"(?:[^"\\]|\\.)*"\s*)+);/g))
+    disp[m[1]] = JSON.parse(unC([...m[2].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(x => x[1]).join('')));
+  const a = cpp.indexOf('struct Options : Serializable'), b = cpp.indexOf('static Options gOptions;');
+  const block = a >= 0 && b > a ? cpp.slice(a, b) : '';
+  const fields = [...block.matchAll(/w\.Field\("([^"]+)",\s*"([^"]+)",\s*(\d+),\s*FieldType::Enum,\s*([\d.]+)f,\s*(k\w+Disp),\s*(\d+)u/g)]
+    .map(m => ({ id: m[1], name: m[2], off: +m[3], def: +m[4], disp: m[5], zones: +m[6], labels: disp[m[5]] ? disp[m[5]].labels : null }));
+  const size = +((block.match(/kBytes\s*=\s*(\d+)u/) || [])[1]);
+  const hash = parseInt((block.match(/SchemaHash\(\)\s*const\s*override\s*\{\s*return\s*(0x[0-9A-Fa-f]+)u/) || [])[1], 16);
+  /* the live defaults: Serialize says which struct holds byte i; its declaration's `= {N}` (or the struct's member initialiser) the value */
+  const defaults = [];
+  for (const m of block.matchAll(/o\[(\d+)\]\s*=\s*(g\w+)\.(sel|mode)/g)) {
+    const decl = cpp.match(new RegExp('static\\s+(\\w+)\\s+' + m[2] + '\\s*(?:=\\s*\\{\\s*(\\d+)\\s*\\})?\\s*;'));
+    let v = decl && decl[2] != null ? +decl[2] : null;
+    if (v == null && decl) { const st = cpp.match(new RegExp('struct\\s+' + decl[1] + '\\s*\\{[^}]*?\\b' + m[3] + '\\s*=\\s*(\\d+)')); v = st ? +st[1] : 0; }
+    defaults[+m[1]] = v;
+  }
+  const jacks = [...cpp.matchAll(/^Jack\s+jk\d+\s*\(\s*"([^"]+)",\s*"([^"]+)"/gm)].map(m => ({ id: m[1], name: m[2] }));
+  const knob = {}; for (const m of cpp.matchAll(/VirtualKnob\s+(\w+)\s*=\s*VirtualKnob\(\w+,\s*"([^"]+)"\)[\s\S]*?\.Ident\("([^"]+)"\)/g)) knob[m[1]] = { name: m[2], id: m[3] };
+  const pages = [...cpp.matchAll(/Page\s+\w+\s*=\s*Page\((\d+)\)\.Name\("([^"]+)"\)[\s\S]*?\.Knobs\(([^)]*)\)/g)].map(m => ({ page: +m[1], name: m[2], knobs: m[3].split(',').map(x => knob[x.trim()] || null) }));
+  const root = cpp.match(/return\s+"(\\"audiothurgist\\":\{(?:[^"\\]|\\.)*\})";/);
+  const caps = root ? JSON.parse('{' + unC(root[1]) + '}').audiothurgist : null;
+  return { fields, size, hash, defaults, jacks, pages, caps };
+}
+function parityDiffs(fw, demoDesc, demoDefaults) {
+  const out = [], opt = demoDesc.components.find(c => c.id === 'options'), pager = demoDesc.components.find(c => c.kind === 'pager');
+  if (!fw.fields.length) out.push('no Options fields parsed from the firmware');
+  if (opt.size !== fw.size) out.push(`Options size: demo ${opt.size}, firmware ${fw.size}`);
+  if (opt.hash !== fw.hash) out.push(`Options schema hash: demo 0x${opt.hash.toString(16)}, firmware 0x${(fw.hash || 0).toString(16)}`);
+  if (opt.fields.length !== fw.fields.length) out.push(`Options fields: demo ${opt.fields.length}, firmware ${fw.fields.length}`);
+  fw.fields.forEach((f, i) => {
+    const d = opt.fields.find(x => x.id === f.id);
+    if (!d) { out.push(`field ${f.id}: missing from the demo`); return; }
+    for (const k of ['name', 'off', 'zones', 'def']) if (d[k] !== f[k]) out.push(`field ${f.id}.${k}: demo ${JSON.stringify(d[k])}, firmware ${JSON.stringify(f[k])}`);
+    if (!f.labels) out.push(`field ${f.id}: the firmware's ${f.disp} did not parse`);
+    else if (JSON.stringify(d.disp.labels) !== JSON.stringify(f.labels)) out.push(`field ${f.id} labels: demo ${JSON.stringify(d.disp.labels)}, firmware ${JSON.stringify(f.labels)}`);
+    if (f.labels && f.labels.length !== f.zones) out.push(`field ${f.id}: the firmware's own zones ${f.zones} ≠ its ${f.labels.length} labels`);
+    if (opt.fields[i] && opt.fields[i].id !== f.id) out.push(`field order at ${i}: demo ${opt.fields[i].id}, firmware ${f.id}`);
+    if (demoDefaults[f.off] !== fw.defaults[f.off]) out.push(`live default of ${f.id} (byte ${f.off}): demo ${demoDefaults[f.off]}, firmware ${fw.defaults[f.off]}`);
+  });
+  if (JSON.stringify(demoDesc.jacks.map(j => [j.id, j.name])) !== JSON.stringify(fw.jacks.map(j => [j.id, j.name]))) out.push('jacks: ' + JSON.stringify(demoDesc.jacks.map(j => j.id)) + ' vs ' + JSON.stringify(fw.jacks.map(j => j.id)));
+  for (const pg of fw.pages) {
+    if (pager.pageNames[pg.page] !== pg.name) out.push(`page ${pg.page}: demo ${pager.pageNames[pg.page]}, firmware ${pg.name}`);
+    pg.knobs.forEach((k, pot) => { const d = pager.fields.find(f => f.page === pg.page && f.pot === pot); if (!k || !d || d.id !== k.id || d.name !== k.name) out.push(`knob ${pg.page}:${pot}: demo ${d && d.id + '/' + d.name}, firmware ${k && k.id + '/' + k.name}`); });
+  }
+  /* capabilities: every one the firmware declares, at least as high in the demo (the demo may run ahead of a firmware
+   * still being built — v0.13's "keys" and "edit": 2 — and says so below; behind it, or different, is drift) */
+  for (const [k, v] of Object.entries(fw.caps || {})) { const dv = demoDesc.audiothurgist[k]; if (dv == null || (k === 'edit' || k === 'keys' || k === 'scope2' ? dv < v : dv !== v)) out.push(`capability ${k}: demo ${dv}, firmware ${v}`); }
+  if (!fw.caps) out.push('the descriptor root (DescriptorRootJson) did not parse');
+  return out;
+}
+{
+  const fArg = process.argv.indexOf('--fw-src'), cppPath = fArg > 0 ? path.resolve(process.argv[fArg + 1]) : path.resolve(here, '..', 'src', 'audiothurgist.cpp');
+  if (!existsSync(cppPath)) console.log('parity: skipped (no ' + cppPath + ')');
+  else {
+    const cpp = readFileSync(cppPath, 'utf8'), fw = firmwareDescriptor(cpp), dd = DEMO.buildDescriptor(true, true), defs = DEMO.OPTION_FIELDS.map(f => f[3]);
+    check('parity: the firmware source parses — 24 Options fields with labels, size, hash, defaults, ten jacks, two pages of six knobs, the root caps',
+      fw.fields.length === 24 && fw.fields.every(f => Array.isArray(f.labels)) && fw.size === 24 && fw.hash === 0x4F505438 && fw.defaults.length === 24 && fw.defaults.every(v => Number.isInteger(v)) && fw.jacks.length === 10 && fw.pages.length === 2 && fw.pages.every(p => p.knobs.length === 6 && p.knobs.every(Boolean)) && !!fw.caps,
+      JSON.stringify({ n: fw.fields.length, size: fw.size, hash: fw.hash, d: fw.defaults, j: fw.jacks.length, p: fw.pages.length, caps: fw.caps }).slice(0, 300));
+    const diffs = parityDiffs(fw, dd, defs);
+    check('parity: demo.js = the firmware (fields, labels, offsets, zones, defaults, jacks, knobs, caps)', diffs.length === 0, diffs.slice(0, 6).join(' · '));
+    const ahead = Object.keys(dd.audiothurgist).filter(k => fw.caps && JSON.stringify(dd.audiothurgist[k]) !== JSON.stringify(fw.caps[k]));
+    if (ahead.length) console.log('parity: the demo runs ahead of this firmware on ' + ahead.map(k => `${k} (${fw.caps[k] ?? 'absent'} → ${dd.audiothurgist[k]})`).join(', ') + ' — v0.13, being built beside it');
+    const live = new DEMO.FakeDevice({ latencyMs: 1 }).options;
+    check('parity: the fake\'s live blob starts at the firmware\'s defaults', Array.from(live).join() === fw.defaults.join());
+    /* the check must bite: one changed label, one moved byte, one default, one missing jack each fail it */
+    const bite = [['Zoom (read on, BreakFix)', 'Zoom (read on)'], ['"quantize", "Quantize", 21', '"quantize", "Quantize", 22'], ['static Sel gTail = {3};', 'static Sel gTail = {2};'], ['Jack jk10("out_r"', 'Jack jk10("out_x"']]
+      .map(([x, y]) => cpp.includes(x) ? parityDiffs(firmwareDescriptor(cpp.replace(x, y)), dd, defs).length : -1);
+    check('parity: the check bites — a changed label, a moved byte, a changed default and a renamed jack each fail it', bite.every(n => n > 0), JSON.stringify(bite));
+  }
+}
+
 /* ── 9. EDIT-UI, the page itself: index.html's inline script under a DOM stub, connected to the fake module through
  *       `?demo=kit`, then the DOM paths driven with synthetic pointer events — the handle drag from the canvas, the
  *       key cells' tap / drag / swap prompt, the Chop pad, the field, and `?demo=noedit`'s view-only fallback ── */
 import vm from 'node:vm';
 const ED9 = require('./edit.js');
+/* The page's colour tokens, per theme, from its own <style> (the stub's getComputedStyle and the contrast check) */
+function cssThemes(html) {
+  const css = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
+  const block = re => { const m = css.match(re); return m ? Object.fromEntries([...m[1].matchAll(/--([\w-]+):\s*([^;}]+)/g)].map(x => [x[1], x[2].trim()])) : {}; };
+  const dark = block(/:root\{([^}]*)\}/);
+  return { css, dark, light: Object.assign({}, dark, block(/:root\[data-theme="light"\]\{([^}]*)\}/)), lightMedia: Object.assign({}, dark, block(/:root:not\(\[data-theme="dark"\]\)\{([^}]*)\}/)) };
+}
 function domStub(html) {
   const ids = new Set([...html.matchAll(/ id="([^"]+)"/g)].map(m => m[1]));
-  const errors = [], warns = [];
+  const errors = [], warns = [], unknownIds = new Set(), themes = cssThemes(html), store = new Map();
   class El {
-    constructor(tag, id) { this.tagName = String(tag).toUpperCase(); this.id = id || ''; this.className = ''; this.style = {}; this.dataset = {}; this.hidden = false; this.disabled = false; this.value = ''; this._text = ''; this._html = ''; this._on = {}; this.children = []; this._q = new Map(); this._parent = null; this._calls = 0; this.offsetWidth = 200; this.offsetHeight = 100; this.width = 0; this.height = 0; this._w = 600; this._h = 290; this.checked = false; this.title = ''; this.textContentSet = 0; }
+    constructor(tag, id) { this._attr = {}; this._log = { text: [], arcs: 0, rects: 0, fills: [] }; this.tagName = String(tag).toUpperCase(); this.id = id || ''; this.className = ''; this.style = {}; this.dataset = {}; this.hidden = false; this.disabled = false; this.value = ''; this._text = ''; this._html = ''; this._on = {}; this.children = []; this._q = new Map(); this._parent = null; this._calls = 0; this.offsetWidth = 200; this.offsetHeight = 100; this.width = 0; this.height = 0; this._w = 600; this._h = 290; this.checked = false; this.title = ''; this.textContentSet = 0; }
     get classList() { const el = this; return { add: (...c) => { for (const x of c) if (!el.classList.contains(x)) el.className = (el.className + ' ' + x).trim(); }, remove: (...c) => { el.className = el.className.split(/\s+/).filter(x => x && !c.includes(x)).join(' '); }, toggle: (x, on) => { const has = el.classList.contains(x); const want = on == null ? !has : !!on; if (want && !has) el.classList.add(x); if (!want && has) el.classList.remove(x); return want; }, contains: x => el.className.split(/\s+/).includes(x) }; }
     get textContent() { return this._text; } set textContent(v) { this._text = String(v); this.textContentSet++; }
     get innerHTML() { return this._html; } set innerHTML(v) { this._html = String(v); this.children.length = 0; this._q.clear(); }
@@ -979,24 +1220,36 @@ function domStub(html) {
     closest(sel) { for (let e = this; e; e = e._parent) if (e.classList.contains(sel.replace(/^\./, ''))) return e; return null; }
     getBoundingClientRect() { return { left: 0, top: 0, width: this._w, height: this._h, right: this._w, bottom: this._h }; }
     setPointerCapture() {} releasePointerCapture() {} focus() {} blur() {}
+    setAttribute(k, v) { this._attr[k] = String(v); } removeAttribute(k) { delete this._attr[k]; } getAttribute(k) { return k in this._attr ? this._attr[k] : null; }
     /* The NaN-draw watch (Kyklophoria): arc(NaN, …) is not an error on any canvas, it draws nothing,
      * indistinguishable from an off-screen mark. Every geometry call is checked for finite numbers. */
-    getContext() { const el = this; return new Proxy({}, { get: (o, k) => { if (k === 'measureText') return () => ({ width: 10 }); if (typeof k === 'string' && k in o) return o[k]; return (...a) => { el._calls++; if (GEOM.has(k)) for (const v of a) if (typeof v === 'number' && !Number.isFinite(v)) { nanDraws.push(k + '(' + a.map(x => String(x)).join(',') + ')'); } }; }, set: (o, k, v) => { o[k] = v; return true; } }); }
+    /* The draw log (Kyklophoria's pagecheck): what the last frame drew — its text with the fill it was drawn in, its
+     * arcs, its rects — reset by a full clearRect, so a check can assert what is on the canvas, not that something was. */
+    getContext() { const el = this; return new Proxy({}, { get: (o, k) => { if (k === 'measureText') return () => ({ width: 10 }); if (typeof k === 'string' && k in o) return o[k]; return (...a) => { el._calls++; if (GEOM.has(k)) for (const v of a) if (typeof v === 'number' && !Number.isFinite(v)) { nanDraws.push(k + '(' + a.map(x => String(x)).join(',') + ')'); }
+      if (k === 'clearRect' && a[0] === 0 && a[1] === 0) el._log = { text: [], arcs: 0, rects: 0, fills: [] };
+      else if (k === 'fillText') el._log.text.push(String(a[0])); else if (k === 'arc') el._log.arcs++; else if (k === 'fillRect' || k === 'strokeRect') { el._log.rects++; if (el._log.fills.length < 4000) el._log.fills.push(String(o.fillStyle)); } }; }, set: (o, k, v) => { o[k] = v; return true; } }); }
   }
   const byId = new Map();
   const document = {
-    getElementById: id => { if (!ids.has(id)) throw new Error('no element with id ' + id); if (!byId.has(id)) byId.set(id, new El(/canvas id="/.test(html.slice(html.indexOf(`id="${id}"`) - 12, html.indexOf(`id="${id}"`))) ? 'canvas' : 'div', id)); return byId.get(id); },
+    /* the unknown-element-id trap: an id the markup does not have is a typo or a stale reference — recorded (a page
+     * catch could swallow the throw) and thrown */
+    getElementById: id => { if (!ids.has(id)) { unknownIds.add(id); throw new Error('no element with id ' + id); } if (!byId.has(id)) byId.set(id, new El(/canvas id="/.test(html.slice(html.indexOf(`id="${id}"`) - 12, html.indexOf(`id="${id}"`))) ? 'canvas' : 'div', id)); return byId.get(id); },
     createElement: tag => new El(tag), addEventListener: () => {}, removeEventListener: () => {}, querySelectorAll: () => [], visibilityState: 'visible', activeElement: null, _at: null,
-    elementFromPoint: () => document._at,
+    elementFromPoint: () => document._at, documentElement: new El('html'), querySelector: () => null,
   };
+  /* getComputedStyle on the root: the token of the theme the page set (data-theme), else the dark set */
+  const getComputedStyle = () => ({ getPropertyValue: n => { const t = document.documentElement.getAttribute('data-theme') === 'light' ? themes.light : themes.dark; return t[n.replace(/^--/, '')] || ''; } });
+  const localStorage = { getItem: k => store.has(k) ? store.get(k) : null, setItem: (k, v) => { store.set(k, String(v)); }, removeItem: k => { store.delete(k); } };
+  const matchMedia = q => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {} });
   const sandbox = { document, console: { log: () => {}, warn: (...a) => warns.push(a.join(' ')), error: (...a) => errors.push(a.join(' ')) }, errors, warns,
     navigator: { userAgent: 'node', usb: undefined, serial: undefined }, location: { search: '', hash: '', protocol: 'http:', href: 'http://localhost/' }, history: { replaceState: () => {} },
     performance, TextDecoder, TextEncoder, ReadableStream, WritableStream, Uint8Array, Int8Array, Uint32Array, Float32Array, DataView, Promise, Map, Set, Math, JSON, Number, String, Array, Object, Error, Date, isNaN, parseInt, parseFloat, RegExp, Symbol,
     setTimeout: (f, ms) => setTimeout((...a) => { try { f(...a); } catch (e) { errors.push('timer: ' + (e.stack || e)); } }, ms), clearTimeout, setInterval: (f, ms) => { const t = setInterval(() => { try { f(); } catch (e) { errors.push('interval: ' + (e.stack || e)); } }, ms); t.unref(); return t; }, clearInterval,
     requestAnimationFrame: f => setTimeout(() => { try { f(performance.now()); } catch (e) { errors.push('rAF: ' + (e.stack || e)); } }, 16),
-    confirm: () => true, alert: () => {}, isSecureContext: true, devicePixelRatio: 1, addEventListener: () => {}, HL, DEMO, ED: ED9 };
+    confirm: () => { sandbox.confirms++; return sandbox.confirmAnswer; }, confirms: 0, confirmAnswer: true, alert: () => {}, isSecureContext: true, devicePixelRatio: 1, addEventListener: () => {}, HL, DEMO, ED: ED9,
+    getComputedStyle, localStorage, matchMedia };
   sandbox.window = sandbox; sandbox.globalThis = sandbox;
-  return { sandbox, errors, warns, El, byId };
+  return { sandbox, errors, warns, El, byId, unknownIds, themes };
 }
 const fireEv = (el, type, ev) => { const e = Object.assign({ preventDefault() {}, stopPropagation() {}, target: el, currentTarget: el, pointerId: 1, clientX: 0, clientY: 0, key: '' }, ev); for (const f of el._on[type] || []) f(e); if (typeof el['on' + type] === 'function') el['on' + type](e); };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -1062,7 +1315,7 @@ async function loadPage(search) {
   check('page: nudge all +5 ms', await until(() => G('demoDevice.table[6].start') === b6 + 240));
   check('page: Undo enabled from undoDepth, Redo disabled while redoDepth is 0, the depth line says both', await until(() => G("$('ed_undo').disabled") === false) && G("$('ed_redo').disabled") === true && /undo \d+ · redo 0/.test(G("$('ed_depth').textContent")));
   G("$('ed_undo').onclick()");
-  check('page: Undo → the nudge is gone, Redo enabled, the entry struck through in the list', await until(() => G('demoDevice.table[6].start') === b6) && await until(() => G("$('ed_redo').disabled") === false) && await until(() => /class="undone"/.test(G("$('ed_hist').innerHTML"))) && /redo 1/.test(G("$('ed_depth').textContent")));
+  check('page: Undo → the nudge is gone, Redo enabled, the entry struck through in the list', await until(() => G('demoDevice.table[6].start') === b6) && await until(() => G("$('ed_redo').disabled") === false) && await until(() => /class="undone"/.test(G("$('ed_hist').innerHTML")) && /redo 1/.test(G("$('ed_depth').textContent"))));
   G("$('ed_redo').onclick()");
   check('page: Redo → the nudge is back, nothing struck', await until(() => G('demoDevice.table[6].start') === b6 + 240) && await until(() => !/class="undone"/.test(G("$('ed_hist').innerHTML"))));
   G("$('ed_follow').onclick()");
@@ -1083,6 +1336,163 @@ async function loadPage(search) {
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
 }
 
+/* ── 9b. The revamp, the page itself over `?demo` — every check performs the real gesture through the captured
+ *        listeners (a click, a pointerdown / up, a change), then asserts what reached the fake module and what the
+ *        page drew: the transport, the mode chips, the pads, the kit view in Pads, markers → keys, clear markers,
+ *        the autoslice count, the Chop pad's guard, Play's buttons, Flow held, the Options groups, the theme, the
+ *        CPU meter, a draw error caught, the unplug — then a 0.12 firmware's fallbacks ── */
+const spyActs = G => G('(() => { const d = demoDevice, h = d.handle.bind(d); d.acts = []; d.handle = (t, b) => { if (t === 0x63) d.acts.push(Array.from(b)); return h(t, b); }; return true; })()');
+const sentAct = (G, ...pre) => G('demoDevice.acts').some(a => pre.every((v, i) => a[i] === v));
+{
+  const { D, G } = await loadPage('?demo');
+  check('revamp page: loads and connects to a v0.13 fake — keys on, the pads card shown, seven mode chips', await until(() => G('!!(st && keysOk && table)')) && G("$('padsCard').hidden") === false && G('modeChips.length') === 7 && G('modeChips.filter(c => c.main).length') === 4, D.errors.join(' | ').slice(0, 300));
+  spyActs(G); await sleep(150);
+  /* the transport */
+  check('transport: running shows ■ and "playing", BPM steady to one decimal', G("$('t_play').textContent") === '■' && /playing/.test(G("$('t_sub').innerHTML")) && /^\d+\.\d$/.test(G("$('t_bpm').textContent")));
+  G("showTab('tab_kit')");   /* the Chop pad lives on the Kit tab; its state is drawn while the tab shows */
+  fireEv(G("$('t_play')"), 'click', {});
+  check('transport ▶/■: SET_MUTE(1) on the wire, the fake stops, the button turns to ▶, "stopped"', await until(() => sentAct(G, 35, 1) && G('demoDevice.muted') === true && G("$('t_play').textContent") === '▶' && /stopped/.test(G("$('t_sub').innerHTML"))));
+  check('Chop pad guard: stopped → srcValid clear → the pad disabled and the reason shown', await until(() => G('st.srcValid') === false && G("$('chop').disabled") === true && G("$('chop_why').hidden") === false));
+  fireEv(G("$('t_play')"), 'click', {});
+  check('…▶ again: SET_MUTE(0), running, the Chop pad back', await until(() => sentAct(G, 35, 0) && G('demoDevice.muted') === false && G("$('chop').disabled") === false && G("$('chop_why').hidden") === true));
+  G("showTab('tab_play')");
+  /* Flow is held */
+  const fl = G("$('t_flow')"); fireEv(fl, 'pointerdown', { pointerId: 4 });
+  check('Flow held: pointerdown → ACTION 4 on, the button lit', await until(() => sentAct(G, 4, 1) && G('demoDevice.flowing') === true) && fl.className.includes('held'));
+  fireEv(fl, 'pointerup', { pointerId: 4 });
+  check('…pointerup → ACTION 4 off', await until(() => sentAct(G, 4, 0) && G('demoDevice.flowing') === false));
+  /* CPU, jacks */
+  check('CPU meter: average and peak from the tail (‰ → %), the bar width set', /^\d+% · max \d+%$/.test(G("$('cpuText').textContent")) && /^\d+%$/.test(G("$('cpuAvg').style.width")));
+  check('Jacks card: Classic → the Brain map and why; J4 live as a key with its volts', G("$('jk_map').textContent") === 'Brain map' && /pattern grammar/.test(G("$('jk_why').textContent")) && /key \d+/.test(G("$('jk_key').textContent")) && /V/.test(G("$('jk_mv').textContent")));
+  /* the slice view in Classic: grid envelopes, the punch path works */
+  G('selSlice = 3'); fireEv(G("$('strip')"), 'click', { clientX: 5 });
+  check('Classic: a strip click punches the selected slice (ACTION 3)', await until(() => sentAct(G, 3)));
+  /* mode chips → Pads */
+  const chip = g => G(`modeChips.find(c => c.g === ${g}).el`);
+  fireEv(chip(6), 'click', {});
+  check('mode chip Pads: grammar.mode written through the blob, the fake in Pads, the chip lit, the line says Voice map', await until(() => G('demoDevice.grammar') === 6 && G('st.grammar') === 6) && await until(() => chip(6).className.includes('on') && /Voice map/.test(G("$('mode_what').innerHTML")) && G("$('play').className").includes('m-pads')));
+  check('Pads: no dice, no flow; the jack map follows (Voice)', await until(() => G("$('t_dice').disabled") === true && G("$('t_flow').disabled") === true && G('st.jackMap') === 1 && G("$('jk_map').textContent") === 'Voice map'));
+  await sleep(120);
+  const wl = G("$('wave')._log");
+  check('Pads: no grid ghosts — the slice view draws the 24 keys (C1 … B2), not the grid', G("$('wave_title').textContent").startsWith('The kit') && wl.text.includes('C1') && wl.text.includes('B2') && wl.text.filter(t => /^[A-G]/.test(t)).length >= 12);
+  G('selSlice = 3'); const n3 = G('demoDevice.acts.filter(a => a[0] === 3).length'); fireEv(G("$('strip')"), 'click', { clientX: 5 }); await sleep(80);
+  check('Pads: a strip click sends no ACTION 3', G('demoDevice.acts.filter(a => a[0] === 3).length') === n3);
+  /* the pads: down / up, several fingers */
+  const pad = k => G(`padEls[${k}].el`);
+  fireEv(pad(5), 'pointerdown', { pointerId: 11 });
+  check('pad F1 down: PLAY_KEY(5, 1), the flash comes back from the tail (keyFlash 5), the pad lit', await until(() => sentAct(G, 32, 5, 1)) && await until(() => G('st.keyFlash') === 5) && pad(5).className.includes('down') && pad(5).className.includes('flash'));
+  fireEv(pad(2), 'pointerdown', { pointerId: 12 }); fireEv(pad(9), 'pointerdown', { pointerId: 13 });
+  check('multi-touch: three fingers, three pads down at once', pad(2).className.includes('down') && pad(9).className.includes('down') && pad(5).className.includes('down') && await until(() => sentAct(G, 32, 9, 1)));
+  for (const [k, id] of [[5, 11], [2, 12], [9, 13]]) fireEv(pad(k), 'pointerup', { pointerId: id });
+  check('…each up is PLAY_KEY(k, 0), every pad released', await until(() => sentAct(G, 32, 5, 0) && sentAct(G, 32, 2, 0) && sentAct(G, 32, 9, 0)) && ![2, 5, 9].some(k => pad(k).className.includes('down')));
+  G('demoDevice.keyFlash = 17; demoDevice.keySeq = (demoDevice.keySeq + 1) & 255');
+  check('a key called elsewhere (CV, the panel) lights its pad', await until(() => pad(17).className.includes('flash')));
+  /* the Kit: autoslice → in Pads the keys follow */
+  G("showTab('tab_kit')"); await sleep(60);
+  G("$('as_k').value = '8'"); fireEv(G("$('as_k')"), 'input', { target: G("$('as_k')") }); fireEv(G("$('as_k')"), 'change', { target: G("$('as_k')") });
+  check('autoslice slider → AUTOSLICE(8) with the gen; eight markers; Pads puts them on the keys (keys follow markers shown)', await until(() => sentAct(G, 36, 8, 0)) && await until(() => G('st.nMarkers') === 8 && G('st.keysFollow') === true) && await until(() => G("$('pads_follow').hidden") === false && G("$('mk_follow').hidden") === false && /marker/.test(G('padEls[0].sub.textContent'))));
+  { const u0 = G('st.undoDepth'), asK = G("$('as_k')"), n36 = G('demoDevice.acts.filter(a => a[0] === 36).length');
+    for (const v of ['9', '10', '11', '12']) { G(`$('as_k').value = '${v}'`); fireEv(asK, 'input', { target: asK }); await sleep(30); }
+    fireEv(asK, 'change', { target: asK });
+    check('autoslice drag: the values go out live, JOIN (b1) on every send after the first, one undo step, one history line', await until(() => G('st.nMarkers') === 12) && G('demoDevice.acts.filter(a => a[0] === 36).slice(' + n36 + ')').every((a, i) => i === 0 ? !(a[2] & 2) : !!(a[2] & 2)) && await until(() => G('st.undoDepth') === u0 + 1) && await until(() => /autoslice 12/.test(G("$('ed_hist').innerHTML"))) && !/autoslice 9/.test(G("$('ed_hist').innerHTML")), JSON.stringify([u0, G('st.undoDepth'), G('st.nMarkers'), G('demoDevice.acts.filter(a => a[0] === 36)'), G("$('ed_hist').innerHTML").slice(0, 400)]));
+    G(`$('as_k').value = '8'`); fireEv(asK, 'input', { target: asK }); fireEv(asK, 'change', { target: asK }); await until(() => G('st.nMarkers') === 8); }
+  const m8 = G('Array.from(demoDevice.liveMarkers()).map(t => demoDevice.table[t].start).sort((a, b) => a - b).join()');
+  /* a re-roll is a new seed; the strong kicks often win again, so up to four rolls to see a different chop */
+  const chopNow = () => G('Array.from(demoDevice.liveMarkers()).map(t => demoDevice.table[t].start).sort((a, b) => a - b).join()');
+  let rolled = false;
+  for (let i = 0; i < 4 && !rolled; i++) { const g0 = G('st.tableGen'); fireEv(G("$('as_reroll')"), 'click', {}); await until(() => G('st.tableGen') !== g0 && !G('ed.busy')); rolled = chopNow() !== m8; }
+  check('Re-roll → AUTOSLICE(8, re-roll): a different chop, the history labels it', sentAct(G, 36, 8, 1) && rolled && await until(() => /autoslice 8 \(re-roll\)/.test(G("$('ed_hist').innerHTML"))), JSON.stringify([rolled, G('demoDevice.acts.filter(a => a[0] === 36)'), G("$('ed_hist').innerHTML").slice(0, 300), G("$('ed_status').textContent")]));
+  await until(() => !G('ed.busy') && G('st.nMarkers') === 8);
+  /* back to Classic: markers → keys by hand, then clear (asked first) */
+  fireEv(chip(0), 'click', {}); await until(() => G('st.grammar') === 0);
+  G('ed.keysFollowGrid && null'); G('for (let k = 0; k < 24; k++) demoDevice.keySlice[k] = demoDevice.spanSlice(k)'); await sleep(150);
+  fireEv(G("$('mk_keys')"), 'click', {});
+  check('Markers → keys: KEYS_FROM_MARKERS on the wire, key 0 plays the first marker, the history says it', await until(() => sentAct(G, 33)) && await until(() => G('st.keySlice[0]') >= 32) && await until(() => /markers → keys \(8\)/.test(G("$('ed_hist').innerHTML"))));
+  G('confirmAnswer = false'); const c0 = G('confirms'); fireEv(G("$('mk_clear')"), 'click', {}); await sleep(80);
+  check('Clear markers asks first — a "no" sends nothing', G('confirms') === c0 + 1 && !sentAct(G, 34));
+  G('confirmAnswer = true'); fireEv(G("$('mk_clear')"), 'click', {});
+  check('…a "yes": CLEAR_MARKERS, no markers left, the keys back on the grid', await until(() => sentAct(G, 34)) && await until(() => G('st.nMarkers') === 0 && G('st.keySlice[0]') === 0));
+  /* the Chop pad over a reused marker: two taps on one spot select instead of stacking */
+  /* a held voice keeps something sounding (the dice may have left a rest under the playhead) */
+  G('demoDevice.srcPos = () => 8 * 6000 + 1000; demoDevice.voice = { key: 0, t: Date.now(), start: 0, len: 1e9, until: Infinity }');
+  fireEv(G("$('chop')"), 'pointerdown', {});
+  check('Chop: a tap while it sounds → one orange marker at the kick', await until(() => G('demoDevice.liveMarkers().length') === 1) && await until(() => /tap → marker/.test(G("$('ed_status').textContent"))));
+  const idx = G('demoDevice.liveMarkers()[0]'); await sleep(100);
+  fireEv(G("$('chop')"), 'pointerdown', {});
+  check('Chop twice on the same hit: still one marker, the second tap selects it (TAP_MARK reused) and says so', await until(() => /already there/.test(G("$('ed_status').textContent"))) && G('demoDevice.liveMarkers().length') === 1 && G('ed.selT') === idx && G('demoDevice.acts.filter(a => a[0] === 29).length') === 2);
+  G('demoDevice.voice = null');
+  G('demoDevice.srcPos = DEMO.FakeDevice.prototype.srcPos');
+  /* Play: Undo / Clear */
+  G("showTab('tab_play')"); fireEv(chip(5), 'click', {});
+  check('mode chip Loop (Play): the transport turns Dice → Undo and Reslice → Clear', await until(() => G('st.grammar') === 5) && await until(() => G("$('t_dice').textContent") === 'Undo' && G("$('t_reslice').textContent") === 'Clear' && G("$('t_flow').disabled") === true));
+  fireEv(pad(4), 'pointerdown', { pointerId: 21 }); fireEv(pad(4), 'pointerup', { pointerId: 21 });
+  check('Play: a pad writes the loop (one event), Undo enables', await until(() => G('st.looperEvents') === 1) && await until(() => G("$('t_dice').disabled") === false));
+  fireEv(G("$('t_dice')"), 'click', {});
+  check('Play: Undo → ACTION 12 (the looper\'s undo, never a dice)', await until(() => sentAct(G, 12)) && await until(() => G('st.looperEvents') === 0) && !G('demoDevice.acts').slice(-3).some(a => a[0] === 0));
+  G('confirmAnswer = false'); fireEv(G("$('t_reslice')"), 'click', {}); await sleep(60);
+  check('Play: Clear asks — a "no" sends nothing (no reslice, no clear)', !sentAct(G, 13) && !G('demoDevice.acts').slice(-2).some(a => a[0] === 1));
+  G('confirmAnswer = true'); fireEv(G("$('t_reslice')"), 'click', {});
+  check('Play: Clear, confirmed → ACTION 13', await until(() => sentAct(G, 13)));
+  /* Options: regrouped, nothing in Other */
+  const grp = G("$('optgroups').children.map(c => c._html)");
+  check('Options: Pattern · Sound · Looper · Jacks & CV · Recording · Editing · Analysis, nothing in "Other"', ['Pattern', 'Sound', 'Looper', 'Jacks &amp; CV', 'Recording', 'Editing', 'Analysis'].every(n => grp.some(h => h.includes(`<h3>${n}</h3>`))) && !grp.some(h => h.includes('Other')) && G('GROUPS.flatMap(g => g[1]).length') === 24);
+  /* the theme: auto → light, tokens re-read, remembered */
+  const darkBg = G("TOK['cv-bg']"); fireEv(G("$('theme')"), 'click', {});
+  check('theme toggle: light on the root, the canvas tokens re-read from the CSS, remembered', G("document.documentElement.getAttribute('data-theme')") === 'light' && G("TOK['cv-bg']") === D.themes.light['cv-bg'] && G("TOK['cv-bg']") !== darkBg && G("localStorage.getItem('audiothurgist.theme')") === 'light');
+  fireEv(G("$('theme')"), 'click', {}); fireEv(G("$('theme')"), 'click', {});
+  check('…dark, then back to following the system', G("document.documentElement.getAttribute('data-theme')") === null && G("TOK['cv-bg']") === darkBg);
+  /* a draw error costs a frame, not the session */
+  G('window.__dj = drawJacks; drawJacks = () => { throw new Error("boom in the jacks card"); }; invalidate(D.jacks)');
+  check('a draw error lands on the message line as a fault', await until(() => /^draw: boom/.test(G("$('msg').textContent")) && G("$('msg').className").includes('bad')));
+  const calls0 = G("$('ring')._calls"); G('drawJacks = window.__dj; invalidate(D.all)'); await sleep(250);
+  check('…and the page draws on (the frame after it, and the next state)', G("$('ring')._calls") > calls0 && G('!!st'));
+  D.errors.length = 0;   /* the injected draw error's console.error */
+  /* the unplug */
+  G('demoPort.unplug()');
+  check('unplugged: onClose → disconnected, said as a fault, the readouts cleared (BPM, CPU, J4, pills)', await until(() => G('link') === null) && /went away/.test(G("$('msg').textContent")) && G("$('t_bpm').textContent") === '—' && G("$('cpuText').textContent") === '—' && G("$('jk_key').textContent") === '—' && G("$('modpill').textContent") === 'not connected' && G("$('t_play').disabled") === true && G("$('connect').textContent") === 'Connect');
+  check('revamp page: no unknown element ids asked for, no runtime errors', D.unknownIds.size === 0 && D.errors.filter(e => !/draw/.test(e)).length === 0, [...D.unknownIds].join(',') + ' ' + D.errors.join(' | ').slice(0, 300));
+}
+{
+  const { D, G } = await loadPage('?demo=old12');
+  check('0.12 page: connects without "keys" — no pads, no markers box, start / stop still there', await until(() => G('!!(st && editOk)')) && G('keysOk') === false && G("$('padsCard').hidden") === true && (await until(() => G("$('mk_box').hidden") === true)), D.errors.join(' | ').slice(0, 300));
+  spyActs(G); fireEv(G("$('t_play')"), 'click', {});
+  check('0.12 page: ▶/■ sends the toggle (ACTION 2), never SET_MUTE', await until(() => sentAct(G, 2) && G('demoDevice.muted') === true) && !sentAct(G, 35));
+  check('0.12 page: the Chop pad is not guarded (no srcValid in a 263-byte body)', await until(() => G('st.srcValid') === undefined && G("$('chop').disabled") === false && G("$('chop_why').hidden") === true));
+  check('0.12 page: the CPU meter falls back to the diag\'s audio µs (a peak, no average)', await until(() => /^max \d+%$/.test(G("$('cpuText').textContent"))));
+  check('0.12 page: no unknown ids, no runtime errors', D.unknownIds.size === 0 && D.errors.length === 0, D.errors.join(' | ').slice(0, 300));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+}
+/* ── 9c. Contrast, measured: every text token against every surface it sits on, in both themes, ≥ 4.5:1; and no
+ *        colour outside the token blocks — not in a CSS rule, not in an inline style, not in the script ── */
+{
+  const html = readFileSync(path.join(here, 'index.html'), 'utf8'), T = cssThemes(html);
+  const lum = hexc => { const h = hexc.replace('#', ''), v = h.length === 3 ? h.split('').map(c => c + c) : h.match(/../g); return v.map(x => parseInt(x, 16) / 255).map(c => c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)).reduce((s, c, i) => s + c * [0.2126, 0.7152, 0.0722][i], 0); };
+  const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+  const TEXT = ['ink', 'ink2', 'ink3', 'accent-ink', 'ok-ink', 'warn-ink', 'bad-ink', 'brain-ink', 'call-ink'], SURF = ['bg', 'panel', 'raise', 'btn', 'pad'];
+  const PAIRS = [['on-accent', 'accent'], ['on-lock', 'lock'], ['warn-ink', 'warn-bg'], ['bad-ink', 'bad-bg'], ['cv-ink', 'cv-bg'], ['cv-ink2', 'cv-bg'], ['cv-ink2', 'cv-lane'], ['cv-ink', 'cv-lane'], ['cv-warn', 'cv-bg']];
+  const bad = [];
+  for (const [name, th] of [['dark', T.dark], ['light', T.light], ['light (system)', T.lightMedia]]) {
+    for (const t of TEXT) for (const s of SURF) { const r = ratio(th[t], th[s]); if (!(r >= 4.5)) bad.push(`${name}: --${t} on --${s} ${r.toFixed(2)}`); }
+    for (const [t, s] of PAIRS) { const r = ratio(th[t], th[s]); if (!(r >= 4.5)) bad.push(`${name}: --${t} on --${s} ${r.toFixed(2)}`); }
+  }
+  check('contrast: every text colour ≥ 4.5:1 on every surface, both themes (' + (TEXT.length * SURF.length + PAIRS.length) * 3 + ' pairs measured)', bad.length === 0, bad.slice(0, 8).join(' · '));
+  check('contrast: the light theme set twice (the media query and the toggle) is the same set', JSON.stringify(T.light) === JSON.stringify(T.lightMedia));
+  const rules = T.css.replace(/:root\{[^}]*\}/, '').replace(/:root:not\(\[data-theme="dark"\]\)\{[^}]*\}/, '').replace(/:root\[data-theme="light"\]\{[^}]*\}/, '');
+  check('no colour outside the tokens: the CSS rules use var(--…) only', !/#[0-9a-fA-F]{3,8}\b/.test(rules), (rules.match(/.{30}#[0-9a-fA-F]{3,8}\b.{0,10}/) || [''])[0]);
+  const script = [...html.matchAll(/<script>\n([\s\S]*?)<\/script>/g)].pop()[1];
+  check('…none in the page script (the canvases read the tokens)', !/['"`]#[0-9a-fA-F]{3,8}\b/.test(script), (script.match(/.{30}['"`]#[0-9a-fA-F]{3,8}.{0,10}/) || [''])[0]);
+  const inl = [...html.matchAll(/style="([^"]*)"/g)].map(m => m[1]).filter(s => /#[0-9a-fA-F]{3,8}\b|rgb/.test(s));
+  check('…none in an inline style', inl.length === 0, inl.slice(0, 3).join(' | '));
+  /* one element per id: the Play tab's output canvas was id="scope" beside main#scope until v0.13, so getElementById
+   * found the canvas and the Scope tab never showed */
+  const markup = html.slice(0, html.indexOf('<script src=')), idList = [...markup.matchAll(/ id="([^"]+)"/g)].map(m => m[1]), dup = idList.filter((x, i) => idList.indexOf(x) !== i);
+  check('markup: no id is used twice (the Scope tab\'s panel is the only #scope)', dup.length === 0 && /<main id="scope">/.test(markup), dup.join(','));
+  /* the phone layout, where a stub can tell: a scrolling tab row, the transport fixed under the thumb, 44 px targets, no column wider than the screen */
+  check('phone layout: the tabs scroll, the transport sits at the bottom of a narrow screen, ▶ is ≥ 48 px, targets ≥ 44 px, grid columns can shrink',
+    /nav\{[^}]*overflow-x:auto/.test(T.css) && /@media\(max-width:640px\)\{[\s\S]*?\.transport\{position:fixed;left:0;right:0;bottom:0/.test(T.css) && /\.tplay\{width:56px;height:56px/.test(T.css) && /\.tplay\{width:52px;height:52px/.test(T.css)
+    && /@media \(max-width:700px\),\(pointer:coarse\)\{button,button\.mini,select,input:not\(\[type=checkbox\]\)\{min-height:44px\}/.test(T.css) && /main\.show\{display:grid;grid-template-columns:minmax\(0,1fr\)\}/.test(T.css) && /\.status\{[^}]*white-space:nowrap;overflow:hidden;text-overflow:ellipsis/.test(T.css) && /body\{[^}]*overflow-x:hidden/.test(T.css));
+}
+
 /* ── the Android path: Google's Web Serial polyfill (vendored, unmodified) and the install manifest ── */
 {
   const here = new URL('.', import.meta.url);
@@ -1097,8 +1507,11 @@ async function loadPage(search) {
   const sw = fs.readFileSync(new URL('sw.js', here), 'utf8'); const shell = [...sw.matchAll(/'(\.\/[^']+)'/g)].map(x => x[1]).filter(x => x !== './');
   check('service worker shell files exist', shell.length >= 6 && shell.every(f => fs.existsSync(new URL(f, here))), shell.filter(f => !fs.existsSync(new URL(f, here))).join(','));
   const html = fs.readFileSync(new URL('index.html', here), 'utf8');
+  const pub = fs.readFileSync(new URL('publish-pages.sh', here), 'utf8');
+  check('publish stamp: the footer marker and the three script tags publish-pages.sh rewrites are in the page as it expects them', html.includes('<!--page-build--><b>local</b>') && ['hostlink', 'edit', 'demo'].every(s => html.includes(`<script src="${s}.js"></script>`) && pub.includes(s)) && /\?v=\$stamp/.test(pub));
+  check('service worker: the cache version bumped for the beta, the query ignored in the offline fallback', /audiothurgist-v2/.test(sw) && /ignoreSearch: true/.test(sw));
   check('page links manifest and loads the polyfill only without navigator.serial', /rel="manifest"/.test(html) && /!navigator\.serial && navigator\.usb/.test(html) && /serialApi\(\)/.test(html));
-  check('page has the Scope tab wired to scope2', /id="tab_scope"/.test(html) && /id="bigscope"/.test(html) && /desc\.audiothurgist\.scope2/.test(html) && /fetchScopeFrame\(/.test(html) && /SCOPE_TAB_STATE_MS/.test(html) && /id="sc_cvchans"/.test(html) && /id="sc_p_gates"/.test(html) && /scope2 >= 2/.test(html));
+  check('page has the Scope tab wired to scope2', /id="tab_scope"/.test(html) && /id="bigscope"/.test(html) && /cp\.scope2 >= 1/.test(html) && /caps\(desc\)/.test(html) && /fetchScopeFrame\(/.test(html) && /SCOPE_TAB_STATE_MS/.test(html) && /id="sc_cvchans"/.test(html) && /id="sc_p_gates"/.test(html) && /cp\.scope2 >= 2/.test(html));
 }
 
 check('no canvas call ever received NaN/Infinity', nanDraws.length === 0, nanDraws.slice(0, 5).join(' · '));
