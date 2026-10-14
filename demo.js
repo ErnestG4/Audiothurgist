@@ -52,33 +52,33 @@ const GRAM = { classic: 0, collins: 1, grids: 2, euclid: 3, camp: 4, play: 5, pa
 /* The card's list as the firmware labels it: loose WAVs, then the sets of sets/ as "<name> [set]". */
 const FILES = ['amen_170.wav', 'apache_120.wav', 'funky_drummer_100.wav', 'think_110.wav', 'amen_kit [set]'];
 const SET_NAME_RE = /^[A-Za-z0-9_-]{1,31}$/;
-/* The pager as DescribeManual / the VirtualKnob declarations give it: ident, name, help. */
+/* The pager as the VirtualKnob declarations and DescribeManual give it: ident, name, help (v0.13.0-beta's text). */
 const KNOBS = [
-  [['chop', 'Chop', '**Chop character** — the journey from verbatim (full right) to rolls, bursts and reverb (full left).'],
-   ['tempo', 'Tempo', '**Tempo**, 60–200 BPM, varispeed like vinyl. Snaps to the break\'s own tempo within ±2 BPM. While following an external clock it becomes a ÷4…×4 multiplier.'],
-   ['history', 'History', '**History** — the last sixteen patterns. Counter-clockwise is older; full clockwise is now. New rolls always append.'],
-   ['pitch', 'Pitch', '**Pitch**, ±12 semitones. Onsets stay on the grid; the kit retunes.'],
-   ['sample', 'Sample', '**Sample** — highlight a file on the card (sets show as “name [set]”); hold **B3** to load it. The browser dropdown loads directly. While a set saves, this ring fills with the progress; while one loads, a dot sweeps it.'],
-   ['volume', 'Volume', '**Volume**, with the reverb tail riding the cluster zone.']],
-  [['lang.x', 'Map X', '**Map X** — Grids drum-map coordinate.'],
-   ['lang.y', 'Map Y', '**Map Y** — Grids drum-map coordinate.'],
-   ['lang.kick', 'Kick', '**Kick density** — Grids threshold / Euclid hits per bar.'],
-   ['lang.snare', 'Snare', '**Snare density** — Grids threshold / Euclid hits per bar.'],
-   ['lang.hat', 'Hat', '**Hat density** — Grids threshold / Euclid hits per bar.'],
-   ['lang.rot', 'Rotation', '**Rotation** — Euclid: rotates every class\'s hits together.']],
+  [["chop", "Chop", "**Chop character** — the journey from verbatim (full right) to rolls, bursts and reverb (full left)."],
+   ["tempo", "Tempo", "**Tempo**, 60–200 BPM, varispeed like vinyl. Snaps to the break's own tempo within ±2 BPM. While following an external clock it becomes a ÷4…×4 multiplier."],
+   ["history", "History", "**History** — the last sixteen patterns. Counter-clockwise is older; full clockwise is now. New rolls always append."],
+   ["pitch", "Pitch", "**Pitch**, ±12 semitones. Onsets stay on the grid; the kit retunes."],
+   ["sample", "Sample", "**Sample** — highlight a file on the card (sets show as “name [set]”); hold **B3** to load it. The browser dropdown loads directly. While a set saves, this ring fills with the progress; while one loads, a dot sweeps it. On the Edit page (B1 held + B3 tap) it is the **autoslice** count."],
+   ["volume", "Volume", "**Volume**, with the reverb tail riding the cluster zone."]],
+  [["lang.x", "Map X", "**Map X** — Grids drum-map coordinate."],
+   ["lang.y", "Map Y", "**Map Y** — Grids drum-map coordinate."],
+   ["lang.kick", "Kick", "**Kick density** — Grids threshold / Euclid hits per bar."],
+   ["lang.snare", "Snare", "**Snare density** — Grids threshold / Euclid hits per bar."],
+   ["lang.hat", "Hat", "**Hat density** — Grids threshold / Euclid hits per bar."],
+   ["lang.rot", "Rotation", "**Rotation** — Euclid: rotates every class's hits together."]],
 ];
-/* The jacks as declared (Jack jk1 ("audio_l", "Audio In L", …)); the help is v0.13's one keymap. */
+/* The jacks as declared (Jack jk1 ("audio_l", "Audio In L", …)) with their help (v0.13.0-beta: one keymap). */
 const JACKS = [
-  ['audio_l', 'Audio In L', 'audioIn', '**Audio in, left.** The record input: summed with J2 (Sampling: Mono) or the L plane (Stereo).'],
-  ['audio_r', 'Audio In R', 'audioIn', '**Audio in, right.** Summed with J1, or the R plane (Sampling: Stereo).'],
-  ['clock', 'Clock In', 'trig', '**Clock in.** Set PPQN in Options. B1 = pulse/lock indicator.'],
-  ['voct', 'V/Oct', 'voct', '**V/Oct = the key.** 0 V is key 0 (C1), one key per semitone up to key 23; anything below 0 V plays key 0. The keys are the Kit\'s table.'],
-  ['gate', 'Gate', 'gate', '**Gate** (Brain map) — each rising edge plays the J4 key. **Style v/oct** (Voice map): 0 plain · 1 reverse · 2 half · 3 double · 4 ratchet · 5 staccato · 6 punch/choke flip · **7 Record** · **8 Clear**, with a dead band between them.'],
-  ['kick', 'Kick Gate', 'gate', '**Kick gate out** (Brain map). **Gate in** (Voice map): plays the J4 key.'],
-  ['snare', 'Snare Gate', 'gate', '**Snare gate out** (Brain map). **Hit trigger out** (Voice map): 10 ms per call.'],
-  ['hat', 'Hat Gate', 'gate', '**Hat gate out** (Brain map). **Velocity out** (Voice map): 1.5–5 V per call.'],
-  ['out_l', 'Audio Out L', 'audioOut', 'Audio out, left.'],
-  ['out_r', 'Audio Out R', 'audioOut', 'Audio out, right.'],
+  ["audio_l", "Audio In L", "audioIn", "**Audio in, left.** The record input: summed with J2 (Sampling: Mono) or the L plane (Stereo); a key take (J5 style 7) or a loop take (Options → Record) hears it unless Record Source = Output."],
+  ["audio_r", "Audio In R", "audioIn", "**Audio in, right.** Summed with J1, or the R plane (Sampling: Stereo)."],
+  ["clock", "Clock In", "trig", "**Clock in.** Set PPQN in Options. B1 = pulse/lock indicator."],
+  ["voct", "V/Oct", "voct", "**Key** (v/oct) — 0 V = key 0 (C1), a semitone per key to key 23, below 0 V = key 0; the key plays what the Kit's key table says. Gated by J6 (Voice map) or J5 (Brain map)."],
+  ["gate", "Gate", "gate", "**Gate** (Brain map) — each rising edge plays J4's key, plain. **Style v/oct** (Voice map): 0 plain (anything under ~70 mV) · 1 reverse · 2 half · 3 double · 4 ratchet · 5 staccato · 6 punch/choke flip · **7 Record** (keys held on J4 record from the input) · **8 Clear** (the key back to its slice)."],
+  ["kick", "Kick Gate", "gate", "**Kick gate out** (Brain map) — every kick-class step, or once per hit (Gate Fires); Gate Lanes can add it to mixed hits. **Gate in** (Voice map): plays the J4 key; with Record armed its first edge starts the loop take, later edges drop slice markers (clocked) or stop it (unclocked)."],
+  ["snare", "Snare Gate", "gate", "**Snare gate out** (Brain map) — every snare-class step, or once per hit. **Hit trigger out** (Voice map): 10 ms per call."],
+  ["hat", "Hat Gate", "gate", "**Hat gate out** (Brain map) — every hat-class step, or once per hit. **Velocity out** (Voice map): 1.5–5 V per call."],
+  ["out_l", "Audio Out L", "audioOut", "Audio out, left."],
+  ["out_r", "Audio Out R", "audioOut", "Audio out, right."],
 ];
 
 /* Blob layout, in Manage() order: pager 48 · locks 64 · sample 1 · options 24 · settings 2. */
@@ -105,18 +105,20 @@ const EDIT_STATUS = { Ok: 0, BadOp: 2, BadArgs: 2, Full: 3, NotMarker: 2, NotGri
 const MAX_BODY = 1024;
 const SC = HL.SCOPE;
 
-/* The manual: src/audiothurgist_manual.cpp's sections, with v0.13's keymap and transport. */
+/* The manual: src/audiothurgist_manual.cpp as of v0.13.0-beta, verbatim (the module sends its own). */
 const MANUAL = {
-  preamble: '**Audiothurgist chops breaks to a grid and rearranges them** with one knob that travels from *the record, verbatim* to rolls, bursts, and reverb rubble. Patterns hold until you ask for new ones. Every sound is a slice of real material played from its attack, on the grid — no grains, no time-stretch. If you don\'t like it, re-slice it. *(The demo\'s copy — a module sends its own.)*',
+  preamble: "**Audiothurgist chops breaks to a grid and rearranges them** with one knob that travels from *the record, verbatim* to rolls, bursts, and reverb rubble. Patterns hold until you ask for new ones. Every sound is a slice of real material played from its attack, on the grid — no grains, no time-stretch. If you don't like it, re-slice it.",
   sections: [
-    { id: 'roles', title: 'Three roles, one engine', body: '**Chopper** — the knobs and buttons: slice, rearrange, reroll, flow, history, tempo. **Voice** — the rack plays *it*: a v/oct + gate pair calls slices from a keyboard or sequencer. **Brain** — it plays the rack: kick, snare and hat gates leave on J6/J7/J8 as the pattern runs, and a clock on J3 locks the loop to your master. The roles run at once; nothing needs a mode.' },
-    { id: 'transport', title: 'Start and stop', body: '**B1 held** (600 ms, no pot turned, no B3) and released stops the pattern; again starts it. The clock runs on while stopped, so a restart lands on the beat, and the keys still play. The web page\'s ▶ / ■ is the same switch.' },
-    { id: 'keymap', title: 'Playing it from CV — one keymap', body: '**J4 = the key**: 0 V is key 0 (C1), one key per semitone up to key 23; below 0 V plays key 0. The keys are the Kit\'s table — a key plays its slice of the break, its marker or its recording. Options → **Jacks** picks the map; *Follow grammar* gives Play and Pads the **Voice map** (J6 gate in, J5 = the style: 0 plain · 1 reverse · 2 half · 3 double · 4 ratchet · 5 staccato · 6 punch/choke flip · 7 record · 8 clear, with a dead band between them; J7 hit trigger out, J8 velocity out). The **Brain map** plays the same keys from J4 on a J5 gate, with the class gates out on J6/J7/J8.' },
-    { id: 'buttons', title: 'The three buttons', body: '**B1** tap: Perform ↔ Brain page; held + turn a pot: a motion lock; held alone and released: start / stop. **B2** tap: dice (in Play: undo the last overdub); hold: flow. **B3** tap: reslice (in Play: clear the loop); hold: load the highlighted file. **B2 + B3 held 2 s**: Settings. **B1 held + B3 tap**: the Edit page (P5 sets the autoslice count; sweeping it to 0 and back re-rolls).' },
-    { id: 'languages', title: 'Pattern languages (Grammar, in Options)', body: '**Classic** is BreakFix\'s Brocot cell grammar. **Collins** adds the breakbeat-science upgrades. **Grids** speaks Mutable Instruments\' drum map through your break\'s own kicks, snares and hats — Map X/Y and three densities on the **Brain** page. **Euclid** spaces each class\'s hits evenly with Rotation. **Camp** rings the bar\'s cells through change-ringing permutations. **Play** has no pattern of its own: the bar is what you play into it, looped; **B2** tap undoes the last pass, **B3** tap clears. **Pads** is the instrument with no looper: hits sound as you play them, nothing is written; its keys follow the markers.' },
-    { id: 'sampling', title: 'Sampling and the kit', body: 'One buffer, one slice table: a loaded break and a recorded kit are the same thing. Markers are spans of the break placed by hand (the Chop pad, a split) or by the autoslice count; **markers → keys** puts them on keys 0, 1, 2… in time order (automatic in Pads), **clear markers** removes them all. Both are one undo step.' },
+    { id: "roles", title: "Three roles, one engine", body: "**Chopper** — the knobs and buttons: slice, rearrange, reroll, flow, history, tempo. **Voice** — the rack plays *it*: a v/oct + gate pair calls the Kit's keys from a keyboard or sequencer. **Brain** — it plays the rack: kick, snare and hat gates leave on J6/J7/J8 as the pattern runs, and a clock on J3 locks the loop to your master. The roles run at once; nothing needs a mode." },
+    { id: "journey", title: "The knob journey (P1)", body: "Full right: verbatim. ~4 o'clock: whole beats trade places. ~1 o'clock: one-beat chops — listen for the double-time illusion. ~11: half-beat motifs. ~9: sixteenth-note dice and reversals. Past 8: the cluster zone — bursts of 32nd rolls, hat-ticks and real silence, reverb blooming toward full left. B3 relocates the burst centres. Chops respect the kit: kicks trade with kicks, snares with snares." },
+    { id: "keymap", title: "Playing it from a keyboard (one keymap)", body: "**J4 is the key in every map: 0 V = key 0 (C1)**, a semitone per key to 23, below 0 V = key 0. A key plays what the Kit's key table says (in **Pads** the keys follow the markers: time order on keys 0, 1, 2…). **Voice map**: J6 gate, **J5 = the style** (0 V plain, then reverse · half · double · ratchet · staccato · punch/choke flip · 7 Record · 8 Clear, a semitone each; under ~70 mV is plain). The style is read with the hit; changing it while the key is held re-strikes it. J7 sends a trigger per call, J8 its velocity. **Brain map**: J5 gate, plain calls, class gates on J6/J7/J8. Options → Jacks picks the map; *Follow grammar* gives Play and Pads the Voice map. In Play calls write the loop (punch flips to momentary), in Pads nothing is written, elsewhere the Voice option decides." },
+    { id: "buttons", title: "The three buttons", body: "**B1** tap: Perform ↔ Brain page. **B1 held 600 ms, let go** (B1 goes white; no pot, no other button): start / stop — the clock runs on, keys still play; B1 breathes while stopped. **B1 held 300 ms + turn a pot**: record that pot's motion as a loop that replays until you hold and nudge it again (a green pip at 6 o'clock marks a locked pot; *Clear locks* in the web app removes them all). **B2** tap: dice (a new arrangement of the same slices; in Play: undo the last overdub); hold: *flow*, a new bar every loop until released. **B3** tap: reslice (new cell tree; in Play: clear the loop); hold: load the highlighted file. **B2 + B3 held 2 s**: Settings (brightness, preset save/load); B2 or B3 leaves. B1 also shows the clock: white per pulse, green when locked. **B1 held + B3 tap: the Edit page** (B1 amber; B1 tap leaves): P1 selects a slice — its segment pulses on the bar ring as it plays and its keys pulse on P5, a Voice-map note selects too — P2 / P3 nudge its start / end ±50 ms once swept through centre, each move re-playing the new edge; B3 tap drops a marker at the playhead (onset-snapped, Options → Tap Allowance; near a marker it selects it), B3 hold reslices; **P5 = autoslice**: 0–32 grey markers on onsets drawn by loudness — up adds one, down drops one, 0 and back re-draws; B2 tap undoes, B2 hold puts the slice back on the grid (a marker: deletes it). Refusals blink red." },
+    { id: "brain", title: "Clock in, gates out", body: "Patch a clock into J3 and set its PPQN in Options; B1 flashes white per pulse and sits green when locked (the loop aligns to the pulse grid at lock). While following, P2 becomes a clock divider/multiplier (÷4 · ÷2 · ×1 · ×2 · ×4, wide ×1 centre) that engages once you move it and switches on the next beat, in phase. Unpatch and the tempo holds until P2 moves. Gates on J6/J7/J8 follow the classifier's labels: *Gate Fires* chooses every step or once per hit (as drums do), *Gate Lanes* can mark every class present in a hit, Gate Length and Gate Level (velocity from loudness, accents to the ceiling) shape them. If a break plays at half or double speed against your clock, set **Bars** in Options — the bar guess is the culprit." },
+    { id: "languages", title: "Pattern languages (Grammar, in Options)", body: "**Classic** is BreakFix's Brocot cell grammar. **Collins** adds the breakbeat-science upgrades: faithful early in the phrase, restless toward its end; 3+3+2 odd cuts; a fill on every fourth loop that snaps back on the downbeat; stutter terminators; accelerating rolls. **Grids** speaks Mutable Instruments' drum map through your break's own kicks, snares and hats — Map X/Y and three densities on the **Brain** page (B1). **Euclid** spaces each class's hits evenly with Rotation. In both, the Chop knob sets how faithfully slices are chosen: full right plays each class's own nearest hit, lower swaps within the class; a rest lets the break run on underneath (or gates it: *Rests*). **Camp** rings the bar's cells through change-ringing permutations — deterministic, B2 rings the next change. **Play** has no pattern of its own: the bar is what you play into it from the keyboard or the web page, looped; B3 clears it. With **Quantize** Off (the default) it is a free looper — every hit replays at the exact moment you played it, held notes with their length, overdubbing pass after pass; 8ths snaps hits to the nearest 8th, 16ths writes the bar step by step as before. **B2** tap undoes the last pass's overdub, **B3** tap clears. **Pads** is the instrument with no looper: hits sound as you play them, nothing is written, keeping the beat is yours." },
+    { id: "options", title: "Options, one line each", body: "**Classifier** — which lens labels kick/snare/hat (Hockman 3-band, the legacy hi/lo split, two-band, keyframe density, or Adaptive: each step judged at its hit, clustered per break). **Clock In** — J3 PPQN. **Voice** — Choke or Punch. **Gate Length / Level / Fires / Lanes** — see the Brain section. **Grammar** — the pattern language. **Bars** — override the bar guess (Auto reads the backbeat). **Rests** — continue or gate. **Fades** — fixed, or adaptive to each slice's brightness. **Slice Tail** — what a slot does at pitch: zoom (read on into the next slice, the record's way), gate, loop forward, or ping-pong. **Swaps** — class only, or class + loudness tier (a ghost never replaces a backbeat). **Flow Déjà Vu** — some flow bars replay from history. **Swing** — slice and step at the material's own swing. **Onsets** — the onset detector behind the bar guess and hit gates. **Jacks** — Brain (class gates out) or Voice (two v/oct + gate, hit trigger and velocity out); Follow grammar switches with Play. **Quantize** — Play's looper: Off (as played), 16ths (punch the bar), 8ths. **Autosave** — Off, or On: 2 s after an edit the slice table and key map are written to the set's JSON, or to sets/<file>.slices.json beside a loose WAV, and read back on load. **Key Plays** — one-shot, or held until the gate falls. **Sampling** — mono, or stereo planes. **Record Source** — the inputs, or the module's own output. **Record** — arm a loop take into the break (see Sampling). **Tap Allowance** — how far back a tap-while-playing mark lands (your reaction time): 0–80 ms." },
+    { id: "sampling", title: "Sampling (record into a key, loop-record the break)", body: "One buffer, one slice table: a loaded break and a recorded kit are the same thing. **Into a key** (Voice map): play J5 style note **7 = Record** — the buttons go red — and every key you hold on J4 records from the input for as long as its gate stands (release: trim, normalise, analyse, live; the key plays it, its position lights on P5's ring). Style **8 = Clear** puts a key back on its grid slice; any other style disarms. Records are appended after the break; a load clears them. **The break itself**: Options → **Record** = Arm, then **B3 tap** or the first **J6** edge starts a take into the other buffer. With a clock on J3 the take is the **Bars** count of bars at the followed tempo and stops itself on the bar; J6 edges during it drop **slice markers** (two or more replace the grid). Unclocked, B3 or J6 stops it. The take runs the load pipeline and plays; the arm drops after one take, and B3's reslice / load are held off while armed. **Record Source**: J1/J2, or the module's own output — play the keys into a take and chop the chop. **Sampling**: Mono sums J1+J2; Stereo keeps J1 → L, J2 → R (loads, takes and playback in two planes). Loads keep 8 s of the 25 s buffer free for keys. While a take runs the buttons are full red and P6 shows the input level. **Cards**: FAT32 microSD, WAVs in the root, 1–4 bar breaks are ideal (longer files trim to their first four bars; levels normalise on load). Turn **Sample** (P5) to highlight a file, hold **B3** to load it — or pick it from the Sample dropdown here. New material opens at its own tempo until P2 moves. **Sets** — a break with its recorded keys, the Options and Play's loop — live in `sets/` as `<name>.wav` + `<name>.json`, listed as “name [set]” and loaded the same way; the browser's Kit tab saves and loads them by name. Every preset save also writes `presets/<slot>.json`; a slot the flash no longer honours after a firmware update comes back from it at boot." },
   ],
-  presets: { help: 'Preset slots store the complete state of the module. Slot 0 is the boot slot.' },
+  presets: { help: "Preset slots store the complete state of the module. Slot 0 is the boot slot." },
 };
 
 /* opts: { edit: true, keys: true } — keys: false plays a 0.12 firmware (edit 1, no ACTION 32.., the 263-byte body). */
@@ -424,12 +426,15 @@ class FakeDevice {
   }
   /* ── KEYS (v0.13): the marker ops. A marker is a live keyless entry past the grid (grey or orange); a recording is
    * an entry with a key of its own, and the key holding it is never taken over. ── */
-  liveMarkers() { const out = []; for (let t = this.nSlices; t < this.nTable; t++) { const e = this.table[t]; if (!this.isTomb(t) && e.key < 0 && e.len > 0) out.push(t); } return out; }
+  /* a marker is a span of the break: a recording (past the break, even one whose key was cleared) never is */
+  liveMarkers() { const out = []; for (let t = this.nSlices; t < this.nTable; t++) { const e = this.table[t]; if (!this.isTomb(t) && e.key < 0 && e.len > 0 && e.start < this.bufLen) out.push(t); } return out; }
   recordingKey(k) { const t = this.keySlice[k]; return t >= this.nSlices && t < this.nTable && !this.isTomb(t) && this.table[t].key >= 0; }
-  /* KEYS_FROM_MARKERS: the markers in time order onto keys 0, 1, 2… skipping the keys that hold a recording */
+  /* KEYS_FROM_MARKERS: the markers in time order onto keys 0, 1, 2… skipping the keys that hold a recording; the keys
+   * past the last marker go back to their span slices */
   edKeysFromMarkers() {
     const ms = this.liveMarkers().sort((a, b) => this.table[a].start - this.table[b].start || a - b); let k = 0, n = 0;
     for (const t of ms) { while (k < KEYS && this.recordingKey(k)) k++; if (k >= KEYS) break; this.keySlice[k++] = t; n++; }
+    for (; k < KEYS; k++) if (!this.recordingKey(k)) this.keySlice[k] = this.spanSlice(k);
     this.lastCount = n; return 'Ok';
   }
   /* CLEAR_MARKERS: every live marker tombstoned; their keys back to their grid slices */
@@ -439,14 +444,19 @@ class FakeDevice {
    * in the (k+1)-set; each marker spans to the next one drawn (the last to the break's end). Orange markers stay. */
   autoOrder(seed) {
     let s = (seed * 2654435761) >>> 0 || 1; const rnd = () => { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return (s + 0.5) / 4294967296; };
-    return this.hits.filter(p => p > 0 && p < this.bufLen).map(p => ({ p, key: Math.pow(rnd(), 1 / Math.max(1, this.onsetStrength(p))) })).sort((a, b) => b.key - a.key).map(x => x.p);
+    const orange = this.liveMarkers().filter(t => this.table[t].flags & F_ORANGE).map(t => this.table[t].start);   /* onsets within 10 ms of an orange marker are skipped */
+    return this.hits.filter(p => p > 0 && p < this.bufLen && !orange.some(o => Math.abs(o - p) <= TAP_REUSE)).map(p => ({ p, key: Math.pow(rnd(), 1 / Math.max(1, this.onsetStrength(p))) })).sort((a, b) => b.key - a.key).map(x => x.p);
   }
   edAutoslice(k, reroll) {
     if (k > AUTO_MAX) return 'BadArgs';
     if (reroll) this.autoSeed = (this.autoSeed * 1103515245 + 12345) >>> 0 || 7;
-    for (let t = this.nSlices; t < this.nTable; t++) { const e = this.table[t]; if (this.isTomb(t) || (e.flags & F_ORANGE) || e.key >= 0 || e.start >= this.bufLen) continue; this.edTomb(t); }
-    const pick = this.autoOrder(this.autoSeed).slice(0, k).sort((a, b) => a - b); let count = 0, st = 'Ok';
-    for (let j = 0; j < pick.length; j++) { const end = j + 1 < pick.length ? pick[j + 1] : this.bufLen; if (end - pick[j] < REC_MIN) continue; st = this.edAdd(-1, pick[j], end - pick[j], 0); if (st !== 'Ok') break; count++; }
+    /* the grey markers already there are re-spanned in place (the keys on them stay), the surplus deleted, the rest added */
+    const greys = this.liveMarkers().filter(t => !(this.table[t].flags & F_ORANGE)).sort((a, b) => this.table[a].start - this.table[b].start || a - b);
+    const pick = this.autoOrder(this.autoSeed).slice(0, k).sort((a, b) => a - b), spans = [];
+    for (let j = 0; j < pick.length; j++) { const end = j + 1 < pick.length ? pick[j + 1] : this.bufLen; if (end - pick[j] >= REC_MIN) spans.push([pick[j], end - pick[j]]); }
+    let count = 0, st = 'Ok';
+    spans.forEach(([s0, len], j) => { if (st !== 'Ok') return; if (j < greys.length) { const e = this.table[greys[j]]; e.start = s0; e.len = len; this.refreshEntry(greys[j]); Object.assign(e, this.metaAt(s0)); count++; } else { st = this.edAdd(-1, s0, len, 0); if (st === 'Ok') count++; } });
+    for (let j = spans.length; j < greys.length; j++) this.edTomb(greys[j]);
     this.autoK = k; this.lastCount = count;
     return st === 'Ok' || (st === 'Full' && count > 0) ? 'Ok' : st;
   }
@@ -483,7 +493,7 @@ class FakeDevice {
     if (this.editBusy()) return [3];
     if (!this.bufLen) return [3];
     if (gen !== 0 && gen !== this.tableGen) return [3];   /* Stale */
-    this.lastIdx = -1; this.lastCount = null; let st, third = null, flags = null;
+    this.lastIdx = -1; this.lastCount = null; let st, third = null, flags = null, join = false;
     if (op === 30 || op === 31) {   /* EDIT-UNDO: one journal step; the gen bumps inside */
       st = this.undoStep(op === 31);
       return st === 'Ok' ? [0, this.tableGen] : [EDIT_STATUS[st]];
@@ -507,13 +517,16 @@ class FakeDevice {
         third = this.lastIdx; if (this.opts.keys) flags = 0; break; }
       case 33: st = this.edKeysFromMarkers(); third = this.lastCount; if (!third) return [0, this.tableGen, 0]; break;
       case 34: st = this.edClearMarkers(); third = this.lastCount; if (!third) return [0, this.tableGen, 0]; break;
-      case 36: st = b[1] > AUTO_MAX ? 'BadArgs' : this.edAutoslice(b[1], !!(b[2] & 1)); third = this.lastCount; break;
+      case 36: st = b[1] > AUTO_MAX ? 'BadArgs' : this.edAutoslice(b[1], !!(b[2] & 1)); third = this.lastCount; join = !!(b[2] & 2) && this.autoGen === this.tableGen && this.journal.length > 0; break;
       default: st = 'BadOp';
     }
     const status = EDIT_STATUS[st];
     if (status !== 0) { this.tableRestore(before); return [status]; }
     if (this.grammar === GRAM.pads && FakeDevice.MARKER_OPS.has(op)) { const c = this.lastCount; this.edKeysFromMarkers(); this.lastCount = c; }   /* Pads: keys follow the markers */
-    this.journalCheck(); this.bumpGen(); this.journalPush(before); this.edits = (this.edits || 0) + 1;
+    /* JOIN (AUTOSLICE flags b1): the previous AUTOSLICE's undo record keeps its before-image — a whole drag is one step */
+    if (join) { this.bumpGen(); this.journalGen = this.tableGen; } else { this.journalCheck(); this.bumpGen(); this.journalPush(before); }
+    if (op === 36) this.autoGen = this.tableGen;
+    this.edits = (this.edits || 0) + 1;
     const out = third == null ? [0, this.tableGen] : [0, this.tableGen, third < 0 ? 255 : third];
     if (flags != null) out.push(flags);
     return out;
@@ -537,7 +550,11 @@ class FakeDevice {
   looperUndo() { const ev = this.loopEvents.pop(); if (ev) this.src[ev.s] = ev.prev; this.looperEvents = Math.max(0, this.looperEvents - 1); }
   looperClear() { if (this.grammar === GRAM.play) this.src.fill(-1); this.loopEvents = []; this.looperEvents = 0; }
   /* a grammar change: Play starts from an empty loop, the others draw a fill */
-  setGrammar(g, before) { if (g === before) return; if (g === GRAM.play) { this.src.fill(-1); this.loopEvents = []; this.looperEvents = 0; } else this.dice(); }
+  setGrammar(g, before) {
+    if (g === before) return; if (g === GRAM.play) { this.src.fill(-1); this.loopEvents = []; this.looperEvents = 0; } else this.dice();
+    /* entering Pads puts the markers on the keys once, as its own undo step */
+    if (g === GRAM.pads && this.opts.keys && this.liveMarkers().length && this.bufLen) { const sn = this.tableSnap(); this.journalCheck(); this.edKeysFromMarkers(); this.bumpGen(); this.journalPush(sn); }
+  }
   /* the J4 / J5 jacks: a slow stepped sequence on J4 (one dip below 0 V, which clamps to key 0), J5's style in the
    * Voice map (255 = the Brain map, where J5 is the gate) */
   j4mV(now = Date.now()) { const seq = [0, 3, 7, 12, -2, 5, 9, 14], i = Math.floor((now - this.t0) / 1500) % seq.length; return Math.round(seq[i] * 1000 / 12) + ((now >> 4) % 3) - 1; }
