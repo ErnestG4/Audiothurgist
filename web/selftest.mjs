@@ -1483,6 +1483,10 @@ const sentAct = (G, ...pre) => G('demoDevice.acts').some(a => pre.every((v, i) =
   check('…none in the page script (the canvases read the tokens)', !/['"`]#[0-9a-fA-F]{3,8}\b/.test(script), (script.match(/.{30}['"`]#[0-9a-fA-F]{3,8}.{0,10}/) || [''])[0]);
   const inl = [...html.matchAll(/style="([^"]*)"/g)].map(m => m[1]).filter(s => /#[0-9a-fA-F]{3,8}\b|rgb/.test(s));
   check('…none in an inline style', inl.length === 0, inl.slice(0, 3).join(' | '));
+  /* one element per id: the Play tab's output canvas was id="scope" beside main#scope until v0.13, so getElementById
+   * found the canvas and the Scope tab never showed */
+  const markup = html.slice(0, html.indexOf('<script src=')), idList = [...markup.matchAll(/ id="([^"]+)"/g)].map(m => m[1]), dup = idList.filter((x, i) => idList.indexOf(x) !== i);
+  check('markup: no id is used twice (the Scope tab\'s panel is the only #scope)', dup.length === 0 && /<main id="scope">/.test(markup), dup.join(','));
   /* the phone layout, where a stub can tell: a scrolling tab row, the transport fixed under the thumb, 44 px targets, no column wider than the screen */
   check('phone layout: the tabs scroll, the transport sits at the bottom of a narrow screen, ▶ is ≥ 48 px, targets ≥ 44 px, grid columns can shrink',
     /nav\{[^}]*overflow-x:auto/.test(T.css) && /@media\(max-width:640px\)\{[\s\S]*?\.transport\{position:fixed;left:0;right:0;bottom:0/.test(T.css) && /\.tplay\{width:56px;height:56px/.test(T.css) && /\.tplay\{width:52px;height:52px/.test(T.css)

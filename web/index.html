@@ -131,7 +131,7 @@
   .padk small{font-size:11px;font-weight:500;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
   .padk.sh{background:var(--raise)} .padk.down{background:var(--pad-hi);transform:translateY(1px)} .padk.flash{box-shadow:inset 0 0 0 2px var(--accent)}
   .padk.c0{border-bottom-color:var(--kick)} .padk.c1{border-bottom-color:var(--snare)} .padk.c2{border-bottom-color:var(--hat)} .padk.c3{border-bottom-color:var(--other)}
-  #play.m-pads .padk{min-height:88px} #padsCard{order:1} .late{order:2} #play.m-pads #padsCard{order:-1} #modesCard{order:-2}
+  #play.m-pads .padk{min-height:88px} #padsCard{order:1} .late{order:2} #play.m-pads #padsCard,#play.m-play #padsCard{order:-1} #modesCard{order:-2}
   .jk{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px 12px;font-size:13px;align-items:baseline}
   .jk .j{font-weight:700;color:var(--ink)} .jk .r{color:var(--ink2)} .jk .r b{color:var(--ink)}
   .j4{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap} .j4 .big{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums} .j4 .v{font-variant-numeric:tabular-nums;color:var(--ink2);min-width:7ch}
@@ -296,7 +296,7 @@
   </section>
   <section class="late">
     <h2>Output</h2>
-    <canvas id="scope" style="height:110px"></canvas>
+    <canvas id="outscope" style="height:110px"></canvas>
     <div class="row" style="margin-top:12px">
       <label class="ctl">History (older ← → now)<input id="hist" type="range" min="0" max="0" value="0"></label>
       <label class="ctl">Sample<select id="sample"><option>—</option></select></label>
@@ -526,7 +526,7 @@ for (const t in TABS) $(t).onclick = () => { showTab(t); history.replaceState(nu
 const D = { bar: 1, wave: 2, scope: 4, text: 8, controls: 16, kit: 32, kitwave: 64, bigscope: 128, transport: 256, pads: 512, jacks: 1024, all: 2047 };
 let dirty = 0, rafPending = false;
 function invalidate(m) { dirty |= m; if (!rafPending) { rafPending = true; requestAnimationFrame(draw); } }
-const canvases = ['ring', 'strip', 'wave', 'scope', 'kitwave', 'bigscope', 'onsethist'].map($);
+const canvases = ['ring', 'strip', 'wave', 'outscope', 'kitwave', 'bigscope', 'onsethist'].map($);
 function sizeCanvas(c) {
   const r = c.getBoundingClientRect(), d = window.devicePixelRatio || 1;
   const w = Math.max(1, Math.round(r.width * d)), h = Math.max(1, Math.round(r.height * d));
@@ -549,9 +549,10 @@ const calledStep = s => st.callFlash !== 255 && st.src[s] === st.callFlash;
 const gridTable = () => table && st && table.nSlices === st.nSlices && st.bufLen > 0 ? table : null;
 function sliceX(s, w) { const ns = st.nSlices, t = gridTable(); if (s >= ns) return w; return t ? t.entries[s].start / st.bufLen * w : s / ns * w; }
 function sliceAt(x, w) { const ns = st.nSlices, t = gridTable(); if (!t) return Math.max(0, Math.min(ns - 1, Math.floor(x / w * ns))); const p = x / w * st.bufLen; let s = 0; while (s + 1 < ns && t.entries[s + 1].start <= p) s++; return s; }
-/* Scope polls only while its canvas is on screen. */
+/* The Play tab's output trace polls only while its canvas is on screen. (It was id="scope" beside main#scope until
+ * v0.13: getElementById found the canvas first, so the Scope tab never showed.) */
 let scopeVisible = true;
-if ('IntersectionObserver' in window) new IntersectionObserver(es => { scopeVisible = es[0].isIntersecting; }).observe($('scope'));
+if ('IntersectionObserver' in window) new IntersectionObserver(es => { scopeVisible = es[0].isIntersecting; }).observe($('outscope'));
 
 /* A drawing bug should cost one frame, not the session (Kyklophoria): the error goes to the message line, once per
  * distinct message, and the next frame tries again. */
@@ -583,7 +584,7 @@ function drawAll(m) {
   if (m & D.kit) drawKit();
   if (m & D.kitwave) { drawKitWave(); drawHist(); }
   if (m & D.scope) {
-    const [g, w, h] = ctx($('scope')); g.clearRect(0, 0, w, h); g.strokeStyle = TOK['cv-grid']; g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
+    const [g, w, h] = ctx($('outscope')); g.clearRect(0, 0, w, h); g.strokeStyle = TOK['cv-grid']; g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
     if (scope) { g.strokeStyle = TOK['cv-ok']; g.lineWidth = 1.5; g.beginPath(); for (let i = 0; i < scope.length; i++) { const x = i / (scope.length - 1) * w, y = h / 2 - scope[i] / 127 * h / 2 * 0.95; i ? g.lineTo(x, y) : g.moveTo(x, y); } g.stroke(); }
   }
   if (m & D.text) drawText();
@@ -1624,7 +1625,7 @@ function clearReadouts() {
   padEls.forEach(p => { p.sig = ''; p.sub.textContent = '—'; p.el.classList.remove('down', 'flash'); }); padDown.clear(); flashAt.fill(0);
   modeChips.forEach(c => { c.el.classList.remove('on'); c.el.disabled = true; });
   $('chop_why').hidden = true; $('mk_follow').hidden = true; $('pads_follow').hidden = true;
-  for (const id of ['ring', 'strip', 'wave', 'scope']) { const [g, w, h] = ctx($(id)); g.clearRect(0, 0, w, h); }
+  for (const id of ['ring', 'strip', 'wave', 'outscope']) { const [g, w, h] = ctx($(id)); g.clearRect(0, 0, w, h); }
   invalidate(D.transport);
 }
 function setDisconnected() {
