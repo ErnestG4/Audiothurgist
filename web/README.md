@@ -1,5 +1,13 @@
 # Audiothurgist — web frontend
 
+**v0.13.0-beta: playing it live.** A transport on every tab (▶ / ■, BPM,
+the clock, a CPU meter, Dice / Flow / Reslice — Undo / Clear in Play), the
+grammars as big mode chips on the Play tab, 24 on-screen pads, a Jacks card
+with the live J4 → key, the Kit's markers → keys / clear markers / autoslice
+count, a light theme beside the dark one, and a layout that works on a
+phone. Details under *What is on the page*; the protocol it needs under
+*The v0.13 keys ops*.
+
 `index.html` is the instrument's face in a browser: the live bar, per-slice
 waveforms you can select and punch into steps, an output scope, a **Controls
 panel that always says what B1/B2/B3 and the six knobs do right now**, a
@@ -21,7 +29,9 @@ dependencies, four static files (plus the vendored Android polyfill), phone-frie
 | `hostlink.js` | HostLink framing, the priority link, StateExt parsers, descriptor helpers — shared with the self-test |
 | `edit.js` | the Kit tab's slice editor without its DOM: snap magnets, handles and hit-testing, clamps, the gesture recogniser, the key-drop rule, the history labels, and the `Editor` that turns gestures into ACTION ops — shared with the self-test |
 | `demo.js` | a fake module behind a fake serial port, for the Demo button and the self-test |
-| `selftest.mjs` | node: golden-vector check + synthetic frames + an end-to-end run over the fake module |
+| `selftest.mjs` | node: golden-vector check + synthetic frames + an end-to-end run over the fake module + the page itself under a DOM stub + the descriptor-parity and contrast checks |
+| `sw.js`, `manifest.webmanifest` | the installable app (network-first service worker) |
+| `publish-pages.sh` | rebuilds the `pages` branch from `web/`, stamping the commit into the footer and the script URLs (`hostlink.js?v=<commit>`) |
 
 ## Running it
 
@@ -79,18 +89,58 @@ and `?demo=v099` the 176-byte body (no sample-mode tail), `?demo=nosets`
 the 219-byte body (no sets tail), `?demo=noedit` a firmware without
 slice editing (no `"edit"` capability, the 255-byte body, the 13-byte
 table) and `?demo=noundo` one without the undo journal (the 262-byte body)
-so you can see the fallbacks; **`?demo=scope`** opens the Scope tab (`cv` / `gates`
+so you can see the fallbacks; **`?demo=play`** starts in Play (an empty
+loop: what the pads play is written into it), **`?demo=pads`** in Pads with
+six autoslice markers already on the keys, **`?demo=old12`** plays a 0.12
+firmware (no `"keys"`: no pads, ▶ / ■ is the mute toggle, the Chop pad
+unguarded); **`?demo=scope`** opens the Scope tab (`cv` / `gates`
 press that preset, `noin` leaves J1/J2 silent, `body512` announces the
 protocol's default `max_body` so a frame takes two requests). `#kit` / `#scope` / `#opts` / `#man` open a tab
 directly.
 
 ## What is on the page
 
-- **Header pills:** module + firmware, current page, clock state
-  (internal / following / locked), BPM with the multiplier, the **link**
-  round-trip (last / worst in the last second · requests per second ·
-  queue depth), and the firmware's own diag pill (worst poll gap and audio
-  callback, playhead jumps, regenerations).
+- **The status line** (one line, ends in an ellipsis; tap it for all of
+  it): module + firmware, current page, clock state, the **link**
+  round-trip (last / worst in the last second · requests per second · KB/s
+  in · queue depth), the jack map, and the firmware's own diag (worst poll
+  gap and audio callback, playhead jumps, regenerations). Under it one
+  message line: what just happened, gone after 8 s unless it is a fault.
+  **Connect** says *Connecting…* and cannot be pressed twice; pulling the
+  cable (the read loop ending) disconnects the page and clears every
+  readout; a drawing error lands on the message line instead of freezing
+  the canvases.
+- **The transport** (every tab; sticky under the tabs, at the bottom of a
+  phone): **▶ / ■** is the mute — the pattern stops, the clock runs on, the
+  keys still play (B1 held 600 ms on the panel); `SET_MUTE` (35) on a v0.13
+  module, the toggle (2) before. BPM (steadied: a short average, shown when
+  it moves 0.1, a 2 BPM step taken at once), playing / stopped, the mode and
+  the clock. The **CPU** meter: the audio callback's mean (bar) and peak
+  (tick) over the last second against the 24-sample block, orange past
+  70 % or on an overrun (the v0.13 tail; older firmware: the diag's worst
+  callback as a tick). **Dice / Flow / Reslice** follow the grammar: in
+  Play they are the looper's **Undo** (12) and **Clear** (13, asked first);
+  Pads has no dice and no flow; Camp's Dice rings the next change. Flow is
+  held — on while the button is down.
+- **Mode** (top of the Play tab): one chip per grammar label in the
+  descriptor — Classic · Grids · Loop (= Play) · Pads big, Collins · Euclid
+  · Camp under *more* — written through the Options blob path; the line
+  under them says what the mode means: the jack map it brings (with Jacks
+  = Follow grammar, Play and Pads take the Voice map) and what B2 / B3 do.
+- **Pads** (`"keys"`): the 24 keys, two octaves from C1, each saying what it
+  plays (slice / marker / recording); `PLAY_KEY` (32) down on press, up on
+  release, one pointer per pad, so several fingers play at once. A pad
+  lights whenever its key is called from anywhere (tail `keyFlash` /
+  `keySeq`). First on the tab in Play and Pads; *keys follow markers* shows
+  when Pads has put the markers on the keys.
+- **Jacks**: the applied map and why (the option, the grammar), J4 live as
+  a key with its volts (0 V = key 0 = C1, a semitone per key, below 0 V =
+  key 0) on a 24-key strip, J5's style in the Voice map, what J6–J8 do.
+- **The slice view** in the pattern grammars is the grid's slices with
+  their envelopes (click one, then a step on the strip, to punch it — ACTION
+  3); in **Play / Pads** it is the kit instead, one column per key, lit as
+  the key fires — no grid ghosts — and a click plays that key. `callFlash`
+  is a slice: the steps that play it light, not step `callFlash`.
 - **The bar:** ring + strip with the playhead, plus grammar, classifier,
   chop, history, sample, page, **native BPM**, **grid** (bars · steps), the
   **Bars** option (editable here as well as in Options), and the clock line:
@@ -101,11 +151,11 @@ directly.
   RMS µs, and `ext n`, the external-clock transition counter (mod 16), when
   the firmware reports them.
 - **Controls:** every button gesture as the firmware implements it (B1 tap
-  = page, B1 held 300 ms + pot = motion lock, hold + nudge again clears; B2
-  tap dice / hold flow; B3 tap reslice / hold load; B2+B3 2 s = Settings),
-  with on-page buttons wherever the protocol has an action: Switch page
-  (ACTION 8), Clear locks (7), Dice (0), Flow (4), Reslice (1), Load
-  selected (6), Mute (2). Below it the six knobs laid out as on the panel
+  = page, B1 held + pot = motion lock, hold + nudge again clears, B1 held
+  alone = start / stop; B2 tap dice — in Play the looper's undo — / hold
+  flow; B3 tap reslice — in Play clear the loop — / hold load; B2+B3 2 s =
+  Settings), with Switch page (ACTION 8), Clear locks (7) and Load selected
+  (6) here — the transport has the rest. Below it the six knobs laid out as on the panel
   for the **current page** (flags bit 4), with what each one means under
   the current grammar and clock: P1 is the chop macro in Classic/Collins,
   slice-choice faithfulness in Grids/Euclid and the **number of bells** in
@@ -203,8 +253,10 @@ directly.
   than the audio ring (1.4 s) detaches the audio tier to its newest window
   and says so. Old firmware without `scope2` gets its mono trace here.
 - **Options tab:** every enum field of the module's Options block, labels
-  and names straight from the descriptor, grouped Sound / Brain & gates /
-  Clock / Analysis (anything new lands in "Other"). A change reads the live
+  and names straight from the descriptor, grouped Pattern / Sound / Looper
+  (Quantize) / Jacks & CV / Recording (Sampling, Record Source, Record) /
+  Editing (Tap Allowance, Autosave) / Analysis — all 24 bytes have a home;
+  a field a newer firmware adds lands in "Other". A change reads the live
   blob fresh, flips one byte and writes it back as a live audition
   (`BLOB_BEGIN 0xFF → DATA → COMMIT`), exactly what `/program` does — it is
   not saved until a preset is saved. If the panel changes an option (a
@@ -244,6 +296,27 @@ directly.
   locks make it ~12 KB) — expect the display to hold for well under a
   second while it goes through.
 
+- **The Kit's marker ops** (`"keys"`, in the Edit panel): the **autoslice
+  count** (0–64; dragging sends each value as it goes, every send after
+  the drag's first with JOIN, so a drag is one undo step) and **Re-roll**
+  (a new draw at the same count), **Markers → keys** (33: time order onto
+  keys 0, 1, 2…, keys holding a recording skipped) and **Clear markers**
+  (34, asked first) — one undo step each. The **Chop pad** is disabled with
+  the reason while nothing sounds (tail 263 b0 — the module would refuse
+  the tap); a tap on a marker that is already there selects it. The
+  waveform keeps the grid's boundaries on a lane at the top and the markers
+  on a lane at the bottom.
+- **Themes:** every colour is a token on `:root` (the canvases read them
+  through `getComputedStyle`); a light set follows `prefers-color-scheme`,
+  and the ◐ button cycles auto → light → dark (remembered per browser).
+  The displays (canvases) stay dark in both, like the module's LEDs behind
+  glass. Every text colour is ≥ 4.5:1 on every surface it sits on, measured
+  by the selftest.
+- **Phone:** one status line instead of wrapping pills, a scrolling tab
+  row, every target ≥ 44 px (the Kit's per-key ● / ✕ give way to the big
+  pair under the keys), the transport under the thumb, no sideways scroll
+  at 320 px.
+
 ## Testing without hardware
 
 ```
@@ -259,7 +332,7 @@ the firmware has shipped (148 / 156 / 164 / 167 / 170 / 176 / 177 / 194 /
 parses the SCOPE request / reply and plans frames at 512 / 1024 / 2048,
 runs the real `Link` over the fake module: priority ordering, coalescing,
 status errors, envelope fetch, the clock flags on a fake clock, a `GET_LIVE
-→ BLOB` option round-trip, the five-label Grammar with Camp at index 4,
+→ BLOB` option round-trip, the seven-label Grammar (Camp 4, Play 5, Pads 6),
 and — on a 64-slice kit with three recordings — the chunked table (39 +
 28), the onset table, raw and decimated waveform windows with the clamp at
 `freePos`, and ACTION 9–13: arm → taking → pending → committed, a second
@@ -279,8 +352,25 @@ merge, delete, promote, copy, keys, nudge, onsets, the Chop pad; a stale gen
 refetched and retried; a take in flight refused and named); and **the page
 itself, headless** — `index.html`'s inline script under a DOM stub in `vm`,
 connected to the fake through `?demo=kit`, driven through its canvases,
-cells, menu and panel, then `?demo=noedit`'s view-only fallback. 430
-checks. Pass `--golden <path>` if the SDK lives elsewhere.
+cells, menu and panel, then `?demo=noedit`'s view-only fallback. Then
+**v0.13**: the transports (Link over a SerialTransport, bytesIn / kbps, the
+unplug as onClose, a WebSocket transport); the KEYS tail and ACTION 32–36
+over the fake (the transport, pads, nested autoslice draws, re-roll, JOIN,
+in-place re-spans, markers → keys, clear markers, Pads' keys following,
+Play's loop, a 0.12 firmware's BAD_ARGS); the **descriptor parity** — it
+parses `src/audiothurgist.cpp` (the Options block's ids, names, offsets,
+zones and enum labels, its size, hash and live defaults, the jacks, the
+pager's knobs, the root capabilities) and fails when `demo.js` drifts (and
+proves the check bites); **the revamped page** under the stub, every
+gesture performed through its listeners (▶ / ■, Flow held, the mode chips,
+three pads at once, the slider drag, re-roll, markers → keys, clear, the
+Chop pad twice, Play's Undo / Clear, the theme, a draw error, the unplug,
+then `?demo=old12`), with the stub's unknown-id trap and draw logs (what
+the last frame drew); the **contrast** of every text token on every
+surface in both themes, no colour outside the tokens, no duplicate ids.
+549 checks. Pass `--golden <path>` if the SDK lives elsewhere (it is found
+above a worktree too) and `--fw-src <file>` to check the parity against
+another firmware source (`git show beta-fw:src/audiothurgist.cpp > /tmp/f.cpp`).
 
 ## The GET_STATE body
 
@@ -307,6 +397,8 @@ char setName[32]                                                  (223..254, SET
 u8 tableGen u8 undoDepth u8 selSlice                              (255..257, EDIT)
 u32 srcPos                                                        (258..261, EDIT)
 u8 redoDepth                                                      (262, EDIT-UNDO)
+u8 flags2 u16 loadAvg u16 loadMax i16 j4mV u8 j4Key u8 j5Style
+u8 keyFlash u8 keySeq u8 autoK u8 nMarkers                        (263..275, KEYS v0.13)
 ```
 
 `recState`: 0 idle · 1 armed (waiting for the gate) · 2 taking · 3 pending
@@ -377,6 +469,33 @@ per op (`editBoundary(link, i, pos, gen)` …) resolving
 30 UNDO_EDIT     —                             one journal step back (64 deep; a take / load / new material ends the history)
 31 REDO_EDIT     —                             one step forward (a new edit clears the redo half)
 ```
+
+## The v0.13 keys ops (ACTION 29, 32–36, capability `"keys": 1`, `"edit": 2`)
+
+```
+29 TAP_MARK      as above, but BAD_STATE while nothing sounds (tail 263 b0 clear); within 10 ms of a live marker
+                 it selects that marker instead: reply u8 status, u8 tableGen, u8 idx, u8 flags (b0 reused)
+32 PLAY_KEY      u8 key (0..23), u8 down (1) / up (0)            the key as a CV note would play it (plain); up releases a held key
+33 KEYS_FROM_MARKERS [u8 gen]  → count                           markers in time order onto keys 0..; recording keys kept; the
+                                                                 keys past the last marker back to their span; one undo step
+34 CLEAR_MARKERS [u8 gen]      → count                           every live marker (grey and orange) deleted, never a take; one step
+35 SET_MUTE      u8 1 stopped / 0 running                        the transport (2 is still the toggle)
+36 AUTOSLICE     u8 k (0..64), u8 flags (b0 re-roll · b1 JOIN) [, u8 gen]  → count
+                 grey markers re-spanned / added / removed to the first k of a seeded draw weighted by salience
+                 (nested in k); orange markers stay, onsets within 10 ms of one are skipped; JOIN folds the apply
+                 into the previous AUTOSLICE's undo step (a slider drag after its first send)
+```
+
+`flags2` (263): b0 `srcValid` (a voice sounds — a TAP_MARK will be taken) ·
+b1 keys follow markers (Pads with markers; in Pads every marker op carries
+markers → keys in its own undo step, and entering Pads applies it once).
+`loadAvg` / `loadMax`: the audio callback in ‰ of the 24-sample budget
+(240 000 cycles), mean and peak over the last second. `j4mV` is J4 now in
+millivolts, `j4Key` the key it would play; `j5Style` the style J5 reads in
+the Voice map (255 in the Brain map); `keyFlash` the last key called by any
+source (255 none), `keySeq` bumps per call; `autoK` the autoslice count last
+applied; `nMarkers` the live markers. `hostlink.js` has `playKey`,
+`keysFromMarkers`, `clearMarkers`, `setMute`, `autoslice` and `caps(desc)`.
 
 ## The scope (0x62)
 
@@ -450,6 +569,7 @@ number of bells, B2 rings the next change, Brain knobs unused).
 | buttons, punch, scrub    | `0x63 ACTION`                     | 0 dice · 1 reslice · 2 mute · 3 punch · 4 flow · 5 scrub · 6 load · 7 clear locks · 8 page · 9 rec arm(key) · 10 rec clear(key) · 11 key plays(0/1) · 12 looper undo · 13 looper clear · 14 save set · 15 load set |
 | slice editing            | `0x63 ACTION` 16–29 (`"edit"`)    | the table ops with a gen, the audition voice, the tap mark — the table above; the Kit tab's editor drives them (`edit.js`) |
 | undo / redo              | `0x63 ACTION` 30 / 31             | the module's journal (EDIT-UNDO); Undo enables from the tail's `undoDepth`, Redo from `redoDepth` |
+| transport, pads, markers | `0x63 ACTION` 32–36 (`"keys"`)    | SET_MUTE · PLAY_KEY per pointer · markers → keys · clear markers · autoslice (JOIN while dragging) |
 | kit waveform             | `0x64 GET_WAVE`                   | on demand, ≤ 3/s, cached windows            |
 | slice table              | `0x65 GET_TABLE`                  | when the state's table signature changes    |
 | onset ticks              | `0x66 GET_HITS`                   | when `matGen` changes                        |
