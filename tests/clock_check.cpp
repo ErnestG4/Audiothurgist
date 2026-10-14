@@ -266,6 +266,20 @@ int main()
         r.Reset(); r.Push(5); CHECK(r.PeriodUs() == 0., "no period from one stamp");
     }
 
+    /* BETA (docs/packages/beta-fw.md): the audio callback's load, Kyklophoria's DWT accounting */
+    {
+        printf("\n== BETA: the load meter — the block budget, ‰ mean and peak ==\n");
+        CHECK(bb::CycleBudget(480000000u, 48000u, 24u) == 240000u, "480 MHz, 48 kHz, 24 samples: 240 000 cycles a block");
+        CHECK(bb::CycleBudget(400000000u, 48000u, 24u) == 200000u && bb::CycleBudget(480000000u, 0u, 24u) == 0u, "400 MHz: 200 000; no rate: 0");
+        CHECK(bb::LoadPermille(0u, 0u, 240000u) == 0u && bb::LoadPermille(5u, 10u, 0u) == 0u, "no blocks / no budget: 0");
+        CHECK(bb::LoadPermille(2000ull * 60000u, 2000u, 240000u) == 250u, "60 000 cycles every block for a second: 250 ‰");
+        CHECK(bb::LoadPermille(240000u, 1u, 240000u) == 1000u && bb::LoadPermille(300000u, 1u, 240000u) == 1250u, "a peak of the whole block: 1000 ‰; an overrun reads past it (1250)");
+        CHECK(bb::LoadPermille(119u, 1u, 240000u) == 0u && bb::LoadPermille(121u, 1u, 240000u) == 1u, "rounded to the nearest ‰");
+        CHECK(bb::LoadPermille(2000ull * 4000000000ull, 2000u, 240000u) == 65535u, "saturating at 65 535");
+        const uint64_t sum = 1999ull * 50000u + 200000u;   // one heavy block among light ones
+        CHECK(bb::LoadPermille(sum, 2000u, 240000u) == 209u && bb::LoadPermille(200000u, 1u, 240000u) == 833u, "the mean hides one heavy block (209 ‰), the peak shows it (833 ‰)");
+    }
+
     printf("\n%d passed, %d failed\n", gPass, gFail);
     return gFail ? 1 : 0;
 }

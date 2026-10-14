@@ -1,7 +1,8 @@
 // panel_check — EDIT-PANEL's pure half (core/bb_panel_edit.h): the selection
 // walker, the centred pickup, the nudge → request mapping and its clamps,
 // the rate window, the computed grid against the engine's own, the revert
-// mask, the bar-ring states. Build + run: tests/run.sh, or by hand:
+// mask, the bar-ring states; BETA: the pickup at a target, the autoslice
+// count knob, the transport hold on B1. Build + run: tests/run.sh, or by hand:
 //   g++ -std=gnu++17 -O1 -g -fsanitize=address,undefined -Icore -Ivendor/capicola/lib \
 //       tests/panel_check.cpp -o /tmp/panel && /tmp/panel
 #include <cmath>
@@ -280,6 +281,68 @@ int main()
         ks[4] = 17;
         CHECK(KeyOnSelection(ks, 4, 17, 16, 20, fl) && !KeyOnSelection(ks, 5, 17, 16, 20, fl) && KeyOnSelection(ks, 3, 3, 16, 20, fl) && !KeyOnSelection(ks, 3, -1, 16, 20, fl), "the keys on the selection");
         CHECK(Pulse(0, 16) == 0.f && Pulse(8, 16) == 1.f && fabsf(Pulse(4, 16) - 0.5f) < 1e-6f && Pulse(12, 16) == 0.5f && Pulse(5, 1) == 1.f, "the triangle");
+    }
+
+    /* ── BETA (docs/packages/beta-fw.md) ─────────────────────────────────── */
+    SECTION("BETA: the pickup at any target (P5's count)");
+    {
+        Pickup p;
+        ArmPickup(p, 0.9f);
+        CHECK(!p.caught && p.target == 0.5f, "the default target is still centre (the nudges unchanged)");
+        const float tol = 0.5f / (float)kAutoMax;
+        ArmPickup(p, 0.8f, AutoPos(10), tol);
+        CHECK(!p.caught && !UpdatePickup(p, 0.6f) && !UpdatePickup(p, 0.33f), "armed at count 10 (0.3125) from 0.8: inert above it");
+        CHECK(UpdatePickup(p, 0.30f), "crossing it picks up");
+        ArmPickup(p, AutoPos(10) + 0.01f, AutoPos(10), tol);
+        CHECK(p.caught, "within half a detent: caught at arm");
+        ArmPickup(p, 0.0f, AutoPos(10), tol);
+        CHECK(!UpdatePickup(p, 0.2f) && UpdatePickup(p, 0.31f), "from below: proximity within half a detent");
+    }
+    SECTION("BETA: the autoslice count — 0..32, hysteresis, the pot's position, the re-roll");
+    {
+        CHECK(AutoCount(0.f, -1) == 0 && AutoCount(1.f, -1) == 32 && AutoCount(0.5f, -1) == 16, "ends and middle (0, 32, 16)");
+        CHECK(AutoCount(-1.f, -1) == 0 && AutoCount(2.f, -1) == 32, "clamped");
+        bool mono = true; int last = -1;
+        for(int i = 0; i <= 400; i++) { const int k = AutoCount((float)i / 400.f, -1); if(k < last) mono = false; last = k; }
+        CHECK(mono && last == 32, "monotonic over the travel");
+        const float edge = 10.5f / 32.f;   // the 10/11 boundary
+        CHECK(AutoCount(edge + 0.005f, 10) == 10 && AutoCount(edge - 0.005f, 11) == 11, "a pot resting on a detent edge keeps the count it has (no flicker)");
+        CHECK(AutoCount(11.f / 32.f, 10) == 11 && AutoCount(9.f / 32.f, 10) == 9, "a whole detent away moves it");
+        bool round = true; for(int k = 0; k <= 32; k++) round &= AutoCount(AutoPos(k), -1) == k && AutoCount(AutoPos(k), k) == k;
+        CHECK(round, "AutoPos(k) reads back as k");
+        CHECK(AutoPos(-3) == 0.f && AutoPos(40) == 1.f, "AutoPos clamps");
+        AutoStep a = AutoChange(5, 5);
+        CHECK(!a.apply && !a.reroll, "no change, nothing");
+        a = AutoChange(5, 6); CHECK(a.apply && !a.reroll, "5 → 6: apply, same draw (nested)");
+        a = AutoChange(6, 0); CHECK(a.apply && !a.reroll, "→ 0: apply (the greys go)");
+        a = AutoChange(0, 3); CHECK(a.apply && a.reroll, "0 → 3: a new draw");
+    }
+    SECTION("BETA: the transport hold on B1 (600 ms, clean) — the page tap, ParamLock and Edit's entry keep their meaning");
+    {
+        float pots[6] = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f};
+        Hold h;
+        auto Run = [&](bool allowed, float upAt, int movePot, float moveBy, bool other) {
+            float p[6]; for(int i = 0; i < 6; i++) p[i] = pots[i];
+            HoldPress(h, p, allowed);
+            bool consumed = false;
+            for(float t = 0.f; t < upAt; t += 1.f)
+            {
+                if(movePot >= 0 && t > upAt * 0.5f) p[movePot] = pots[movePot] + moveBy;
+                if(HoldPoll(h, t, p, other && t > 100.f)) consumed = true;
+            }
+            const bool toggled = HoldRelease(h);
+            return (consumed ? 1 : 0) | (toggled ? 2 : 0);
+        };
+        CHECK(Run(true, 200.f, -1, 0.f, false) == 0, "a tap (200 ms): not consumed (the page flips), no toggle");
+        CHECK(Run(true, 590.f, -1, 0.f, false) == 0, "590 ms: still a page flip");
+        CHECK(Run(true, 601.f, -1, 0.f, false) == 3, "601 ms, clean: consumed (no page flip) and toggled");
+        CHECK(Run(true, 2000.f, -1, 0.f, false) == 3, "2 s, clean: toggled");
+        CHECK(Run(true, 1500.f, 2, 0.05f, false) == 1, "a pot moved during the hold (ParamLock): consumed, no toggle");
+        CHECK(Run(true, 1500.f, 2, 0.02f, false) == 3, "pot jitter under 3 %%: still clean");
+        CHECK(Run(true, 1500.f, -1, 0.f, true) == 1, "B3 (Edit's entry) or B2 during the hold: consumed, no toggle");
+        CHECK(Run(false, 1500.f, -1, 0.f, false) == 0, "a press that started in Edit / Settings: not watched at all");
+        HoldPress(h, pots, true);
+        CHECK(!HoldRelease(h) && !HoldRelease(h), "a release without polls (and a second one) never toggles");
     }
 
     printf("\npanel_check: %d passed, %d failed\n", gPass, gFail);

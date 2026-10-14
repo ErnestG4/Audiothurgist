@@ -259,4 +259,28 @@ struct PeriodRegress
     }
 };
 
+/* ── BETA: the audio callback's load (docs/packages/beta-fw.md) ───────────
+ * Kyklophoria's DWT accounting: the callback reads DWT->CYCCNT at entry and
+ * exit and adds the difference to a one-second window (sum, peak, count);
+ * the control thread rolls the window once a second (the diag roll) into
+ * ‰ of the block budget — the cycles one block may take, core clock ÷
+ * blocks per second: 480 MHz / (48 000 / 24) = 240 000. 1000 ‰ = the whole
+ * block; more = an overrun. Pure arithmetic here; the shell owns the
+ * counters (volatile, audio writes, control rolls and clears). */
+inline uint32_t CycleBudget(uint32_t coreHz, uint32_t sampleRate, uint32_t blockSamples)
+{
+    if(sampleRate == 0u || blockSamples == 0u) return 0u;
+    return (uint32_t)((uint64_t)coreHz * blockSamples / sampleRate);
+}
+/* The mean of `blocks` blocks totalling `cycles`, in ‰ of `budget`, rounded,
+ * saturating at 65 535; 0 with no blocks or no budget. The peak is the same
+ * call with blocks = 1. */
+inline uint16_t LoadPermille(uint64_t cycles, uint32_t blocks, uint32_t budget)
+{
+    if(blocks == 0u || budget == 0u) return 0u;
+    const uint64_t den = (uint64_t)blocks * budget;
+    const uint64_t v   = (cycles * 1000u + den / 2u) / den;
+    return (uint16_t)(v > 65535u ? 65535u : v);
+}
+
 } // namespace bb

@@ -106,20 +106,23 @@ inline int Reselect(int sel, int oldOrdinal, const uint8_t* flags, int nTable)
  * (proximity). Re-armed on every selection and every re-base. ────────── */
 struct Pickup
 {
-    bool caught = false;
-    int  sign   = 0;      // sign of (phys − centre) when armed; 0 = caught at arm
+    bool  caught = false;
+    int   sign   = 0;      // sign of (phys − target) when armed; 0 = caught at arm
+    float target = 0.5f;   // BETA: the value to pick up at (the nudges: centre; P5's count: the count now)
+    float tol    = kCentreTol;
 };
-inline void ArmPickup(Pickup& p, float phys)
+inline void ArmPickup(Pickup& p, float phys, float target = 0.5f, float tol = kCentreTol)
 {
-    const float d = phys - 0.5f;
-    if(d > -kCentreTol && d < kCentreTol) { p.caught = true; p.sign = 0; }
+    p.target = target; p.tol = tol;
+    const float d = phys - target;
+    if(d > -tol && d < tol) { p.caught = true; p.sign = 0; }
     else { p.caught = false; p.sign = d > 0.f ? 1 : -1; }
 }
 inline bool UpdatePickup(Pickup& p, float phys)
 {
     if(p.caught) return true;
-    const float d = phys - 0.5f;
-    if(d > -kCentreTol && d < kCentreTol) { p.caught = true; return true; }
+    const float d = phys - p.target;
+    if(d > -p.tol && d < p.tol) { p.caught = true; return true; }
     const int s = d > 0.f ? 1 : -1;
     if(s != p.sign) { p.caught = true; return true; }
     return false;
@@ -326,6 +329,90 @@ inline float Pulse(uint32_t frame, uint32_t period)
     const float half = (float)period * 0.5f;
     const float v = ph < half ? (float)ph / half : (float)(period - ph) / half;
     return v;
+}
+
+/* ── BETA (docs/packages/beta-fw.md): P5 in Edit = the autoslice count ────
+ * 0..kAutoMax over the pot's travel (33 detents, ~8° each). 32 is the room
+ * a 64-step grid leaves for markers (kMaxTable 96 − 64); a shorter grid has
+ * more, but past 32 grey markers a 2-bar break is chopped finer than its
+ * onsets anyway, and the page's AUTOSLICE goes to 64. Hysteresis: a count
+ * holds until the pot is 0.7 of a detent away from it, so a resting pot on
+ * a detent edge never flickers (each change re-slices). */
+constexpr int   kAutoMax  = 32;
+constexpr float kAutoHyst = 0.7f;
+inline int AutoCount(float phys, int last, int kmax = kAutoMax)
+{
+    if(phys < 0.f) phys = 0.f;
+    if(phys > 1.f) phys = 1.f;
+    const float x = phys * (float)kmax;
+    if(last >= 0 && last <= kmax && x > (float)last - kAutoHyst && x < (float)last + kAutoHyst) return last;
+    int k = (int)(x + 0.5f);
+    return k > kmax ? kmax : k;
+}
+/* Where the pot sits for a count (the pickup's target, the ring's level). */
+inline float AutoPos(int k, int kmax = kAutoMax)
+{
+    if(k < 0) k = 0;
+    if(k > kmax) k = kmax;
+    return kmax > 0 ? (float)k / (float)kmax : 0.f;
+}
+/* A count change → what to post: apply the new count; re-roll (a new seed)
+ * when it comes up from 0 — "sweep to 0 and back up re-rolls". */
+struct AutoStep { bool apply = false; bool reroll = false; };
+inline AutoStep AutoChange(int prev, int next)
+{
+    AutoStep a;
+    if(next == prev) return a;
+    a.apply  = true;
+    a.reroll = prev == 0 && next > 0;
+    return a;
+}
+
+/* ── BETA: the transport hold on B1 ─────────────────────────────────────
+ * B1 held ≥ kHoldMs and released with no pot moved (> kHoldPotTol from where
+ * it was at the press) and no other button pressed during the hold toggles
+ * the mute (▶/■). Every other B1 gesture keeps its meaning: a tap flips the
+ * page (the Pager, on release), B1 held + B3 tap enters Edit, B1 held + a
+ * pot records a ParamLock (≥ 300 ms, the SDK's) — the hold is spoiled the
+ * moment a pot moves or B2 / B3 goes down, and a spoiled hold does nothing.
+ * Once the hold passes kHoldMs the shell claims B1's release from the Pager
+ * (Pager::ConsumeButton while held), clean or not, so a long press never
+ * flips the page — that release used to be a slow page flip. A press that
+ * starts in Edit (or Settings) is not tracked. */
+constexpr float kHoldMs     = 600.f;
+constexpr float kHoldPotTol = 0.03f;   // ParamLock's own arming threshold (3 %)
+constexpr int   kHoldPots   = 6;
+struct Hold
+{
+    bool  track = false;   // a press is being watched
+    bool  dirty = false;   // a pot moved or another button went down
+    bool  armed = false;   // held ≥ kHoldMs: the release is ours
+    float base[kHoldPots] = {};
+};
+inline void HoldPress(Hold& h, const float* pots, bool allowed)
+{
+    h.track = allowed; h.dirty = false; h.armed = false;
+    for(int p = 0; p < kHoldPots; p++) h.base[p] = pots[p];
+}
+/* While B1 is down. Returns true once the release must be consumed. */
+inline bool HoldPoll(Hold& h, float heldMs, const float* pots, bool otherButton)
+{
+    if(!h.track) return false;
+    if(otherButton) h.dirty = true;
+    for(int p = 0; p < kHoldPots; p++)
+    {
+        const float d = pots[p] - h.base[p];
+        if(d > kHoldPotTol || d < -kHoldPotTol) h.dirty = true;
+    }
+    if(heldMs >= kHoldMs) h.armed = true;
+    return h.armed;
+}
+/* B1 came up: true = toggle the mute. */
+inline bool HoldRelease(Hold& h)
+{
+    const bool go = h.track && h.armed && !h.dirty;
+    h.track = false; h.armed = false;
+    return go;
 }
 
 } // namespace panel
