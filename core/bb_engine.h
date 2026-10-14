@@ -294,7 +294,8 @@ enum class EditOp : uint8_t
     NudgeAll,      // every grid boundary (b = 0) or marker start (b = 1) by `a` samples
     Promote,       // SetBoundary(i, marker t's start)
     Undo,          // EDIT-UNDO: one step back through the journal (no fields)
-    Redo           // EDIT-UNDO: one step forward
+    Redo,          // EDIT-UNDO: one step forward
+    SetKeyMap      // BETA: the whole key map from `keys` (−1 = the key's default) — KEYS_FROM_MARKERS, Pads
 };
 enum class EditStatus : uint8_t
 {
@@ -313,6 +314,17 @@ struct EditReq
     static constexpr uint8_t kOrange = 1u;       // ADD: the entry is user-placed (flag b0)
     static constexpr uint8_t kMeta   = 1u << 7;  // `meta` is filled (AnalyseEntry ran)
     static constexpr uint8_t kJoin   = 1u << 6;  // EDIT-UNDO: this op joins the previous one's undo step (FROM_ONSETS' applies)
+    /* BETA (docs/packages/beta-fw.md): a bulk op as ONE undo record. kSnap: this op's
+     * record is a snapshot of the whole marker range [nSlices, kMaxTable) with the key
+     * map and nTable (instead of the entries the op touches), heading a step. kQuiet:
+     * no record at all — the newest record already restores what this op changes (a
+     * snapshot covers marker ops and the key map; any record covers SetKeyMap); the
+     * journal stays live. A kQuiet op the newest record does not cover is journaled
+     * as a joined record instead. kKeep: SetEntry leaves the entry's colour (an
+     * AUTOSLICE re-span of a grey marker is not a user edit). */
+    static constexpr uint8_t kKeep   = 1u << 1;
+    static constexpr uint8_t kQuiet  = 1u << 4;
+    static constexpr uint8_t kSnap   = 1u << 5;
     EditOp    op    = EditOp::None;
     uint8_t   gen   = 0;    // 0 = unchecked; else must equal Engine::tableGen
     uint8_t   flags = 0;
@@ -323,6 +335,7 @@ struct EditReq
     int       start = 0;    // SetEntry / AddEntry: the span · SetBoundary / Split: the position
     int       len   = 0;    // SetEntry / AddEntry
     EntryMeta meta  = {3, 0.f, 0.f, false};
+    int8_t    keys[24] = {};   // BETA: SetKeyMap (Engine::kKeys entries; −1 = the key's default)
 };
 
 struct Engine
@@ -1264,6 +1277,15 @@ struct Engine
         const int s = stepSrc[k] >= 0 && stepSrc[k] < nTable ? stepSrc[k] : k;
         return slices[s].start;
     }
+    /* BETA: SrcPos() is a real playhead — some voice that is not an audition
+     * sounds (a step, a call, a held key, a fade). False = SrcPos() is only the
+     * current step's slice start: TAP_MARK and the panel's chop refuse. */
+    bool SrcValid() const
+    {
+        for(int i = 0; i < kVoices; i++)
+            if(voices[i].active && !voices[i].scratch) return true;
+        return false;
+    }
 
     // Recorded entry owned by `key`, or -1.
     int RecordedEntry(int key) const
@@ -1519,6 +1541,15 @@ struct Engine
     EditStatus EdSwapKeys(int a, int b);
     EditStatus EdNudge(int delta, int which);
     int        MergeTarget(int t) const;                               // the marker Merge(t) swallows, else −1
+    /* BETA (docs/packages/beta-fw.md): markers as the player sees them, and the
+     * key map they imply. A MARKER is a live entry past the grid, inside the
+     * break, owned by no key (a recording is not one, however it was re-keyed). */
+    EditStatus EdSetKeyMap(const int8_t* keys);
+    bool       IsMarker(int t) const;
+    bool       IsGrey(int t) const;                                    // a marker that is not orange (FROM_ONSETS / AUTOSLICE own these)
+    int        MarkerCount() const;
+    int        MarkerNear(int pos, int tol) const;                     // the live entry ≥ nSlices whose start is nearest pos within tol, else −1
+    int        KeysFromMarkers(int8_t* out) const;                     // markers in time order → keys 0..; returns how many keys got a marker
     /* ── EDIT-UNDO (docs/packages/slice-edit-undo.md; bodies in core/bb_undo.h) ──
      * The journal is the shell's (SDRAM, NOLOAD): the engine holds a pointer
      * and nothing else grows here. ApplyEdit captures what an op will touch
@@ -1537,6 +1568,10 @@ struct Engine
     void       UndoRestoreEntry(const UndoEntry& e);
     void       UndoCaptureEntries(UndoRec& r, const int* idx, int n) const;
     void       UndoCaptureStarts(UndoRec& r, int first, int n) const;
+    void       UndoCaptureSnap(UndoRec& r) const;                      // BETA: the marker range, whole
+    bool       UndoQuiet(const EditReq& r) const;                      // BETA: kQuiet honoured (the newest record covers r)
+    void       UndoKeepLive();                                         // BETA: after a quiet op, the journal follows tableGen
+    bool       UndoAtEnd() const;                                      // BETA: live, records held, nothing undone since the newest
     bool       UndoSwap(UndoRec& r);
     /* ── EDIT end ──────────────────────────────────────────────────────── */
 

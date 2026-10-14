@@ -8,6 +8,7 @@
 // (loop points, the hit flag, the recorded-entry shadow, the gas well) and
 // bumps tableGen. All of it runs on the AUDIO thread at block start.
 #include <cstdint>
+#include <cmath>
 
 namespace bb {
 
@@ -62,6 +63,148 @@ inline TapMark TapMarkAt(int srcPos, int allow, int snap, const int* onsets, int
     }
     m.start = p; m.len = len;
     return m;
+}
+
+/* ── BETA: AUTOSLICE's draw (docs/packages/beta-fw.md) ─────────────────────
+ * Weighted sampling without replacement over the onsets, by salience
+ * (Efraimidis & Spirakis 2006): each onset gets key u^(1/w), u uniform in
+ * (0, 1] and w its weight; the k largest keys are the sample. Compared as
+ * ln(u) / w (the same order, no pow). u is a hash of (seed, the onset's
+ * POSITION), so for one seed the order is fixed and the first k are always
+ * a subset of the first k + 1 — turning the count up adds the next drawn
+ * onset, down removes the last one — and an onset keeps its key when others
+ * join or leave the candidate list. A re-roll is a new seed. `w8` 0..255
+ * (the shell's onset strength); 0 still weighs 1/256, so every onset is
+ * eventually drawn. order[0..n) = candidate indices, the sample's order;
+ * ties keep the lower index first. O(n²) insertion, n ≤ 128, control thread. */
+inline float AutoSliceKey(int pos, uint8_t w8, uint32_t seed)
+{
+    uint32_t x = seed ^ ((uint32_t)pos * 0x9E3779B9u);
+    x ^= x >> 16; x *= 0x85EBCA6Bu; x ^= x >> 13; x *= 0xC2B2AE35u; x ^= x >> 16;
+    const float u = (float)((x >> 8) + 1u) * (1.f / 16777216.f);   // (0, 1]
+    const float w = ((float)w8 + 1.f) * (1.f / 256.f);              // (0, 1]
+    return logf(u) / w;                                             // ≤ 0; larger = drawn earlier
+}
+inline void AutoSliceOrder(const int* pos, const uint8_t* w8, int n, uint32_t seed, int* order)
+{
+    float key[Engine::kMaxOnsets];   // 512 B of stack
+    if(n > Engine::kMaxOnsets) n = Engine::kMaxOnsets;
+    for(int i = 0; i < n; i++)
+    {
+        const float k = AutoSliceKey(pos[i], w8[i], seed);
+        int j = i;
+        while(j > 0 && key[j - 1] < k) { key[j] = key[j - 1]; order[j] = order[j - 1]; j--; }
+        key[j] = k; order[j] = i;
+    }
+}
+
+/* ── BETA: a bulk change of the grey markers as the fewest ops ───────────
+ * The target: grey markers at `starts[0..n)` (ascending), each spanning to
+ * the next target (the last to the break's end; a span under kRecMin is
+ * dropped, as FROM_ONSETS does). The plan against the table now: every grey
+ * marker that starts at no target goes (tomb), a grey one already at a
+ * target start keeps its slot and keys and only re-spans if its length
+ * differs (set — the shell posts SetEntry with kKeep, so it stays grey), and
+ * the rest are added (add). Orange markers, recordings, the grid: never
+ * touched. Applying the plan leaves the grey set equal to the target, so a
+ * count turned 5 → 6 → 5 posts one add + one re-span, then one tomb + one
+ * re-span. Pure (reads the table), control thread. */
+struct GreyPlan   // a POD (the shell keeps one in SDRAM): PlanGrey sets every count
+{
+    static constexpr int kMax = Engine::kMaxTable;
+    int nTomb, tomb[kMax];
+    int nSet, setT[kMax], setLen[kMax];
+    int nAdd, addStart[kMax], addLen[kMax];
+    int nTarget;   // spans the target keeps (≤ n)
+};
+inline void PlanGrey(const Engine& e, const int* starts, int n, GreyPlan& p)
+{
+    p.nTomb = p.nSet = p.nAdd = p.nTarget = 0;
+    bool used[Engine::kMaxTable] = {};
+    for(int j = 0; j < n; j++)
+    {
+        const int s = starts[j];
+        const int end = j + 1 < n ? starts[j + 1] : e.bufLen;
+        if(s < 0 || s >= e.bufLen || end - s < Engine::kRecMin) continue;
+        if(p.nTarget >= GreyPlan::kMax) break;
+        p.nTarget++;
+        int hit = -1;
+        for(int t = e.nSlices; t < e.nTable && hit < 0; t++)
+            if(!used[t] && e.IsGrey(t) && e.slices[t].start == s) hit = t;
+        if(hit >= 0)
+        {
+            used[hit] = true;
+            if(e.slices[hit].len != end - s) { p.setT[p.nSet] = hit; p.setLen[p.nSet] = end - s; p.nSet++; }
+        }
+        else { p.addStart[p.nAdd] = s; p.addLen[p.nAdd] = end - s; p.nAdd++; }
+    }
+    for(int t = e.nSlices; t < e.nTable; t++)
+        if(e.IsGrey(t) && !used[t]) p.tomb[p.nTomb++] = t;
+}
+
+/* ── BETA: markers ────────────────────────────────────────────────────── */
+inline bool Engine::IsMarker(int t) const
+{
+    return t >= nSlices && t < nTable && !(tableFlags[t] & kFlagTomb) && tableKey[t] < 0 && slices[t].start < bufLen;
+}
+inline bool Engine::IsGrey(int t) const
+{
+    return IsMarker(t) && !(tableFlags[t] & kFlagOrange);
+}
+inline int Engine::MarkerCount() const
+{
+    int n = 0;
+    for(int t = nSlices; t < nTable; t++) if(IsMarker(t)) n++;
+    return n;
+}
+// TAP_MARK's dedupe: a mark within `tol` of a live marker's (or recording's)
+// start selects it instead of stacking a new one. The nearest wins; −1 none.
+inline int Engine::MarkerNear(int pos, int tol) const
+{
+    int best = -1, bestD = tol + 1;
+    for(int t = nSlices; t < nTable; t++)
+    {
+        if(tableFlags[t] & kFlagTomb) continue;
+        int d = slices[t].start - pos; if(d < 0) d = -d;
+        if(d < bestD) { bestD = d; best = t; }
+    }
+    return best;
+}
+// KEYS_FROM_MARKERS (and Pads, whenever the markers change): the markers in
+// time order (ties by index) → keys 0, 1, 2…; a key that owns a recording is
+// skipped and keeps what it plays; keys past the markers go back to their
+// span slice. `out` is the whole map (kKeys); returns how many keys got a
+// marker. Pure: the shell posts it as SetKeyMap.
+inline int Engine::KeysFromMarkers(int8_t* out) const
+{
+    int order[kMaxTable]; int n = 0;
+    for(int t = nSlices; t < nTable; t++)
+    {
+        if(!IsMarker(t)) continue;
+        int j = n++;
+        while(j > 0 && slices[order[j - 1]].start > slices[t].start) { order[j] = order[j - 1]; j--; }
+        order[j] = t;
+    }
+    int m = 0, given = 0;
+    for(int k = 0; k < kKeys; k++)
+    {
+        if(RecordedEntry(k) >= 0) { out[k] = keySlice[k]; continue; }
+        if(m < n) { out[k] = (int8_t)order[m++]; given++; }
+        else out[k] = (int8_t)SpanSlice(k);
+    }
+    return given;
+}
+inline EditStatus Engine::EdSetKeyMap(const int8_t* keys)
+{
+    for(int k = 0; k < kKeys; k++)
+        if(keys[k] >= 0 && (keys[k] >= nTable || (tableFlags[keys[k]] & kFlagTomb))) return EditStatus::BadArgs;
+    for(int k = 0; k < kKeys; k++)
+    {
+        if(keys[k] >= 0) { keySlice[k] = keys[k]; continue; }
+        const int r = RecordedEntry(k);
+        keySlice[k] = (int8_t)(r >= 0 ? r : SpanSlice(k));
+    }
+    return EditStatus::Ok;
 }
 
 inline int Engine::FreeSlot() const
@@ -408,6 +551,7 @@ inline EditStatus Engine::EdNudge(int delta, int which)
  *   SwapKeys      a, b                         —                a ≠ b; recorded owners trade too
  *   NudgeAll      a = samples, b = 0 grid / 1 markers  —        grid: linked and clamped; markers: clamped to [0, freePos)
  *   Promote       t, i                         → slice i        SetBoundary(i, marker t's start)
+ *   SetKeyMap     keys[kKeys] (−1 = default)   —                BETA: every key at once; each a live entry
  *
  * `meta` is copied verbatim when flags has kMeta (the control thread ran
  * bb::AnalyseEntry on the span first); ops marked — ignore it. The entry a
@@ -424,7 +568,9 @@ inline EditStatus Engine::ApplyEdit(const EditReq& r, int* newIdx)
     if(!buf || nSlices < 1 || bufLen < 1) return EditStatus::NoMaterial;
     if(r.gen != 0 && r.gen != tableGen) return EditStatus::Stale;
     if(r.op == EditOp::Undo || r.op == EditOp::Redo) return UndoStep(r.op == EditOp::Redo);
-    const bool journal = UndoBegin(r);
+    const bool quiet   = UndoQuiet(r);               /* BETA: the newest record already covers this op */
+    const bool tail    = (r.flags & EditReq::kQuiet) && UndoAtEnd();   /* BETA: …else, right behind its step, it joins it */
+    const bool journal = !quiet && UndoBegin(r);
     EditStatus st  = EditStatus::BadOp;
     int        who = -1;   // the entry that takes the meta and the orange
     int        idx = -1;
@@ -432,6 +578,7 @@ inline EditStatus Engine::ApplyEdit(const EditReq& r, int* newIdx)
     {
         case EditOp::SetBoundary: st = EdMoveBoundary(r.i, r.start); who = r.i; break;
         case EditOp::SetEntry:    st = EdSetEntry(r.t, r.start, r.len); who = r.t; break;
+        case EditOp::SetKeyMap:   st = EdSetKeyMap(r.keys); break;               /* BETA */
         case EditOp::AddEntry:    st = EdAdd(r, idx); break;                      // meta and flags applied inside
         case EditOp::Split:       st = EdSplit(r, idx); break;                    // meta → the new half, inside
         case EditOp::Merge:       st = EdMerge(r.t); who = r.t; break;
@@ -449,7 +596,7 @@ inline EditStatus Engine::ApplyEdit(const EditReq& r, int* newIdx)
     if(st != EditStatus::Ok) return st;
     if(who >= 0 && who < nTable)
     {
-        tableFlags[who] |= kFlagOrange;
+        if(!(r.op == EditOp::SetEntry && (r.flags & EditReq::kKeep))) tableFlags[who] |= kFlagOrange;   /* BETA: kKeep = a machine re-span keeps its colour */
         if(r.flags & EditReq::kMeta)
         {
             stepClass[who] = r.meta.cls;
@@ -463,7 +610,8 @@ inline EditStatus Engine::ApplyEdit(const EditReq& r, int* newIdx)
     if(r.op == EditOp::SetBoundary || r.op == EditOp::Promote || (r.op == EditOp::NudgeAll && r.b == 0)) SaveOverlay();
     if(newIdx) *newIdx = idx;
     BumpGen();
-    if(journal) UndoCommit(!(r.flags & EditReq::kJoin));
+    if(journal) UndoCommit(!((r.flags & EditReq::kJoin) || tail));
+    else if(quiet) UndoKeepLive();                  /* BETA: no record, the step it joined stays live */
     return EditStatus::Ok;
 }
 

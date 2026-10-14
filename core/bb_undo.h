@@ -42,6 +42,7 @@ struct UndoRec
 {
     static constexpr uint8_t kEntries = 0;   // u.e[0..n): the entries the op touched
     static constexpr uint8_t kStarts  = 1;   // u.nudge: the starts of [first, first + n) with their orange / hit bits
+    static constexpr uint8_t kSnap    = 2;   // BETA: u.e[0..n) = every slot of [first, first + n) — the marker range, whole
     uint8_t op;        // the forward EditOp this record undoes (informational)
     uint8_t kind;      // kEntries / kStarts
     uint8_t head;      // 1 = the first record of a step (Undo pops back to a head)
@@ -52,7 +53,7 @@ struct UndoRec
     int8_t  keys[Engine::kKeys];   // keySlice as it was
     union
     {
-        UndoEntry e[2];
+        UndoEntry e[Engine::kMaxTable];   // kEntries: [0, 2) · BETA kSnap: [0, n)
         struct { uint32_t orange[3], hit[3]; int32_t start[Engine::kMaxTable]; } nudge;
     } u;
     // the bytes a record uses: the header, the keys, then what its kind fills
@@ -60,10 +61,15 @@ struct UndoRec
     {
         const size_t head = offsetof(UndoRec, u);
         if(kind == kStarts) return head + sizeof(u.nudge.orange) + sizeof(u.nudge.hit) + sizeof(int32_t) * (size_t)n;
+        if(kind == kSnap)   return head + sizeof(UndoEntry) * (size_t)(n > Engine::kMaxTable ? Engine::kMaxTable : n);
         return head + sizeof(UndoEntry) * (size_t)(n > 2 ? 2 : n);
     }
 };
-static_assert(sizeof(UndoRec) == 8 + Engine::kKeys + 24 + 4 * Engine::kMaxTable, "UndoRec is 440 bytes");
+/* BETA: the union grew from two entries / the nudge form (408 B) to a whole marker
+ * range snapshot (96 × 24 B): 440 → 2 336 B a record, the journal 28.6 → 151.9 KB of
+ * SDRAM (NOLOAD). Push copies only Bytes(), so a two-entry record still costs 80 B
+ * of copying; the snapshot's bound is one memcpy of ≤ 2.3 KB at block start. */
+static_assert(sizeof(UndoRec) == 8 + Engine::kKeys + 24 * Engine::kMaxTable, "UndoRec is 2 336 bytes");
 
 struct UndoJournal
 {
@@ -129,7 +135,10 @@ inline void Engine::UndoRestoreEntry(const UndoEntry& e)
     sliceDens[t]  = e.dens;
     stepBands[t]  = e.bands;
     if(t >= nSlices) recMeta[t] = {e.cls, e.sal, e.dens, e.hit != 0};
-    RefreshEntry(t);                 // loopState, the gas well; the hit it derives is overridden:
+    /* loopState, the gas well; the hit it derives is overridden. A marker's
+     * RefreshEntry would only search the onsets for a hit thrown away below
+     * (BETA: a snapshot restores ~90 of them in one block), so it is skipped. */
+    if(t < nSlices) RefreshEntry(t); else loopState[t] = 0;
     stepHit[t] = e.hit != 0;         // the entry's hit may have come from AnalyseEntry, not the onset table
     if(t >= nSlices) recMeta[t].hit = stepHit[t];
 }
@@ -170,12 +179,38 @@ inline void Engine::UndoCaptureStarts(UndoRec& r, int first, int n) const
     }
 }
 
+// BETA: every slot of the marker range [nSlices, kMaxTable) — live, tombstoned
+// or past nTable — with the key map and nTable: what restoring any run of
+// marker ops (tombstones, adds into reused or fresh slots, re-spans) and a
+// key-map change needs. A bulk op's step is this one record (EditReq::kSnap),
+// its later ops kQuiet.
+inline void Engine::UndoCaptureSnap(UndoRec& r) const
+{
+    r.kind = UndoRec::kSnap;
+    r.first = (uint8_t)nSlices;
+    r.n = (uint8_t)(kMaxTable - nSlices);
+    r.nTable = (uint8_t)nTable;
+    memcpy(r.keys, keySlice, sizeof r.keys);
+    for(int j = 0; j < r.n; j++) UndoCaptureEntry(r.u.e[j], nSlices + j);
+}
+
 // Restore r and leave the state it replaced in r (the record becomes its
 // own inverse). true = a grid entry was touched (the overlay must follow).
 inline bool Engine::UndoSwap(UndoRec& r)
 {
     bool grid = false;
-    if(r.kind == UndoRec::kStarts)
+    if(r.kind == UndoRec::kSnap)
+    {
+        for(int j = 0; j < r.n && r.first + j < kMaxTable; j++)
+        {
+            UndoEntry now;
+            UndoCaptureEntry(now, r.u.e[j].idx);
+            UndoRestoreEntry(r.u.e[j]);
+            r.u.e[j] = now;
+        }
+        if(r.first < nSlices) grid = true;   // never, by construction (first = nSlices)
+    }
+    else if(r.kind == UndoRec::kStarts)
     {
         const int first = r.first, n = r.n;
         if(first + n > kMaxTable) return false;
@@ -241,6 +276,7 @@ inline bool Engine::UndoBegin(const EditReq& r)
     if(undo->gen != tableGen) undo->Clear();   // something went past the journal: the history restarts here
     UndoRec& s = undo->scratch;
     s.op = (uint8_t)r.op; s.head = 1; s.pad[0] = s.pad[1] = 0;
+    if(r.flags & EditReq::kSnap) { UndoCaptureSnap(s); undo->armed = 1; return true; }   /* BETA: a bulk op's one record */
     int idx[2] = {-1, -1};
     int n = 0;
     switch(r.op)
@@ -252,7 +288,8 @@ inline bool Engine::UndoBegin(const EditReq& r)
         case EditOp::AddEntry:  idx[0] = FreeSlot(); n = 1; break;
         case EditOp::Split:     idx[0] = r.t; idx[1] = FreeSlot(); n = 2; break;
         case EditOp::Merge:     idx[0] = r.t; idx[1] = MergeTarget(r.t); n = 2; break;
-        case EditOp::SetKey:    n = 0; break;   // the key map alone
+        case EditOp::SetKey:
+        case EditOp::SetKeyMap: n = 0; break;   // the key map alone (BETA: SetKeyMap too)
         case EditOp::SwapKeys:
             if(r.a >= 0 && r.a < kKeys) idx[0] = keySlice[r.a];
             if(r.b >= 0 && r.b < kKeys) idx[1] = keySlice[r.b];
@@ -268,6 +305,29 @@ inline bool Engine::UndoBegin(const EditReq& r)
     undo->armed = 1;
     return true;
 }
+
+// BETA: kQuiet is honoured — no record — only when the journal is live, the
+// cursor is at its end (nothing undone since) and the newest record restores
+// everything the op writes: any record carries the whole key map (SetKeyMap),
+// a snapshot carries the whole marker range (the marker ops a bulk plan
+// posts). Otherwise the op is journaled: joined to the step it follows when
+// the cursor is at the end (UndoAtEnd), a step of its own when it is not.
+inline bool Engine::UndoQuiet(const EditReq& r) const
+{
+    if(!undo || !(r.flags & EditReq::kQuiet) || (r.flags & EditReq::kSnap)) return false;
+    if(undo->gen != tableGen || undo->count <= 0 || undo->cur != undo->count) return false;
+    if(r.op == EditOp::SetKeyMap) return true;
+    const UndoRec& last = undo->Slot(undo->count - 1);
+    if(last.kind != UndoRec::kSnap) return false;
+    switch(r.op)
+    {
+        case EditOp::AddEntry: case EditOp::SetEntry: case EditOp::Tombstone: return r.op != EditOp::SetEntry || r.t >= nSlices;
+        default: return false;
+    }
+}
+
+inline void Engine::UndoKeepLive() { if(undo) undo->gen = tableGen; }
+inline bool Engine::UndoAtEnd() const { return undo && undo->gen == tableGen && undo->count > 0 && undo->cur == undo->count; }
 
 // After a successful op (tableGen already bumped): commit the capture.
 inline void Engine::UndoCommit(bool head)

@@ -8,6 +8,7 @@
 // 6000 samples; step k carries a sine at (200 + 50·k) Hz, so the slice that
 // actually sounded in any rendered step is read back from its zero-crossing
 // rate. Every assertion below is a behaviour the module relies on.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -2537,7 +2538,177 @@ int main()
             e.SetUndoJournal(nullptr);
             CHECK(e.ApplyEdit(Bnd(5, 28000)) == EditStatus::Ok && e.UndoDepth() == 0 && e.ApplyEdit(Undo()) == EditStatus::BadArgs, "without a journal: the op lands, depth 0, Undo BadArgs");
         }
-        CHECK(sizeof(bb::UndoRec) == 440 && sizeof(bb::UndoJournal) == 65 * 440 + 16, "record 440 B, journal %zu B", sizeof(bb::UndoJournal));
+        /* ── BETA (docs/packages/beta-fw.md): bulk ops as one step, the key map, markers, AUTOSLICE's draw ── */
+        SECTION("BETA: SetKeyMap; kSnap / kQuiet = one undo record for a bulk op; kKeep; markers; keys from markers; AUTOSLICE's draw and plan; SrcValid");
+        {
+            auto Map = [](const int8_t* k, uint8_t flags = 0) { EditReq r; r.op = EditOp::SetKeyMap; memcpy(r.keys, k, sizeof r.keys); r.flags = flags; return r; };
+            // SetKeyMap: every key at once, −1 = the default, a tombstone / past the table refused, undone as one step
+            setup();
+            int8_t km[24]; for(int k = 0; k < 24; k++) km[k] = (int8_t)(15 - (k % 16));
+            km[3] = -1;                                                   // key 3 owns entry 16: its default is its recording
+            const Snap b0 = Take(e);
+            CHECK(e.ApplyEdit(Map(km)) == EditStatus::Ok && e.keySlice[0] == 15 && e.keySlice[3] == 16 && e.keySlice[20] == 11, "SET_KEY_MAP lands, −1 = the key's default (key 3 → its recording 16)");
+            const char* why = "";
+            CHECK(e.UndoDepth() == 1 && e.ApplyEdit(Undo()) == EditStatus::Ok && Same(b0, Take(e), &why), "…one step, undone exactly (%s)", why);
+            int8_t bad[24]; memcpy(bad, km, 24); bad[5] = 40;
+            const uint8_t g0 = e.tableGen;
+            CHECK(e.ApplyEdit(Map(bad)) == EditStatus::BadArgs && e.tableGen == g0 && e.keySlice[5] == b0.ks[5], "an entry past the table: BadArgs, nothing written");
+            e.ApplyEdit(Add(-1, 6000, 3000, 0)); e.ApplyEdit(One(EditOp::Tombstone, 17));
+            memcpy(bad, km, 24); bad[2] = 17;
+            CHECK(e.ApplyEdit(Map(bad)) == EditStatus::BadArgs, "a tombstone: BadArgs");
+
+            // markers: live, past the grid, inside the break, keyless; grey = not orange; the nearest within a tolerance
+            setup();
+            e.ApplyEdit(Add(-1, 30000, 3000, 0));                         // 17 grey
+            e.ApplyEdit(Add(-1, 12000, 3000, EditReq::kOrange));          // 18 orange
+            e.ApplyEdit(Add(-1, 60000, 3000, 0));                         // 19 grey
+            e.ApplyEdit(Add(-1, 66000, 3000, 0)); e.ApplyEdit(One(EditOp::Tombstone, 20));   // 20 tombstone
+            CHECK(e.IsMarker(17) && e.IsMarker(18) && e.IsMarker(19) && !e.IsMarker(16) && !e.IsMarker(20) && !e.IsMarker(5), "markers: 17..19 (not the recording 16, the tombstone 20, the grid)");
+            CHECK(e.IsGrey(17) && !e.IsGrey(18) && e.IsGrey(19) && e.MarkerCount() == 3, "grey = not orange; three markers");
+            CHECK(e.MarkerNear(30200, 480) == 17 && e.MarkerNear(29600, 480) == 17 && e.MarkerNear(30481, 480) == -1, "MarkerNear: within 10 ms either side, not past it");
+            CHECK(e.MarkerNear(kLen + 100, 480) == 16, "…a recording's start counts too (a tap inside a played recording)");
+            CHECK(e.MarkerNear(66000, 480) == -1, "…a tombstone does not");
+
+            // keys from markers: time order → keys 0.., key 3 (a recording) skipped and kept, the rest their span slice
+            {
+                int8_t out[24];
+                const int given = e.KeysFromMarkers(out);
+                bool rest = true; for(int k = 4; k < 24; k++) rest &= out[k] == (int8_t)e.SpanSlice(k);
+                CHECK(given == 3 && out[0] == 18 && out[1] == 17 && out[2] == 19 && out[3] == 16 && rest, "18 (12000), 17 (30000), 19 (60000) on keys 0..2; key 3 keeps its recording; 4.. back to the span (%d %d %d %d)", out[0], out[1], out[2], out[3]);
+            }
+
+            // Pads: an op that changes the markers, then the key map QUIET → one step restores table and keys together
+            {
+                const Snap before = Take(e);
+                const int d0 = e.UndoDepth(), r0 = journal.count;
+                int mark = -1;
+                CHECK(e.ApplyEdit(Add(-1, 3000, 2000, EditReq::kOrange), &mark) == EditStatus::Ok && mark == 20, "a tap mark (orange, the tombstone's slot 20)");
+                int8_t follow[24]; e.KeysFromMarkers(follow);
+                CHECK(e.ApplyEdit(Map(follow, EditReq::kQuiet)) == EditStatus::Ok && e.keySlice[0] == mark && e.keySlice[1] == 18, "the keys follow, quiet (key 0 → the new mark)");
+                CHECK(e.UndoDepth() == d0 + 1 && journal.count == r0 + 1, "…no record of its own: one step, one record (depth %d, records %d)", e.UndoDepth(), journal.count - r0);
+                const Snap after = Take(e);
+                CHECK(e.ApplyEdit(Undo()) == EditStatus::Ok && Same(before, Take(e), &why), "one Undo takes the mark AND the key map back (%s)", why);
+                CHECK(e.ApplyEdit(Redo()) == EditStatus::Ok && Same(after, Take(e), &why), "one Redo brings both (%s)", why);
+            }
+            // kQuiet the newest record does not cover → journaled (joined), never lost
+            {
+                const int r0 = journal.count, d0 = e.UndoDepth();
+                CHECK(e.ApplyEdit(Bnd(5, 28000)) == EditStatus::Ok, "a boundary move (an entries record)");
+                EditReq q = One(EditOp::Tombstone, 19); q.flags = EditReq::kQuiet;
+                CHECK(e.ApplyEdit(q) == EditStatus::Ok && journal.count == r0 + 2 && e.UndoDepth() == d0 + 1, "a quiet tombstone after it is recorded, joined to its step (records +%d, depth +%d)", journal.count - r0, e.UndoDepth() - d0);
+                CHECK(e.ApplyEdit(Undo()) == EditStatus::Ok && e.IsMarker(19) && e.slices[5].start == 30000, "…and undone with it");
+                EditReq q2 = Map(km, EditReq::kQuiet);
+                const int u1 = e.UndoDepth();
+                CHECK(e.RedoDepth() == 1 && e.ApplyEdit(q2) == EditStatus::Ok && e.UndoDepth() == u1 + 1 && e.RedoDepth() == 0, "after an undo (the cursor not at the end) a quiet op is recorded as a step");
+            }
+
+            // a bulk op: the first apply kSnap, the rest kQuiet — ONE record, whatever the count (the ring can't be overrun)
+            {
+                setup();
+                for(int j = 0; j < 6; j++) e.ApplyEdit(Add(-1, 3000 + j * 12000, 4000, 0));   // 17..22 grey
+                e.ApplyEdit(Add(5, 7000, 3000, EditReq::kOrange));                             // 23 orange, key 5
+                const Snap before = Take(e);
+                const int d0 = e.UndoDepth(), r0 = journal.count;
+                bool snapped = false; int ops = 0, okOps = 0;
+                auto Bulk = [&](EditReq r) { r.flags |= snapped ? EditReq::kQuiet : EditReq::kSnap; ops++; const EditStatus s = e.ApplyEdit(r); if(s == EditStatus::Ok) { snapped = true; okOps++; } return s; };
+                for(int t = e.nSlices; t < e.nTable; t++) if(e.IsGrey(t)) Bulk(One(EditOp::Tombstone, t));
+                for(int j = 0; j < 80; j++) Bulk(Add(-1, 500 + j * 1300, 1200, 0));            // 80 adds: 6 reuse the tombstones, 72 append, 2 Full
+                CHECK(okOps == 6 + 78 && journal.count == r0 + 1 && e.UndoDepth() == d0 + 1, "%d of %d applies landed as ONE record (records +%d, depth +%d)", okOps, ops, journal.count - r0, e.UndoDepth() - d0);
+                CHECK(e.nTable == bb::Engine::kMaxTable && !e.IsGrey(23) && e.keySlice[5] == 23, "the table filled; the orange marker and its key untouched");
+                const Snap after = Take(e);
+                CHECK(e.ApplyEdit(Undo()) == EditStatus::Ok && Same(before, Take(e), &why) && e.UndoDepth() == d0, "one Undo: every slot of the marker range back, nTable back (%s)", why);
+                CHECK(e.ApplyEdit(Redo()) == EditStatus::Ok && Same(after, Take(e), &why), "one Redo: all 84 applies back (%s)", why);
+                CHECK(e.ApplyEdit(Undo()) == EditStatus::Ok && e.ApplyEdit(Undo()) == EditStatus::Ok, "…and the steps before it still undo");
+            }
+            // kKeep: a machine re-span stays grey; the same SetEntry without it turns orange (a user edit)
+            {
+                setup();
+                e.ApplyEdit(Add(-1, 30000, 3000, 0));
+                EditReq k = Ent(17, 30000, 5000); k.flags = EditReq::kKeep;
+                CHECK(e.ApplyEdit(k) == EditStatus::Ok && e.IsGrey(17) && e.slices[17].len == 5000, "SET_ENTRY + kKeep: re-spanned, still grey");
+                CHECK(e.ApplyEdit(Ent(17, 30000, 4000)) == EditStatus::Ok && !e.IsGrey(17) && e.IsMarker(17), "without it: orange");
+            }
+
+            // AUTOSLICE's draw: deterministic, nested by construction, a new seed reorders, the weights tell
+            {
+                int pos[40]; uint8_t w[40];
+                for(int i = 0; i < 40; i++) { pos[i] = 1000 + i * 2357; w[i] = (uint8_t)(i * 6); }
+                int o1[40], o2[40], o3[40];
+                bb::AutoSliceOrder(pos, w, 40, 7u, o1); bb::AutoSliceOrder(pos, w, 40, 7u, o2); bb::AutoSliceOrder(pos, w, 40, 8u, o3);
+                bool perm = true; int seen[40] = {}; for(int i = 0; i < 40; i++) { if(o1[i] < 0 || o1[i] >= 40 || seen[o1[i]]++) perm = false; }
+                CHECK(perm && memcmp(o1, o2, sizeof o1) == 0, "a permutation, the same for the same seed");
+                CHECK(memcmp(o1, o3, sizeof o1) != 0, "another seed, another order (a re-roll)");
+                bool desc = true; for(int i = 1; i < 40; i++) desc &= bb::AutoSliceKey(pos[o1[i - 1]], w[o1[i - 1]], 7u) >= bb::AutoSliceKey(pos[o1[i]], w[o1[i]], 7u);
+                CHECK(desc, "the order is the keys' descending order — the first k ⊂ the first k + 1 for every k");
+                // drop candidates: the survivors keep their relative order (keys hang on positions, not indices)
+                int pos2[20]; uint8_t w2[20]; int o4[20];
+                for(int i = 0; i < 20; i++) { pos2[i] = pos[2 * i]; w2[i] = w[2 * i]; }
+                bb::AutoSliceOrder(pos2, w2, 20, 7u, o4);
+                int sub[20], ns = 0; for(int i = 0; i < 40; i++) if((o1[i] & 1) == 0) sub[ns++] = o1[i] / 2;
+                CHECK(ns == 20 && memcmp(sub, o4, sizeof o4) == 0, "with half the onsets gone the rest are drawn in the same order");
+                // weight: over 2000 seeds the heaviest onset is in the first 5 far more often than the lightest
+                int heavy = 0, light = 0;
+                for(uint32_t sd = 1; sd <= 2000; sd++)
+                {
+                    int o[40]; bb::AutoSliceOrder(pos, w, 40, sd * 2654435761u, o);
+                    for(int i = 0; i < 5; i++) { heavy += o[i] == 39; light += o[i] == 0; }
+                }
+                CHECK(heavy > 3 * light && heavy > 300, "salience weighs: the loudest onset is drawn in the first 5 %d times of 2000, the quietest %d", heavy, light);
+                CHECK(light > 0, "…and the quietest (weight 0 → 1/256) still comes up sometimes (%d)", light);
+            }
+            // AUTOSLICE's plan applied as the shell posts it: the grey set = the target; up one = one add + one re-span; one undo step
+            {
+                setup();
+                e.ApplyEdit(Add(-1, 12500, 3000, EditReq::kOrange));    // 17 orange
+                e.ApplyEdit(Add(-1, 40000, 3000, 0));                   // 18 grey, not on any onset below
+                int on[12]; for(int i = 0; i < 12; i++) on[i] = 2000 + i * 7900;
+                static bb::GreyPlan pl;
+                auto ApplyK = [&](int k, int& posted) {
+                    int st[12]; for(int j = 0; j < k; j++) st[j] = on[j];
+                    bb::PlanGrey(e, st, k, pl);
+                    bool snapped = false; posted = 0;
+                    auto P = [&](EditReq r) { r.flags |= snapped ? EditReq::kQuiet : EditReq::kSnap; if(e.ApplyEdit(r) == EditStatus::Ok) { snapped = true; posted++; } };
+                    for(int j = 0; j < pl.nTomb; j++) P(One(EditOp::Tombstone, pl.tomb[j]));
+                    for(int j = 0; j < pl.nSet; j++) { EditReq r = Ent(pl.setT[j], e.slices[pl.setT[j]].start, pl.setLen[j]); r.flags = EditReq::kKeep; P(r); }
+                    for(int j = 0; j < pl.nAdd; j++) P(Add(-1, pl.addStart[j], pl.addLen[j], 0));
+                };
+                auto Greys = [&](int* s, int& n) { n = 0; for(int t = e.nSlices; t < e.nTable; t++) if(e.IsGrey(t)) s[n++] = e.slices[t].start; std::sort(s, s + n); };
+                const Snap s0 = Take(e);
+                const int d0 = e.UndoDepth();
+                int posted = 0; ApplyK(5, posted);
+                int g[96], ng = 0; Greys(g, ng);
+                bool eq = ng == 5; for(int j = 0; j < 5 && eq; j++) eq = g[j] == on[j];
+                CHECK(eq && posted == 6 && e.UndoDepth() == d0 + 1, "k = 5: the grey set is the 5 onsets (the stray grey gone), %d applies, one step", posted);
+                CHECK(e.IsMarker(17) && !e.IsGrey(17) && e.slices[17].start == 12500, "the orange marker untouched");
+                int lastLen = 0; for(int t = e.nSlices; t < e.nTable; t++) if(e.IsGrey(t) && e.slices[t].start == on[4]) lastLen = e.slices[t].len;
+                CHECK(lastLen == kLen - on[4], "the last spans to the break's end (%d)", lastLen);
+                ApplyK(6, posted);
+                CHECK(pl.nTomb == 0 && pl.nSet == 1 && pl.nAdd == 1 && posted == 2, "k = 6: one add, one re-span (tomb %d set %d add %d)", pl.nTomb, pl.nSet, pl.nAdd);
+                Greys(g, ng); eq = ng == 6; for(int j = 0; j < 6 && eq; j++) eq = g[j] == on[j];
+                CHECK(eq, "…the 6-set contains the 5-set");
+                ApplyK(5, posted);
+                CHECK(pl.nTomb == 1 && pl.nSet == 1 && pl.nAdd == 0, "back to 5: one tombstone, one re-span");
+                ApplyK(0, posted);
+                CHECK(e.MarkerCount() == 1 && e.IsMarker(17), "k = 0: every grey marker gone, the orange one stays");
+                ApplyK(0, posted);
+                CHECK(posted == 0, "k = 0 again: nothing to post");
+                int n = 0; while(e.UndoDepth() > d0 && e.ApplyEdit(Undo()) == EditStatus::Ok) n++;
+                CHECK(n == 4 && Same(s0, Take(e), &why), "four steps (5, 6, 5, 0) undo to the start exactly (%s)", why);
+            }
+            // SrcValid: nothing sounds (muted, no call) → false; a call → true; the voice ends → false
+            {
+                setup(); e.muted = true;
+                float out[24];
+                for(int i = 0; i < 40; i++) e.Process(out, 24);
+                CHECK(!e.SrcValid(), "muted, no call: no playhead (SrcPos would be the step's slice start)");
+                e.CallSlice(3, 1.f, false, false, false);
+                e.Process(out, 24);
+                CHECK(e.SrcValid() && e.SrcPos() > e.slices[3].start && e.SrcPos() < e.slices[3].start + 100, "a call sounds: valid, at the call's position (%d)", e.SrcPos());
+                e.CallRegion(20000, 2400, 1.f, 0); for(int i = 0; i < 400; i++) e.Process(out, 24);
+                CHECK(!e.SrcValid(), "the call has ended; an audition alone is not a playhead");
+            }
+        }
+        CHECK(sizeof(bb::UndoRec) == 2336 && sizeof(bb::UndoJournal) == 65 * 2336 + 16, "record 2 336 B (BETA: a whole marker-range snapshot), journal %zu B", sizeof(bb::UndoJournal));
     }
 
     printf("\n%d passed, %d failed\n", gPass, gFail);
