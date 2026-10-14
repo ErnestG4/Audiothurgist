@@ -1503,6 +1503,9 @@ const sentAct = (G, ...pre) => G('demoDevice.acts').some(a => pre.every((v, i) =
   const sw = fs.readFileSync(new URL('sw.js', here), 'utf8'); const shell = [...sw.matchAll(/'(\.\/[^']+)'/g)].map(x => x[1]).filter(x => x !== './');
   check('service worker shell files exist', shell.length >= 6 && shell.every(f => fs.existsSync(new URL(f, here))), shell.filter(f => !fs.existsSync(new URL(f, here))).join(','));
   const html = fs.readFileSync(new URL('index.html', here), 'utf8');
+  const pub = fs.readFileSync(new URL('publish-pages.sh', here), 'utf8');
+  check('publish stamp: the footer marker and the three script tags publish-pages.sh rewrites are in the page as it expects them', html.includes('<!--page-build--><b>local</b>') && ['hostlink', 'edit', 'demo'].every(s => html.includes(`<script src="${s}.js"></script>`) && pub.includes(s)) && /\?v=\$stamp/.test(pub));
+  check('service worker: the cache version bumped for the beta, the query ignored in the offline fallback', /audiothurgist-v2/.test(sw) && /ignoreSearch: true/.test(sw));
   check('page links manifest and loads the polyfill only without navigator.serial', /rel="manifest"/.test(html) && /!navigator\.serial && navigator\.usb/.test(html) && /serialApi\(\)/.test(html));
   check('page has the Scope tab wired to scope2', /id="tab_scope"/.test(html) && /id="bigscope"/.test(html) && /cp\.scope2 >= 1/.test(html) && /caps\(desc\)/.test(html) && /fetchScopeFrame\(/.test(html) && /SCOPE_TAB_STATE_MS/.test(html) && /id="sc_cvchans"/.test(html) && /id="sc_p_gates"/.test(html) && /cp\.scope2 >= 2/.test(html));
 }
