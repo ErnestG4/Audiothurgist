@@ -17,10 +17,12 @@ is in the firmware and the edges are still being filed.
 
 - **Chopper** — the knobs and buttons: slice, rearrange, dice, flow,
   history, tempo, pitch.
-- **Voice** — the rack plays *it*: with the Voice jack map, J4 is the slice
-  note, J5 the style note (reverse, half, double, ratchet, staccato,
-  punch/choke — and Record), J6 the gate; J7 sends a trigger per hit and J8
-  its velocity. Two play grammars: **Play** loops what you play in
+- **Voice** — the rack plays *it*: **J4 is the key in every map — 0 V =
+  key 0 (C1)**, a semitone per key to key 23, negatives = key 0, each key
+  playing what the Kit's key table says. With the Voice jack map J5 is the
+  style note (reverse, half, double, ratchet, staccato, punch/choke — and
+  Record; under ~70 mV is plain), J6 the gate; J7 sends a trigger per hit
+  and J8 its velocity; with the Brain map J5 is the gate. Two play grammars: **Play** loops what you play in
   (unquantized by default), **Pads** is the MPC — nothing written, the beat
   is yours.
 - **Brain** — it plays the rack: kick, snare and hat gates on J6/J7/J8 as
@@ -54,7 +56,9 @@ power-up breathing pulse to reach the Daisy bootloader, then flash.
 | P5 | **Sample** — highlight a file on the card | Hat density |
 | P6 | **Volume** (reverb rides the cluster zone) | Rotation (Euclid) |
 
-**B1** tap: Perform ↔ Brain · held 300 ms + turn a pot: record that pot's
+**B1** tap: Perform ↔ Brain · **held 600 ms and let go** (no pot, no other
+button; B1 turns white when it will): **start / stop** — the pattern stops,
+the clock runs on, keys still play, B1 breathes while stopped · held 300 ms + turn a pot: record that pot's
 motion as a loop (hold + nudge again clears; a green pip marks a locked pot;
 a dim blue-grey ring is a pot waiting for you to sweep through its value).
 **B2** tap: dice (new arrangement) · hold: flow (a new bar every loop).
@@ -69,15 +73,16 @@ the Perform/Brain page underneath is untouched) — see the table below.
 | P2 | **Start nudge** ±50 ms — inert until swept through centre (a dim fan shows where it would land), then live in 1 ms steps; every move re-plays the first 250 ms |
 | P3 | **End nudge** ±50 ms, the same; every move re-plays the last 250 ms |
 | P4 | Pitch, as ever |
-| P5 | The kit map, with the selection's key cells pulsing |
+| P5 | **Autoslice** count 0–32: grey markers on onsets drawn at random, weighted by loudness — up adds the next, down drops the last, 0 and back re-draws; picks up at the count there is; a sweep is one undo; the selection's key cells pulse on top |
 | B1 | tap: leave (commit) |
 | B2 | tap: undo the last edit · hold: revert the slice to the computed grid (a marker: delete it) |
-| B3 | tap while the break plays: a marker at the playhead, onset-snapped (Options → Tap Allowance) · hold: reslice |
+| B3 | tap while something sounds: a marker at the playhead, onset-snapped (Options → Tap Allowance); within 10 ms of a marker it selects that one · hold: reslice |
 
-Jacks, **Brain map**: J1/J2 audio in · **J3 clock in** · **J4 v/oct · J5
+Jacks, **Brain map**: J1/J2 audio in · **J3 clock in** · **J4 key · J5
 gate** · **J6/J7/J8 kick/snare/hat gates out** · J9/J10 audio out. **Voice
-map** (Options → Jacks, or automatically with Play/Pads): J4 slice · J5 style
+map** (Options → Jacks, or automatically with Play/Pads): J4 key · J5 style
 · **J6 gate in** · J7 hit trigger out · J8 velocity out; the clock stays.
+In **Pads** the keys follow the markers (time order on keys 0, 1, 2…).
 
 ## Options (in the web app or Hermetic's `/program`)
 

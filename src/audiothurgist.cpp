@@ -9,8 +9,9 @@
  * take (J5 style 7) and a loop take into the break (Options → Record).
  *
  *   P1 Chop · P2 Tempo · P3 History · P4 Pitch · P5 Sample-select · P6 Volume
- *   B1 hold + turn a pot = record a motion loop (ParamLock) · B2 tap refill /
- *   hold flow · B3 tap reslice / hold load · B2+B3 held 2 s = Settings
+ *   B1 hold + turn a pot = record a motion loop (ParamLock) · B1 held 600 ms
+ *   and let go clean = start / stop (BETA) · B2 tap refill / hold flow · B3 tap
+ *   reslice / hold load · B2+B3 held 2 s = Settings · B1 held + B3 tap = Edit
  *
  * DMA law (SDK's SdCard header confirms our Pod-era finding): every buffer
  * SDMMC touches must live in SDRAM, not DTCM. BOOT_SRAM puts plain .bss in
@@ -60,7 +61,8 @@
 #include "bb_gates.h"    /* GATES: pure lane law (arm / poll / volts) */
 #include "bb_bars.h"
 #include "bb_testbreak.h"
-#include "bb_clockmath.h" /* CLOCK: ClockMap, PhaseGuard, MultZone, JitterMeter (pure, host-tested) */
+#include "bb_clockmath.h" /* CLOCK: ClockMap, PhaseGuard, MultZone, JitterMeter (pure, host-tested); BETA: the load meter's arithmetic */
+#include "bb_keys.h"      /* BETA: the one CV keymap — J4 key, J5 style, the call plan (pure, host-tested) */
 #include "bb_sample.h"   /* SAMPLE: TrimRegion, AnalyseRegion (a key take, control thread) */
 #include "bb_record.h"   /* RECORD: record input, kit map, take length, markers → cues, TakeRecorder */
 #include "bb_sets.h"     /* SETS: set naming, engine ↔ SetInfo, the load plan (docs/packages/sample-sets.md) */
@@ -73,6 +75,9 @@
 #include <new>           /* SETS: placement-new for the NOLOAD SDRAM objects */
 
 using namespace alchemy;
+
+/* BETA: the one version string — HELLO's version field, the descriptor, the page's footer. */
+static constexpr const char* kFirmwareVersion = "0.13.0-beta";
 
 constexpr float kSr       = 48000.f;
 constexpr int   kMaxSec   = 25;
@@ -222,7 +227,7 @@ static bb::bardetail::BarScratch ALCHEMY_SDRAM_BSS gBarScratchMem;
 Settings           settings(hw, &pager);
 void DescribeManual(alchemy::hostlink::Host& host);   /* src/audiothurgist_manual.cpp */
 static hostlink::Host host(presets, "audiothurgist", "Audiothurgist",
-                           "0.12.3-harden", BB_GIT_HASH);   /* the git field = the build stamp (Makefile) */
+                           kFirmwareVersion, BB_GIT_HASH);   /* the git field = the build stamp (Makefile) */
 
 /* ── shared control/audio state ─────────────────────────────────────── */
 static volatile float gVol      = 0.8f;
@@ -311,18 +316,17 @@ struct ClockSel
 };
 static ClockSel gClockSel;
 
-/* ── Voice (M3): J4 v/oct + J5 gate → the MONO keymap (spec §6.3) ──────
- * Each gate rising edge samples v/oct once, quantises with note-CENTER
- * windows (boundaries are the knife-edge bug class), and dispatches by
- * range relative to 0 V: 0 = mute toggle · 1 = gap · 2..11 = latched
- * modifier keyswitches · 12..23 reserved · 24..39 = sixteen slice keys
- * spread across the loop. Replace-don't-layer; CHOKE vs PUNCH dropdown. */
+/* ── Voice: J4 = the key (BETA: one map, core/bb_keys.h) ───────────────
+ * Each gate rising edge plays J4's key — 0 V = key 0, a semitone a key,
+ * quantised with note-CENTER windows (boundaries are the knife-edge bug
+ * class), negatives clamp to key 0 — through the Kit's key table
+ * (Engine::KeySlice). Voice map: J6 gate, J5 style; Brain map: J5 gate,
+ * plain. Replace-don't-layer; CHOKE vs PUNCH dropdown. (The M3 MONO keymap
+ * — 0 V mute, ten latched modifier keyswitches, sixteen slice keys two
+ * octaves up — went in v0.13.) */
 static constexpr uint8_t kVoiceVoctChan = 1u;  /* J4 */
 static constexpr uint8_t kVoiceGateChan = 2u;  /* J5 */
-enum : uint32_t { kModRev = 1u << 0, kModHalf = 1u << 1, kModDouble = 1u << 2,
-                  kModPunch = 1u << 3, kModRat = 1u << 4 };
-static uint32_t       gMods      = 0u;    /* latched keyswitch state */
-static int            gLastNote  = -1;
+static int            gCvKey     = -1;    /* BETA: the key the jacks called last (released on the gate's fall / a map change) */
 static volatile bool  gCallReq   = false; /* control → audio handshake */
 static volatile int   gCallIdx   = 0;
 static volatile float gCallMul   = 1.f;
@@ -334,6 +338,13 @@ static volatile bool  gCallHeld = false;
 static volatile int   gCallKey  = -1;
 static volatile int   gRelKey   = -1;     /* poll → audio: release this key (-1 none) */
 /* SAMPLE end */
+/* BETA: what the jacks read now and the last key called (state tail 268..273) */
+static volatile int16_t gJ4mV     = 0;      /* J4 in millivolts */
+static volatile uint8_t gJ4Key    = 0;      /* the key J4 would play now (0..23) */
+static volatile uint8_t gJ5Style  = 255u;   /* Voice map: the style J5 reads now (0..8); 255 in the Brain map */
+static volatile uint8_t gKeyFlash = 255u;   /* the last key called by any source (CV, page, panel), 255 none */
+static volatile uint8_t gKeySeq   = 0;      /* bumps on every key call */
+static volatile uint8_t gAutoK    = 0;      /* BETA AUTOSLICE: the count last applied (0 none; tail 274) */
 static volatile int   gCallFlash = -1;    /* ring: called step flashes */
 static volatile int   gCallFlashT = 0;
 static const char* kVoiceDisp =
@@ -565,6 +576,7 @@ static volatile bool      gEditPend   = false;     /* control → audio: apply i
 static volatile uint8_t   gEditStatus = 0;         /* audio → control: the EditStatus of the last apply */
 static volatile int       gEditIdx    = -1;        /* audio → control: the new entry (ADD / SPLIT), else −1 */
 static volatile uint32_t  gSrcPos     = 0;         /* audio → control: engine.SrcPos() once per block (state tail 258) */
+static volatile bool      gSrcValid   = false;     /* BETA: … and whether a voice really sounds (Engine::SrcValid; tail 263 b0) */
 /* EDIT-AUDITION: ACTION 27 / 28 → engine.CallRegion / ReleaseRegion. At
  * most one request is held and at most ten go out a second: a request that
  * lands inside the 100 ms window replaces the held one and goes out when
@@ -579,6 +591,7 @@ static uint8_t            gAudHeldFlags = 0;
 static uint32_t           gAudLastMs = 0;          /* control: when the last request went out (ms) */
 static constexpr uint32_t kAudMinMs  = 100u;
 static constexpr int      kEditMsToSamp = (int)(kSr / 1000.f);   /* 48: the shell's ms → samples */
+static constexpr int      kTapDedupe    = 10 * kEditMsToSamp;     /* BETA: a tap this close to a live marker selects it */
 static void PostAudition(int start, int len, uint8_t flags)
 {
     gAudStart = start; gAudLen = len; gAudFlags = flags;
@@ -738,6 +751,14 @@ static volatile uint32_t gGateArmUs[3]   = {0u, 0u, 0u};
 static volatile uint16_t gDiagGateLateUs = 0;
 static uint32_t          gDiagGateLateCur = 0;
 static volatile uint16_t gDiagOverruns   = 0;   /* callbacks > 450 µs, lifetime */
+/* BETA: DWT cycle accounting of the audio callback (Kyklophoria's): the callback
+ * adds its cycles to a one-second window, the diag roll in OnPoll turns it into
+ * ‰ of the block budget (bb::LoadPermille: 240 000 cycles at 480 MHz, 24 samples)
+ * for the state tail's loadAvg / loadMax (264 / 266). audioUs / overruns above
+ * stay as they were (TIM2 µs, lifetime count). */
+static volatile uint32_t gCycSum    = 0, gCycMax = 0, gCycN = 0;   /* 32-bit: one word, never torn; a second at 100 % is 480 M */
+static uint32_t          gCycBudget = 240000u;   /* set from the core clock at boot */
+static volatile uint16_t gLoadAvg   = 0, gLoadMax = 0;   /* ‰, the last second */
 static double         gLastLp   = -1.;   /* audio thread: < 0 = re-arm the phase guard (new material) */
 static float          gP2ExtRef = -1.f;  /* P2 while following: engage on move */
 static bool           gP2ExtEng = false;
@@ -919,6 +940,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
                     size_t                           size)
 {
     const uint32_t cbStartTick = TickNow();   /* diag: callback duration (ticks) */
+    const uint32_t cbStartCyc  = DWT->CYCCNT;  /* BETA: the load meter */
     /* new material ready: swap buffers and re-point the engine (SetMaterial
      * is audio-thread work here exactly as it was on the Pod). */
     if(gApply || gReapply)
@@ -1054,6 +1076,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
 
     engine.Process(gMono, gOutR, n);   /* RECORD: both planes (mono material copies L to R) */
     gSrcPos = (uint32_t)engine.SrcPos();   /* EDIT: the youngest voice's material position, for the tail and TAP_MARK */
+    gSrcValid = engine.SrcValid();         /* BETA: false = SrcPos is only the step's slice start (nothing sounds) */
 
     /* per-class trigger bitmask → ARM gate countdowns (sample-accurate).
      * The CV writes themselves happen in OnPoll, never here: J3–J6 are
@@ -1164,6 +1187,13 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
     const uint32_t cbUs = (TickNow() - cbStartTick) / gTicksPerUs;
     if(cbUs > gDiagAudioCur) gDiagAudioCur = cbUs;
     if(cbUs > 450u) gDiagOverruns = (uint16_t)(gDiagOverruns + 1u);
+    {   /* BETA: cycles this block (modular: CYCCNT wraps every 8.9 s at 480 MHz) */
+        const uint32_t cyc = DWT->CYCCNT - cbStartCyc;
+        const uint32_t sum = gCycSum + cyc;
+        gCycSum = sum < cyc ? 0xFFFFFFFFu : sum;   /* saturating (an 8.9× overload for a whole second) */
+        gCycN = gCycN + 1u;
+        if(cyc > gCycMax) gCycMax = cyc;
+    }
 }
 
 /* ── control frame ──────────────────────────────────────────────────── */
@@ -1192,6 +1222,21 @@ static uint8_t  gPanelGen      = 0;       /* tableGen the base came from; a chan
 static uint8_t  gPanelReq      = 0;       /* OnPoll → ServicePanel one-shots (below) */
 static uint32_t gPanelTapPos   = 0;       /* gSrcPos at the B3 press: the chop's moment */
 static float    gPanelSaved[3] = {0.f, 0.f, 0.f};   /* P1..P3 stored values at entry */
+static float    gPanelSaved5   = 0.f;     /* BETA: P5's stored value at entry (P5 is the autoslice count in Edit) */
+static bool     gPanelTapValid = false;   /* BETA: a voice sounded at the B3 press (Engine::SrcValid) — else the chop is refused */
+/* BETA: P5 in Edit = the AUTOSLICE count (bb::panel::AutoCount, 0..32), picked
+ * up at the grey-marker count it finds (re-armed whenever the table moves
+ * under it), posted through a 100 ms rate window, the last count wins; coming
+ * up from 0 re-rolls (a new seed). A run of counts with nothing else edited
+ * between folds into ONE undo step (the shell's Autoslice join). */
+static bb::panel::Pickup   gAutoPick;
+static bb::panel::RateGate gAutoGate;
+static int      gAutoPot       = 0;       /* the count the pot points at (the ring) */
+static int      gAutoPrev      = 0;       /* the count last posted from the pot (AutoChange's prev: 0 → n re-rolls) */
+static bool     gAutoOffer     = false;   /* OnPoll → ServicePanel: a new count */
+static constexpr uint32_t kAutoRateUs = 100000u;
+static constexpr Rgb kAutoCol   {200, 200, 210};   /* the count: grey-white (the page's grey markers) */
+static constexpr Rgb kAutoDim   { 30,  30,  36};   /* …before the pot has picked up */
 static float    gP1Anchor      = 0.f;     /* P1 re-selects once it has travelled kP1Wake from here */
 static uint8_t  gPanelPage     = 0;       /* the Pager page Edit was entered on */
 static uint32_t gPanelFrame    = 0;       /* OnRender counter: the pulses */
@@ -1236,10 +1281,22 @@ static void PanelSelect(int t)
     gSel = t;
     PanelArm();
 }
+/* BETA: P5 picks up at the grey markers there are now (capped at the knob's 32). */
+static void PanelArmAuto()
+{
+    int g = 0;
+    for(int t = engine.nSlices; t < engine.nTable; t++) if(engine.IsGrey(t)) g++;
+    if(g > bb::panel::kAutoMax) g = bb::panel::kAutoMax;
+    gAutoPot = gAutoPrev = g;
+    bb::panel::ArmPickup(gAutoPick, hw.pots[P_SPACE].Value(), bb::panel::AutoPos(g), 0.5f / (float)bb::panel::kAutoMax);
+    gAutoOffer = false; gAutoGate.pend = false;
+}
 static void PanelEnter()
 {
     gPanelPage = pager.Page();
     for(uint8_t p = 0; p < 3u; p++) gPanelSaved[p] = pager.Value(p);
+    gPanelSaved5 = pager.Value(P_SPACE);   /* BETA */
+    PanelArmAuto();                         /* BETA */
     gEdit = true; gPanelReq = kPanelNone;
     /* the first selection is what plays now; P1 takes over once it moves */
     const int ns = engine.nSlices > 0 ? engine.nSlices : 1;
@@ -1253,9 +1310,45 @@ static void PanelLeave()
     float ph[kNumPots];
     for(uint8_t i = 0; i < kNumPots; i++) ph[i] = hw.pots[i].Value();
     for(uint8_t p = 0; p < 3u; p++) pager.SetStored(gPanelPage, p, gPanelSaved[p], ph);   /* back where they were, catch armed */
+    pager.SetStored(gPanelPage, P_SPACE, gPanelSaved5, ph);   /* BETA: P5 too — the file highlight (Perform) / the hat density (Brain) holds */
     gEdit = false; gSel = -1; gSelOrd = -1; gPanelReq = kPanelNone;
 }
 static void ServicePanel();   /* the main loop: after the EDIT helpers */
+
+/* ── BETA: one key call — the Voice map, the Brain map and PLAY_KEY share it.
+ * The key plays what the Kit's key table says (Engine::KeySlice) in `style`
+ * (bb::keys::CallFor: Pads never writes, Play writes unless style 6 flips it,
+ * elsewhere Options → Voice), held until its release when Options → Key
+ * Plays = Held. One slot (gCallReq) carries it to the audio thread, as ever;
+ * the jacks write it straight away, PLAY_KEY waits for it to drain first. In
+ * Edit the key's entry is selected. Every call sets keyFlash and bumps keySeq
+ * (tail 272 / 273), whoever made it. ─────────────────────────────────── */
+static void CallKey(int key, int style)
+{
+    if(engine.nSlices < 1) return;
+    if(key < 0) key = 0;
+    if(key >= bb::Engine::kKeys) key = bb::Engine::kKeys - 1;
+    const int idx = engine.KeySlice(key);
+    if(gEdit && idx != gSel) PanelSelect(idx);   /* EDIT-PANEL: a note selects its key's entry */
+    const bb::keys::Call c = bb::keys::CallFor(style, gGrammar.mode, gVoiceSel.sel);
+    gCallIdx   = idx;
+    gCallRev   = c.rev;
+    gCallMul   = c.mul;
+    gCallRat   = c.rat;
+    gCallLen   = c.len;
+    gCallPunch = c.punch;
+    gCallHeld  = gKeyPlays.sel == 1;   /* SAMPLE: Options → Key Plays = Held */
+    gCallKey   = key;
+    gCallFlash = idx; gCallFlashT = 6;
+    gKeyFlash  = (uint8_t)key; gKeySeq = (uint8_t)(gKeySeq + 1u);
+    gCallReq   = true;
+}
+/* BETA: the transport hold on B1 (bb::panel::Hold): held ≥ 600 ms and released
+ * with no pot moved and no B2 / B3 toggles the mute — ▶/■: the pattern stops,
+ * the clock runs on, keys still sound. OnPoll feeds it; OnRender lights B1 full
+ * white once a release would toggle, and breathes it while stopped. */
+static bb::panel::Hold gHold;
+static_assert(bb::panel::kHoldPots == kNumPots, "the hold watches every pot");
 /* ── end EDIT-PANEL state ──────────────────────────────────────────────── */
 
 static void OnFrame()
@@ -1278,7 +1371,7 @@ static void OnFrame()
 
     /* P5 highlights a file (Selector value = index once labelled; Norm
      * fallback before the card is scanned). Loading is on B3-hold. */
-    if(gNumFiles > 0)
+    if(gNumFiles > 0 && !gEdit)   /* BETA: P5 is the autoslice count while Edit is on; the highlight holds */
     {
         int idx = (int)(k_sample.Value() + 0.5f);
         if(idx < 0) idx = 0;
@@ -1492,6 +1585,12 @@ static void OnPoll(uint32_t /*t_ms*/)
             gDiagAudioUs   = (uint16_t)(a > 65535u ? 65535u : a);
             gDiagStallPhase = gDiagStallCur; gDiagStallCur = 0;
             gDiagGateLateUs = (uint16_t)(gDiagGateLateCur > 65535u ? 65535u : gDiagGateLateCur); gDiagGateLateCur = 0;
+            {   /* BETA: the load window — read, then clear (a block landing between the two is one block of 2 000 lost) */
+                const uint32_t sum = gCycSum, n = gCycN, mx = gCycMax;
+                gCycSum = 0; gCycN = 0; gCycMax = 0;
+                gLoadAvg = bb::LoadPermille(sum, n, gCycBudget);
+                gLoadMax = bb::LoadPermille(mx, 1u, gCycBudget);
+            }
             s_gapMax = 0; gDiagAudioCur = 0;
             uint16_t pk, rms; gJitter.Roll(pk, rms);
             gDiagJitterUs = pk; gDiagJitterRmsUs = rms;
@@ -1500,122 +1599,79 @@ static void OnPoll(uint32_t /*t_ms*/)
     }
     /* ── end CLOCK ─────────────────────────────────────────────────────── */
 
-    /* Voice map keymap: J6 gate · J4 slice v/oct · J5 style v/oct. The note IS
-     * the slice (one key per slice region, up to two octaves from 0 V; one
-     * semitone below 0 V toggles mute). The style note is read with the hit
-     * and a CHANGE of style while the gate is held re-strikes the slice:
-     * 0 plain · 1 reverse · 2 half-speed · 3 double · 4 ratchet · 5 staccato ·
-     * 6 punch/choke flip. */
+    /* BETA: the one CV keymap (core/bb_keys.h, Combust 2026-10-14). J4 is the
+     * key in both maps — 0 V = key 0, a semitone a key up to 23, negatives
+     * clamp to 0, the key plays what the Kit's key table says — read every
+     * poll for the tail's live J4 → key (268 / 270). Voice map: J6 gate, J5
+     * the style (0 plain · 1 reverse · 2 half · 3 double · 4 ratchet · 5
+     * staccato · 6 punch/choke flip · 7 Record · 8 Clear), read with the hit,
+     * a style CHANGE while the gate is held re-strikes the key; under 0.85 st
+     * J5 reads plain. Brain map: J5 is the gate, the calls are plain. Both
+     * honour Options → Key Plays (held: the gate's fall releases). Gone: the
+     * Voice map's −1 st mute toggle, the Brain map's 0 V mute and its latched
+     * modifier keyswitches — start / stop is B1's hold and ACTION 35. */
+    static int s_j4Last = -99;
+    const float j4v   = hw.cv[kVoiceVoctChan].Volts();
+    const int   j4key = bb::keys::KeyOf(j4v, s_j4Last);
+    gJ4mV = bb::keys::MilliVolts(j4v); gJ4Key = (uint8_t)j4key;
+    /* a key held from the jacks when the map changes is released (review L1, kept); the page's held pads are its own */
+    static uint8_t s_prevMap = 0xFFu;
+    if(gJackMapCur != s_prevMap) { if(gCvKey >= 0) gRelKey = gCvKey; gCvKey = -1; s_prevMap = gJackMapCur; }
     /* RECORD: the record styles live on the Voice map — leaving it disarms and ends a key take */
     if(gJackMapCur != 1u)
     {
         gKeyArm = false; if(gKeyTake && !gWebTake) gKeyTakeDone = true;   /* a browser take runs on any map */
-        static int s_heldOnLeave = -1;
-        if(gCallHeld && gCallKey >= 0 && s_heldOnLeave != gCallKey) { gRelKey = gCallKey; s_heldOnLeave = gCallKey; }   /* a key held when the map left: release it (review L1) */
     }
     if(gJackMapCur == 1u)
     {
-        static int  s_note = -99, s_style = 0, s_lastIdx = -1;
-        static int  s_lastKey = -1;   /* SAMPLE: the key of the last call (0..23) */
-        auto quant = [](float volts, int& last) {
-            const float nf = volts * 12.f; int n = (int)floorf(nf + 0.5f);
-            if(fabsf(nf - (float)n) < 0.4f) last = n; else n = last;
-            return n; };
+        static int s_style = 0, s_lastStyle = 0;
         const bool rose = gClkEdge.JustRose(3u);
         const bool held = hw.cv[3].Volts() > 2.5f;
         /* SAMPLE: the gate's falling edge releases the held key (a no-op for one-shot voices) */
-        if(gClkEdge.JustFell(3u) && s_lastKey >= 0) gRelKey = s_lastKey;
-        static int s_lastNote = -99, s_lastStyle = 0;
-        const int n  = quant(hw.cv[kVoiceVoctChan].Volts(), s_lastNote);
-        const int st = quant(hw.cv[kVoiceGateChan].Volts(), s_lastStyle);
+        if(gClkEdge.JustFell(3u) && gCvKey >= 0) gRelKey = gCvKey;
+        const int st = bb::keys::StyleOf(hw.cv[kVoiceGateChan].Volts(), s_lastStyle);
+        gJ5Style = bb::keys::StyleByte(st);
         /* RECORD: J5 style 7 = Record (armed: every key held records into
          * that key), 8 = Clear (the key goes back to its grid slice); any
          * other style disarms. Neither calls the slice, neither re-strikes.
          * A running key take ends when the gate falls, the plane fills, or
          * the style moves off 7; the main loop finishes it (ServiceRecord). */
-        const int  sty    = st < 0 ? 0 : st;
-        const bool recSty = sty >= 7;
-        gKeyArm = sty == 7 && !gTakeActive;
-        if(gKeyTake && (engine.recFull || (!gWebTake && (gClkEdge.JustFell(3u) || sty != 7)))) gKeyTakeDone = true;   /* a browser take: only the cap or the next arm stops it */
+        const bool recSty = st >= 7;
+        gKeyArm = st == 7 && !gTakeActive;
+        if(gKeyTake && (engine.recFull || (!gWebTake && (gClkEdge.JustFell(3u) || st != 7)))) gKeyTakeDone = true;   /* a browser take: only the cap or the next arm stops it */
         /* RECORD end */
-        const bool restrike = held && s_lastIdx >= 0 && st != s_style && !rose && !recSty /* RECORD */;
+        const bool restrike = held && gCvKey >= 0 && st != s_style && !rose && !recSty /* RECORD */;
         s_style = st;
         if(rose || restrike)
         {
-            if(rose && n == -1) engine.muted = !engine.muted;
             /* RECORD */
-            else if(recSty)
+            if(recSty)
             {
-                if(rose && n >= 0 && engine.nSlices > 0)
+                if(rose && engine.nSlices > 0)
                 {
-                    const int key = n >= bb::Engine::kKeys ? bb::Engine::kKeys - 1 : n;
-                    if(sty == 7)
+                    if(st == 7)
                     {
-                        if(!gKeyTake && !gKeyTakeDone && !gTakeActive && engine.RecArm(key))
-                        { gKeyTake = true; gKeyTakeKey = key; gRecPeak = 0.f; }
+                        if(!gKeyTake && !gKeyTakeDone && !gTakeActive && engine.RecArm(j4key))
+                        { gKeyTake = true; gKeyTakeKey = j4key; gRecPeak = 0.f; }
                     }
-                    else engine.ClearKey(key);   /* 8: Clear (forgets the recorded entry's key too, review L2) */
+                    else engine.ClearKey(j4key);   /* 8: Clear (forgets the recorded entry's key too, review L2) */
                 }
             }
             /* RECORD end */
             else if(engine.nSlices > 0)
             {
-                int idx = s_lastIdx;
-                if(rose && n >= 0)
-                {
-                    /* SAMPLE: the engine's key table — the span mapping by default
-                     * (k · nSlices / span, keys past the span play the last slice),
-                     * a recorded key points at its take */
-                    s_lastKey = n >= bb::Engine::kKeys ? bb::Engine::kKeys - 1 : n;
-                    idx       = engine.KeySlice(s_lastKey);
-                    if(gEdit) PanelSelect(idx);   /* EDIT-PANEL: a note selects its key's entry */
-                }
-                if(idx >= 0)
-                {
-                    const int s = st < 0 ? 0 : (st > 6 ? 6 : st);
-                    s_lastIdx  = idx;
-                    gCallIdx   = idx;
-                    gCallRev   = s == 1;
-                    gCallMul   = s == 2 ? 0.5f : (s == 3 ? 2.f : 1.f);
-                    gCallRat   = s == 4;
-                    gCallLen   = s == 5 ? 0.5f : 1.f;
-                    gCallPunch = gGrammar.mode == 6 ? false   /* Pads: never written */
-                               : (((gGrammar.mode == 5) || gVoiceSel.sel == 1) != (s == 6));
-                    gCallHeld  = gKeyPlays.sel == 1;   /* SAMPLE: Options → Key Plays = Held */
-                    gCallKey   = s_lastKey;
-                    gCallFlash = idx; gCallFlashT = 6;
-                    gCallReq   = true;
-                }
+                if(rose) gCvKey = j4key;
+                CallKey(gCvKey, st);   /* a re-strike calls the held key in the new style */
             }
         }
-        s_note = n;
     }
-    /* Brain map keymap: sample v/oct at each gate edge (MONO, latched mods). */
-    else if(gClkEdge.JustRose(kVoiceGateChan))
+    /* Brain map: J5 is the gate — each rising edge calls J4's key, plain; its fall releases a held one. */
+    else
     {
-        const float nf = hw.cv[kVoiceVoctChan].Volts() * 12.f;
-        int n = (int)floorf(nf + 0.5f);
-        if(fabsf(nf - (float)n) < 0.4f) gLastNote = n;   /* inside the note-center window */
-        else n = gLastNote;                                /* on a boundary: keep last */
-        if(n == 0)                       engine.muted = !engine.muted;
-        else if(n >= 2 && n <= 11)       gMods ^= (1u << (n - 2));
-        else if(n >= 24 && n <= 39 && engine.nSlices > 0)
-        {
-            const int k = n - 24;
-            gCallIdx   = (k * engine.nSlices) / 16;      /* 16 keys span the loop */
-            gCallMul   = ((gMods & kModHalf) ? 0.5f : 1.f) * ((gMods & kModDouble) ? 2.f : 1.f);
-            gCallRev   = (gMods & kModRev) != 0;
-            /* Play grammar: playing IS writing — the punch keyswitch flips to choke */
-            gCallPunch = gGrammar.mode == 6 ? false
-                       : gGrammar.mode == 5 ? !((gMods & kModPunch) != 0)
-                                            : ((gVoiceSel.sel == 1) != ((gMods & kModPunch) != 0));
-            gCallRat   = (gMods & kModRat) != 0;
-            gCallLen   = 1.f;
-            gCallFlash = gCallIdx; gCallFlashT = 6;
-            gCallReq   = true;
-        }
+        gJ5Style = 255u;
+        if(gClkEdge.JustFell(kVoiceGateChan) && gCvKey >= 0 && gKeyPlays.sel == 1) gRelKey = gCvKey;   /* held only: no release events for one-shots in Play's loop */
+        if(gClkEdge.JustRose(kVoiceGateChan) && engine.nSlices > 0) { gCvKey = j4key; CallKey(j4key, 0); }
     }
-
     /* Gate CV writes — control thread (I²C-safe), on CHANGE only so J6's
      * MCP4728 isn't hit with a WriteAll+LDAC transaction every millisecond. */
     static float s_lastV[3] = {-1.f, -1.f, -1.f};
@@ -1637,8 +1693,22 @@ static void OnPoll(uint32_t /*t_ms*/)
         }
     }
 
+    IButton& b1 = hw.buttons[kButtonB1];
     IButton& b2 = hw.buttons[kButtonB2];
     IButton& b3 = hw.buttons[kButtonB3];
+    /* BETA: the transport hold. A press that starts in Edit or Settings is not
+     * watched; B2 / B3 or a pot moving spoils it; past 600 ms B1's release is
+     * claimed from the Pager (a long press no longer flips the page), and a
+     * clean release toggles ▶/■. ParamLock (B1 + pot) and Edit's entry (B1 +
+     * B3) consume B1 themselves and spoil the hold on the way. */
+    {
+        float pots[kNumPots];
+        for(uint8_t i = 0; i < kNumPots; i++) pots[i] = hw.pots[i].Value();
+        if(b1.RisingEdge()) bb::panel::HoldPress(gHold, pots, !gEdit && !settings.IsActive());
+        if(b1.Pressed() && bb::panel::HoldPoll(gHold, b1.TimeHeldMs(), pots, b2.Pressed() || b3.Pressed() || gEdit || settings.IsActive()))
+            pager.ConsumeButton();
+        if(b1.FallingEdge() && bb::panel::HoldRelease(gHold)) engine.muted = !engine.muted;
+    }
     /* B1 belongs to the Pager + ParamLock. B2+B3 together is the Settings
      * chord: while both are down (or Settings is open) none of the single-
      * button gestures may fire, and the releases that end the chord must
@@ -1670,7 +1740,6 @@ static void OnPoll(uint32_t /*t_ms*/)
      * here — it is never a reslice, a load or a record gesture — and the
      * release of the B1 that entered does not leave. A page moved under
      * Edit (the web app) leaves it. */
-    IButton& b1 = hw.buttons[kButtonB1];
     static bool s_b3_loaded  = false;   /* B3's hold-load fired: its release is not a tap */
     static bool s_editB1Down = false;   /* the B1 press that entered Edit */
     static bool s_editB2Held = false, s_editB3Held = false;
@@ -1693,11 +1762,11 @@ static void OnPoll(uint32_t /*t_ms*/)
         if(pager.Page() != gPanelPage) gPanelReq = kPanelLeave;
         if(b2.Pressed() && !s_editB2Held && b2.TimeHeldMs() > 400.f) { s_editB2Held = true; gPanelReq = kPanelRevert; }
         if(b2.FallingEdge()) { if(!s_editB2Held) gPanelReq = kPanelUndo; s_editB2Held = false; }
-        if(b3.RisingEdge()) gPanelTapPos = gSrcPos;
+        if(b3.RisingEdge()) { gPanelTapPos = gSrcPos; gPanelTapValid = gSrcValid; }
         if(b3.Pressed() && !s_editB3Held && b3.TimeHeldMs() > 400.f) { s_editB3Held = true; gPendReslice = true; }
         if(b3.FallingEdge())
         {
-            if(!s_editB3Held) { if(engine.muted) gSetErrT = 36.f; else gPanelReq = kPanelChop; }   /* the break must be playing */
+            if(!s_editB3Held) { if(!gPanelTapValid) gSetErrT = 36.f; else gPanelReq = kPanelChop; }   /* BETA: something must sound at the press */
             s_editB3Held = false;
         }
         /* P1 selects once it has moved (a note's selection holds until then) */
@@ -1715,6 +1784,15 @@ static void OnPoll(uint32_t /*t_ms*/)
             const int   ms = bb::panel::OffsetMs(v);
             gNudgeMs[w] = ms;
             if(bb::panel::UpdatePickup(gNudgePick[w], v) && ms != gNudgeLast[w]) { gNudgeLast[w] = ms; gNudgeOffer[w] = true; }
+        }
+        /* BETA: P5 = the autoslice count, inert until picked up at the count there is */
+        {
+            const float v = hw.pots[P_SPACE].Value();
+            if(bb::panel::UpdatePickup(gAutoPick, v))
+            {
+                const int k = bb::panel::AutoCount(v, gAutoPot);
+                if(k != gAutoPot) { gAutoPot = k; gAutoOffer = true; }
+            }
         }
         gDiagPhase = 2;
         return;
@@ -1872,6 +1950,22 @@ static void OnRender(uint32_t /*t_ms*/)
                 c8((locked ? 120.f : 12.f) + 120.f * lf + 220.f * cf),
                 c8(4.f + 220.f * cf)});
     }
+    /* BETA: the transport on B1. ■ stopped: B1 breathes cool white (1.6 s; the
+     * clock's white pulse still flashes through) and the bar ring is dimmed to a
+     * quarter (below, as ever). A hold that will toggle on release: B1 full white
+     * — let go now. Edit's amber and a take's red still win (below). */
+    {
+        auto c8 = [](float v) { return (uint8_t)(v > 255.f ? 255.f : (v < 0.f ? 0.f : v)); };
+        if(gHold.track && gHold.armed && !gHold.dirty)
+            hw.leds.SetButtonPair(kButtonB1, Rgb{230, 230, 255});
+        else if(engine.muted)
+        {
+            const uint32_t ph = (NowUs() / 1000u) % 1600u;
+            const float    br = ph < 800u ? (float)ph / 800.f : (float)(1600u - ph) / 800.f;
+            const float    cf = gClkFlash;
+            hw.leds.SetButtonPair(kButtonB1, Rgb{c8(8.f + 90.f * br + 220.f * cf), c8(8.f + 90.f * br + 220.f * cf), c8(14.f + 130.f * br + 220.f * cf)});
+        }
+    }
     hw.leds.SetButtonPair(kButtonB2, gFlowing ? Rgb{20, 160, 60} : Rgb{6, 10, 6});
     hw.leds.SetButtonPair(kButtonB3, Rgb{12, 6, 2});
     /* EDIT-PANEL: B1 amber = leave (the clock pulse still flashes through),
@@ -1883,7 +1977,7 @@ static void OnRender(uint32_t /*t_ms*/)
         auto c8 = [](float v) { return (uint8_t)(v > 255.f ? 255.f : (v < 0.f ? 0.f : v)); };
         hw.leds.SetButtonPair(kButtonB1, Rgb{c8((float)kEditCol.r + 220.f * cf), c8((float)kEditCol.g + 220.f * cf), c8((float)kEditCol.b + 220.f * cf)});
         hw.leds.SetButtonPair(kButtonB2, PanelUndoDepth() > 0 ? kUndoCol : Rgb{6, 8, 14});
-        const bool plays = engine.buf && engine.nSlices > 0 && !engine.muted;
+        const bool plays = engine.buf && engine.nSlices > 0 && gSrcValid;   /* BETA: a chop lands when something sounds */
         hw.leds.SetButtonPair(kButtonB3, plays ? kChopCol : Rgb{14, 8, 2});
     }
     /* RECORD: the three buttons red while armed (a key: J5 style 7; the
@@ -1980,6 +2074,12 @@ static void OnRender(uint32_t /*t_ms*/)
             d.color = live ? kNudgePos : kNudgeDimP; d.neg_color = live ? kNudgeNeg : kNudgeDimN;
             d.center_color = live ? kEditCol : Rgb{40, 30, 6};
             DrawFill(hw.leds, pot, kAlchemyLabArcGeometry, gSel >= 0 ? RingValue(gNudgeMs[w]) : 0.f, d);
+        }
+        /* BETA: P5 = the autoslice count as a level arc, grey-white (dim until picked up) */
+        hw.leds.ClearRing(P_SPACE);
+        {
+            const Rgb ac = gAutoPick.caught ? kAutoCol : kAutoDim;
+            if(gAutoPot > 0) DrawLevelArc(hw.leds, P_SPACE, kAlchemyLabArcGeometry, AutoPos(gAutoPot), {0.5f, 0.99f}, ac, ac, ac);   /* 0 = a dark ring */
         }
         if(gSel >= 0)
         {
@@ -2794,6 +2894,27 @@ static void ServiceLoad()
  *   EDIT-UNDO (docs/packages/slice-edit-undo.md): 30 UNDO_EDIT · 31 REDO_EDIT — no fields (an optional
  *                   trailing gen as the others); one journal step either way → u8 status (2 BAD_ARGS = nothing to
  *                   undo / redo, or a history something went past; 3 BAD_STATE as the other ops), u8 tableGen.
+ *   BETA (docs/packages/beta-fw.md; capabilities "edit":2, "keys":1):
+ *   0x63 ACTION     29 TAP_MARK as before, but BAD_STATE when nothing sounds (tail 263 b0 clear), and a mark
+ *                   within 10 ms of a live marker selects that marker: reply u8 status, u8 tableGen, u8 idx,
+ *                   u8 flags (b0 = an existing marker reused; the table did not move)
+ *                   32 PLAY_KEY(u8 key 0..23, u8 down 1 / up 0) → u8 status: the key as a CV note plays it (plain,
+ *                   Key Plays honoured), any grammar; an up releases a held key, a no-op for one-shot
+ *                   33 KEYS_FROM_MARKERS([u8 gen]) → u8 status, u8 tableGen, u8 count: live markers in time order →
+ *                   keys 0.. (keys holding a recording skipped and kept, the rest back to their span slice); one
+ *                   undo step (none when the map already follows)
+ *                   34 CLEAR_MARKERS([u8 gen]) → u8 status, u8 tableGen, u8 count: every live marker, grey and
+ *                   orange, tombstoned (recordings stay); keys on them go back to their grid slices; one undo step
+ *                   35 SET_MUTE(u8 1 stopped / 0 running) → u8 status (op 2 still toggles)
+ *                   36 AUTOSLICE(u8 k 0..64, u8 flags b0 re-roll · b1 join [, u8 gen]) → u8 status, u8 tableGen,
+ *                   u8 count: the grey markers become the first k onsets of a seeded salience-weighted draw (k
+ *                   nested in k + 1), orange markers stay; k = 0 removes the grey ones; one undo step (b1: folded
+ *                   into the previous AUTOSLICE's when nothing else moved the table)
+ *                   In Pads (grammar 6) the keys follow the markers after every op that changes them, inside
+ *                   that op's undo step.
+ *   state tail      263 u8 flags2 (b0 srcValid · b1 keys follow markers) · 264 u16 loadAvg · 266 u16 loadMax (‰ of
+ *                   the 24-sample block budget, the last second) · 268 i16 j4mV · 270 u8 j4Key · 271 u8 j5Style (255 in
+ *                   the Brain map) · 272 u8 keyFlash (255 none) · 273 u8 keySeq · 274 u8 autoK · 275 u8 nMarkers — ends at 276
  *   0x65 GET_TABLE  ← [u8 first, u8 count, u8 form] — form 1 = entries carry a trailing u8 flags
  *                   (b0 orange · b1 tombstone), 14 bytes each; absent / 0 = the 13-byte form. */
 /* WEB → RECORD: ACTION 9 / 10. -1 = nothing requested; the consumer clears
@@ -2815,7 +2936,8 @@ struct EditBody
     uint32_t U32() { uint32_t v = (uint32_t)p[at] | ((uint32_t)p[at + 1] << 8) | ((uint32_t)p[at + 2] << 16) | ((uint32_t)p[at + 3] << 24); at += 4; return v; }
     uint8_t  Gen() const { return at < n ? p[at] : 0u; }
 };
-static const uint8_t kEditNeed[16] = {5u, 9u, 10u, 5u, 1u, 1u, 2u, 2u, 3u, 2u, 3u, 7u, 0u, 2u, 0u, 0u};   /* field bytes of ops 16..31 */
+static const uint8_t kEditNeed[21] = {5u, 9u, 10u, 5u, 1u, 1u, 2u, 2u, 3u, 2u, 3u, 7u, 0u, 2u, 0u, 0u,   /* field bytes of ops 16..31 */
+                                      2u, 0u, 0u, 1u, 2u};                                                /* BETA: 32..36 */
 /* HostLink status for an EditStatus: Ok → 0; a refusal of the arguments → BAD_ARGS; a refusal of the
  * moment (stale gen, no room, no material) → BAD_STATE. */
 static uint8_t EditToStatus(bb::EditStatus s)
@@ -2866,7 +2988,128 @@ static void EditMeta(bb::EditReq& r)
     bb::AnalyseEntry(engine, r.start, r.len, r.meta, gClass.mode);
     r.flags |= bb::EditReq::kMeta;
 }
-/* ACTION 16..31. Writes the whole reply. */
+
+/* ── BETA (docs/packages/beta-fw.md): the bulk ops and the keys that follow markers ──
+ * A bulk op (FROM_ONSETS, CLEAR_MARKERS, AUTOSLICE) is many applies and ONE undo
+ * step: the first apply that lands carries EditReq::kSnap — its record is a
+ * snapshot of the whole marker range and the key map — and every later one
+ * kQuiet (no record; the snapshot restores it). The page's gen is checked by the
+ * first apply only. A step is one record however many markers it touches, so
+ * the 64-record ring can no longer be overrun by one op (FROM_ONSETS could:
+ * 40 grey markers out and 40 onsets in was 80 joined records). */
+struct Bulk
+{
+    uint8_t gen     = 0;       /* the page's gen, for the first apply */
+    bool    snapped = false;   /* the step's snapshot is in: the rest go quiet */
+    int     landed  = 0;
+};
+static bb::EditStatus BulkPost(Bulk& b, bb::EditReq r, int* idx = nullptr)
+{
+    r.gen    = b.snapped ? 0u : b.gen;
+    r.flags |= b.snapped ? bb::EditReq::kQuiet : bb::EditReq::kSnap;
+    const bb::EditStatus st = PostEdit(r, idx);
+    if(st == bb::EditStatus::Ok) { b.snapped = true; b.landed++; }
+    bb::Yield();
+    return st;
+}
+/* Pads (grammar 6) with markers: the keys follow them — markers in time order →
+ * keys 0.. (Engine::KeysFromMarkers: a key holding a recording keeps it, keys
+ * past the markers go back to their span slice). Called right after every op
+ * that changed the marker set, posted kQuiet so the key map rides in that op's
+ * undo step (every record carries the whole key map); `quiet = false` (entering
+ * Pads) makes it a step of its own. Nothing is posted when the map already
+ * follows. SET_KEY / SWAP_KEYS do not trigger it: a hand-made map stands until
+ * the markers next change. */
+static bool PadsFollows() { return gGrammar.mode == 6 && engine.MarkerCount() > 0; }
+static void PadsFollow(bool quiet)
+{
+    if(!PadsFollows() || engine.nSlices < 1 || EditBusy()) return;
+    bb::EditReq r; r.op = bb::EditOp::SetKeyMap;
+    engine.KeysFromMarkers(r.keys);
+    if(memcmp(r.keys, engine.keySlice, sizeof r.keys) == 0) return;
+    if(quiet) r.flags = bb::EditReq::kQuiet;
+    PostEdit(r, nullptr);
+}
+static volatile bool gPadsFollowReq = false;   /* the grammar became Pads: follow at the next idle main-loop turn */
+/* AUTOSLICE: the grey markers become the first k onsets of a seeded draw
+ * (bb::AutoSliceOrder: Efraimidis–Spirakis, weighted by OnsetStrength — the
+ * FROM_ONSETS proxy, the salience of the grid slice the onset falls in), each
+ * spanning to the next drawn one, the last to the break's end. Orange markers,
+ * recordings and the grid stay; an onset within 10 ms of an orange marker is
+ * not a candidate (it would stack on it). The fewest ops (bb::PlanGrey):
+ * greys at no drawn onset go, a grey already at one keeps its slot and keys and
+ * only re-spans (SetEntry + kKeep: it stays grey), the rest are added — so the
+ * count turned one detent posts an add (or a tombstone) and a re-span. One undo
+ * step; `join` folds it into the step of the previous AUTOSLICE when nothing
+ * else touched the table since (the panel's knob: a whole sweep undoes as one).
+ * `reroll` draws a new seed first. *count = the grey markers it leaves. */
+static uint32_t gAutoSeed = 0x5EED0013u;
+static uint8_t  gAutoGen  = 0;       /* tableGen right after the last AUTOSLICE (0 none) */
+struct AutoScratch { int pos[kMaxOnsets]; uint8_t w[kMaxOnsets]; int order[kMaxOnsets]; int starts[kMaxOnsets]; };
+static AutoScratch   ALCHEMY_SDRAM_BSS gAutoScratch;   /* control thread only; POD */
+static bb::GreyPlan  ALCHEMY_SDRAM_BSS gGreyPlan;      /* PlanGrey fills every field it reads */
+BB_SDRAM_POD(gAutoScratch);
+BB_SDRAM_POD(gGreyPlan);
+static bb::EditStatus Autoslice(int k, bool reroll, bool join, uint8_t gen, int* count)
+{
+    using bb::EditOp; using bb::EditReq; using bb::EditStatus;
+    *count = 0;
+    if(!engine.buf || engine.nSlices < 1 || engine.bufLen < 1) return EditStatus::NoMaterial;
+    if(reroll) gAutoSeed = (gAutoSeed * 1664525u + 1013904223u) ^ TickNow();
+    AutoScratch& a = gAutoScratch;
+    int n = 0;
+    const int no = gPendN < 0 ? 0 : (gPendN > kMaxOnsets ? kMaxOnsets : gPendN);
+    for(int i = 0; i < no; i++)
+    {
+        const int p = gPendOnsets[i];
+        if(p < 0 || p >= engine.bufLen) continue;
+        bool nearOrange = false;
+        for(int t = engine.nSlices; t < engine.nTable && !nearOrange; t++)
+            if(engine.IsMarker(t) && !engine.IsGrey(t) && abs(engine.slices[t].start - p) <= bb::Engine::kRecMin) nearOrange = true;
+        if(nearOrange) continue;
+        a.pos[n] = p; a.w[n] = OnsetStrength(p); n++;
+    }
+    bb::AutoSliceOrder(a.pos, a.w, n, gAutoSeed, a.order);
+    if(k > n) k = n;
+    if(k < 0) k = 0;
+    for(int j = 0; j < k; j++)   /* the first k drawn, back in time order */
+    {
+        const int p = a.pos[a.order[j]];
+        int i = j;
+        while(i > 0 && a.starts[i - 1] > p) { a.starts[i] = a.starts[i - 1]; i--; }
+        a.starts[i] = p;
+    }
+    bb::GreyPlan& pl = gGreyPlan;
+    bb::PlanGrey(engine, a.starts, k, pl);
+    Bulk b; b.gen = gen;
+    b.snapped = join && gAutoGen != 0 && gAutoGen == engine.tableGen && engine.UndoDepth() > 0;
+    EditStatus st = EditStatus::Ok;
+    for(int j = 0; j < pl.nTomb && st == EditStatus::Ok; j++)
+    { EditReq r; r.op = EditOp::Tombstone; r.t = pl.tomb[j]; st = BulkPost(b, r); }
+    for(int j = 0; j < pl.nSet && st == EditStatus::Ok; j++)
+    {
+        EditReq r; r.op = EditOp::SetEntry; r.t = pl.setT[j]; r.start = engine.slices[pl.setT[j]].start; r.len = pl.setLen[j];
+        EditMeta(r); r.flags |= EditReq::kKeep;
+        st = BulkPost(b, r);
+    }
+    for(int j = 0; j < pl.nAdd && st == EditStatus::Ok; j++)
+    {
+        EditReq r; r.op = EditOp::AddEntry; r.key = -1; r.start = pl.addStart[j]; r.len = pl.addLen[j];
+        EditMeta(r);
+        st = BulkPost(b, r);
+    }
+    if(st == EditStatus::Full && b.landed > 0) st = EditStatus::Ok;   /* the table filled: what fitted stays (FROM_ONSETS' rule) */
+    int g = 0;
+    for(int t = engine.nSlices; t < engine.nTable; t++) if(engine.IsGrey(t)) g++;
+    *count = g;
+    if(st != EditStatus::Ok) return st;
+    gAutoK = (uint8_t)(k > 255 ? 255 : k);
+    PadsFollow(true);
+    gAutoGen = engine.tableGen;
+    return EditStatus::Ok;
+}
+/* ACTION 16..31, and BETA's table ops 33 / 34 / 36 (32 PLAY_KEY and 35 SET_MUTE are not table ops: the
+ * 0x63 switch answers them). Writes the whole reply. */
 static void HandleEdit(uint8_t op, const hostlink::ParsedFrame& f, hostlink::FrameWriter& w)
 {
     using bb::EditOp; using bb::EditReq; using bb::EditStatus;
@@ -2888,6 +3131,7 @@ static void HandleEdit(uint8_t op, const hostlink::ParsedFrame& f, hostlink::Fra
     EditReq r;
     int  third = -1;   /* the reply's third byte: newIdx / count, or none */
     bool withThird = false;
+    bool tapFlags  = false;   /* BETA: TAP_MARK's reply carries a fourth byte, u8 flags (b0 an existing marker reused) */
     switch(op)
     {
         case 16: r.op = EditOp::SetBoundary; r.i = b.U8(); r.start = (int)b.U32(); break;
@@ -2915,18 +3159,14 @@ static void HandleEdit(uint8_t op, const hostlink::ParsedFrame& f, hostlink::Fra
              * accepted onset, each spanning to the next accepted one (the last to the break's end),
              * analysed on this thread. The gen is checked by the first apply only. */
             const uint8_t thresh = b.U8(); const int minGap = (int)b.U16() * kEditMsToSamp;
-            uint8_t gen = b.Gen();
             if(engine.nSlices < 1 || engine.bufLen < 1) { w.U8(3u); return; }
             EditStatus st = EditStatus::Ok;
-            uint8_t join = 0u;   /* EDIT-UNDO: the first apply heads the undo step, every later one joins it */
+            Bulk bk; bk.gen = b.Gen();   /* BETA: one snapshot record heads the step, the rest are quiet (was: kJoin records, one per apply) */
             for(int t = engine.nSlices; t < engine.nTable && st == EditStatus::Ok; t++)
             {
-                const uint8_t fl = engine.TableFlags(t);
-                if((fl & (bb::Engine::kFlagTomb | bb::Engine::kFlagOrange)) || engine.tableKey[t] >= 0 || engine.slices[t].start >= engine.bufLen) continue;
-                EditReq d; d.op = EditOp::Tombstone; d.t = t; d.gen = gen; d.flags = join;
-                st = PostEdit(d, nullptr);
-                if(st == EditStatus::Ok) { gen = 0u; join = EditReq::kJoin; }
-                bb::Yield();
+                if(!engine.IsGrey(t)) continue;   /* a recording, an orange marker, anything past the break: kept */
+                EditReq d; d.op = EditOp::Tombstone; d.t = t;
+                st = BulkPost(bk, d);
             }
             if(st != EditStatus::Ok) { w.U8(EditToStatus(st)); return; }
             int acc[kMaxOnsets]; int na = 0, last = -1;
@@ -2943,25 +3183,85 @@ static void HandleEdit(uint8_t op, const hostlink::ParsedFrame& f, hostlink::Fra
             {
                 const int end = j + 1 < na ? acc[j + 1] : engine.bufLen;
                 if(end - acc[j] < bb::Engine::kRecMin) continue;
-                EditReq a; a.op = EditOp::AddEntry; a.key = -1; a.start = acc[j]; a.len = end - acc[j]; a.flags = join; a.gen = gen;
+                EditReq a; a.op = EditOp::AddEntry; a.key = -1; a.start = acc[j]; a.len = end - acc[j];
                 EditMeta(a);
-                int idx = -1;
-                st = PostEdit(a, &idx);
+                st = BulkPost(bk, a);
                 if(st != EditStatus::Ok) break;
-                gen = 0u; join = EditReq::kJoin; count++;
-                bb::Yield();
+                count++;
             }
             if(st != EditStatus::Ok && !(st == EditStatus::Full && count > 0)) { w.U8(EditToStatus(st)); return; }
+            gAutoK = 0;            /* BETA: the grey markers are FROM_ONSETS' now */
+            PadsFollow(true);      /* BETA */
+            w.U8(0u); w.U8(engine.tableGen); w.U8((uint8_t)count);
+            return;
+        }
+        case 33:
+        {
+            /* BETA: KEYS_FROM_MARKERS — the markers in time order → keys 0.. (a key holding a recording kept,
+             * keys past the markers back to their span slice), one SetKeyMap: one undo step. A map that
+             * already follows posts nothing (no empty step). Reply: status, gen, the keys that got a marker. */
+            if(engine.nSlices < 1) { w.U8(3u); return; }
+            EditReq k; k.op = EditOp::SetKeyMap; k.gen = b.Gen();
+            const int given = engine.KeysFromMarkers(k.keys);
+            if(memcmp(k.keys, engine.keySlice, sizeof k.keys) != 0)
+            {
+                const EditStatus st = PostEdit(k, nullptr);
+                if(st != EditStatus::Ok) { w.U8(EditToStatus(st)); return; }
+            }
+            else if(k.gen != 0u && k.gen != engine.tableGen) { w.U8(3u); return; }   /* a stale view is stale even with nothing to do */
+            w.U8(0u); w.U8(engine.tableGen); w.U8((uint8_t)given);
+            return;
+        }
+        case 34:
+        {
+            /* BETA: CLEAR_MARKERS — every live marker, grey and orange, tombstoned (recordings and the grid
+             * stay; keys on a marker go back to their span slice), one undo step. Reply: status, gen, count. */
+            if(engine.nSlices < 1) { w.U8(3u); return; }
+            Bulk bk; bk.gen = b.Gen();
+            EditStatus st = EditStatus::Ok;
+            for(int t = engine.nSlices; t < engine.nTable && st == EditStatus::Ok; t++)
+            {
+                if(!engine.IsMarker(t)) continue;
+                EditReq d; d.op = EditOp::Tombstone; d.t = t;
+                st = BulkPost(bk, d);
+            }
+            if(st != EditStatus::Ok) { w.U8(EditToStatus(st)); return; }
+            gAutoK = 0;
+            w.U8(0u); w.U8(engine.tableGen); w.U8((uint8_t)(bk.landed > 255 ? 255 : bk.landed));
+            return;
+        }
+        case 36:
+        {
+            /* BETA: AUTOSLICE(u8 k 0..64, u8 flags b0 re-roll · b1 join [, u8 gen]) → status, gen, count
+             * (the grey markers it leaves). b1 (a firmware extra, docs/packages/beta-fw.md): fold into the
+             * previous AUTOSLICE's undo step if nothing else changed the table since — a slider's drag as one. */
+            const int k = b.U8(); const uint8_t fl = b.U8();
+            if(k > 64 || (fl & ~3u)) { w.U8(2u); return; }
+            int count = 0;
+            const EditStatus st = Autoslice(k, (fl & 1u) != 0, (fl & 2u) != 0, b.Gen(), &count);
+            if(st != EditStatus::Ok) { w.U8(EditToStatus(st)); return; }
             w.U8(0u); w.U8(engine.tableGen); w.U8((uint8_t)count);
             return;
         }
         case 29:
         {
-            /* TAP_MARK: the audio thread's position snapshot at receipt, the rule in core/bb_edit.h */
+            /* TAP_MARK: the audio thread's position snapshot at receipt, the rule in core/bb_edit.h. BETA:
+             * refused (BAD_STATE) when nothing sounds — srcPos is then only the step's slice start (tail 263
+             * b0) — and a mark within 10 ms of a live marker selects that one instead of stacking a new one
+             * (reply flags b0; the table and its gen do not move). */
             const int snap = (int)b.U8() * kEditMsToSamp, allow = (int)b.U8() * kEditMsToSamp;
+            if(!gSrcValid) { w.U8(3u); return; }
             const bb::TapMark m = bb::TapMarkAt((int)gSrcPos, allow, snap, gPendOnsets, gPendN < 0 ? 0 : (gPendN > kMaxOnsets ? kMaxOnsets : gPendN),
                                                 engine.freePos, 250 * kEditMsToSamp, bb::Engine::kRecMin);
-            r.op = EditOp::AddEntry; r.key = -1; r.start = m.start; r.len = m.len; r.flags = EditReq::kOrange; withThird = true;
+            const int near = engine.MarkerNear(m.start, kTapDedupe);
+            if(near >= 0)
+            {
+                const uint8_t g = b.Gen();
+                if(g != 0u && g != engine.tableGen) { w.U8(3u); return; }
+                w.U8(0u); w.U8(engine.tableGen); w.U8((uint8_t)near); w.U8(1u);
+                return;
+            }
+            r.op = EditOp::AddEntry; r.key = -1; r.start = m.start; r.len = m.len; r.flags = EditReq::kOrange; withThird = true; tapFlags = true;
             break;
         }
         default: w.U8(2u); return;
@@ -2982,8 +3282,11 @@ static void HandleEdit(uint8_t op, const hostlink::ParsedFrame& f, hostlink::Fra
     const uint8_t status = EditToStatus(st);
     w.U8(status);
     if(status != 0u) return;
+    /* BETA: an op that changed the marker set → in Pads the keys follow, inside the same undo step */
+    if(op == 17u || op == 18u || op == 19u || op == 20u || op == 21u || op == 29u || (op == 24u && r.b == 1)) PadsFollow(true);
     w.U8(engine.tableGen);
     if(withThird) w.U8((uint8_t)(third < 0 ? 255 : third));
+    if(tapFlags) w.U8(0u);
 }
 /* ── end EDIT helpers ──────────────────────────────────────────────────── */
 
@@ -3006,7 +3309,10 @@ static void ServicePanel()
     using bb::EditOp; using bb::EditReq; using bb::EditStatus;
     /* the table moved under us (a page edit, a take, a load, a re-slice): the selection follows its ordinal, the pots re-base */
     if(engine.tableGen != gPanelGen || (gSel >= 0 && (gSel >= engine.nTable || engine.IsTomb(gSel))))
+    {
+        if(engine.tableGen != gPanelGen) PanelArmAuto();   /* BETA: P5 picks up again at the grey markers there are now */
         PanelSelect(Reselect(gSel, gSelOrd, engine.tableFlags, engine.nTable));
+    }
     bool refused = false;
     const uint8_t req = gPanelReq; gPanelReq = kPanelNone;
     switch(req)
@@ -3040,17 +3346,21 @@ static void ServicePanel()
             const int n = gPendN < 0 ? 0 : (gPendN > kMaxOnsets ? kMaxOnsets : gPendN);
             const bb::TapMark m = bb::TapMarkAt((int)gPanelTapPos, (int)kTapAllowMs[gTapAllow.sel] * kEditMsToSamp, 60 * kEditMsToSamp,
                                                 gPendOnsets, n, engine.freePos, 250 * kEditMsToSamp, bb::Engine::kRecMin);
+            /* BETA: within 10 ms of a live marker → select it instead of stacking a new one */
+            const int near = engine.MarkerNear(m.start, kTapDedupe);
+            if(near >= 0) { PanelSelect(near); break; }
             EditReq r; r.op = EditOp::AddEntry; r.key = -1; r.start = m.start; r.len = m.len; r.flags = EditReq::kOrange;
             EditMeta(r);
             int idx = -1;
             if(PostEdit(r, &idx) != EditStatus::Ok || idx < 0) { refused = true; break; }
+            PadsFollow(true);   /* BETA */
             PanelSelect(idx);
             break;
         }
         case kPanelUndo:
         {
             /* EDIT-PANEL: B2 tap → EditOp::Undo through the EDIT-UNDO journal (the same mailbox as every edit). */
-            { bb::EditReq r; r.op = bb::EditOp::Undo; if(EditBusy() || PostEdit(r, nullptr) != bb::EditStatus::Ok) refused = true; else PanelArm(); }
+            { bb::EditReq r; r.op = bb::EditOp::Undo; if(EditBusy() || PostEdit(r, nullptr) != bb::EditStatus::Ok) refused = true; else { PanelArmAuto(); PanelArm(); } }
             break;
         }
         case kPanelRevert:
@@ -3073,6 +3383,7 @@ static void ServicePanel()
                 /* a marker: the delete (a tombstone; its keys go back to their span slices); the selection moves on */
                 EditReq r; r.op = EditOp::Tombstone; r.t = gSel;
                 if(PostEdit(r, nullptr) != EditStatus::Ok) refused = true;
+                else { PadsFollow(true); PanelArmAuto(); }   /* BETA */
                 PanelSelect(Reselect(gSel, gSelOrd, engine.tableFlags, engine.nTable));
             }
             break;
@@ -3096,9 +3407,28 @@ static void ServicePanel()
         if(pl.kind == NudgeKind::Boundary) { r.op = EditOp::SetBoundary; r.i = pl.i; r.start = pl.start; }
         else                               { r.op = EditOp::SetEntry; r.t = pl.t; r.start = pl.start; r.len = pl.len; }
         if(PostEdit(r, nullptr) != EditStatus::Ok) { refused = true; continue; }
+        if(pl.kind == NudgeKind::Entry) PadsFollow(true);   /* BETA: a marker moved — its place in time may have */
         Landed(gNudgeBase, pl, w);
         gPanelGen = engine.tableGen;
         PanelAudition(pl.audStart, pl.audLen, pl.fromEnd ? bb::Engine::kRegionFromEnd : 0u);   /* hear the move */
+    }
+    /* BETA: P5's count → AUTOSLICE, ≤ 10 a second, the last count wins; a sweep folds into one undo step */
+    {
+        int  k  = 0;
+        bool go = false;
+        if(gAutoOffer) { gAutoOffer = false; go = Offer(gAutoGate, gAutoPot, now, &k, kAutoRateUs); }
+        else go = Drain(gAutoGate, now, &k, kAutoRateUs);
+        if(go)
+        {
+            const AutoStep a = AutoChange(gAutoPrev, k);
+            if(a.apply)
+            {
+                int count = 0;
+                if(EditBusy() || Autoslice(k, a.reroll, true, 0u, &count) != EditStatus::Ok) refused = true;
+                gAutoPrev = k;
+                PanelSelect(Reselect(gSel, gSelOrd, engine.tableFlags, engine.nTable));   /* the selection's span may have moved; gPanelGen follows (no P5 re-arm: our own change) */
+            }
+        }
     }
     if(refused) gSetErrT = 36.f;
 }
@@ -3114,8 +3444,11 @@ struct StateExt : hostlink::IHostlinkExtension
         /* SETS: "sets":1 = ACTION 14 / 15 and the 219.. state tail. */
         /* SCOPE: "scope2":2 = the 0x62 body (chanMask / decim / n / flags) beside the empty-body reply, with the
          * ext form (J3..J8 as CV channels, cvDecim, trigger level and source); 1 was the audio-only body. */
-        /* EDIT: "edit":1 = ACTION 16..29, the 255.. state tail, GET_TABLE's flags form. */
-        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102,\"sets\":1,\"scope2\":2,\"edit\":1}";
+        /* EDIT: "edit":1 = ACTION 16..29, the 255.. state tail, GET_TABLE's flags form. BETA: "edit":2 = TAP_MARK
+         * refuses with nothing sounding and reuses a marker within 10 ms (a fourth reply byte). */
+        /* BETA: "keys":1 = ACTION 32..36 (PLAY_KEY, KEYS_FROM_MARKERS, CLEAR_MARKERS, SET_MUTE, AUTOSLICE) and the
+         * state tail from 263 (flags2, load, J4 → key, J5 style, key flash, autoK, nMarkers). */
+        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102,\"sets\":1,\"scope2\":2,\"edit\":2,\"keys\":1}";
     }
     /* WEB: one float → i8 (±127), saturating. */
     static int8_t ToI8(float v)
@@ -3190,6 +3523,17 @@ struct StateExt : hostlink::IHostlinkExtension
                 { const int ud = engine.UndoDepth(); w.U8(engine.tableGen); w.U8((uint8_t)(ud > 255 ? 255 : ud)); }
                 w.U8(PanelSelByte()); w.U32(gSrcPos);
                 { const int rd = engine.RedoDepth(); w.U8((uint8_t)(rd > 255 ? 255 : rd)); }   /* 262 */
+                /* BETA tail (263..275, docs/packages/beta-fw.md): u8 flags2 (b0 srcValid: a voice sounds, TAP_MARK
+                 * will be taken · b1 keys follow markers: Pads with markers) · u16 loadAvg · u16 loadMax (the audio
+                 * callback, ‰ of the block budget over the last second: mean, peak) · i16 j4mV · u8 j4Key (the key
+                 * J4 would play now) · u8 j5Style (Voice map: 0..8; 255 in the Brain map) · u8 keyFlash (the last
+                 * key called by anyone, 255 none) · u8 keySeq (bumps per key call) · u8 autoK (the autoslice count
+                 * last applied, 0 none) · u8 nMarkers (live markers) — ends at 276. */
+                w.U8((uint8_t)((gSrcValid ? 1u : 0u) | (PadsFollows() ? 2u : 0u)));   /* 263 */
+                w.U16(gLoadAvg); w.U16(gLoadMax);                                   /* 264, 266 */
+                w.U16((uint16_t)gJ4mV); w.U8(gJ4Key); w.U8(gJ5Style);               /* 268, 270, 271 */
+                w.U8(gKeyFlash); w.U8(gKeySeq); w.U8(gAutoK);                       /* 272, 273, 274 */
+                { const int nm = engine.MarkerCount(); w.U8((uint8_t)(nm > 255 ? 255 : nm)); }   /* 275 */
                 return;
             }
             case 0x61u:
@@ -3322,7 +3666,33 @@ struct StateExt : hostlink::IHostlinkExtension
                     /* EDIT: 16..29 — the table ops, the audition voice, the tap mark; EDIT-UNDO: 30 / 31 (HandleEdit writes the reply) */
                     case 16: case 17: case 18: case 19: case 20: case 21: case 22: case 23: case 24: case 25: case 26: case 27: case 28: case 29:
                     case 30: case 31:
+                    case 33: case 34: case 36:   /* BETA: KEYS_FROM_MARKERS, CLEAR_MARKERS, AUTOSLICE — table ops, the same rules */
                         HandleEdit(op, f, w); return;
+                    case 32:
+                    {
+                        /* BETA: PLAY_KEY(u8 key 0..23, u8 down 1 / up 0) — the key as a CV note would play it
+                         * (plain style, Options → Key Plays honoured), on any grammar and jack map; an up
+                         * releases a held key (a no-op for one-shot). The call / release slots are the jacks'
+                         * too: wait ≤ 2 ms (yielding to the clock) for a pending one to drain. */
+                        if(f.len < 3 || f.body[1] >= bb::Engine::kKeys || f.body[2] > 1u) { w.U8(2u); return; }
+                        if(!engine.buf || engine.nSlices < 1) { w.U8(3u); return; }
+                        const uint32_t t0 = TickNow();
+                        if(f.body[2])
+                        {
+                            while(gCallReq && (TickNow() - t0) < 2000u * gTicksPerUs) bb::Yield();
+                            CallKey(f.body[1], 0);
+                        }
+                        else if(gKeyPlays.sel == 1)
+                        {
+                            while(gRelKey >= 0 && (TickNow() - t0) < 2000u * gTicksPerUs) bb::Yield();
+                            gRelKey = f.body[1];
+                        }
+                        break;
+                    }
+                    case 35:   /* BETA: SET_MUTE(u8 1 stopped / 0 running) — the transport; op 2 still toggles */
+                        if(f.len < 2 || f.body[1] > 1u) { w.U8(2u); return; }
+                        engine.muted = f.body[1] != 0u;
+                        break;
                     default: w.U8(2u); return;   /* BAD_ARGS */
                 }
                 w.U8(0u);
@@ -3415,6 +3785,12 @@ int main()
     hw.Init(daisy::SaiHandle::Config::SampleRate::SAI_48KHZ, kEngineBlockSamples, true);
     gTicksPerUs = daisy::System::GetTickFreq() / 1000000u;
     if(gTicksPerUs == 0u) gTicksPerUs = 1u;
+    /* BETA: the cycle counter for the load meter (Kyklophoria's three lines), and the block budget at this clock */
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    gCycBudget = bb::CycleBudget(daisy::System::GetSysClkFreq(), (uint32_t)kSr, (uint32_t)kEngineBlockSamples);
+    if(gCycBudget == 0u) gCycBudget = 240000u;
     gLastTick   = daisy::System::GetTick();
     locks.Init();                                   /* SDRAM arena is NOLOAD */
     /* SCOPE: the cv tier reads ADC1's DMA slots for J3..J8 straight from the audio callback; the
@@ -3686,6 +4062,13 @@ int main()
             engine.patternMode = gGrammar.mode;
             engine.restSustain = (gGrammar.mode == 2 || gGrammar.mode == 3) && gRests.sel == 0;   /* Grids/Euclid rests continue the break */
             gPendReroll        = true;
+            if(gGrammar.mode == 6) gPadsFollowReq = true;   /* BETA: entering Pads, the keys take the markers (its own undo step) */
+        }
+        /* BETA: Pads' follow on entry waits for a quiet moment (no take, no set op, no swap); new material ends autoK */
+        if(gPadsFollowReq && !EditBusy()) { gPadsFollowReq = false; PadsFollow(false); }
+        {
+            static uint8_t s_mat = 0;
+            if(gMatGen != s_mat) { s_mat = gMatGen; gAutoK = 0; gAutoGen = 0; }
         }
         /* RECORD: Options → Sampling re-applies the material with (or
          * without) its R plane now when no key holds a recording — the

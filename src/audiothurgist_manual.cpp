@@ -34,7 +34,7 @@ static Manual manual =
         .Section("roles", "Three roles, one engine",
             "**Chopper** — the knobs and buttons: slice, rearrange, reroll, "
             "flow, history, tempo. **Voice** — the rack plays *it*: a v/oct + "
-            "gate pair on J4/J5 calls slices from a keyboard or sequencer. "
+            "gate pair calls the Kit's keys from a keyboard or sequencer. "
             "**Brain** — it plays the rack: kick, snare and hat gates leave on "
             "J6/J7/J8 as the pattern runs, and a clock on J3 locks the loop "
             "to your master. The roles run at once; nothing needs a mode.")
@@ -46,22 +46,25 @@ static Manual manual =
             "real silence, reverb blooming toward full left. B3 relocates the "
             "burst centres. Chops respect the kit: kicks trade with kicks, "
             "snares with snares.")
-        .Section("keymap", "Playing it from a keyboard (the Voice jack map)",
-            "Options → **Jacks** picks the map; *Follow grammar* gives the "
-            "Play grammar the Voice map. **Voice map**: J6 gate, **J4 = the "
-            "slice** (one key per slice region, up to two octaves from 0 V; "
-            "one semitone below 0 V toggles mute), **J5 = the style** (0 V "
-            "plain, then reverse · half-speed · double · ratchet · staccato · "
-            "punch/choke flip, one semitone each). The style is read with "
-            "the hit, and changing it while the key is held re-strikes the "
-            "slice — the left hand plays rhythm. J7 sends a trigger per "
-            "call, J8 its velocity. In Play, calls write the bar (the punch "
-            "style flips to momentary); elsewhere the Voice option decides. "
-            "**Brain map** (J5 gate, J4 v/oct): the older single-keyboard "
-            "layout — 0 V mutes, ten latched modifier keys, sixteen slice "
-            "keys two octaves up — with the class gates on J6/J7/J8.")
+        .Section("keymap", "Playing it from a keyboard (one keymap)",
+            "**J4 is the key in every map: 0 V = key 0 (C1)**, a semitone per "
+            "key to 23, below 0 V = key 0. A key plays what the Kit's key "
+            "table says (in **Pads** the keys follow the markers: time order "
+            "on keys 0, 1, 2…). **Voice map**: J6 gate, **J5 = the style** "
+            "(0 V plain, then reverse · half · double · ratchet · staccato · "
+            "punch/choke flip · 7 Record · 8 Clear, a semitone each; under "
+            "~70 mV is plain). The style is read with the hit; changing it "
+            "while the key is held re-strikes it. J7 sends a trigger per "
+            "call, J8 its velocity. **Brain map**: J5 gate, plain calls, "
+            "class gates on J6/J7/J8. Options → Jacks picks the map; *Follow "
+            "grammar* gives Play and Pads the Voice map. In Play calls write "
+            "the loop (punch flips to momentary), in Pads nothing is written, "
+            "elsewhere the Voice option decides.")
         .Section("buttons", "The three buttons",
-            "**B1** tap: Perform ↔ Brain page. **B1 held 300 ms + turn a pot**: "
+            "**B1** tap: Perform ↔ Brain page. **B1 held 600 ms, let go** "
+            "(B1 goes white; no pot, no other button): start / stop — the "
+            "clock runs on, keys still play; B1 breathes while stopped. "
+            "**B1 held 300 ms + turn a pot**: "
             "record that pot's motion as a loop that replays until you hold "
             "and nudge it again (a green pip at 6 o'clock marks a locked pot; "
             "*Clear locks* in the web app removes them all). **B2** tap: dice "
@@ -76,9 +79,12 @@ static Manual manual =
             "keys pulse on P5, a Voice-map note selects too — P2 / P3 nudge "
             "its start / end ±50 ms once swept through centre, each move "
             "re-playing the new edge; B3 tap drops a marker at the playhead "
-            "(onset-snapped, Options → Tap Allowance), B3 hold reslices; B2 "
-            "tap undoes, B2 hold puts the slice back on the grid (a marker: "
-            "deletes it). Refusals blink red.")
+            "(onset-snapped, Options → Tap Allowance; near a marker it "
+            "selects it), B3 hold reslices; **P5 = autoslice**: 0–32 grey "
+            "markers on onsets drawn by loudness — up adds one, down drops "
+            "one, 0 and back re-draws; B2 tap undoes, B2 hold puts the "
+            "slice back on the grid (a "
+            "marker: deletes it). Refusals blink red.")
         .Section("brain", "Clock in, gates out",
             "Patch a clock into J3 and set its PPQN in Options; B1 flashes "
             "white per pulse and sits green when locked (the loop aligns to "
@@ -203,7 +209,8 @@ void DescribeManual(hostlink::Host& host)
     k_sample.Help("**Sample** — highlight a file on the card (sets show as "
                   "“name [set]”); hold **B3** to load it. The browser dropdown "
                   "loads directly. While a set saves, this ring fills with the "
-                  "progress; while one loads, a dot sweeps it.")
+                  "progress; while one loads, a dot sweeps it. On the Edit page "
+                  "(B1 held + B3 tap) it is the **autoslice** count.")
             .SeeAlso(jk1);
     k_vol.Help("**Volume**, with the reverb tail riding the cluster zone.");
 
@@ -215,13 +222,15 @@ void DescribeManual(hostlink::Host& host)
        .SeeAlso(jk1);
     jk3.Help("**Clock in.** Set PPQN in Options. B1 = pulse/lock indicator.")
        .SeeAlso(k_tempo);
-    jk4.Help("**V/Oct** — the keymap's pitch: mute key, modifiers, sixteen "
-             "slice keys. Pair with J5.")
+    jk4.Help("**Key** (v/oct) — 0 V = key 0 (C1), a semitone per key to key 23, "
+             "below 0 V = key 0; the key plays what the Kit's key table says. "
+             "Gated by J6 (Voice map) or J5 (Brain map).")
        .SeeAlso(jk5);
-    jk5.Help("**Gate** (Brain map) — each rising edge samples J4 and dispatches. "
-             "**Style v/oct** (Voice map): 0 plain · 1 reverse · 2 half · 3 double · "
-             "4 ratchet · 5 staccato · 6 punch/choke flip · **7 Record** (keys held "
-             "on J4 record from the input) · **8 Clear** (the key back to its slice).")
+    jk5.Help("**Gate** (Brain map) — each rising edge plays J4's key, plain. "
+             "**Style v/oct** (Voice map): 0 plain (anything under ~70 mV) · 1 reverse · "
+             "2 half · 3 double · 4 ratchet · 5 staccato · 6 punch/choke flip · "
+             "**7 Record** (keys held on J4 record from the input) · **8 Clear** (the "
+             "key back to its slice).")
        .SeeAlso(jk4);
     jk6.Help("**Kick gate out** (Brain map) — every kick-class step, or once per hit "
              "(Gate Fires); Gate Lanes can add it to mixed hits. **Gate in** (Voice map): "
