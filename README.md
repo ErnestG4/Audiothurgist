@@ -10,8 +10,14 @@ re-slice it.
 Audiothurgist is the Eurorack form of [BreakFix](https://codeberg.org/combust/BreakFix)
 (Daisy Pod), rebuilt for the [Alchemy Lab v2](https://hermeticmodular.com)
 (Daisy Seed 2 DFM, six pots with LED rings, three buttons, ten jacks, SD,
-USB). **Status: alpha.** It works and it is being played, but the manual
-is in the firmware and the edges are still being filed.
+USB). **Status: beta (firmware 0.13.0-beta).** It works and it is being
+played; the manual is in the firmware and on the page's Manual tab.
+
+**Quick start:** flash `audiothurgist.bin` (below), put breaks on a FAT32
+card, and open the page — [combust.codeberg.page/Audiothurgist](https://combust.codeberg.page/Audiothurgist/)
+in Chrome or Edge — then Connect. Press **▶/■** to start and stop, pick a
+mode (Classic · Grids · Loop · Pads), and play the 24 pads or the J4 keys.
+No module? Add `?demo` to the page's address.
 
 ## Three roles, one engine
 
