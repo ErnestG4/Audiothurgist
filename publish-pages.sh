@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Publish web/ to Codeberg Pages: rebuilds the `pages` branch from the web/
-# subtree of HEAD, stamps it, and prints the push. Codeberg serves a repo's
-# `pages` branch at https://<user>.codeberg.page/<repo>/ over https — a secure
+# Publish web/ to GitHub Pages: rebuilds the `pages` branch from the web/
+# subtree of HEAD, stamps it, and prints the push. GitHub serves this repo's
+# `pages` branch at https://ernestg4.github.io/Audiothurgist/ over https — a secure
 # context, which Web Serial (desktop) and WebUSB (Android) both require.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -27,4 +27,4 @@ if [ "$ok" != 1 ]; then echo "stamp failed"; git worktree remove --force "$wt"; 
 git -C "$wt" commit -q -am "Page build $stamp"
 git worktree remove "$wt"
 echo "pages branch rebuilt at $(git rev-parse --short pages) from $stamp (stamped)"
-echo "now: git push -f origin pages    → https://combust.codeberg.page/Audiothurgist/"
+echo "now: git push --force-with-lease github pages    → https://ernestg4.github.io/Audiothurgist/"
