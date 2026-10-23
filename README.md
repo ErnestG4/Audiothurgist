@@ -7,14 +7,14 @@ for new ones. Every sound is a slice of real material played from its
 attack, on the grid: no grains, no time-stretch. If you don't like it,
 re-slice it.
 
-Audiothurgist is the Eurorack form of [BreakFix](https://codeberg.org/combust/BreakFix)
+Audiothurgist is the Eurorack form of BreakFix
 (Daisy Pod), rebuilt for the [Alchemy Lab v2](https://hermeticmodular.com)
 (Daisy Seed 2 DFM, six pots with LED rings, three buttons, ten jacks, SD,
 USB). **Status: beta (firmware 0.13.0-beta).** It works and it is being
 played; the manual is in the firmware and on the page's Manual tab.
 
 **Quick start:** flash `audiothurgist.bin` (below), put breaks on a FAT32
-card, and open the page — [combust.codeberg.page/Audiothurgist](https://combust.codeberg.page/Audiothurgist/)
+card, and open the page — [ernestg4.github.io/Audiothurgist](https://ernestg4.github.io/Audiothurgist/)
 in Chrome or Edge — then Connect. Press **▶/■** to start and stop, pick a
 mode (Classic · Grids · Loop · Pads), and play the 24 pads or the J4 keys.
 No module? Add `?demo` to the page's address.
@@ -136,8 +136,8 @@ tier, gain, a trigger on any channel, peak decimation, afterglow, at up to
 cd web && python3 -m http.server 8080     # then http://localhost:8080 in Chrome/Edge
 ```
 
-or publish it: `./web/publish-pages.sh && git push -f origin pages` →
-https://combust.codeberg.page/Audiothurgist/. **Phones and tablets:** on
+or publish it: `./web/publish-pages.sh && git push --force-with-lease github pages` →
+https://ernestg4.github.io/Audiothurgist/. **Phones and tablets:** on
 Chrome for Android the page uses Google's Web Serial polyfill over WebUSB
 (vendored, Apache-2.0), so an OTG cable to the module's front USB-C is
 enough; Chrome's *Install app* puts it on the home screen. iOS has no

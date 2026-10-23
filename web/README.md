@@ -46,8 +46,8 @@ says `· WebUSB`. iOS and iPadOS browsers have neither API. Either:
 
 - **Locally:** `cd web && python3 -m http.server 8080` → http://localhost:8080
 - **Hosted:** `./web/publish-pages.sh` rebuilds the `pages` branch from
-  `web/`; `git push -f origin pages` publishes it on Codeberg Pages →
-  https://combust.codeberg.page/Audiothurgist/ (https, so the phone works
+  `web/`; `git push --force-with-lease github pages` publishes it on GitHub Pages →
+  https://ernestg4.github.io/Audiothurgist/ (https, so the phone works
   too). Chrome's menu offers **Add to Home screen** / **Install app** —
   the manifest and the small network-first service worker (`sw.js`) make
   it a proper installable app with the ring icon.
@@ -67,11 +67,11 @@ no WebUSB) under the header instead of failing silently.
 **Play Store, later:** with the page on https and the manifest + service
 worker in place, [Bubblewrap](https://github.com/GoogleChromeLabs/bubblewrap)
 wraps it as a Trusted Web Activity (`bubblewrap init --manifest
-https://combust.codeberg.page/Audiothurgist/manifest.webmanifest`) — it is
+https://ernestg4.github.io/Audiothurgist/manifest.webmanifest`) — it is
 still Chrome underneath, so the WebUSB path is what runs. One catch: the
 full-screen (no URL bar) verification needs
-`/.well-known/assetlinks.json` at the **origin root**, which on Codeberg
-Pages means a repo named `pages` (served at `combust.codeberg.page/`), not
+`/.well-known/assetlinks.json` at the **origin root**, which on GitHub
+Pages means a repo named `ErnestG4.github.io` (served at `ernestg4.github.io/`), not
 the `pages` branch of this repo (served under `/Audiothurgist/`). Without
 it the TWA works but keeps Chrome's bar.
 

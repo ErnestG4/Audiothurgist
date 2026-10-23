@@ -1,7 +1,7 @@
 # core/ — the BreakFix engine (vendored)
 
 These headers are the pure, header-only DSP engine shared with
-[BreakFix](https://codeberg.org/combust/BreakFix) (the Daisy Pod original).
+BreakFix (the Daisy Pod original).
 "One core, many main()s": `src/audiothurgist.cpp` is the Alchemy Lab main().
 No libDaisy, no SDK types, no allocation in the audio path.
 

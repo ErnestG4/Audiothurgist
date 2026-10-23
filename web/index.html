@@ -89,7 +89,7 @@
   .legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;color:var(--ink2)} .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
   .sw-kick{background:var(--kick)} .sw-snare{background:var(--snare)} .sw-hat{background:var(--hat)} .sw-other{background:var(--other)} .sw-play{background:var(--cv-play);outline:1px solid var(--line-hi)} .sw-call{background:var(--cv-call)}
   .sw-grid{background:var(--cv-play);outline:1px solid var(--line-hi)} .sw-rec{background:var(--cv-rec)} .sw-mark{background:var(--cv-marker)} .sw-orange{background:var(--cv-orange)} .sw-ok{background:var(--cv-ok)} .sw-end{background:var(--cv-end)}
-  footer{color:var(--ink2);font-size:12px;padding:8px 14px 24px;max-width:1200px;margin:0 auto} footer b{color:var(--ink)}
+  footer{color:var(--ink2);font-size:12px;padding:8px 14px 24px;max-width:1200px;margin:0 auto} footer b{color:var(--ink)} footer a{color:inherit;text-decoration:underline}
   code{background:var(--btn);padding:1px 4px;border-radius:4px;font-size:12px}
   /* ── the transport: on every tab, sticky under the tabs; at the bottom of a phone, under the thumb ── */
   .transport{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:12px;padding:8px 14px;background:var(--panel);border-bottom:1px solid var(--line);box-shadow:0 4px 14px var(--shadow)}
@@ -429,7 +429,7 @@
   <section class="wide"><h2>Manual</h2><div id="manual" class="man"><p class="note">Connect to read the module's manual from its descriptor.</p></div></section>
 </main>
 
-<footer>Runs over the module's front USB-C. Hermetic's <code>/program</code> keeps flashing, presets and settings; this page is the instrument's window. <span title="the commit this page was published from (web/publish-pages.sh stamps it); local when opened from the repo">page <!--page-build--><b>local</b></span> · codeberg.org/combust/Audiothurgist</footer>
+<footer>Runs over the module's front USB-C. Hermetic's <code>/program</code> keeps flashing, presets and settings; this page is the instrument's window. <span title="the commit this page was published from (web/publish-pages.sh stamps it); local when opened from the repo">page <!--page-build--><b>local</b></span> · <a href="https://github.com/ErnestG4/Audiothurgist">github.com/ErnestG4/Audiothurgist</a></footer>
 
 <script src="hostlink.js"></script>
 <script src="edit.js"></script>
@@ -1699,7 +1699,7 @@ function serialApi() { return navigator.serial || (navigator.usb && window.seria
 function transportName() { return navigator.serial ? 'Web Serial' : (navigator.usb && window.serialPolyfill) ? 'WebUSB' : null; }
 function describeNoSerial() {
   const secure = window.isSecureContext, ua = navigator.userAgent;
-  if (!secure) return 'This page is not in a secure context, so the browser hides its USB APIs. Open it over https:// (Codeberg Pages) or http://localhost — on a phone, `adb reverse` makes the PC\'s localhost yours.';
+  if (!secure) return 'This page is not in a secure context, so the browser hides its USB APIs. Open it over https:// (GitHub Pages) or http://localhost — on a phone, `adb reverse` makes the PC\'s localhost yours.';
   if (/iPhone|iPad|iPod/.test(ua)) return 'iOS and iPadOS browsers have neither Web Serial nor WebUSB, so this page cannot reach the module from here. Use Chrome on Android, or a desktop browser.';
   if (/Android/.test(ua) && !navigator.usb) return 'This browser has no WebUSB. Use Chrome (or another Chromium browser) on Android with a USB OTG cable.';
   return 'This browser has no Web Serial and no WebUSB. Use Chrome, Edge or Opera on the desktop, or Chrome on Android.';
