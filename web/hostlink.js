@@ -6,7 +6,8 @@
  * standard commands the page needs (HELLO, GET_DESCRIPTOR, GET_LIVE, live
  * BLOB writes) and the firmware's StateExt parsers (0x60–0x66: state, envelope,
  * scope — the old mono reply and the four-channel SCOPE body —, actions, the
- * sample-mode wave / table / hits reads, and the set save / load).
+ * sample-mode wave / table / hits reads, the set save / load, and CARD's 0x67:
+ * a break uploaded from a file the browser decoded, an old card copied in).
  *
  * Plain script in the browser (globals via window.HL); CommonJS in node so
  * selftest.mjs can pin it to the SDK's golden vectors. No dependencies.
@@ -18,7 +19,7 @@ const PROTO = 1;
 const CMD = {
   hello: 0x01, getDescriptor: 0x02, blobBegin: 0x12, blobData: 0x13, blobCommit: 0x14,
   getLive: 0x20, reboot: 0x40,
-  state: 0x60, env: 0x61, scope: 0x62, action: 0x63, wave: 0x64, table: 0x65, hits: 0x66,
+  state: 0x60, env: 0x61, scope: 0x62, action: 0x63, wave: 0x64, table: 0x65, hits: 0x66, card: 0x67,
 };
 const ACT = { dice: 0, reslice: 1, mute: 2, punch: 3, flow: 4, scrub: 5, load: 6, clearLocks: 7, page: 8,
   recArm: 9, recClear: 10, keyPlays: 11, looperUndo: 12, looperClear: 13, saveSet: 14, loadSet: 15,
@@ -41,7 +42,7 @@ const EDIT = { orange: 1, tomb: 2, fromEnd: 1, loop: 2, grid: 0, markers: 1, noK
 /* SETS (state tail 219..254): a set is sets/<name>.wav + sets/<name>.json on the card. The op's
  * state, its progress, the result of the last op and a sequence that bumps when one finishes;
  * then the name of the set the material came from. A name is 1..31 of [A-Za-z0-9_-]. */
-const SET_STATE = ['idle', 'saving', 'loading'];
+const SET_STATE = ['idle', 'saving', 'loading', 'card'];   /* 3: CARD — an upload being written or a copy (every set op waits) */
 const SET_RESULT = ['ok', 'no card', 'card full', 'write failed', 'bad name', 'not found', 'busy', 'bad file'];
 const SET_NAME_RE = /^[A-Za-z0-9_-]{1,31}$/;
 const setNameOk = n => typeof n === 'string' && SET_NAME_RE.test(n);
@@ -54,6 +55,7 @@ const NOTE_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A'
 const keyName = k => NOTE_NAMES[k % 12] + (1 + Math.floor(k / 12));
 const STATUS = ['OK', 'UNSUPPORTED', 'BAD_ARGS', 'BAD_STATE', 'BAD_CRC', 'BAD_SLOT', 'TOO_LARGE',
   'SCHEMA_MISMATCH', 'FLASH_FAIL', 'BUSY', 'FRAME_ERROR'];
+STATUS[20] = 'EXISTS'; STATUS[21] = 'NO_CARD'; STATUS[22] = 'CARD_FULL';   /* CARD (0x67): the card's own answers (Kyklophoria's 20) */
 
 /* ───────────── codecs ───────────── */
 const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let i = 0; i < 256; i++) { let c = i; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[i] = c >>> 0; } return t; })();
@@ -373,6 +375,18 @@ function parseState(b) {
     const mv = u16(b, 268); st.j4mV = mv > 0x7fff ? mv - 0x10000 : mv; st.j4Key = b[270]; st.j5Style = b[271] === 255 ? -1 : b[271];
     st.keyFlash = b[272] === 255 ? -1 : b[272]; st.keySeq = b[273]; st.autoK = b[274]; st.nMarkers = b[275];
   }
+  /* CARD tail (→ 293, capability "card": 1): 276 state (CARD.STATE), 277 progress 0..255, 278 result of the last op
+   * (CARD.RESULT), 279 seq (bumps per finished op), 280 flags (CARD.F), 281 rootWavs, 283 pending (old files not in the
+   * folder yet), 285 breaks (WAVs in Audiothurgist/breaks), 287 lastIdx (the last upload's list index, -1 none), 288 copied
+   * · 290 skipped (the last copy), 292 nFiles. An older body leaves st.card null. */
+  st.card = null;
+  if (b.length >= 293) {
+    const f = b[280];
+    st.card = { state: b[276], progress: b[277], result: b[278], seq: b[279], flags: f, mounted: !!(f & CARD.F.mounted),
+      oldRoot: !!(f & CARD.F.rootWavs), oldSets: !!(f & CARD.F.oldSets), oldPresets: !!(f & CARD.F.oldPresets),
+      hasBreaks: !!(f & CARD.F.breaks), rootWavs: u16(b, 281), pending: u16(b, 283), breaks: u16(b, 285),
+      lastIdx: b[287] === 255 ? -1 : b[287], copied: u16(b, 288), skipped: u16(b, 290), nFiles: b[292] };
+  }
   return st;
 }
 /* GET_WAVE: one window of the material buffer — n ≤ 480 output bytes, each
@@ -492,7 +506,100 @@ const autoslice      = (link, k, reroll = false, gen = 0, join = false) => editO
 /* What the descriptor's "audiothurgist" object says the firmware can do (each 0 when absent). */
 function caps(desc) {
   const a = (desc && desc.audiothurgist) || {};
-  return { ext: a.ext | 0, table: !!a.table, sets: a.sets | 0, scope2: a.scope2 | 0, edit: a.edit | 0, keys: a.keys | 0 };
+  return { ext: a.ext | 0, table: !!a.table, sets: a.sets | 0, scope2: a.scope2 | 0, edit: a.edit | 0, keys: a.keys | 0, card: a.card | 0 };
+}
+
+/* ───────────── CARD (0x67, capability "card": 1) ─────────────
+ * The card is one folder, Audiothurgist/: breaks/*.wav (the list), sets/, presets/. The page turns any file the
+ * browser can decode into what the module loads — at most 17 s, 48 kHz, mono or stereo, PCM16 WAV — and sends it in
+ * order from byte 0, one chunk per round trip: UP_BEGIN(total, overwrite, name), then UP_DATA(total, offset, bytes)
+ * until the last byte; the module answers each with the bytes it holds, and once all are in it writes
+ * Audiothurgist/breaks/<name>.wav itself (the state tail's card state / progress / result / seq tell). COPY_OLD copies
+ * an old card's root WAVs, sets/ and presets/ in (never moves, never deletes, skips what is there); RESCAN looks again;
+ * LIST reads the module's list as it is now (the descriptor's dropdown is the list at boot). */
+const CARD = { begin: 0, data: 1, abort: 2, copy: 3, rescan: 4, list: 5, sr: 48000, loadSec: 17, maxName: 100, overwrite: 1,
+  STATE: ['idle', 'receiving', 'writing', 'copying'],
+  RESULT: ['ok', 'no card', 'card full', 'write failed', 'bad name', 'not found', 'busy', 'bad file', 'already on the card', 'timed out', 'nothing to copy'],
+  F: { mounted: 1, rootWavs: 2, oldSets: 4, oldPresets: 8, breaks: 16, pending: 32 },
+  chunkFor: maxBody => Math.max(64, Math.min(1000, (maxBody || 512) - 24)) };
+/* The module's name rule (core/bb_card.h BreakNameOk): 1..100 printable ASCII, none of / \ : * ? " < > |, not starting
+ * with a space or a dot, not ending with a space or a dot. */
+function breakNameOk(n) {
+  if (typeof n !== 'string' || !n.length || n.length > CARD.maxName) return false;
+  if (!/^[\x20-\x7e]+$/.test(n) || /[\/\\:*?"<>|]/.test(n)) return false;
+  return n[0] !== ' ' && n[0] !== '.' && !/[ .]$/.test(n);
+}
+/* A file name → a stem the module takes: the extension off, accents folded, anything else outside printable ASCII
+ * or reserved by FAT replaced, runs of spaces / dashes squeezed, the ends trimmed, at most 100; "break" if nothing is left. */
+function breakName(fileName) {
+  let s = String(fileName == null ? '' : fileName).replace(/\.[A-Za-z0-9]{1,5}$/, '');
+  try { s = s.normalize('NFKD').replace(/[\u0300-\u036f]/g, ''); } catch {}
+  s = s.replace(/\s+/g, ' ').replace(/[^\x20-\x7e]/g, '_').replace(/[\/\\:*?"<>|]/g, '-').replace(/-{2,}/g, '-');
+  s = s.slice(0, CARD.maxName).replace(/^[ .]+/, '').replace(/[ .]+$/, '');
+  return breakNameOk(s) ? s : 'break';
+}
+/* What the module will get from a decoded buffer: ≤ 2 channels (more: the first two), at 48 kHz, cut at 17 s. */
+function uploadPlan(channels, sampleRate, frames) {
+  const ch = Math.max(1, Math.min(2, channels | 0)), sr = sampleRate || CARD.sr;
+  const at48 = Math.round(frames * CARD.sr / sr), keep = Math.min(at48, CARD.loadSec * CARD.sr);
+  return { channels: ch, frames: keep, seconds: keep / CARD.sr, sourceSeconds: frames / sr, trimmed: at48 > keep, resample: sr !== CARD.sr, bytes: 44 + keep * ch * 2 };
+}
+/* Planes (Float32Array each, one or two) at `sr` → a canonical PCM16 WAV: RIFF / fmt (16 bytes, format 1) / data,
+ * interleaved, each sample clamped to ±1 and scaled symmetrically (±1 → ±32767, NaN → 0). Pure. */
+function encodeWav(planes, sr = CARD.sr, frames) {
+  const ch = planes.length, n = frames == null ? Math.min(...planes.map(p => p.length)) : frames, data = n * ch * 2;
+  const out = new Uint8Array(44 + data), dv = new DataView(out.buffer);
+  const tag = (at, t) => { for (let i = 0; i < 4; i++) out[at + i] = t.charCodeAt(i); };
+  tag(0, 'RIFF'); dv.setUint32(4, 36 + data, true); tag(8, 'WAVE'); tag(12, 'fmt '); dv.setUint32(16, 16, true);
+  dv.setUint16(20, 1, true); dv.setUint16(22, ch, true); dv.setUint32(24, sr, true); dv.setUint32(28, sr * ch * 2, true);
+  dv.setUint16(32, ch * 2, true); dv.setUint16(34, 16, true); tag(36, 'data'); dv.setUint32(40, data, true);
+  let at = 44;
+  for (let i = 0; i < n; i++) for (let c = 0; c < ch; c++) {
+    let v = planes[c][i]; v = v > 1 ? 1 : v < -1 ? -1 : (v === v ? v : 0);
+    dv.setInt16(at, Math.round(v * 32767), true); at += 2;
+  }
+  return out;
+}
+/* One card job on the wire at a time, whoever starts it (Kyklophoria's putQueued: two chunked transfers interleaved
+ * make the module refuse one mid-stream). serial() returns a runner; every job waits for the one before. */
+function serial() { let chain = Promise.resolve(); return job => { const p = chain.then(job); chain = p.catch(() => {}); return p; }; }
+/* Send `bytes` as Audiothurgist/breaks/<name>.wav. One chunk per round trip at normal priority, so the page's clicks
+ * (urgent) go first and its polls interleave. onProgress(acked, total, kbps). Resolves { bytes, ms, kbps } when the
+ * module holds every byte (its write follows: watch the tail); rejects with the module's status name (EXISTS,
+ * NO_CARD, CARD_FULL, BAD_STATE, TOO_LARGE, BAD_ARGS) or 'cancelled' (opts.cancel() true between chunks). */
+async function uploadBreak(link, name, bytes, opts = {}) {
+  if (!breakNameOk(name)) throw new Error('bad name');
+  const total = bytes.length, chunk = opts.chunk || CARD.chunkFor(opts.maxBody), t0 = _now();
+  await link.request(CMD.card, Uint8Array.of(CARD.begin, ...u32b(total), opts.overwrite ? CARD.overwrite : 0, ...nameBytes(name)), { urgent: true, timeoutMs: 4000 });
+  let off = 0;
+  while (off < total) {
+    if (opts.cancel && opts.cancel()) { await link.request(CMD.card, Uint8Array.of(CARD.abort), { urgent: true }).catch(() => {}); throw new Error('cancelled'); }
+    const n = Math.min(chunk, total - off), body = new Uint8Array(9 + n);
+    body[0] = CARD.data; body.set(u32b(total), 1); body.set(u32b(off), 5); body.set(bytes.subarray(off, off + n), 9);
+    const r = await link.request(CMD.card, body, { timeoutMs: 4000 });
+    const have = u32(r, 1);
+    if (have !== off + n) throw new Error('out of step (the module holds ' + have + ' of ' + total + ')');
+    off = have;
+    const ms = Math.max(1, _now() - t0);
+    if (opts.onProgress) opts.onProgress(off, total, off / ms);
+    if (r[5] === 2) throw new Error('not a WAV the module reads');
+  }
+  const ms = Math.max(1, _now() - t0);
+  return { bytes: total, ms, kbps: total / ms };
+}
+const cardOp = (link, op) => link.request(CMD.card, Uint8Array.of(op), { urgent: true });
+const copyOldCard = link => cardOp(link, CARD.copy);
+const cardRescan = link => cardOp(link, CARD.rescan);
+/* The module's list as it is now — labels as P5 shows them ("<name> [set]" for a set). */
+async function cardList(link) {
+  const out = []; let first = 0, total = 0;
+  do {
+    const b = await link.request(CMD.card, Uint8Array.of(CARD.list, first), { key: 'cardlist' + first });
+    total = b[1]; const n = b[3]; let at = 4;
+    for (let i = 0; i < n; i++) { const k = b[at]; out.push(new TextDecoder('ascii').decode(b.subarray(at + 1, at + 1 + k))); at += 1 + k; }
+    if (!n) break; first += n;
+  } while (first < total);
+  return out;
 }
 
 /* GET_ENV: fetch nSlices × 16 envelope bytes in ≤30-slice chunks. */
@@ -635,6 +742,7 @@ const api = { PROTO, CMD, ACT, REC, NOTE_NAMES, keyName, STATUS, statusName, crc
   TABLE_ENTRY, TABLE_ENTRY_EDIT, TABLE_CHUNK, fetchWave, parseWave, fetchTable, parseTableChunk, fetchHits, parseHitsChunk,
   SET_STATE, SET_RESULT, setNameOk, setLabelName, nameBytes, saveSet, loadSet,
   EDIT, editOp, editBoundary, editEntry, editAdd, editSplit, editMerge, editTombstone, editSetKey, editSwapKeys, editNudgeAll, editPromote, editFromOnsets, audition, release, tapMark, editUndo, editRedo,
-  KEYS, playKey, keysFromMarkers, clearMarkers, setMute, autoslice, caps };
+  KEYS, playKey, keysFromMarkers, clearMarkers, setMute, autoslice, caps,
+  CARD, breakNameOk, breakName, uploadPlan, encodeWav, serial, uploadBreak, copyOldCard, cardRescan, cardList };
 if (typeof module === 'object' && module.exports) module.exports = api; else root.HL = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

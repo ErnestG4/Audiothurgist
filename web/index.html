@@ -195,6 +195,16 @@
   .sc-ch .role{color:var(--ink3);font-size:11px} .sc-ch.on .role{color:var(--ink2)} .sc-ch .dc{font-variant-numeric:tabular-nums;min-width:52px;text-align:right;color:var(--ink)} .sc-ch:not(.on) .dc{color:var(--ink3)}
   .sc-grp{display:flex;flex-wrap:wrap;gap:4px;align-items:center} .sc-grp .lbl{font-size:11px;color:var(--ink3);text-transform:uppercase;letter-spacing:.08em;margin-right:2px}
   #sc_clip{color:var(--bad-ink);border-color:var(--bad-line);font-weight:600}
+  /* ── Card ── */
+  .cardnote{background:var(--warn-bg);border:1px solid var(--warn-line);color:var(--warn-ink);padding:10px 12px;border-radius:10px;margin:12px 14px 0;display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center} .cardnote[hidden]{display:none} .cardnote span{flex:1 1 260px;font-size:13px}
+  .cdold{background:var(--warn-bg);border:1px solid var(--warn-line);color:var(--warn-ink);border-radius:10px;padding:10px 12px;margin:0 0 10px} .cdold p{margin:0 0 8px;font-size:13px} .cdold[hidden]{display:none} #cd_copy_state:empty{display:none}
+  .cddrop{border:2px dashed var(--line-hi);border-radius:12px;padding:14px;background:var(--raise);display:flex;flex-direction:column;gap:8px} .cddrop.over{border-color:var(--accent);background:var(--pad-hi)} .cddrop.off{opacity:.5}
+  .cddrop .big{font-size:15px;color:var(--ink);font-weight:600} .cddrop .sub{font-size:12px;color:var(--ink2)}
+  .cdlist{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
+  .cdlist li{border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:var(--raise);display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 10px;align-items:center}
+  .cdlist .nm{font-weight:600;color:var(--ink);overflow-wrap:anywhere} .cdlist .inf{grid-column:1/-1;font-size:12px;color:var(--ink2)} .cdlist .st{font-size:12px;color:var(--ink2);overflow-wrap:anywhere}
+  .cdlist .bar{grid-column:1/-1;height:8px} .cdlist .bar i{background:var(--accent);transition:width .1s linear} .cdlist li.ok .bar i{background:var(--ok-ink)} .cdlist li.bad .bar i{background:var(--bad-ink)}
+  .cdlist li.ok .st{color:var(--ok-ink)} .cdlist li.bad .st{color:var(--bad-ink)} .cdlist .acts{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
 </style>
 </head>
 <body>
@@ -212,6 +222,7 @@
 </header>
 <div id="msg" class="msg" role="status" aria-live="polite"></div>
 <div id="notice"></div>
+<div id="cardnote" class="cardnote" role="status" hidden><span id="cn_text"></span><button id="cn_copy" class="mini primary" title="copy the root's WAVs, sets/ and presets/ into the Audiothurgist folder (COPY_OLD) — the originals stay where they are">Copy them in</button><button id="cn_more" class="mini ghost">Card…</button></div>
 <nav id="tabs"><button id="tab_play" class="on">Play</button><button id="tab_kit">Kit</button><button id="tab_scope">Scope</button><button id="tab_opts">Options</button><button id="tab_man">Manual</button></nav>
 
 <div id="transport" class="transport">
@@ -300,8 +311,9 @@
     <div class="row" style="margin-top:12px">
       <label class="ctl">History (older ← → now)<input id="hist" type="range" min="0" max="0" value="0"></label>
       <label class="ctl">Sample<select id="sample"><option>—</option></select></label>
+      <button id="p_add" class="mini" hidden title="Kit → Card: upload audio files to the module's card">Add breaks…</button>
     </div>
-    <p class="note">Picking a file here loads it at once (ACTION 6); on the panel P5 highlights and B3-hold loads.</p>
+    <p class="note">Picking a file here loads it at once (ACTION 6); on the panel P5 highlights and B3-hold loads. The list is <code>Audiothurgist/breaks</code> on the card, then the sets.</p>
   </section>
 </main>
 
@@ -392,7 +404,22 @@
       <div class="bar meterbar idle" id="s_barbox" title="progress of the save"><i id="s_bar"></i></div>
       <span id="s_cur" class="note" style="margin:0"></span>
     </div>
-    <p class="note">A set is <code>sets/&lt;name&gt;.wav</code> (PCM16, both planes when the material is stereo, the slice starts as cue points) beside <code>sets/&lt;name&gt;.json</code>. Sets also appear in the Sample list as “name [set]” and load from P5 + B3 like any file. Saving refuses while a take runs.</p>
+    <p class="note">A set is <code>Audiothurgist/sets/&lt;name&gt;.wav</code> (PCM16, both planes when the material is stereo, the slice starts as cue points) beside <code>&lt;name&gt;.json</code>. Sets also appear in the Sample list as “name [set]” and load from P5 + B3 like any file. Saving refuses while a take runs.</p>
+  </section>
+  <section class="wide" id="cardCard" hidden>
+    <h2>Card — add breaks <span id="cd_status" class="pill">—</span></h2>
+    <div id="cd_old" class="cdold" hidden>
+      <p id="cd_old_text"></p>
+      <div class="row"><button id="cd_copy" class="mini primary" title="COPY_OLD: the root's WAVs → Audiothurgist/breaks, sets/ → Audiothurgist/sets, presets/ → Audiothurgist/presets; what is there already is skipped; nothing is moved or deleted">Copy them in</button></div>
+    </div>
+    <p id="cd_copy_state" class="note" style="margin:0 0 10px"></p>
+    <div id="cd_drop" class="cddrop" tabindex="0" aria-label="drop audio files here to upload them to the module">
+      <span class="big">Drop audio files here</span>
+      <span class="sub">WAV (16/24-bit or float), AIFF, MP3, FLAC, OGG — anything this browser can open. Each becomes <code>Audiothurgist/breaks/&lt;name&gt;.wav</code>: 48 kHz, PCM16, stereo kept, the first 17 s.</span>
+      <div class="row"><button id="cd_pick" class="mini primary">Choose files…</button><input id="cd_file" type="file" accept="audio/*,.wav,.wave,.aif,.aiff,.mp3,.flac,.ogg,.m4a" multiple hidden><label class="ctl inl"><input type="checkbox" id="cd_over"> replace a break of the same name</label></div>
+    </div>
+    <ol id="cd_list" class="cdlist"></ol>
+    <p class="note">The browser decodes and converts the file; the module receives it whole and then writes it to the card itself (P5's ring fills meanwhile) — the break keeps playing and the clock keeps time throughout. One file at a time; refused while a set saves or loads, a take runs or a file loads. The module only reads its <code>Audiothurgist</code> folder.</p>
   </section>
 </main>
 
@@ -446,7 +473,7 @@
 <script src="demo.js"></script>
 <script>
 'use strict';
-const { CMD, ACT, REC, KEYS, ZONE_MULT, keyName, Link, hello, getDescriptor, getLive, setLive, parseState, fetchEnv, parseScope, SCOPE, SCOPE_CH, SCOPE_JACK_ROLE, SCOPE_JACK_IN, scopeVolts, scopePlan, fetchScopeFrame, fetchWave, fetchTable, fetchHits, fieldLabels, pagerInfo, optionsInfo, manualInfo, SET_STATE, SET_RESULT, setNameOk, setLabelName, saveSet, loadSet, caps, playKey, setMute } = HL;
+const { CMD, ACT, REC, KEYS, ZONE_MULT, keyName, Link, hello, getDescriptor, getLive, setLive, parseState, fetchEnv, parseScope, SCOPE, SCOPE_CH, SCOPE_JACK_ROLE, SCOPE_JACK_IN, scopeVolts, scopePlan, fetchScopeFrame, fetchWave, fetchTable, fetchHits, fieldLabels, pagerInfo, optionsInfo, manualInfo, SET_STATE, SET_RESULT, setNameOk, setLabelName, saveSet, loadSet, caps, playKey, setMute, CARD } = HL;
 const $ = id => document.getElementById(id);
 const CLS_NAME = ['kick', 'snare', 'hat', 'other'];
 const SR = 48000;   /* the engine's rate: lengths and positions are shown in seconds */
@@ -961,6 +988,7 @@ function onState(b) {
   if (s.keySeq != null && p && p.keySeq != null && s.keySeq !== p.keySeq && s.keyFlash >= 0) flashKey(s.keyFlash);
   if (s.matGen !== envGen && !poll.pEnv) { const gen = s.matGen; poll.pEnv = fetchEnv(link, s.nSlices).then(e => { env = e; envGen = gen; selSlice = -1; invalidate(D.wave); }, e => warn('env', e)).finally(() => { poll.pEnv = null; }); }
   syncKit(s);
+  if (cardOk) drawCard();
   /* EDIT-PANEL: the module's Edit page publishes its selection (tail byte 257); the editor follows the knobs */
   if (editOk && s.selSlice != null && s.selSlice >= 0 && s.selSlice !== (p ? p.selSlice : -1) && s.selSlice !== ed.selT) ed.select(s.selSlice);
   /* Options edited elsewhere (a preset load on the panel): the state carries three of them. */
@@ -1612,6 +1640,155 @@ function buildManual() {
   host.innerHTML = h;
 }
 
+/* ───────────── Card (0x67, capability "card": 1) ─────────────
+ * Files dropped or picked here are decoded by the browser (decodeAudioData on a 48 kHz OfflineAudioContext decodes
+ * and resamples in one step), cut to 17 s, kept stereo when stereo, encoded PCM16 (HL.encodeWav) and sent one chunk
+ * per round trip (HL.uploadBreak). One card job on the wire at a time (HL.serial: Kyklophoria's putQueued), so two
+ * drops never interleave. The module writes the file once it holds every byte; the state tail's card seq says when,
+ * and lastIdx is what "Load it now" loads. An old card (WAVs in the root, no Audiothurgist folder) is said so plainly
+ * and offered a copy — never a move. */
+let cardOk = false, cardJobs = [], cardCopying = false;
+const cardRun = HL.serial();
+/* the decoder, a variable so the selftest can stand in for the browser's */
+let cardDecode = async file => {
+  const AC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  if (!AC) throw new Error('this browser has no audio decoder (OfflineAudioContext)');
+  const data = await file.arrayBuffer();
+  return await new AC(1, 1, CARD.sr).decodeAudioData(data);
+};
+const fmtKB = n => n >= 1048576 ? (n / 1048576).toFixed(2) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+const cardNow = () => (st && st.card) || null;
+/* the module's list as it is now (the descriptor's dropdown is the list at boot) → the Sample select, the set names */
+async function cardRefreshList() {
+  if (!link || !cardOk) return;
+  try {
+    const l = await HL.cardList(link); labels.sample = l;
+    const sel = $('sample'), cur = sel.value;
+    sel.innerHTML = l.length ? l.map((n, i) => `<option value="${i}">${esc(n)}</option>`).join('') : '<option value="-1">—</option>';
+    if (cur != null) sel.value = cur; $('b_load').disabled = !l.length; fillSetList(); ctlSig = ''; invalidate(D.text | D.controls);
+  } catch (e) { warn('card list', e); }
+}
+/* wait for the module to finish the op it took (the tail's card seq moves past seq0 and the state is idle) */
+async function cardSettle(seq0, ms = 60000) {
+  const t0 = performance.now();
+  while (performance.now() - t0 < ms) {
+    const c = cardNow(); if (!link) throw new Error('disconnected');
+    if (c && c.seq !== seq0 && c.state === 0) return c;
+    poll.tState = 0; await new Promise(r => setTimeout(r, 60));
+  }
+  throw new Error('the module did not finish in time');
+}
+function cardRow(job) {
+  const li = document.createElement('li'), nm = document.createElement('span'), acts = document.createElement('span'), inf = document.createElement('span'), bar = document.createElement('div'), fill = document.createElement('i'), stl = document.createElement('span');
+  nm.className = 'nm'; acts.className = 'acts'; inf.className = 'inf'; bar.className = 'bar'; stl.className = 'st'; stl.style.gridColumn = '1/-1';
+  nm.textContent = job.name + '.wav'; inf.textContent = job.file.name + (job.file.size ? ' · ' + fmtKB(job.file.size) : '');
+  bar.appendChild(fill); li.appendChild(nm); li.appendChild(acts); li.appendChild(inf); li.appendChild(bar); li.appendChild(stl);
+  $('cd_list').appendChild(li);
+  Object.assign(job, { li, nmEl: nm, acts, inf, fill, stl });
+}
+function jobSay(job, text, kind) { job.stl.textContent = text; job.li.className = kind || ''; job.kind = kind || ''; }
+function jobBar(job, f) { job.fill.style.width = Math.round(Math.max(0, Math.min(1, f)) * 100) + '%'; }
+function jobButton(job, label, fn, primary) { const b = document.createElement('button'); b.className = 'mini' + (primary ? ' primary' : ''); b.textContent = label; b.onclick = fn; job.acts.appendChild(b); (job.btns = job.btns || {})[label] = b; return b; }
+function jobClear(job) { job.acts.innerHTML = ''; job.btns = {}; }
+function cardAddFiles(files) {
+  if (!cardOk || !link) { say('connect to a module with card uploads first', true); return; }
+  for (const file of Array.from(files || [])) {
+    const job = { file, name: HL.breakName(file.name), overwrite: $('cd_over').checked, state: 'queued' };
+    cardRow(job); jobSay(job, 'waiting…'); jobBar(job, 0); cardJobs.push(job);
+    jobButton(job, 'Cancel', () => { job.cancelled = true; if (job.state === 'queued') { jobClear(job); jobSay(job, 'cancelled', 'bad'); } });
+    cardRun(() => cardUpload(job)).catch(e => warn('card', e));
+  }
+}
+async function cardUpload(job) {
+  if (job.cancelled) return;
+  if (!link) { jobClear(job); jobSay(job, 'not connected', 'bad'); return; }
+  if (!job.bytes) {
+    job.state = 'decoding'; jobSay(job, 'decoding…');
+    let ab;
+    try { ab = await cardDecode(job.file); }
+    catch (e) { job.state = 'failed'; jobClear(job); jobSay(job, 'this browser cannot decode it: ' + (e && e.message || e), 'bad'); return; }
+    const plan = HL.uploadPlan(ab.numberOfChannels, ab.sampleRate, ab.length), planes = [];
+    if (plan.frames < CARD.sr / 4) { job.state = 'failed'; jobClear(job); jobSay(job, `too short (${plan.seconds.toFixed(2)} s; the module needs ¼ s)`, 'bad'); return; }
+    for (let c = 0; c < plan.channels; c++) planes.push(ab.getChannelData(c).subarray(0, plan.frames));
+    job.bytes = HL.encodeWav(planes, CARD.sr, plan.frames); job.plan = plan;
+    job.inf.textContent = `${job.file.name} → ${plan.channels === 2 ? 'stereo' : 'mono'}, ${plan.seconds.toFixed(2)} s${plan.trimmed ? ` (the first 17 of ${plan.sourceSeconds.toFixed(1)} s)` : ''}, 48 kHz PCM16, ${fmtKB(job.bytes.length)}`;
+  }
+  if (job.cancelled) { jobClear(job); jobSay(job, 'cancelled', 'bad'); return; }
+  const c0 = cardNow(), seq0 = c0 ? c0.seq : -1;
+  job.state = 'sending'; jobSay(job, 'sending…'); jobBar(job, 0);
+  try {
+    const r = await HL.uploadBreak(link, job.name, job.bytes, { overwrite: job.overwrite, maxBody: info && info.maxBody, cancel: () => job.cancelled || !link,
+      onProgress: (a, t, kbps) => { jobBar(job, a / t); job.kbps = kbps; jobSay(job, `sending ${Math.round(100 * a / t)} % · ${kbps.toFixed(0)} KB/s`); } });
+    job.kbps = r.kbps; job.state = 'writing'; jobClear(job); jobSay(job, `sent ${fmtKB(r.bytes)} at ${r.kbps.toFixed(0)} KB/s — the module is writing it to the card…`);
+    const c = await cardSettle(seq0);
+    if (c.result) { job.state = 'failed'; jobSay(job, 'the card write failed: ' + (CARD.RESULT[c.result] || 'error ' + c.result), 'bad'); jobButton(job, 'Try again', () => cardRetry(job)); return; }
+    job.idx = c.lastIdx; jobBar(job, 1);
+    jobSay(job, `on the card as Audiothurgist/breaks/${job.name}.wav · ${fmtKB(r.bytes)} at ${r.kbps.toFixed(0)} KB/s`, 'ok');
+    await cardRefreshList();
+    if (job.idx >= 0) jobButton(job, 'Load it now', () => action(ACT.load, job.idx), true);
+    job.state = 'done';   /* after the list: done means the page shows it too */
+  } catch (e) {
+    const m = e && e.message || String(e); jobClear(job); job.state = 'failed';
+    if (m === 'EXISTS') { jobSay(job, `a break called ${job.name}.wav is already on the card`, 'bad'); jobButton(job, 'Replace it', () => { job.overwrite = true; cardRetry(job); }, true); }
+    else if (m === 'BAD_STATE') { jobSay(job, 'the module is busy (a set saving or loading, a take, a file loading, another upload) — try again in a moment', 'bad'); jobButton(job, 'Try again', () => cardRetry(job)); }
+    else if (m === 'NO_CARD') jobSay(job, 'no card in the module', 'bad');
+    else if (m === 'CARD_FULL') jobSay(job, 'the card is full', 'bad');
+    else if (m === 'TOO_LARGE') jobSay(job, 'too large for the module (17 s of stereo is the most)', 'bad');
+    else if (m === 'cancelled') jobSay(job, 'cancelled — nothing was written', 'bad');
+    else { jobSay(job, 'failed: ' + m, 'bad'); if (link) jobButton(job, 'Try again', () => cardRetry(job)); }
+  }
+}
+function cardRetry(job) { job.cancelled = false; jobClear(job); jobSay(job, 'waiting…'); jobButton(job, 'Cancel', () => { job.cancelled = true; }); cardRun(() => cardUpload(job)).catch(e => warn('card', e)); }
+async function cardCopy() {
+  if (!link || !cardOk || cardCopying) return;
+  cardCopying = true; drawCard();
+  try {
+    await cardRun(async () => {
+      const c0 = cardNow(), seq0 = c0 ? c0.seq : -1;
+      try { await HL.copyOldCard(link); }
+      catch (e) { setText('cd_copy_state', e.message === 'BAD_STATE' ? 'the module is busy — try again in a moment' : e.message === 'NO_CARD' ? 'no card in the module' : 'refused: ' + e.message); return; }
+      const c = await cardSettle(seq0, 300000);
+      setText('cd_copy_state', c.result && c.result !== 10 ? 'the copy stopped: ' + (CARD.RESULT[c.result] || c.result) + ` (${c.copied} copied)` : `copied ${c.copied} file${c.copied === 1 ? '' : 's'}${c.skipped ? `, ${c.skipped} already there` : ''} — the originals are where they were`);
+      say(`card: ${c.copied} copied into Audiothurgist/${c.skipped ? `, ${c.skipped} already there` : ''}`);
+      await cardRefreshList();
+    });
+  } catch (e) { setText('cd_copy_state', 'failed: ' + e.message); }
+  finally { cardCopying = false; drawCard(); }
+}
+/* the card readouts: the pill, the old-card notice (here and as the banner), the drop zone */
+function drawCard() {
+  const c = cardNow(), show = cardOk && !!c;
+  $('cardnote').hidden = true;
+  if (!show) { setPill('cd_status', cardOk ? '—' : 'needs card firmware', cardOk ? '' : 'warn'); $('cd_old').hidden = true; return; }
+  const busy = c.state === 2 || c.state === 3, pct = Math.round(c.progress / 2.55);
+  setPill('cd_status', !c.mounted ? 'no card' : c.state === 1 ? `receiving ${pct} %` : c.state === 2 ? `writing ${pct} %` : c.state === 3 ? `copying ${pct} %` : `${c.breaks} break${c.breaks === 1 ? '' : 's'} in Audiothurgist/breaks`, !c.mounted || busy || !c.breaks ? 'warn' : 'ok');
+  $('cd_drop').classList.toggle('off', !c.mounted); $('cd_pick').disabled = !c.mounted;
+  const old = c.mounted && c.pending > 0;
+  $('cd_old').hidden = !old; $('cd_copy').disabled = !old || cardCopying || busy;
+  if (old) {
+    const where = [c.rootWavs ? `${c.rootWavs} WAV${c.rootWavs === 1 ? '' : 's'} in its root` : '', c.oldSets ? 'a sets folder' : '', c.oldPresets ? 'a presets folder' : ''].filter(Boolean);
+    const list = where.length > 1 ? where.slice(0, -1).join(', ') + ' and ' + where.slice(-1) : where[0] || 'files in the old places';
+    const text = c.hasBreaks
+      ? `${c.pending} file${c.pending === 1 ? '' : 's'} in the card's old places (${list}) ${c.pending === 1 ? 'is' : 'are'} not in the Audiothurgist folder yet.`
+      : `This card is laid out the old way: ${list}. This firmware reads only the Audiothurgist folder, so none of them is in its list — and it moves nothing for you, because files in the root may belong to another module. Copy them in: ${c.pending} file${c.pending === 1 ? '' : 's'} copied into Audiothurgist/, the originals left where they are.`;
+    setText('cd_old_text', text);
+    if (!c.hasBreaks) { $('cardnote').hidden = false; setText('cn_text', `This card keeps its breaks the old way (${list}); this firmware reads only the Audiothurgist folder and moves nothing for you.`); $('cn_copy').disabled = cardCopying || busy; }
+  }
+}
+function cardShowPanel() { showTab('tab_kit'); const el = $('cardCard'); if (el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+$('cd_copy').onclick = () => cardCopy(); $('cn_copy').onclick = () => cardCopy(); $('cn_more').onclick = cardShowPanel; $('p_add').onclick = cardShowPanel;
+$('cd_pick').onclick = () => { const i = $('cd_file'); if (i.click) i.click(); };
+$('cd_file').addEventListener('change', e => { const t = e.target; cardAddFiles(t && t.files); try { t.value = ''; } catch {} });
+{
+  const z = $('cd_drop'), has = e => !!(e.dataTransfer && e.dataTransfer.types && Array.from(e.dataTransfer.types).includes('Files'));
+  z.addEventListener('dragover', e => { e.preventDefault(); z.classList.add('over'); });
+  z.addEventListener('dragleave', () => z.classList.remove('over'));
+  z.addEventListener('drop', e => { e.preventDefault(); e.stopPropagation(); z.classList.remove('over'); cardAddFiles(e.dataTransfer && e.dataTransfer.files); });
+  /* a drop that misses the zone must not navigate the page away from the module; with card uploads it uploads */
+  window.addEventListener('dragover', e => { if (has(e)) e.preventDefault(); });
+  window.addEventListener('drop', e => { if (!has(e)) return; e.preventDefault(); if (cardOk && link) { cardShowPanel(); cardAddFiles(e.dataTransfer.files); } });
+}
+
 /* ───────────── Connect ───────────── */
 /* The readouts are readouts of the module: after it goes they must not keep its last values (Kyklophoria's
  * 2026-09-13 review — block, link, cpu all read as live with nothing connected). */
@@ -1633,6 +1810,7 @@ function setDisconnected() {
   table = null; tableSig = ''; bufSig = ''; hits = null; hitsGen = -1; kitOk = false; wave.cache.clear(); wave.queue.length = 0; wave.planSig = ''; keyCells.forEach(c => { c.sig = ''; });
   editOk = false; keysOk = false; copyArm = -1; ed.selT = -1; ed.drag = null; ed.local = null; ed.history = new ED.History(); histSig = fieldSig = ''; closeMenu(); ghost(null); dropHi(-1); setEditorShown(false);
   setsOk = false; setSeqShown = -1; setAsked = null; setPill('s_status', '—', ''); $('s_save').disabled = $('s_load').disabled = true;
+  cardOk = false; for (const j of cardJobs) j.cancelled = true; $('cardCard').hidden = true; $('cardnote').hidden = true; $('p_add').hidden = true;
   scope2Ok = scopeCvOk = false; clearTimeout(sc.timer); sc.timer = null; sc.frames.length = 0; sc.fps = sc.rps = sc.bps = 0; sc.err = ''; invalidate(D.bigscope);
   $('connect').textContent = 'Connect'; $('connect').disabled = !serialApi(); $('demo').disabled = false; $('demo').hidden = false; $('padsCard').hidden = true;
   clearReadouts();
@@ -1672,8 +1850,11 @@ async function connectPort(port, isDemo) {
     keysOk = editOk && cp.keys >= 1;          /* v0.13: the pads, SET_MUTE, the marker ops, the autoslice count, the 263.. tail */
     setEditorShown(editOk);
     setsOk = !!cp.sets;                       /* ACTION 14 / 15 + the 219.. tail */
+    cardOk = cp.card >= 1;                    /* CARD: 0x67 (upload, copy an old card in, the list) + the 276.. tail */
+    $('cardCard').hidden = !cardOk; $('p_add').hidden = !cardOk; $('cardnote').hidden = true;
     scope2Ok = cp.scope2 >= 1;                /* SCOPE: the 0x62 body (audio channels) */
     scopeCvOk = cp.scope2 >= 2;               /* SCOPE: … with the J3..J8 ext */
+    if (cardOk) await cardRefreshList();      /* CARD: the list as it is now, not as it was at boot */
     fillSetList();
     setPill('kit_status', kitOk ? 'reading…' : 'this firmware has no sample-mode commands (0x64–0x66)', kitOk ? '' : 'warn');
     buildManual(); buildModes(); $('padsCard').hidden = !keysOk;
@@ -1751,15 +1932,18 @@ async function connect() {
  * editing, `noundo` one without the journal, `old12` a 0.12 firmware (no
  * "keys": no pads, the mute toggle, TAP_MARK taken whatever sounds);
  * `scope` opens the Scope tab (`cv` / `gates` press that preset), `noin`
- * leaves J1/J2 silent, `body512` announces the protocol's default max_body. */
+ * leaves J1/J2 silent, `body512` announces the protocol's default max_body; CARD: `oldcard` the old layout (WAVs in
+ * the root, sets/ and presets/ beside them, no Audiothurgist folder), `nocard` no card in, `nocardfw` a 0.13 firmware
+ * before the card work (no "card", the 276-byte body), `card` opens the Kit tab's Card panel. */
 async function connectDemo(flags = '') {
   if (link) return; notice('');
   const f = new Set(flags.split(',').filter(Boolean));
-  const tail = f.has('old') ? 148 : f.has('short') ? 167 : f.has('v099') ? 176 : f.has('nosets') ? 219 : f.has('noedit') ? 255 : f.has('noundo') ? 262 : f.has('old12') ? 263 : 276;
-  demoDevice = new DEMO.FakeDevice({ tail, latencyMs: 6, kit: f.has('kit') || f.has('pads'), swing: f.has('kit') || f.has('swing'), inputs: !f.has('noin'), maxBody: f.has('body512') ? 512 : DEMO.MAX_BODY, edit: !(f.has('noedit') || f.has('nosets') || f.has('v099') || f.has('short') || f.has('old')) });
+  const tail = f.has('old') ? 148 : f.has('short') ? 167 : f.has('v099') ? 176 : f.has('nosets') ? 219 : f.has('noedit') ? 255 : f.has('noundo') ? 262 : f.has('old12') ? 263 : f.has('nocardfw') ? 276 : 293;
+  demoDevice = new DEMO.FakeDevice({ tail, latencyMs: 6, oldcard: f.has('oldcard'), nocard: f.has('nocard'), kit: f.has('kit') || f.has('pads'), swing: f.has('kit') || f.has('swing'), inputs: !f.has('noin'), maxBody: f.has('body512') ? 512 : DEMO.MAX_BODY, edit: !(f.has('noedit') || f.has('nosets') || f.has('v099') || f.has('short') || f.has('old')) });
   const d = demoDevice;
   if (f.has('scope')) showTab('tab_scope');
   if (f.has('cv')) $('sc_p_cv').onclick(); if (f.has('gates')) $('sc_p_gates').onclick();
+  if (f.has('card')) setTimeout(() => { if (demoDevice === d) cardShowPanel(); }, 0);
   if (f.has('kit')) { showTab('tab_kit'); setInterval(() => { if (demoDevice === d && d.looperEvents < 16 && Math.random() < 0.5) d.looperEvents++; }, 3000); }
   if (f.has('brain')) d.brain = true;
   if (f.has('ext')) { d.ext = true; d.locked = true; d.mult = 2; d.multZone = 3; d.p2Engaged = true; }

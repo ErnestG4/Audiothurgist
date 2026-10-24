@@ -150,6 +150,36 @@ you have the OTG adapter, the phone. Close `/program`.
 - [ ] `/program` with your **fullest card**: the file list loads (the
       manual grew; the descriptor shares a 24 KB buffer with the list).
 
+## 10b. The card — one folder, uploads, an old card copied in (8 min)
+
+Firmware with `"card": 1` (branch `beta-card`; `docs/packages/card.md`).
+Bring the **old card** (WAVs in the root, a `sets/` and a `presets/`) and,
+for the last box, a blank one. A clock on J3 and a break playing throughout.
+
+- [ ] Boot on the old card: the synth break plays, P5 lists nothing; the page
+      shows the banner ("keeps its breaks the old way … moves nothing for
+      you") and the Kit's Card panel says the same with the counts.
+- [ ] **Copy them in** while a break plays. *Listen for*: no click, no
+      dropout, no tempo wobble against the clock; P5's ring fills with the
+      progress. Then P5 and the page list the breaks and sets; on a computer
+      the root still holds every original and `Audiothurgist/` the copies.
+- [ ] **Copy them in** again (from the panel): everything "already there".
+- [ ] Drop three files on the page while the break plays — a 44.1 kHz
+      stereo WAV, an MP3, a 30 s file. *Listen for*: **no glitch and no drift
+      against the clock** while they transfer and while the module writes
+      (P5's ring). Write down the KB/s the rows show: ____ KB/s.
+- [ ] **Load it now** on each: the stereo one plays stereo (Sampling →
+      Stereo), the 30 s one is its first 17 s, the MP3 sounds right (no
+      pitch shift: the 48 kHz conversion).
+- [ ] The same file again: "already on the card"; **Replace it** replaces it.
+- [ ] Start a set save while an upload transfers: one of them waits or is
+      refused, never a broken file; the upload still lands.
+- [ ] Unplug USB mid-upload: no `<name>.wav` on the card afterwards; plug
+      back, connect, upload again.
+- [ ] No card in: the panel says "no card", an upload is refused plainly.
+- [ ] Blank card: the first upload creates `Audiothurgist/breaks` itself;
+      a preset save adds `Audiothurgist/presets/<slot>.json`.
+
 ## 11. Scope (3 min)
 
 - [ ] Scope tab: Out L/R trace the beat (this tab was hidden by a duplicate
@@ -174,9 +204,13 @@ you have the OTG adapter, the phone. Close `/program`.
 5. **Pads on the Play tab** in pattern modes (Classic, Grids…): keep them
    second, or hide them there?
 6. **Pads mode** still draws the bar strip, dimmed: keep or hide?
+7. **The card folder at boot**: make `Audiothurgist/breaks` on a card that
+   has none (so a computer shows where breaks go), or only on the first
+   write (now)?
 
 ## Known and not to be reported
 
-SRAM ~92 %, DTCM ~85 %, SDRAM ~59 % (the undo journal grew to 152 KB); the
+SRAM ~93 %, DTCM ~85 %, SDRAM ~64 % (the undo journal grew to 152 KB; the
+card's upload buffer is 3.3 MB); the
 Play tab's small scope uses the old request on purpose; a preset save costs
 one 10–50 ms poll gap; iOS has no browser USB.

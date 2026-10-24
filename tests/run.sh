@@ -16,6 +16,10 @@
 # 6. sets_check     — SETS package: set naming, the engine → set → engine
 #                     round trip (table, keys, looper, identical audio),
 #                     PlanSet's refusals, Looper::Adopt (ASan/UBSan).
+# 6b. card_check   — CARD package: the one folder's paths, the upload name
+#                     rule, the upload receiver, the copy plan, and the FatFs
+#                     half (scan, survey, copy, the upload's write) over
+#                     tests/fatfs_shim.h with a scratch card (ASan/UBSan).
 # 7. scope_check    — SCOPE package: request parsing and clamps, the trigger
 #                     (crossing, hysteresis, ring age), channel alignment,
 #                     plain / peak decimation, at-pos frames, the old-mode
@@ -65,6 +69,9 @@ $CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $I
 echo; echo "== sets_check (ASan/UBSan) =="
 $CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/sets_check.cpp -o "$OUT/sc" || fail=1
 "$OUT/sc" || fail=1
+echo; echo "== card_check (ASan/UBSan) =="
+$CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/card_check.cpp -o "$OUT/cardchk" || fail=1
+"$OUT/cardchk" "$OUT" || fail=1
 echo; echo "== scope_check (ASan/UBSan) =="
 $CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/scope_check.cpp -o "$OUT/scope" || fail=1
 "$OUT/scope" || fail=1

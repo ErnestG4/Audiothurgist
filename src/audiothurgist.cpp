@@ -66,6 +66,13 @@
 #include "bb_sample.h"   /* SAMPLE: TrimRegion, AnalyseRegion (a key take, control thread) */
 #include "bb_record.h"   /* RECORD: record input, kit map, take length, markers → cues, TakeRecorder */
 #include "bb_sets.h"     /* SETS: set naming, engine ↔ SetInfo, the load plan (docs/packages/sample-sets.md) */
+/* CARD: none of the card code is time-critical (it waits on the card and yields), and SRAM is the module's
+ * tightest budget — built for size, not speed. */
+#pragma GCC push_options
+#pragma GCC optimize("Os")
+#include "bb_card.h"     /* CARD: the one folder, upload names, the receiver, the copy plan (docs/packages/card.md) */
+#include "bb_cardfs.h"   /* CARD: scan, survey, copy, the upload's write — FatFs, host-tested over a shim */
+#pragma GCC pop_options
 #ifndef BB_GIT_HASH
 #define BB_GIT_HASH "local"
 #endif
@@ -689,6 +696,33 @@ static uint32_t         gPresetSeq[Presets::kNumSlots] = {};   /* preset backup:
 static uint32_t         gPresetPollMs  = 0;
 static PresetName*      gPresetName    = nullptr;
 /* ── end SETS ──────────────────────────────────────────────────────────── */
+/* ── CARD ── the one folder, uploads from the page, an old card copied in
+ * (docs/packages/card.md; the rules are core/bb_card.h, the FatFs half
+ * core/bb_cardfs.h). An upload arrives whole into gUpBuf (SDRAM: 17 s of
+ * stereo PCM16 is 3.3 MB, there is room) — each 0x67 chunk is a memcpy and
+ * nothing else, so the transfer never touches the card or the audio; once the
+ * last byte is in, the main loop writes it as a set save writes (gSetState = 3:
+ * every set-op guard holds, KeepClock runs the control loop at 25 Hz, the
+ * writer yields per 8 KiB through gSetStage). The copy runs the same way. ── */
+static constexpr uint32_t kUpMax = (uint32_t)kLoadMax * 4u + 4096u;   /* 17 s × 48 kHz × stereo PCM16 + the header's room */
+alignas(32) static uint8_t ALCHEMY_SDRAM_BSS gUpBuf[kUpMax];
+BB_SDRAM_POD(gUpBuf);
+ALCHEMY_SDMMC_BSS alignas(32) static FIL gCardFil;    /* the copy's source (gSetFil is its destination) */
+static bb::UploadRx     gUp;                          /* POD; buf / cap set at boot */
+static char             gUpName[bb::kBreakNameMax + 1] = {};
+static bool             gUpOverwrite  = false;
+static uint32_t         gUpLastMs     = 0;            /* the last chunk: 5 s of silence drops the transfer */
+static volatile uint8_t gCardState    = 0;            /* bb::CardState (tail 276) */
+static volatile uint8_t gCardProg     = 0;            /* receive / copy progress 0..255 (277) */
+static volatile uint8_t gCardResult   = 0;            /* bb::CardResult of the last op (278) */
+static volatile uint8_t gCardSeq      = 0;            /* bumps per finished op (279) */
+static volatile uint8_t gCardReq      = 0;            /* main loop: 1 write the upload · 2 copy the old card in · 3 rescan */
+static uint8_t          gCardLastIdx  = 255;          /* the last upload's list index (287), 255 none */
+static uint32_t         gCardMoved    = 0;            /* bytes the upload's write has done */
+static uint16_t         gCardCopied = 0, gCardSkipped = 0;
+static bb::CardSurvey   gSurvey;                      /* what the card holds, old and new (280..) */
+static uint8_t          CardProgress();               /* the op's progress byte (OnRender, the tail) */
+/* ── end CARD ──────────────────────────────────────────────────────────── */
 /* ── CLOCK ── control-thread clock state; the math is core/bb_clockmath.h ── */
 static volatile float gClkFlash = 0.f;   /* B1 white flash per detected pulse */
 static volatile float gClkMult  = 1.f;   /* APPLIED multiplier (telemetry mirror of gMap.mult) */
@@ -2109,8 +2143,8 @@ static void OnRender(uint32_t /*t_ms*/)
     if(gSetState)
     {
         hw.leds.ClearRing(P_SPACE);
-        if(gSetState == 1u)
-            DrawLevelArc(hw.leds, P_SPACE, kAlchemyLabArcGeometry, (float)gSetProgress / 255.f, {0.5f, 0.99f}, kSpaceCol, kSpaceCol, kDimHi);
+        if(gSetState == 1u || gSetState == 3u)   /* CARD: 3 = an upload's write or a copy, its progress */
+            DrawLevelArc(hw.leds, P_SPACE, kAlchemyLabArcGeometry, (float)(gSetState == 3u ? CardProgress() : gSetProgress) / 255.f, {0.5f, 0.99f}, kSpaceCol, kSpaceCol, kDimHi);
         else
         {
             static uint8_t s_dot = 0;
@@ -2134,52 +2168,13 @@ static void OnRender(uint32_t /*t_ms*/)
 }
 
 /* ── SD: scan + load (main-loop only, off the audio thread) ─────────── */
-static void SortFiles(int from, int to)
-{
-    for(int i = from + 1; i < to; i++)
-        for(int j = i; j > from && strcasecmp(gFiles[j - 1], gFiles[j]) > 0; j--)
-        {
-            char tmp[128];
-            memcpy(tmp, gFiles[j - 1], 128);
-            memcpy(gFiles[j - 1], gFiles[j], 128);
-            memcpy(gFiles[j], tmp, 128);
-        }
-}
-/* The loose WAVs of the root, sorted; then SETS: the WAVs of sets/, sorted,
- * as the entries "sets/<name>.wav" (the label shows "<name> [set]"; the
- * load path takes the JSON beside them). */
+/* CARD: the breaks of 0:/Audiothurgist/breaks, sorted; then SETS: the WAVs of
+ * 0:/Audiothurgist/sets, sorted, as the entries "sets/<name>.wav" (the label
+ * shows "<name> [set]"; the load path takes the JSON beside them). The card
+ * root is not read (core/bb_cardfs.h). */
 static void ScanSD()
 {
-    gNumFiles = 0;
-    if(f_opendir(&gDir, "0:/") != FR_OK) return;
-    while(gNumFiles < kMaxFiles && f_readdir(&gDir, &gFno) == FR_OK && gFno.fname[0])
-    {
-        if(gFno.fattrib & AM_DIR) continue;
-        const char* dot = strrchr(gFno.fname, '.');
-        if(!dot || strcasecmp(dot, ".wav") != 0) continue;
-        strncpy(gFiles[gNumFiles], gFno.fname, 127);
-        gFiles[gNumFiles][127] = 0;
-        gNumFiles++;
-    }
-    f_closedir(&gDir);
-    SortFiles(0, gNumFiles);
-    /* SETS */
-    const int nRoot = gNumFiles;
-    if(f_opendir(&gDir, "0:/sets") == FR_OK)
-    {
-        while(gNumFiles < kMaxFiles && f_readdir(&gDir, &gFno) == FR_OK && gFno.fname[0])
-        {
-            if(gFno.fattrib & AM_DIR) continue;
-            const char* dot = strrchr(gFno.fname, '.');
-            if(!dot || strcasecmp(dot, ".wav") != 0 || strlen(gFno.fname) > 120) continue;
-            strcpy(gFiles[gNumFiles], "sets/");
-            strcat(gFiles[gNumFiles], gFno.fname);
-            gNumFiles++;
-        }
-        f_closedir(&gDir);
-        SortFiles(nRoot, gNumFiles);
-    }
-    /* SETS end */
+    gNumFiles = bb::ScanCard(&gDir, &gFno, &gFiles[0][0], sizeof gFiles[0], kMaxFiles);
 }
 
 /* RECORD: the load pipeline's tail, shared by a card load and a loop take.
@@ -2331,12 +2326,7 @@ static bool SdSink(void* ctx, const void* p, size_t n)
     return true;
 }
 static bool CardReady() { return sd.EnsureMounted(daisy::System::GetNow()); }
-static bool SetDirsOk()   /* FR_EXIST is success */
-{
-    const FRESULT a = f_mkdir("0:/sets");
-    const FRESULT b = f_mkdir("0:/presets");
-    return (a == FR_OK || a == FR_EXIST) && (b == FR_OK || b == FR_EXIST);
-}
+static bool SetDirsOk() { return bb::CardMkdirs(); }   /* CARD: 0:/Audiothurgist and its three folders; FR_EXIST is success */
 /* A set saved this session joins the list at the END, so every index a host
  * or a preset already holds stays valid; the next boot sorts it in. The
  * browser's dropdown (rendered at boot) learns it at the next connect. */
@@ -2383,18 +2373,9 @@ static bool WriteSetJson(const char* path, const bb::SetInfo& s)
     if(!ok) f_unlink(tmp);
     return ok;
 }
-/* EDIT-PERSIST: "0:/sets/<basename of entry>.slices.json" — the loose
- * file's sidecar (the entry's directory is dropped: sets/plain.wav, a
- * JSON-less WAV in sets/, gets sets/plain.wav.slices.json). */
-static bool SidecarPath(const char* entry, char* out, size_t cap)
-{
-    const char* base = strrchr(entry, '/');
-    base = base ? base + 1 : entry;
-    const size_t n = strlen(base);
-    if(n == 0 || 8 + n + 13 > cap) { if(cap) out[0] = 0; return false; }
-    memcpy(out, "0:/sets/", 8); memcpy(out + 8, base, n); memcpy(out + 8 + n, ".slices.json", 13);
-    return true;
-}
+/* EDIT-PERSIST: a loose file's sidecar is 0:/Audiothurgist/sets/<basename of
+ * entry>.slices.json — bb::SidecarPath (CARD, core/bb_card.h). */
+using bb::SidecarPath;
 /* EDIT-PERSIST: a loose file's sidecar, read into *gSet before the load
  * pipeline runs (the FatFs part; the plan is staged by StageSidecar once the
  * conditioned length is known). true = *gSet holds a parsed sidecar. */
@@ -2772,6 +2753,202 @@ static void ServiceSets()
 }
 /* ── end SETS ──────────────────────────────────────────────────────────── */
 
+/* ── CARD: the main loop's half ─────────────────────────────────────────── */
+#pragma GCC push_options
+#pragma GCC optimize("Os")   /* CARD: for size (see the includes) */
+static uint8_t CardProgress()
+{
+    if(gCardState == bb::kCardWriting && gUp.total) { const uint32_t p = (uint32_t)(((uint64_t)gCardMoved * 255u) / gUp.total); return (uint8_t)(p > 255u ? 255u : p); }
+    return gCardProg;
+}
+static void CardFinish(uint8_t r)
+{
+    gCardResult = r; gCardState = bb::kCardIdle; gCardProg = 0; gCardMoved = 0;
+    gCardSeq = (uint8_t)(gCardSeq + 1u);
+    if(r) gSetErrT = 36.f;   /* the panel's red blink, as a failed set op */
+}
+static bool CardBusy()   /* what an upload or a copy waits behind (BAD_STATE at the request) */
+{
+    const bool take = gKeyTake || gTakeActive || gKeyArm || engine.recArmed || engine.recPending;
+    return take || gSetState || gSetReq || gCardReq || gLoadReq || gApply || gReapply;
+}
+static void CardSurveyNow() { bb::SurveyCard(&gDir, &gFno, gSurvey); }
+static void CardMerge()   /* new breaks / sets join the list's end: every index held stays valid */
+{
+    bb::MergeCard(&gDir, &gFno, &gFiles[0][0], sizeof gFiles[0], gNumFiles, kMaxFiles);
+    k_sample.Selector((uint8_t)(gNumFiles > 255 ? 255 : gNumFiles));
+}
+static void CardWriteUpload()
+{
+    char wav[160], part[160], lock[160], entry[bb::kEntryMax];
+    if(!bb::BreakPaths(gUpName, wav, part, sizeof wav) || !bb::BreakLockPath(gUpName, lock, sizeof lock) || !bb::BreakEntry(gUpName, entry, sizeof entry))
+    { gUp.Reset(); CardFinish(bb::kCardBadName); return; }
+    if(!bb::CardMkdirs()) { gUp.Reset(); CardFinish(bb::kCardWriteFail); return; }
+    if(sd.IsLocked(lock)) { gUp.Reset(); CardFinish(bb::kCardBusy); return; }
+    sd.Lock(lock);   /* the SDK's file block refuses writes to it meanwhile */
+    gCardMoved = 0;
+    const bb::CardResult r = bb::WriteCardFile(&gSetFil, wav, part, gUpBuf, gUp.total, gUpOverwrite, gSetStage, sizeof gSetStage, &gFno, &gCardMoved);
+    sd.Unlock(lock);
+    gUp.Reset();
+    if(r == bb::kCardWriteFail) sd.OnIoError();
+    if(r != bb::kCardOk) { CardFinish(r); return; }
+    /* an overwritten break's sidecar described the old audio: it goes with it */
+    if(gUpOverwrite) { char sc[160]; if(bb::SidecarPath(entry, sc, sizeof sc)) f_unlink(sc); }
+    const int before = gNumFiles;
+    const int idx = bb::AddCardEntry(&gFiles[0][0], sizeof gFiles[0], gNumFiles, kMaxFiles, entry);
+    if(gNumFiles != before) { k_sample.Selector((uint8_t)(gNumFiles > 255 ? 255 : gNumFiles)); if(gSurvey.breaks < 0xFFFFu) gSurvey.breaks++; }
+    gCardLastIdx = (idx >= 0 && idx < 255) ? (uint8_t)idx : 255u;
+    CardFinish(bb::kCardOk);
+}
+static void CardCopyOld()
+{
+    gCardCopied = gCardSkipped = 0;
+    if(!bb::CardMkdirs()) { CardFinish(bb::kCardWriteFail); return; }
+    gCardState = bb::kCardCopying; gCardProg = 0;
+    const bb::CopyStats cs = bb::CopyOldCard(&gDir, &gFno, &gCardFil, &gSetFil, gSetStage, sizeof gSetStage,
+        [](uint32_t d, uint32_t t) { gCardProg = (uint8_t)(t ? ((uint64_t)d * 255u) / t : 255u); });
+    gCardCopied = cs.copied; gCardSkipped = cs.skipped;
+    CardMerge();
+    CardSurveyNow();
+    CardFinish(cs.full ? bb::kCardFull : cs.failed ? bb::kCardWriteFail : (cs.copied + cs.skipped) == 0 ? bb::kCardNothing : bb::kCardOk);
+}
+/* Main loop: a transfer gone quiet, then the request waiting — after any set
+ * op, under BusyGuard, with gSetState = 3 so the whole control loop keeps
+ * running through it and nothing else touches the card or the planes. */
+static void ServiceCard()
+{
+    if(gCardState == bb::kCardReceiving && (uint32_t)(daisy::System::GetNow() - gUpLastMs) > 5000u)
+    { gUp.Reset(); CardFinish(bb::kCardTimeout); }
+    if(!gCardReq || gSetState || gSetReq || gApply || gReapply) return;
+    const uint8_t req = gCardReq;
+    gCardReq = 0;
+    if(!CardReady()) { gUp.Reset(); CardFinish(bb::kCardNoCard); return; }
+    SdCard::BusyGuard busy(sd);
+    gSetState = 3; gSetProgress = 0;
+    if(req == 1u) CardWriteUpload();
+    else if(req == 2u) CardCopyOld();
+    else { CardMerge(); CardSurveyNow(); CardFinish(bb::kCardOk); }
+    gSetState = 0;
+}
+/* 0x67 CARD (capability "card": 1) — every op answers u8 status first:
+ *   0 UP_BEGIN  ← u32 total, u8 flags (b0 overwrite), name[1..100] (the stem; ".wav" is the module's)
+ *               → status, u32 the most one upload may be. BAD_ARGS a bad name / total 0 · BAD_STATE a set op,
+ *               a take, a load, an upload being written or a copy · TOO_LARGE · 20 EXISTS (no overwrite) ·
+ *               21 NO_CARD · 22 CARD_FULL (the FSINFO free count, when the card keeps one). A begin while
+ *               another upload is still arriving replaces it.
+ *   1 UP_DATA   ← u32 total, u32 offset, bytes → status, u32 have, u8 done (0 more · 1 complete, the write is
+ *               queued · 2 complete but not a WAV the loader reads: dropped, result 7). In order from zero;
+ *               out of sequence, a changed total or past the end is BAD_ARGS and drops the transfer.
+ *   2 UP_ABORT  → status (the transfer dropped, nothing written)
+ *   3 COPY_OLD  → status: the old card's root WAVs and everything in its sets and presets folders COPIED in, what is
+ *               there already skipped; BAD_STATE / NO_CARD as a begin
+ *   4 RESCAN    → status: the survey again, new files in the folders appended to the list
+ *   5 LIST      ← u8 first → status, u8 nFiles (≤ 255), u8 first, u8 n, then n × {u8 len, label} (the
+ *               labels P5 and the page show, "<name> [set]" for a set) up to what fits max_body
+ * The state tail from 276 reports state, progress, result and what the card holds. */
+static void CardTail(hostlink::FrameWriter& w)   /* the state tail's 276..292 (the 0x60 comment has the bytes) */
+{
+    w.U8(gCardState); w.U8(CardProgress()); w.U8(gCardResult); w.U8(gCardSeq);          /* 276..279 */
+    w.U8(bb::CardFlags(gSurvey, sd.CardState() == SdCard::State::Mounted));               /* 280 */
+    w.U16(gSurvey.rootWavs); w.U16(gSurvey.pending); w.U16(gSurvey.breaks);              /* 281, 283, 285 */
+    w.U8(gCardLastIdx); w.U16(gCardCopied); w.U16(gCardSkipped);                          /* 287, 288, 290 */
+    w.U8((uint8_t)(gNumFiles > 255 ? 255 : gNumFiles));                                   /* 292 */
+}
+static void HandleCard(const hostlink::ParsedFrame& f, hostlink::FrameWriter& w)
+{
+    if(f.len < 1) { w.U8(bb::kStBadArgs); return; }
+    auto rd32 = [&](int at) { return (uint32_t)f.body[at] | ((uint32_t)f.body[at + 1] << 8) | ((uint32_t)f.body[at + 2] << 16) | ((uint32_t)f.body[at + 3] << 24); };
+    const uint8_t op = f.body[0];
+    switch(op)
+    {
+        case 0:
+        {
+            const int n = (int)f.len - 6;
+            if(n < 1 || n > bb::kBreakNameMax) { w.U8(bb::kStBadArgs); return; }
+            char nm[bb::kBreakNameMax + 1];
+            memcpy(nm, f.body + 6, (size_t)n); nm[n] = 0;
+            const uint32_t total = rd32(1);
+            if(!bb::BreakNameOk(nm) || total == 0u) { w.U8(bb::kStBadArgs); return; }
+            if(CardBusy() || gCardState >= bb::kCardWriting) { w.U8(bb::kStBadState); return; }
+            if(total > kUpMax) { w.U8(bb::kStTooLarge); return; }
+            if(!CardReady()) { w.U8(bb::kStNoCard); return; }
+            const bool over = (f.body[5] & 1u) != 0u;
+            {
+                SdCard::BusyGuard busy(sd);
+                char wav[160], part[160];
+                bb::BreakPaths(nm, wav, part, sizeof wav);
+                if(!over && f_stat(wav, &gFno) == FR_OK) { w.U8(bb::kStExists); return; }
+            }
+            uint32_t totalKib = 0, freeKib = 0; bool freeValid = false;
+            if(sd.VolumeKib(totalKib, freeKib, freeValid) && freeValid && (uint64_t)freeKib * 1024u < (uint64_t)total + 65536u) { w.U8(bb::kStFull); return; }
+            gUp.buf = gUpBuf; gUp.cap = kUpMax;
+            gUp.Begin(total);
+            memcpy(gUpName, nm, (size_t)n + 1u);
+            gUpOverwrite = over; gUpLastMs = daisy::System::GetNow();
+            gCardState = bb::kCardReceiving; gCardProg = 0;
+            w.U8(bb::kStOk); w.U32(kUpMax);
+            return;
+        }
+        case 1:
+        {
+            if(f.len < 9) { w.U8(bb::kStBadArgs); return; }
+            if(gCardState != bb::kCardReceiving) { w.U8(bb::kStBadState); return; }
+            const uint8_t r = gUp.Take(rd32(1), rd32(5), f.body + 9, (uint32_t)f.len - 9u);
+            if(r != bb::kStOk) { gCardState = bb::kCardIdle; gCardProg = 0; w.U8(r); return; }
+            gUpLastMs = daisy::System::GetNow();
+            gCardProg = gUp.Progress();
+            uint8_t done = 0u;
+            if(gUp.Done())
+            {
+                if(bb::WavBytesOk(gUpBuf, gUp.total)) { gCardState = bb::kCardWriting; gCardMoved = 0; gCardReq = 1u; done = 1u; }
+                else { const uint32_t have = gUp.have; gUp.Reset(); CardFinish(bb::kCardBadFile); w.U8(bb::kStOk); w.U32(have); w.U8(2u); return; }
+            }
+            w.U8(bb::kStOk); w.U32(gUp.have); w.U8(done);
+            return;
+        }
+        case 2:
+            if(gCardState == bb::kCardReceiving) { gUp.Reset(); gCardState = bb::kCardIdle; gCardProg = 0; }
+            w.U8(bb::kStOk);
+            return;
+        case 3:
+        case 4:
+            if(CardBusy() || gCardState != bb::kCardIdle) { w.U8(bb::kStBadState); return; }
+            if(!CardReady()) { w.U8(bb::kStNoCard); return; }
+            gCardReq = op == 3u ? 2u : 3u;
+            if(op == 3u) { gCardState = bb::kCardCopying; gCardProg = 0; }
+            w.U8(bb::kStOk);
+            return;
+        case 5:
+        {
+            const int nf = gNumFiles > 255 ? 255 : gNumFiles;
+            const int first = f.len >= 2 ? f.body[1] : 0;
+            if(first > nf) { w.U8(bb::kStBadArgs); return; }
+            /* count first, so the reply stops before max_body (sdk-quirks: an overflowing reply is silence) */
+            size_t room = (size_t)hostlink::kMaxBody - 4u;
+            int    n    = 0;
+            char   lab[bb::kEntryMax];
+            for(int i = first; i < nf; i++)
+            {
+                bb::SetLabel(gFiles[i], lab, sizeof lab);
+                const size_t k = strlen(lab) > 255u ? 255u : strlen(lab);
+                if(k + 1u > room) break;
+                room -= k + 1u; n++;
+            }
+            w.U8(bb::kStOk); w.U8((uint8_t)nf); w.U8((uint8_t)first); w.U8((uint8_t)n);
+            for(int i = first; i < first + n; i++)
+            {
+                bb::SetLabel(gFiles[i], lab, sizeof lab);
+                const size_t k = strlen(lab) > 255u ? 255u : strlen(lab);
+                w.U8((uint8_t)k); w.Bytes((const uint8_t*)lab, k);
+            }
+            return;
+        }
+        default: w.U8(bb::kStBadArgs); return;
+    }
+}
+#pragma GCC pop_options
+/* ── end CARD ──────────────────────────────────────────────────────────── */
+
 /* Runs between control ticks; does the heavy SD read → condition → classify
  * into gLoad, then hands off to the audio thread via gApply. */
 static void ServiceLoad()
@@ -2794,10 +2971,8 @@ static void ServiceLoad()
     }
     /* SETS end */
 
-    char path[140];
-    path[0] = '0'; path[1] = ':'; path[2] = '/';
-    strncpy(path + 3, entry, 136);
-    path[139] = 0;
+    char path[160];
+    if(!bb::EntryPath(entry, path, sizeof path)) { if(gLoadIdx < 0) SetFinish(7); return; }   /* CARD: 0:/Audiothurgist/breaks/… or …/sets/… */
 
     /* RECORD: at most kLoadSec (17 s) of the 25 s plane, so a take into a key
      * always finds room; Sampling = Stereo keeps a stereo file's planes apart */
@@ -2928,6 +3103,8 @@ static void ServiceLoad()
  *   state tail      263 u8 flags2 (b0 srcValid · b1 keys follow markers) · 264 u16 loadAvg · 266 u16 loadMax (‰ of
  *                   the 24-sample block budget, the last second) · 268 i16 j4mV · 270 u8 j4Key · 271 u8 j5Style (255 in
  *                   the Brain map) · 272 u8 keyFlash (255 none) · 273 u8 keySeq · 274 u8 autoK · 275 u8 nMarkers — ends at 276
+ *   CARD (docs/packages/card.md; capability "card": 1): 0x67 CARD — upload a break, copy an old card in, rescan,
+ *                   the list (HandleCard has the ops); state tail 276..292 (StateExt's 0x60 has the bytes) — ends at 293
  *   0x65 GET_TABLE  ← [u8 first, u8 count, u8 form] — form 1 = entries carry a trailing u8 flags
  *                   (b0 orange · b1 tombstone), 14 bytes each; absent / 0 = the 13-byte form. */
 /* WEB → RECORD: ACTION 9 / 10. -1 = nothing requested; the consumer clears
@@ -3461,7 +3638,9 @@ struct StateExt : hostlink::IHostlinkExtension
          * refuses with nothing sounding and reuses a marker within 10 ms (a fourth reply byte). */
         /* BETA: "keys":1 = ACTION 32..36 (PLAY_KEY, KEYS_FROM_MARKERS, CLEAR_MARKERS, SET_MUTE, AUTOSLICE) and the
          * state tail from 263 (flags2, load, J4 → key, J5 style, key flash, autoK, nMarkers). */
-        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102,\"sets\":1,\"scope2\":2,\"edit\":2,\"keys\":1}";
+        /* CARD: "card":1 = everything under 0:/Audiothurgist, the 0x67 command (upload, copy an old card in, rescan,
+         * list) and the state tail from 276. */
+        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102,\"sets\":1,\"scope2\":2,\"edit\":2,\"keys\":1,\"card\":1}";
     }
     /* WEB: one float → i8 (±127), saturating. */
     static int8_t ToI8(float v)
@@ -3547,6 +3726,13 @@ struct StateExt : hostlink::IHostlinkExtension
                 w.U16((uint16_t)gJ4mV); w.U8(gJ4Key); w.U8(gJ5Style);               /* 268, 270, 271 */
                 w.U8(gKeyFlash); w.U8(gKeySeq); w.U8(gAutoK);                       /* 272, 273, 274 */
                 { const int nm = engine.MarkerCount(); w.U8((uint8_t)(nm > 255 ? 255 : nm)); }   /* 275 */
+                /* CARD tail (276..292, docs/packages/card.md): u8 cardState (0 idle · 1 receiving · 2 writing · 3 copying) ·
+                 * u8 progress 0..255 · u8 result of the last op (0 ok · 1 no card · 2 card full · 3 write failed · 4 bad
+                 * name · 5 not found · 6 busy · 7 bad file · 8 exists · 9 timed out · 10 nothing to copy) · u8 seq (bumps
+                 * per finished op) · u8 flags (b0 mounted · b1 root WAVs · b2 old sets/ · b3 old presets/ · b4 breaks in the
+                 * folder · b5 something not copied in yet) · u16 rootWavs · u16 pending · u16 breaks · u8 lastIdx (the last
+                 * upload's list index, 255 none) · u16 copied · u16 skipped (the last copy) · u8 nFiles — ends at 293. */
+                CardTail(w);
                 return;
             }
             case 0x61u:
@@ -3784,6 +3970,7 @@ struct StateExt : hostlink::IHostlinkExtension
                 for(int i = first; i < first + count; i++) w.U32((uint32_t)(gPendOnsets[i] < 0 ? 0 : gPendOnsets[i]));
                 return;
             }
+            case 0x67u: HandleCard(f, w); return;   /* CARD: uploads, the old card copied in, the list */
             default: w.U8(1u); return;   /* UNSUPPORTED */
         }
     }
@@ -3831,6 +4018,8 @@ int main()
      * FATFS; the SDRAM objects constructed in place (their NSDMI would
      * otherwise run before SDRAM is up). */
     memset(&gSetFil, 0, sizeof gSetFil);
+    memset(&gCardFil, 0, sizeof gCardFil);   /* CARD: the copy's source FIL (NOLOAD, .axi_bss) */
+    gUp.buf = gUpBuf; gUp.cap = kUpMax; gUp.Reset();
     gSet       = new(gSetInfoMem) bb::SetInfo();
     gSetLooper = new(gSetLooperMem) bb::Looper();
 
@@ -3843,6 +4032,7 @@ int main()
 
     /* Boot material: first WAV on the card, else the synth break. */
     ScanSD();
+    CardSurveyNow();   /* CARD: an old card's root WAVs and folders, for the page (state tail 280..) */
     if(gNumFiles > 0)
     {
         uint8_t n = gNumFiles > 255 ? 255 : (uint8_t)gNumFiles;
@@ -3873,9 +4063,8 @@ int main()
     bool loaded = false;
     if(gNumFiles > 0)
     {
-        char path[140];
-        path[0] = '0'; path[1] = ':'; path[2] = '/';
-        strncpy(path + 3, gFiles[0], 136); path[139] = 0;
+        char path[160];
+        bb::EntryPath(gFiles[0], path, sizeof path);   /* CARD */
         int cues[kMaxOnsets], nCues = 0, err = 0;
         len = bbwav::Load(path, gStage, kStageMax, gPlay, kLoadMax, kSr,
                           kLoadSec, cues, &nCues, kMaxOnsets, &err);   /* RECORD: mono at boot (presets apply Sampling after), 17 s cap */
@@ -4105,6 +4294,7 @@ int main()
         /* RECORD end */
         ServicePanel();   /* EDIT-PANEL: the Edit page's posts (the mailbox waits here, never in OnPoll) */
         ServiceSets();   /* SETS: a loaded set's recordings, ACTION 14 / 15, the preset backups */
+        ServiceCard();   /* CARD: an upload's write, the old card copied in, a rescan */
         ServiceLoad();
     }
 }

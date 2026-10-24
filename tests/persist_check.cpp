@@ -28,16 +28,10 @@
 #include "bb_set.h"
 #include "wav_read.h"
 
-// ── the firmware loader over stdio: exactly the FatFs surface it touches ──
-struct FIL { FILE* fp; };
-typedef unsigned UINT;
-enum FRESULT { FR_OK = 0, FR_DISK_ERR = 1 };
-#define FA_READ 1
-static FRESULT f_open(FIL* f, const char* n, int) { f->fp = fopen(n, "rb"); return f->fp ? FR_OK : FR_DISK_ERR; }
-static FRESULT f_read(FIL* f, void* b, UINT n, UINT* br) { *br = (UINT)fread(b, 1, n, f->fp); return FR_OK; }
-static FRESULT f_lseek(FIL* f, uint32_t o) { return fseek(f->fp, (long)o, SEEK_SET) == 0 ? FR_OK : FR_DISK_ERR; }
-static uint32_t f_tell(FIL* f) { return (uint32_t)ftell(f->fp); }
-static FRESULT f_close(FIL* f) { fclose(f->fp); return FR_OK; }
+// ── the firmware loader over stdio: the FatFs surface it touches, from the
+// shared shim (CARD: tests/fatfs_shim.h — card_check drives the card code
+// through the same one) ──
+#include "fatfs_shim.h"
 #include "wav_loader.h"
 
 static int gFail = 0, gPass = 0;

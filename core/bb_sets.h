@@ -4,7 +4,8 @@
 // docs/packages/sample-sets.md is the package). Host-tested in
 // tests/sets_check.cpp.
 //
-//   * Naming. A set is `sets/<name>.wav` + `sets/<name>.json`. ScanSD lists
+//   * Naming. A set is `sets/<name>.wav` + `sets/<name>.json` under
+//     0:/Audiothurgist (CARD, core/bb_card.h). ScanSD lists
 //     the WAV as the entry "sets/<name>.wav" (so the plain load path still
 //     works on it) and the dropdown / P5 label reads "<name> [set]". A name
 //     is 1..31 of [A-Za-z0-9_-] — portable across LFN and 8.3 hosts, never a
@@ -121,31 +122,33 @@ inline void SetLabel(const char* entry, char* out, size_t cap)
     else setdetail::Cat(out, cap, 0, entry ? entry : "");
 }
 
-// The two card paths of a set: "0:/sets/<name>.wav" and "0:/sets/<name>.json".
+// The two card paths of a set: "0:/Audiothurgist/sets/<name>.wav" and
+// "0:/Audiothurgist/sets/<name>.json" (CARD: everything under one folder,
+// core/bb_card.h).
 inline bool SetPaths(const char* name, char* wav, char* json, size_t cap)
 {
     if(!SetNameOk(name)) { if(cap) { wav[0] = 0; json[0] = 0; } return false; }
-    size_t a = setdetail::Cat(wav, cap, 0, "0:/sets/");
+    size_t a = setdetail::Cat(wav, cap, 0, "0:/Audiothurgist/sets/");
     a = setdetail::Cat(wav, cap, a, name);
     a = setdetail::Cat(wav, cap, a, ".wav");
-    size_t b = setdetail::Cat(json, cap, 0, "0:/sets/");
+    size_t b = setdetail::Cat(json, cap, 0, "0:/Audiothurgist/sets/");
     b = setdetail::Cat(json, cap, b, name);
     b = setdetail::Cat(json, cap, b, ".json");
     return a < cap && b < cap;
 }
 
-// The WAV's protocol-form path for SdCard::Lock ("/sets/<name>.wav"; the
+// The WAV's protocol-form path for SdCard::Lock ("/Audiothurgist/sets/<name>.wav"; the
 // lock table compares case-insensitively).
 inline bool SetLockPath(const char* name, char* out, size_t cap)
 {
     if(!SetNameOk(name)) { if(cap) out[0] = 0; return false; }
-    size_t at = setdetail::Cat(out, cap, 0, "/sets/");
+    size_t at = setdetail::Cat(out, cap, 0, "/Audiothurgist/sets/");
     at = setdetail::Cat(out, cap, at, name);
     at = setdetail::Cat(out, cap, at, ".wav");
     return at < cap;
 }
 
-// "0:/presets/<slot>.json".
+// "0:/Audiothurgist/presets/<slot>.json".
 inline bool PresetPath(int slot, char* out, size_t cap)
 {
     if(slot < 0 || slot > 999) { if(cap) out[0] = 0; return false; }
@@ -155,7 +158,7 @@ inline bool PresetPath(int slot, char* out, size_t cap)
     if(slot >= 10) num[n++] = (char)('0' + (slot / 10) % 10);
     num[n++] = (char)('0' + slot % 10);
     num[n] = 0;
-    size_t at = setdetail::Cat(out, cap, 0, "0:/presets/");
+    size_t at = setdetail::Cat(out, cap, 0, "0:/Audiothurgist/presets/");
     at = setdetail::Cat(out, cap, at, num);
     at = setdetail::Cat(out, cap, at, ".json");
     return at < cap;
