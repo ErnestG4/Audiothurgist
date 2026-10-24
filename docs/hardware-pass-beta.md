@@ -7,10 +7,17 @@ proves the ground under the next, so **stop and report at the first
 failure**. Write **ok** or what you saw next to each box. "Listen for" is what
 tells pass from fail.
 
-Setup: `audiothurgist.bin` from the Desktop's `Audiothurgist-flash/` flashed
-(0.13.0-beta); a card with the Amen and one break with no hats; the page from
-the local server (address in the hand-off message) on the desktop and, if
-you have the OTG adapter, the phone. Close `/program`.
+Setup: `audiothurgist-beta3-card-190ce8d.bin` from the Desktop's
+`Audiothurgist-flash/` flashed (0.13.0-beta, the CV fix and the card folder);
+a card with the Amen and one break with no hats; the page from
+https://ernestg4.github.io/Audiothurgist/ on the desktop and, if you have the
+OTG adapter, the phone. Close `/program`.
+
+This firmware reads only `Audiothurgist/` on the card, so a card laid out
+the old way (WAVs in the root) boots to the synth break with nothing on P5.
+**Do §10b's first two boxes first** (the banner, then Copy them in): that
+moves your breaks into the new folder and proves the copy, and everything
+from §0 on then has the Amen to play.
 
 ## 0. Boot, identity, load (3 min)
 
@@ -152,7 +159,8 @@ you have the OTG adapter, the phone. Close `/program`.
 
 ## 10b. The card — one folder, uploads, an old card copied in (8 min)
 
-Firmware with `"card": 1` (branch `beta-card`; `docs/packages/card.md`).
+Firmware with `"card": 1` (`docs/packages/card.md`). The first two boxes
+you did at the start; do the rest here.
 Bring the **old card** (WAVs in the root, a `sets/` and a `presets/`) and,
 for the last box, a blank one. A clock on J3 and a break playing throughout.
 
