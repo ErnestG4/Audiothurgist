@@ -194,7 +194,7 @@ static void Plan()
 static void FatFs(const std::string& scratch)
 {
     SECTION("FatFs half on an old card");
-    gShimCard = scratch + "/card";
+    gShimCard = scratch + "/card_check-card";
     (void)!system(("rm -rf '" + gShimCard + "' && mkdir -p '" + gShimCard + "/sets' '" + gShimCard + "/presets' '" + gShimCard + "/Other Module'").c_str());
     const auto amen = MakeWav(48000, false), think = MakeWav(24000, true);
     Put("amen.wav", amen); Put("Think.WAV", think); Put("._amen.wav", "AppleDouble"); Put("notes.txt", "not a break");

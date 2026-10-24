@@ -70,8 +70,8 @@ echo; echo "== sets_check (ASan/UBSan) =="
 $CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/sets_check.cpp -o "$OUT/sc" || fail=1
 "$OUT/sc" || fail=1
 echo; echo "== card_check (ASan/UBSan) =="
-$CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/card_check.cpp -o "$OUT/card" || fail=1
-"$OUT/card" "$OUT" || fail=1
+$CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/card_check.cpp -o "$OUT/cardchk" || fail=1
+"$OUT/cardchk" "$OUT" || fail=1
 echo; echo "== scope_check (ASan/UBSan) =="
 $CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/scope_check.cpp -o "$OUT/scope" || fail=1
 "$OUT/scope" || fail=1

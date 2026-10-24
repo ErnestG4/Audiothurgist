@@ -1722,10 +1722,11 @@ async function cardUpload(job) {
     job.kbps = r.kbps; job.state = 'writing'; jobClear(job); jobSay(job, `sent ${fmtKB(r.bytes)} at ${r.kbps.toFixed(0)} KB/s — the module is writing it to the card…`);
     const c = await cardSettle(seq0);
     if (c.result) { job.state = 'failed'; jobSay(job, 'the card write failed: ' + (CARD.RESULT[c.result] || 'error ' + c.result), 'bad'); jobButton(job, 'Try again', () => cardRetry(job)); return; }
-    job.state = 'done'; job.idx = c.lastIdx; jobBar(job, 1);
+    job.idx = c.lastIdx; jobBar(job, 1);
     jobSay(job, `on the card as Audiothurgist/breaks/${job.name}.wav · ${fmtKB(r.bytes)} at ${r.kbps.toFixed(0)} KB/s`, 'ok');
     await cardRefreshList();
     if (job.idx >= 0) jobButton(job, 'Load it now', () => action(ACT.load, job.idx), true);
+    job.state = 'done';   /* after the list: done means the page shows it too */
   } catch (e) {
     const m = e && e.message || String(e); jobClear(job); job.state = 'failed';
     if (m === 'EXISTS') { jobSay(job, `a break called ${job.name}.wav is already on the card`, 'bad'); jobButton(job, 'Replace it', () => { job.overwrite = true; cardRetry(job); }, true); }

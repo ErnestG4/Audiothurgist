@@ -46,10 +46,38 @@ break and a kit are the same thing, played by different rules (slice or held).
 2. Open Hermetic's web flasher (`/program`) in Chrome or Edge and flash
    `audiothurgist.bin` (a release build is attached to each tag; see
    *Building* to make your own).
-3. FAT32 microSD with WAVs in the root — 1 to 4 bar breaks are ideal.
+3. FAT32 microSD with your breaks in `Audiothurgist/breaks/` — or upload
+   them from the page (see *The card* below). 1 to 4 bar breaks are ideal.
 
 If a build ever leaves the module USB-silent, tap **BOOT** during the
 power-up breathing pulse to reach the Daisy bootloader, then flash.
+
+## The card
+
+Everything the module reads or writes lives in one folder, `Audiothurgist/`:
+
+| | |
+|---|---|
+| `Audiothurgist/breaks/*.wav` | the breaks P5 and the page's Sample list show, sorted |
+| `Audiothurgist/sets/` | sets (`<name>.wav` + `<name>.json`) and the loose files' edits (`<wav>.slices.json`) |
+| `Audiothurgist/presets/` | preset backups (`<slot>.json`) |
+
+The folders are made the first time something is written. **What loads:** WAV,
+PCM 16- or 24-bit, mono or stereo, 8 kHz or more, at least ¼ s; the first 17 s
+are used (the rest of the 25 s buffer is kept for takes into keys); any rate is
+converted to 48 kHz on load. **Uploads** from the page (Kit → Card, or *Add
+breaks…* beside the Sample list) take anything the browser can decode — WAV of
+any kind including float, AIFF, MP3, FLAC, OGG — and send it as a 48 kHz PCM16
+WAV, stereo kept, cut to 17 s; the module writes it into `breaks/` while the
+music plays.
+
+**Cards from older firmware** kept WAVs in the root and `sets/`, `presets/`
+beside them. This firmware reads only `Audiothurgist/` and moves nothing for
+you — files in the root may belong to another module. The page says so and
+offers **Copy them in**: the root's WAVs, `sets/` and `presets/` are *copied*
+into the folder (anything already there is skipped; nothing is moved or
+deleted). Do it before relying on preset backups. Details:
+`docs/packages/card.md`.
 
 ## Controls
 
@@ -126,7 +154,8 @@ strip, per-slice waveform envelopes, an oscilloscope, every button and
 knob function for the current page and grammar, locks, options, presets,
 the manual, a diagnostics line, a **Kit** tab: the 24 keys, each
 recording's waveform with onsets and boundaries, record/clear per key, the
-looper's events, and set save/load — and a **Scope** tab: out L/R and
+looper's events, set save/load, and the **Card** panel (upload breaks,
+copy an old card in) — and a **Scope** tab: out L/R and
 in L/R at full rate plus the six jacks J3–J8 as DC-coupled CV traces
 (LFOs, sequences, gates — ours read back too), ten colours, time zoom per
 tier, gain, a trigger on any channel, peak decimation, afterglow, at up to
