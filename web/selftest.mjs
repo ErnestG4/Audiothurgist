@@ -350,7 +350,8 @@ await link.start();
   check('save progresses', s2.setState === 1 && s2.setProgress > 100 && s2.setProgress < 255);
   d.set.t -= 1000; const s3 = HL.parseState(await l.request(HL.CMD.state));
   check('save done: idle, ok, seq bumped, the material is the set', s3.setState === 0 && s3.setResult === 0 && s3.setSeq === 1 && s3.setName === 'kit_1' && d.sets.has('kit_1'));
-  check('the saved set joined the list at the end', HL.fieldLabels(await HL.getDescriptor(l, await HL.hello(l)), 'sample.idx').slice(-1)[0] === 'kit_1 [set]' && s3.file === labs.length);
+  /* the firmware appends it to its list (AddSetEntry) and keeps its boot descriptor: the list grows, the dropdown does not */
+  check('the saved set joined the list at the end (the module list; the descriptor is the boot one)', d.files.slice(-1)[0] === 'kit_1 [set]' && s3.file === labs.length && HL.fieldLabels(await HL.getDescriptor(l, await HL.hello(l)), 'sample.idx').length === labs.length);
   /* change the kit, then load the set back: the table and keys return */
   await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.recClear, 3), { urgent: true });
   const s4 = HL.parseState(await l.request(HL.CMD.state)); check('kit changed', s4.nTable === 67 && s4.keySlice[3] === 8);
@@ -852,6 +853,126 @@ await link.start();
   o.muted = true; r = await HL.tapMark(ol, 10, 0); const r2 = await HL.tapMark(ol, 10, 0);
   check('0.12 firmware: TAP_MARK taken while stopped, and two taps stack (the old behaviour), a three-byte reply', r.ok && r2.ok && r2.newIdx !== r.newIdx && r.flags === 0);
   await ol.close();
+}
+
+/* ── 7c. CARD (0x67, capability "card": 1): the WAV encoder, the name rule, the plan, the 276.. tail, then the upload
+ *        sequencer, the refusals, the serialiser and the copy over the fake module ── */
+{
+  /* the encoder, read back byte by byte */
+  const L = Float32Array.of(0, 0.5, -0.5, 1, -1, 2, -2, NaN), R = Float32Array.of(0.25, -0.25, 0, 0, 0, 0, 0, 0);
+  const w = HL.encodeWav([L, R], 48000), dv = new DataView(w.buffer), tag = at => String.fromCharCode(...w.subarray(at, at + 4));
+  check('encodeWav: RIFF / WAVE / fmt 16 PCM / data, the sizes', w.length === 44 + 8 * 2 * 2 && tag(0) === 'RIFF' && dv.getUint32(4, true) === w.length - 8 && tag(8) === 'WAVE' && tag(12) === 'fmt '
+    && dv.getUint32(16, true) === 16 && dv.getUint16(20, true) === 1 && dv.getUint16(22, true) === 2 && dv.getUint32(24, true) === 48000 && dv.getUint32(28, true) === 48000 * 4 && dv.getUint16(32, true) === 4 && dv.getUint16(34, true) === 16 && tag(36) === 'data' && dv.getUint32(40, true) === 32);
+  const smp = (i, c) => dv.getInt16(44 + (i * 2 + c) * 2, true);
+  check('encodeWav: interleaved L R, symmetric scale, clamped, NaN → 0', smp(0, 0) === 0 && smp(0, 1) === 8192 && smp(1, 0) === 16384 && smp(1, 1) === -8192 && smp(2, 0) === Math.round(-0.5 * 32767) && smp(3, 0) === 32767 && smp(4, 0) === -32767 && smp(5, 0) === 32767 && smp(6, 0) === -32767 && smp(7, 0) === 0,
+    [0, 1, 2, 3, 4, 5, 6, 7].map(i => smp(i, 0)).join());
+  const m = HL.encodeWav([new Float32Array(1000).fill(0.1)], 48000, 600);
+  check('encodeWav: mono, and a frame count shorter than the plane', m.length === 44 + 1200 && new DataView(m.buffer).getUint16(22, true) === 1 && new DataView(m.buffer).getUint32(40, true) === 1200);
+  /* the name rule: the module's table (tests/card_check.cpp), and the sanitiser always lands inside it */
+  const good = ['amen', 'Amen Break 170', 'a', 'think (live) #2', 'x-y_z.v2', '~tilde', '100%', 'a'.repeat(100)];
+  const bad = ['', ' lead', 'trail ', 'dot.', '.hidden', 'a/b', 'a\\b', 'c:d', 'star*', 'q?', 'quote"', 'lt<', 'gt>', 'pipe|', 'tab\t', 'del\x7f', 'é', 'a'.repeat(101), null, 7];
+  check('breakNameOk: the module\'s rule (the same table as card_check)', good.every(HL.breakNameOk) && !bad.some(HL.breakNameOk), bad.filter(HL.breakNameOk).join('|'));
+  const san = { 'Amen Break.wav': 'Amen Break', 'Ämen Brëak: 170?.WAV': 'Amen Break- 170-', '  .hidden.mp3': 'hidden', 'a/b\\c.flac': 'a-b-c', '...': 'break', '': 'break', 'tab\there.aiff': 'tab here', 'こんにちは.wav': '_____' };
+  check('breakName: extension off, accents folded, reserved → "-", ends trimmed, "break" when nothing is left', Object.entries(san).every(([a, b]) => HL.breakName(a) === b), Object.keys(san).map(k => HL.breakName(k)).join(' | '));
+  let fuzzBad = 0; let seed = 7; const rnd = n => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+  for (let i = 0; i < 2000; i++) { let t = ''; const n = rnd(140); for (let k = 0; k < n; k++) t += String.fromCharCode(rnd(4) ? rnd(128) : rnd(0x3000)); const out = HL.breakName(t); if (!HL.breakNameOk(out) || out.length > 100) fuzzBad++; }
+  check('breakName: 2000 random names (ASCII, control, CJK) all pass the module\'s rule', fuzzBad === 0, fuzzBad + ' failed');
+  /* the plan: 17 s, two channels, 48 kHz */
+  const p1 = HL.uploadPlan(2, 44100, 44100 * 20), p2 = HL.uploadPlan(6, 48000, 48000), p3 = HL.uploadPlan(1, 96000, 96000 * 3);
+  check('uploadPlan: 20 s at 44.1 → 17 s at 48 k (trimmed, resampled); 6 channels → 2; 96 k → half the frames', p1.frames === 17 * 48000 && p1.trimmed && p1.resample && Math.abs(p1.sourceSeconds - 20) < 1e-9 && p1.channels === 2 && p1.bytes === 44 + 17 * 48000 * 4
+    && p2.channels === 2 && p2.frames === 48000 && !p2.trimmed && !p2.resample && p3.frames === 3 * 48000 && p3.channels === 1, JSON.stringify([p1, p2, p3]));
+  check('uploadPlan: the most the module takes fits its buffer (UP_MAX)', HL.uploadPlan(2, 48000, 48000 * 60).bytes <= DEMO.UP_MAX && DEMO.UP_MAX === 17 * 48000 * 4 + 4096);
+  check('the chunk fits max_body with its 9-byte header (1024 and 512)', HL.CARD.chunkFor(1024) + 9 <= 1024 && HL.CARD.chunkFor(512) + 9 <= 512 && HL.CARD.chunkFor(1024) >= 900);
+
+  /* the tail, synthetic */
+  const b = stateBody(293); const dvb = new DataView(b.buffer);
+  b[276] = 2; b[277] = 128; b[278] = 8; b[279] = 4; b[280] = 1 | 2 | 4 | 32; dvb.setUint16(281, 12, true); dvb.setUint16(283, 15, true); dvb.setUint16(285, 0, true); b[287] = 255; dvb.setUint16(288, 3, true); dvb.setUint16(290, 9, true); b[292] = 41;
+  const sc = HL.parseState(b).card;
+  check('state 293: the card tail (state, progress, result, seq, flags, counts, lastIdx −1, copied / skipped, nFiles)', sc && sc.state === 2 && HL.CARD.STATE[sc.state] === 'writing' && sc.progress === 128 && HL.CARD.RESULT[sc.result] === 'already on the card' && sc.seq === 4
+    && sc.mounted && sc.oldRoot && sc.oldSets && !sc.oldPresets && !sc.hasBreaks && sc.rootWavs === 12 && sc.pending === 15 && sc.breaks === 0 && sc.lastIdx === -1 && sc.copied === 3 && sc.skipped === 9 && sc.nFiles === 41);
+  check('state 276: no card tail (null)', HL.parseState(stateBody(276)).card === null && HL.SET_STATE[3] === 'card');
+
+  /* over the fake: the upload */
+  const d = new DEMO.FakeDevice({ latencyMs: 1 });
+  const l = new HL.Link(new DEMO.FakePort(d)); await l.start();
+  const info = await HL.hello(l), desc = await HL.getDescriptor(l, info);
+  const state = async () => HL.parseState(await l.request(HL.CMD.state));
+  const settle = async seq0 => { for (let i = 0; i < 200; i++) { const s = await state(); if (s.card.seq !== seq0 && s.card.state === 0) return s; d.cardOp.t -= 200; await new Promise(r => setTimeout(r, 5)); } return null; };
+  let s = await state();
+  check('card: "card": 1, a 293-byte body, a mounted card with the four breaks, nothing old', HL.caps(desc).card === 1 && s.card && s.card.mounted && s.card.breaks === 4 && s.card.pending === 0 && !s.card.oldRoot && s.card.state === 0 && s.card.lastIdx === -1);
+  check('card list: the module\'s list as it is now', JSON.stringify(await HL.cardList(l)) === JSON.stringify(DEMO.FILES));
+  const bodies = []; { const h = d.handle.bind(d); d.handle = (t, x) => { if (t === HL.CMD.card) bodies.push(x.length); return h(t, x); }; }
+  const planes = [new Float32Array(48000 * 2).map((_, i) => Math.sin(i / 20) * 0.5), new Float32Array(48000 * 2).map((_, i) => Math.cos(i / 20) * 0.5)];
+  const wav = HL.encodeWav(planes, 48000), prog = [];
+  let polls = 0; const poller = setInterval(() => { l.request(HL.CMD.state, undefined, { key: 'state' }).then(() => polls++, () => {}); }, 20);
+  const r = await HL.uploadBreak(l, 'Think Break', wav, { maxBody: info.maxBody, onProgress: (a, t, k) => prog.push([a, t, k]) });
+  clearInterval(poller);
+  check('upload: every byte acknowledged in order, progress monotonic to the end, a rate', r.bytes === wav.length && prog.length === Math.ceil(wav.length / HL.CARD.chunkFor(info.maxBody)) && prog.every((p, i) => i === 0 || p[0] > prog[i - 1][0]) && prog[prog.length - 1][0] === wav.length && r.kbps > 0);
+  check('upload: every request fits max_body', bodies.length > 1 && Math.max(...bodies) <= info.maxBody, Math.max(...bodies) + ' > ' + info.maxBody);
+  check('upload: the state polls interleave (the page stays live)', polls >= 3, 'polls ' + polls);
+  s = await state(); check('upload done: the module is writing', s.card.state === 2);
+  s = await settle(s.card.seq);
+  check('…then idle, ok, lastIdx = the new list entry, the file on the card byte for byte', s && s.card.result === 0 && s.card.lastIdx === 5 && d.files[5] === 'Think Break.wav' && s.card.nFiles === 6 && s.card.breaks === 5
+    && Buffer.from(d.cardFs.get('Audiothurgist/breaks/Think Break.wav')).equals(Buffer.from(wav)));
+  check('…and in the module\'s list at the end (nothing re-sorted)', (await HL.cardList(l)).slice(-1)[0] === 'Think Break.wav' && (await HL.cardList(l))[0] === DEMO.FILES[0]);
+  await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.load, s.card.lastIdx), { urgent: true });
+  check('"Load it now": ACTION 6 with lastIdx loads it', d.file === 5);
+  /* the refusals */
+  const err = async f => { try { await f(); return 'ok'; } catch (e) { return e.message; } };
+  check('the same name again: EXISTS, nothing sent', await err(() => HL.uploadBreak(l, 'think break', wav)) === 'EXISTS');
+  const wav2 = HL.encodeWav([new Float32Array(24000)], 48000), seqA = (await state()).card.seq;
+  check('…with overwrite: replaced', await err(() => HL.uploadBreak(l, 'Think Break', wav2, { overwrite: true })) === 'ok' && (await settle(seqA)) && d.cardFs.get('Audiothurgist/breaks/Think Break.wav').length === wav2.length && d.files.length === 6);
+  check('a bad name is refused before the wire', await err(() => HL.uploadBreak(l, 'a/b', wav2)) === 'bad name');
+  check('a raw bad name on the wire: BAD_ARGS', await err(() => l.request(HL.CMD.card, Uint8Array.of(0, 10, 0, 0, 0, 0, 0x61, 0x2f, 0x62))) === 'BAD_ARGS');
+  check('UP_DATA with nothing open: BAD_STATE', await err(() => l.request(HL.CMD.card, Uint8Array.of(1, 10, 0, 0, 0, 0, 0, 0, 0, 1, 2))) === 'BAD_STATE');
+  await l.request(HL.CMD.card, Uint8Array.of(0, 100, 0, 0, 0, 0, ...HL.nameBytes('seq')));
+  check('out of sequence: BAD_ARGS and the transfer dropped', await err(() => l.request(HL.CMD.card, Uint8Array.of(1, 100, 0, 0, 0, 5, 0, 0, 0, 1))) === 'BAD_ARGS' && (await state()).card.state === 0
+    && await err(() => l.request(HL.CMD.card, Uint8Array.of(1, 100, 0, 0, 0, 0, 0, 0, 0, 1))) === 'BAD_STATE');
+  check('too large: TOO_LARGE', await err(() => l.request(HL.CMD.card, Uint8Array.of(0, ...[DEMO.UP_MAX + 1].flatMap(v => [v & 255, v >> 8 & 255, v >> 16 & 255, v >>> 24]), 0, ...HL.nameBytes('big')))) === 'TOO_LARGE');
+  d.cardFree = 1000; check('a full card: CARD_FULL at the begin', await err(() => HL.uploadBreak(l, 'full', wav2)) === 'CARD_FULL'); d.cardFree = Infinity;
+  check('not a WAV: the module drops it (result bad file)', await err(() => HL.uploadBreak(l, 'junk', new Uint8Array(5000).fill(7))) === 'not a WAV the module reads' && HL.CARD.RESULT[(await state()).card.result] === 'bad file' && !d.cardHas('Audiothurgist/breaks/junk.wav'));
+  d.set.pending = { op: 14, name: 'x' }; check('BAD_STATE while a set op waits', await err(() => HL.uploadBreak(l, 'busy', wav2)) === 'BAD_STATE' && await err(() => HL.copyOldCard(l)) === 'BAD_STATE'); d.set.pending = null;
+  d.rec.state = 2; check('BAD_STATE while a take runs', await err(() => HL.uploadBreak(l, 'busy', wav2)) === 'BAD_STATE'); d.rec.state = 0;
+  let cancelAt = 0; check('cancel between chunks: UP_ABORT, nothing written', await err(() => HL.uploadBreak(l, 'gone', wav, { cancel: () => ++cancelAt > 3 })) === 'cancelled' && (await state()).card.state === 0 && !d.cardHas('Audiothurgist/breaks/gone.wav'));
+  await l.request(HL.CMD.card, Uint8Array.of(0, 100, 0, 0, 0, 0, ...HL.nameBytes('quiet'))); d.cardUp.last -= 6000;
+  { const q = await state(); check('a transfer quiet for 5 s is dropped (result timed out)', q.card.state === 0 && HL.CARD.RESULT[q.card.result] === 'timed out'); }
+  /* one card job at a time: two uploads started together interleave on the wire and one is refused; through serial() both land */
+  const wa = HL.encodeWav([new Float32Array(9000).fill(0.2)], 48000), wb = HL.encodeWav([new Float32Array(9000).fill(-0.2)], 48000);
+  const raw = await Promise.all([err(() => HL.uploadBreak(l, 'raw a', wa, { chunk: 1000 })), err(() => HL.uploadBreak(l, 'raw b', wb, { chunk: 1000 }))]);
+  check('two uploads started together without the queue: one of them fails mid-stream (the hazard is real)', raw.filter(x => x !== 'ok').length >= 1, raw.join(' / '));
+  for (let i = 0; i < 40 && (await state()).card.state; i++) { d.cardOp.t -= 1000; d.cardUp.last -= 6000; }
+  const run = HL.serial(), done = [];
+  const job = (name, bytes) => run(async () => { const q0 = (await state()).card.seq; await HL.uploadBreak(l, name, bytes, { chunk: 1000 }); done.push(name); await settle(q0); });
+  await Promise.all([job('queued a', wa), job('queued b', wb)]);
+  check('…through serial() both land, in order, each whole', done.join() === 'queued a,queued b' && Buffer.from(d.cardFs.get('Audiothurgist/breaks/queued a.wav')).equals(Buffer.from(wa)) && Buffer.from(d.cardFs.get('Audiothurgist/breaks/queued b.wav')).equals(Buffer.from(wb)));
+  await l.close();
+
+  /* the old card: nothing listed, the survey, the copy, a second copy */
+  const o = new DEMO.FakeDevice({ latencyMs: 1, oldcard: true });
+  const lo = new HL.Link(new DEMO.FakePort(o)); await lo.start(); const io = await HL.hello(lo), dsc = await HL.getDescriptor(lo, io);
+  const st2 = async () => HL.parseState(await lo.request(HL.CMD.state));
+  let so = await st2();
+  check('old card: nothing listed (the root is not read), no dropdown, the survey says so', so.card.nFiles === 0 && HL.fieldLabels(dsc, 'sample.idx').length === 0 && so.card.mounted && so.card.oldRoot && so.card.oldSets && so.card.oldPresets && !so.card.hasBreaks && so.card.rootWavs === 4 && so.card.pending === 8, JSON.stringify(so.card));
+  const before = new Map(o.cardFs);
+  await HL.copyOldCard(lo);
+  so = await st2(); check('copy: accepted, copying', so.card.state === 3);
+  for (let i = 0; i < 50 && so.card.state; i++) { o.cardOp.t -= 300; so = await st2(); }
+  check('copy done: 8 copied, nothing skipped, ok, the list has the breaks and the set', so.card.state === 0 && so.card.result === 0 && so.card.copied === 8 && so.card.skipped === 0 && so.card.pending === 0 && so.card.hasBreaks && so.card.breaks === 4
+    && JSON.stringify(await HL.cardList(lo)) === JSON.stringify(DEMO.FILES));
+  check('…copied, never moved: every original is still there, byte for byte; the shadow and another module\'s folder untouched', [...before].every(([k, v]) => o.cardFs.get(k) === v) && !o.cardHas('Audiothurgist/breaks/._amen_170.wav') && !o.cardHas('Audiothurgist/breaks/kyk.wav')
+    && o.cardHas('Audiothurgist/sets/think_110.wav.slices.json') && o.cardHas('Audiothurgist/presets/0.json'));
+  await HL.copyOldCard(lo); so = await st2(); for (let i = 0; i < 50 && so.card.state; i++) { o.cardOp.t -= 300; so = await st2(); }
+  check('a second copy: everything skipped', so.card.copied === 0 && so.card.skipped === 8 && so.card.result === 0);
+  await lo.close();
+  /* no card, and a firmware before the card work */
+  const nc = new DEMO.FakeDevice({ latencyMs: 1, nocard: true }), ln = new HL.Link(new DEMO.FakePort(nc)); await ln.start(); await HL.hello(ln);
+  const sn = HL.parseState(await ln.request(HL.CMD.state));
+  check('no card: flags 0, NO_CARD for an upload and a copy', sn.card.flags === 0 && !sn.card.mounted && await err(() => HL.uploadBreak(ln, 'x', wav2)) === 'NO_CARD' && await err(() => HL.copyOldCard(ln)) === 'NO_CARD');
+  await ln.close();
+  const of = new DEMO.FakeDevice({ latencyMs: 1, tail: 276 }), lf = new HL.Link(new DEMO.FakePort(of)); await lf.start(); const iof = await HL.hello(lf);
+  const sf = HL.parseState(await lf.request(HL.CMD.state)), cf = HL.caps(await HL.getDescriptor(lf, iof));
+  check('a firmware before the card work: no "card", a 276-byte body (card null), 0x67 UNSUPPORTED', cf.card === 0 && cf.keys === 1 && sf.card === null && await err(() => HL.cardList(lf)) === 'UNSUPPORTED');
+  await lf.close();
 }
 
 /* ── 8. EDIT-UI: the pure editor (edit.js) — magnets, clamps, handles, positions, labels, the drop rule, the onset
@@ -1460,6 +1581,69 @@ const sentAct = (G, ...pre) => G('demoDevice.acts').some(a => pre.every((v, i) =
   check('0.12 page: the Chop pad is not guarded (no srcValid in a 263-byte body)', await until(() => G('st.srcValid') === undefined && G("$('chop').disabled") === false && G("$('chop_why').hidden") === true));
   check('0.12 page: the CPU meter falls back to the diag\'s audio µs (a peak, no average)', await until(() => /^max \d+%$/.test(G("$('cpuText').textContent"))));
   check('0.12 page: no unknown ids, no runtime errors', D.unknownIds.size === 0 && D.errors.length === 0, D.errors.join(' | ').slice(0, 300));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+}
+/* ── 9d. CARD, the page itself: the Card panel over `?demo=card` — a file picked (the change event), two dropped at
+ *        once (the drop event), each decoded by a stand-in for the browser's decoder, converted, sent, written; the
+ *        row's progress, KB/s and result; "Load it now"; the same name again and "Replace it"; then `?demo=oldcard`'s
+ *        banner and "Copy them in", and `?demo=nocardfw`'s hidden panel ── */
+{
+  const { D, G } = await loadPage('?demo=card');
+  check('card page: connects with "card" — the panel and Play\'s "Add breaks…" shown, the list from the module, no banner',
+    await until(() => G('!!(st && st.card && cardOk)')) && G("$('cardCard').hidden") === false && G("$('p_add').hidden") === false && G("$('cardnote').hidden") === true && G('kitShown') === true, D.errors.join(' | ').slice(0, 300));
+  check('card page: the pill counts the breaks in the folder', await until(() => /4 breaks in Audiothurgist\/breaks/.test(G("$('cd_status').textContent"))), G("$('cd_status').textContent"));
+  /* the browser's decoder, stood in: 2 s of stereo at 44.1 kHz (the page converts to 48 k); the name says how long */
+  G(`cardDecode = async f => { const secs = /long/.test(f.name) ? 20 : 2, sr = 44100, n = sr * secs; return { numberOfChannels: 2, sampleRate: sr, length: n, getChannelData: c => new Float32Array(n).fill(c ? -0.25 : 0.25) }; }`);
+  spyActs(G);
+  fireEv(G("$('cd_file')"), 'change', { target: { files: [{ name: 'Think Break (live).flac', size: 812345 }], value: 'x' } });
+  check('picked: a row named by the sanitiser, then decoded → converted → sent → written', await until(() => G("cardJobs.length === 1 && cardJobs[0].state === 'done'"), 15000), G('cardJobs[0] && cardJobs[0].stl.textContent'));
+  const bytes = G("demoDevice.cardFs.get('Audiothurgist/breaks/Think Break (live).wav')");
+  check('…the module holds 2 s of stereo at 48 kHz PCM16 (the 44.1 kHz file converted)', bytes && bytes.length === 44 + 96000 * 4 && new DataView(bytes.buffer, bytes.byteOffset).getUint32(24, true) === 48000 && new DataView(bytes.buffer, bytes.byteOffset).getUint16(22, true) === 2, bytes && bytes.length);
+  check('…the row says where it went and how fast, the bar is full', /on the card as Audiothurgist\/breaks\/Think Break \(live\)\.wav/.test(G('cardJobs[0].stl.textContent')) && /KB\/s/.test(G('cardJobs[0].stl.textContent')) && G('cardJobs[0].fill.style.width') === '100%' && G('cardJobs[0].li.className') === 'ok'
+    && /stereo, 2\.00 s, 48 kHz PCM16/.test(G('cardJobs[0].inf.textContent')), G('cardJobs[0].inf.textContent'));
+  check('…the Sample list re-read from the module (the new break at the end)', G('labels.sample[labels.sample.length - 1]') === 'Think Break (live).wav' && /Think Break \(live\)\.wav/.test(G("$('sample').innerHTML")));
+  fireEv(G("cardJobs[0].btns['Load it now']"), 'click', {});
+  check('"Load it now": ACTION 6 with the module\'s lastIdx, the fake loads it', await until(() => sentAct(G, HL.ACT.load, 5) && G('demoDevice.file') === 5));
+  /* two dropped at once: one card job at a time, both land; a long one is cut to 17 s */
+  fireEv(G("$('cd_drop')"), 'drop', { dataTransfer: { files: [{ name: 'one long.wav', size: 10 }, { name: 'two.aiff', size: 10 }], types: ['Files'] } });
+  check('dropped two: both land, one after the other', await until(() => G("cardJobs.length === 3 && cardJobs[1].state === 'done' && cardJobs[2].state === 'done'"), 30000), G('cardJobs.map(j => j.state).join()'));
+  check('…the long one cut to the first 17 s, and says so', G("demoDevice.cardFs.get('Audiothurgist/breaks/one long.wav').length") === 44 + 17 * 48000 * 4 && /the first 17 of 20\.0 s/.test(G('cardJobs[1].inf.textContent')));
+  /* the same name again: refused, then replaced on request */
+  fireEv(G("$('cd_file')"), 'change', { target: { files: [{ name: 'two.wav', size: 10 }] } });
+  check('the same name again: "already on the card", a Replace button', await until(() => G("cardJobs.length === 4 && cardJobs[3].state === 'failed'")) && /already on the card/.test(G('cardJobs[3].stl.textContent')) && !!G("cardJobs[3].btns['Replace it']"));
+  fireEv(G("cardJobs[3].btns['Replace it']"), 'click', {});
+  check('…Replace it: sent with overwrite, done, the list not grown', await until(() => G("cardJobs[3].state === 'done'"), 15000) && G('demoDevice.files.length') === 8 && G('labels.sample.length') === 8);
+  /* busy: a set op waiting → BAD_STATE → said, with a retry */
+  G("demoDevice.set.pending = { op: 14, name: 'x' }");
+  fireEv(G("$('cd_file')"), 'change', { target: { files: [{ name: 'busy.wav', size: 10 }] } });
+  check('busy module: said plainly, Try again offered', await until(() => G("cardJobs.length === 5 && cardJobs[4].state === 'failed'")) && /busy/.test(G('cardJobs[4].stl.textContent')) && !!G("cardJobs[4].btns['Try again']"));
+  G("demoDevice.set.pending = null");
+  fireEv(G("cardJobs[4].btns['Try again']"), 'click', {});
+  check('…Try again once it is free: done', await until(() => G("cardJobs[4].state === 'done'"), 15000));
+  /* a file the browser cannot decode */
+  G(`cardDecode = async () => { throw new Error('EncodingError'); }`);
+  fireEv(G("$('cd_file')"), 'change', { target: { files: [{ name: 'notes.txt', size: 10 }] } });
+  check('an undecodable file: said, nothing sent', await until(() => G("cardJobs.length === 6 && cardJobs[5].state === 'failed'")) && /cannot decode/.test(G('cardJobs[5].stl.textContent')) && !G("demoDevice.cardHas('Audiothurgist/breaks/notes.wav')"));
+  check('card page: no unknown ids, no runtime errors', D.unknownIds.size === 0 && D.errors.length === 0, [...D.unknownIds].join(',') + ' ' + D.errors.join(' | ').slice(0, 300));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+}
+{
+  const { D, G } = await loadPage('?demo=oldcard,card');
+  check('old card page: the banner and the panel say it plainly — the root\'s WAVs, sets and presets, nothing moved for you',
+    await until(() => G('!!(st && st.card && cardOk)')) && await until(() => G("$('cardnote').hidden") === false) && /old way/.test(G("$('cn_text').textContent")) && /moves nothing/.test(G("$('cn_text').textContent")) && G("$('cd_old').hidden") === false
+    && /4 WAVs in its root, a sets folder and a presets folder/.test(G("$('cd_old_text').textContent")) && /8 files copied into Audiothurgist\/, the originals left where they are/.test(G("$('cd_old_text').textContent")) && G('labels.sample.length') === 0, G("$('cd_old_text').textContent"));
+  spyActs(G); { G('demoDevice.cardOps = []'); G(`(() => { const d = demoDevice, h = d.handle; d.handle = (t, b) => { if (t === 0x67) d.cardOps.push(b[0]); return h(t, b); }; })()`); }
+  fireEv(G("$('cn_copy')"), 'click', {});
+  check('"Copy them in" (the banner): COPY_OLD on the wire, then copied, the list re-read, the banner gone', await until(() => G('demoDevice.cardOps').includes(HL.CARD.copy) && /copied 8 files/.test(G("$('cd_copy_state').textContent")) && G('labels.sample.length') === 5 && G("$('cardnote').hidden") === true && G("$('cd_old').hidden") === true && /4 breaks/.test(G("$('cd_status').textContent")), 15000),
+    G("$('cd_copy_state').textContent") + ' / ' + G('labels.sample.length'));
+  check('…the originals still in the root', G("demoDevice.cardHas('amen_170.wav') && demoDevice.cardHas('sets/amen_kit.json') && demoDevice.cardHas('presets/0.json')") === true);
+  check('old card page: no unknown ids, no runtime errors', D.unknownIds.size === 0 && D.errors.length === 0, [...D.unknownIds].join(',') + ' ' + D.errors.join(' | ').slice(0, 300));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+}
+{
+  const { D, G } = await loadPage('?demo=nocardfw');
+  check('pre-card firmware: no panel, no "Add breaks…", no banner, no 0x67 asked', await until(() => G('!!(st && keysOk)')) && G('cardOk') === false && G("$('cardCard').hidden") === true && G("$('p_add').hidden") === true && G("$('cardnote').hidden") === true && !G('demoDevice.log').includes(0x67) && G('st.card') === null);
+  check('pre-card firmware page: no errors', D.unknownIds.size === 0 && D.errors.length === 0, D.errors.join(' | ').slice(0, 300));
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
 }
 /* ── 9c. Contrast, measured: every text token against every surface it sits on, in both themes, ≥ 4.5:1; and no
