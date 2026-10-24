@@ -95,7 +95,12 @@ six autoslice markers already on the keys, **`?demo=old12`** plays a 0.12
 firmware (no `"keys"`: no pads, ▶ / ■ is the mute toggle, the Chop pad
 unguarded); **`?demo=scope`** opens the Scope tab (`cv` / `gates`
 press that preset, `noin` leaves J1/J2 silent, `body512` announces the
-protocol's default `max_body` so a frame takes two requests). `#kit` / `#scope` / `#opts` / `#man` open a tab
+protocol's default `max_body` so a frame takes two requests); **`?demo=card`**
+opens the Kit tab's Card panel on a fake card (in-memory files: upload, list,
+Load it now), **`?demo=oldcard`** lays the card out the old way (WAVs in the
+root, `sets/` and `presets/` beside them — the banner and *Copy them in*),
+`nocard` has no card in, `nocardfw` plays a 0.13 firmware before the card work
+(no `"card"`, the 276-byte body). `#kit` / `#scope` / `#opts` / `#man` open a tab
 directly.
 
 ## What is on the page
@@ -366,9 +371,12 @@ gesture performed through its listeners (▶ / ■, Flow held, the mode chips,
 three pads at once, the slider drag, re-roll, markers → keys, clear, the
 Chop pad twice, Play's Undo / Clear, the theme, a draw error, the unplug,
 then `?demo=old12`), with the stub's unknown-id trap and draw logs (what
-the last frame drew); the **contrast** of every text token on every
-surface in both themes, no colour outside the tokens, no duplicate ids.
-549 checks. Pass `--golden <path>` if the SDK lives elsewhere (it is found
+the last frame drew); CARD: the WAV encoder, the name rule (fuzzed), the
+upload sequencer and every refusal against the fake, two uploads at once
+(refused mid-stream without the queue, both landing through it), the old
+card's copy, and the Card panel through real `change` / `drop` / `click`
+gestures; the **contrast** of every text token on every surface in both
+themes, no colour outside the tokens, no duplicate ids. 612 checks. Pass `--golden <path>` if the SDK lives elsewhere (it is found
 above a worktree too) and `--fw-src <file>` to check the parity against
 another firmware source (`git show beta-fw:src/audiothurgist.cpp > /tmp/f.cpp`).
 
@@ -399,6 +407,9 @@ u32 srcPos                                                        (258..261, EDI
 u8 redoDepth                                                      (262, EDIT-UNDO)
 u8 flags2 u16 loadAvg u16 loadMax i16 j4mV u8 j4Key u8 j5Style
 u8 keyFlash u8 keySeq u8 autoK u8 nMarkers                        (263..275, KEYS v0.13)
+u8 cardState u8 cardProgress u8 cardResult u8 cardSeq u8 cardFlags
+u16 rootWavs u16 pending u16 breaks u8 lastIdx u16 copied u16 skipped
+u8 nFiles                                                         (276..292, CARD)
 ```
 
 `recState`: 0 idle · 1 armed (waiting for the gate) · 2 taking · 3 pending
@@ -436,6 +447,37 @@ timestamped from.
                   [, u8 flags (b0 orange · b1 tombstone) — 14 bytes, when form = 1 and "edit" is present]
 0x66 GET_HITS   ← [u8 first]  → u8 status, u8 nTotal, u8 first, u32 pos[…] (≤127)
 ```
+
+## The card (0x67, capability `"card": 1`)
+
+The card is one folder, `Audiothurgist/` (`breaks/`, `sets/`, `presets/`); the
+module no longer reads the root. The **Card** panel on the Kit tab (and *Add
+breaks…* beside Play's Sample list) uploads files: the browser decodes them
+(`decodeAudioData` on a 48 kHz `OfflineAudioContext` — decode and resample in
+one step), keeps two channels at most, cuts at 17 s, encodes PCM16
+(`HL.encodeWav`) and sends one chunk per round trip (`HL.uploadBreak`):
+
+```
+op 0 UP_BEGIN  ← u32 total, u8 flags (b0 overwrite), name (1..100, the stem) → status, u32 max
+op 1 UP_DATA   ← u32 total, u32 offset, bytes → status, u32 have, u8 done (1 write queued · 2 not a WAV)
+op 2 UP_ABORT · op 3 COPY_OLD · op 4 RESCAN → status
+op 5 LIST      ← u8 first → status, u8 nFiles, u8 first, u8 n, n × {u8 len, label}
+statuses: 0 OK · 2 BAD_ARGS · 3 BAD_STATE · 6 TOO_LARGE · 20 EXISTS · 21 NO_CARD · 22 CARD_FULL
+```
+
+Chunks are `max_body − 24` bytes at normal priority (clicks still go first,
+the state poll interleaves); every card job goes through one queue
+(`HL.serial`, Kyklophoria's `putQueued` fix) so two drops never interleave.
+Once the module holds every byte it writes `breaks/<name>.wav` itself; the
+tail's `cardSeq` bumps when it is done, `cardResult` says how, `lastIdx` is the
+new list entry (**Load it now** = ACTION 6 with it). The tail's `cardState` is
+0 idle · 1 receiving · 2 writing · 3 copying, `cardFlags` b0 mounted · b1 root
+WAVs · b2 old `sets/` · b3 old `presets/` · b4 breaks in the folder · b5
+something not copied in; `pending` counts old files whose copy is missing — the
+page shows the old-card banner and **Copy them in** from these. `setState`
+reads 3 while the module writes or copies. LIST is the module's list as it is
+now (the descriptor's dropdown is the boot one). Protocol and reasons:
+`docs/packages/card.md`.
 
 ## The slice-editing ops (ACTION 16–29, capability `"edit": 1`)
 
@@ -573,6 +615,7 @@ number of bells, B2 rings the next change, Brain knobs unused).
 | kit waveform             | `0x64 GET_WAVE`                   | on demand, ≤ 3/s, cached windows            |
 | slice table              | `0x65 GET_TABLE`                  | when the state's table signature changes    |
 | onset ticks              | `0x66 GET_HITS`                   | when `matGen` changes                        |
+| card: upload, copy, list | `0x67 CARD` (`"card"`)            | one job at a time; chunks of max_body − 24; the 276.. tail reports |
 
 Flashing, presets and settings stay in `/program`; this page is deliberately
 the *instrument* view.
