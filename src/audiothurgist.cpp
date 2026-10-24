@@ -1617,6 +1617,13 @@ static void OnPoll(uint32_t /*t_ms*/)
     /* a key held from the jacks when the map changes is released (review L1, kept); the page's held pads are its own */
     static uint8_t s_prevMap = 0xFFu;
     if(gJackMapCur != s_prevMap) { if(gCvKey >= 0) gRelKey = gCvKey; gCvKey = -1; s_prevMap = gJackMapCur; }
+    /* BETA (2026-10-23, "sometimes playing the last note"): the gate's sample-and-hold —
+     * the key is read on the first poll from the edge on which J4 has stopped moving
+     * (at once when it was already still, at most kSettleMax ms later). One for
+     * whichever jack is the gate: J6 on the Voice map, J5 on the Brain map. */
+    static bb::keys::GateSettle s_settle;
+    const uint8_t gateCh = gJackMapCur == 1u ? 3u : kVoiceGateChan;
+    const bool    fire   = s_settle.Tick(gClkEdge.JustRose(gateCh), gClkEdge.JustFell(gateCh), j4v * 12.f);
     /* RECORD: the record styles live on the Voice map — leaving it disarms and ends a key take */
     if(gJackMapCur != 1u)
     {
@@ -1625,10 +1632,11 @@ static void OnPoll(uint32_t /*t_ms*/)
     if(gJackMapCur == 1u)
     {
         static int s_style = 0, s_lastStyle = 0;
-        const bool rose = gClkEdge.JustRose(3u);
+        const bool rose = fire;   /* BETA: the settled edge (s_settle), not the raw one */
         const bool held = hw.cv[3].Volts() > 2.5f;
-        /* SAMPLE: the gate's falling edge releases the held key (a no-op for one-shot voices) */
-        if(gClkEdge.JustFell(3u) && gCvKey >= 0) gRelKey = gCvKey;
+        /* SAMPLE: the gate's falling edge releases the held key (a no-op for one-shot voices);
+         * BETA: a fall while the edge waits for J4 releases once the call is made, below */
+        if(gClkEdge.JustFell(3u) && gCvKey >= 0 && !s_settle.Waiting() && !fire) gRelKey = gCvKey;
         const int st = bb::keys::StyleOf(hw.cv[kVoiceGateChan].Volts(), s_lastStyle);
         gJ5Style = bb::keys::StyleByte(st);
         /* RECORD: J5 style 7 = Record (armed: every key held records into
@@ -1640,7 +1648,7 @@ static void OnPoll(uint32_t /*t_ms*/)
         gKeyArm = st == 7 && !gTakeActive;
         if(gKeyTake && (engine.recFull || (!gWebTake && (gClkEdge.JustFell(3u) || st != 7)))) gKeyTakeDone = true;   /* a browser take: only the cap or the next arm stops it */
         /* RECORD end */
-        const bool restrike = held && gCvKey >= 0 && st != s_style && !rose && !recSty /* RECORD */;
+        const bool restrike = held && gCvKey >= 0 && st != s_style && !rose && !s_settle.Waiting() && !recSty /* RECORD */;
         s_style = st;
         if(rose || restrike)
         {
@@ -1662,6 +1670,7 @@ static void OnPoll(uint32_t /*t_ms*/)
             {
                 if(rose) gCvKey = j4key;
                 CallKey(gCvKey, st);   /* a re-strike calls the held key in the new style */
+                if(rose && s_settle.FellPending()) gRelKey = gCvKey;   /* BETA: a trigger shorter than the settle */
             }
         }
     }
@@ -1669,8 +1678,12 @@ static void OnPoll(uint32_t /*t_ms*/)
     else
     {
         gJ5Style = 255u;
-        if(gClkEdge.JustFell(kVoiceGateChan) && gCvKey >= 0 && gKeyPlays.sel == 1) gRelKey = gCvKey;   /* held only: no release events for one-shots in Play's loop */
-        if(gClkEdge.JustRose(kVoiceGateChan) && engine.nSlices > 0) { gCvKey = j4key; CallKey(j4key, 0); }
+        if(gClkEdge.JustFell(kVoiceGateChan) && gCvKey >= 0 && gKeyPlays.sel == 1 && !s_settle.Waiting() && !fire) gRelKey = gCvKey;   /* held only: no release events for one-shots in Play's loop */
+        if(fire && engine.nSlices > 0)   /* BETA: the settled edge */
+        {
+            gCvKey = j4key; CallKey(j4key, 0);
+            if(s_settle.FellPending() && gKeyPlays.sel == 1) gRelKey = gCvKey;
+        }
     }
     /* Gate CV writes — control thread (I²C-safe), on CHANGE only so J6's
      * MCP4728 isn't hit with a WriteAll+LDAC transaction every millisecond. */

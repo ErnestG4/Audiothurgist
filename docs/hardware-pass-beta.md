@@ -62,6 +62,10 @@ you have the OTG adapter, the phone. Close `/program`.
       and the live voltage.
 - [ ] Walk up a chromatic octave: one key per semitone, the card follows.
       −1 V: key 0, **no mute**.
+- [ ] **A sequencer that changes pitch with its gate** (the last-note fix,
+      23 Oct): a fast run of different notes into J4 with gates on J6 —
+      *listen for* every hit playing **its own** key, never the previous
+      one. Then very short triggers (1–2 ms): each still plays.
 - [ ] J5 at 1/12 V: reverse. J5 style 7 (7/12 V): record into the key held;
       style 8: clear it.
 - [ ] Brain map (Classic, Jacks = Follow grammar): gate on **J5**, the same

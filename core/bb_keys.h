@@ -25,19 +25,59 @@ namespace bb {
 namespace keys {
 
 constexpr int   kKeys      = 24;      // Engine::kKeys
-constexpr float kNoteTol   = 0.4f;    // note-centre window, semitones (spec §6.3: boundaries are the knife-edge bug class)
+constexpr float kNoteHyst  = 0.1f;    // past the half-semitone midpoint a reading must go to leave the last note (semitones)
 constexpr float kStyleZero = 0.85f;   // J5: below this (semitones) is style 0
 constexpr int   kStyleMax  = 8;       // the highest style that means something (8 Clear)
+constexpr float kSettleTol = 0.15f;   // a gate's key is read once J4 moved less than this (semitones) over one poll
+constexpr int   kSettleMax = 4;       // …or after this many polls (ms) whatever J4 is doing
 
-/* The note-centre quantiser: n = round(volts · 12), taken only inside ±kNoteTol
- * of the note; between notes the last reading holds (`last`, the caller's). */
+/* The quantiser: the nearest note, with a Schmitt band round the LAST note
+ * only — a reading holds `last` while it stays within half a semitone +
+ * kNoteHyst of it, so a voltage sitting on a midpoint can't chatter between
+ * two keys; anywhere else it is simply the nearest note. (Before 2026-10-23 a
+ * reading outside ±0.4 st of ANY note centre returned `last`, wherever J4 was:
+ * a note that read 0.45 st off — calibration, a sequencer's tuning, or J4
+ * caught mid-step at the gate edge — played the PREVIOUS key. Combust's bench
+ * report: "sometimes playing the last note".) */
 inline int Note(float volts, int& last)
 {
     const float nf = volts * 12.f;
-    const int   n  = (int)floorf(nf + 0.5f);
-    if(fabsf(nf - (float)n) < kNoteTol) last = n;
+    if(last > -99 && fabsf(nf - (float)last) < 0.5f + kNoteHyst) return last;
+    last = (int)floorf(nf + 0.5f);
     return last;
 }
+/* The gate's sample-and-hold: a sequencer moves J4 at (or just after) its
+ * gate edge, and the input's RC settles over a millisecond or so, so the key
+ * is read on the first poll from the edge on which J4 has stopped moving —
+ * the edge's own poll when J4 was already still (no added latency for a
+ * sequencer that sets the pitch first), else a poll or two later, never more
+ * than kSettleMax. Tick every poll with the gate's edges and J4 in semitones;
+ * true = make the call now (read the key from J4 this poll). A fall during
+ * the wait is reported once the call has been made (FellPending), so a
+ * trigger shorter than the settle still releases what it played. */
+struct GateSettle
+{
+    int   wait = -1;      // polls since the edge, −1 = idle
+    float prev = 0.f;     // J4 at the last poll (semitones)
+    bool  fell = false;   // the gate fell during the wait
+    bool  fellOut = false;
+    bool Tick(bool rose, bool fellNow, float semis)
+    {
+        bool fire = false;
+        fellOut = false;
+        if(rose) { wait = 0; fell = false; }
+        else if(fellNow && wait >= 0) fell = true;
+        if(wait >= 0)
+        {
+            if(fabsf(semis - prev) < kSettleTol || wait >= kSettleMax) { fire = true; wait = -1; fellOut = fell; fell = false; }
+            else wait++;
+        }
+        prev = semis;
+        return fire;
+    }
+    bool Waiting() const { return wait >= 0; }
+    bool FellPending() const { return fellOut; }   // true on the firing poll when the gate already fell
+};
 /* J4 → the key 0..23: negatives clamp to 0, past 23 to 23. */
 inline int KeyOf(float volts, int& last)
 {

@@ -33,7 +33,7 @@ int main()
         KeyOf(St(6), last);
         CHECK(KeyOf(St(5) + 0.5f / 12.f, last) == 6, "…coming from 6 it stays 6 (no knife edge)");
         last = -99;
-        CHECK(KeyOf(St(5) + 0.5f / 12.f, last) == 0, "a first reading on a boundary: nothing yet → key 0");
+        CHECK(KeyOf(St(5) + 0.5f / 12.f, last) == 6, "a first reading on a boundary: the nearest note (rounds up)");
     }
     SECTION("J5 → the style: semitone steps, a wide zero (an unpatched / offset jack plays plain)");
     {
@@ -60,6 +60,46 @@ int main()
         bool pads = true; for(int s = 0; s <= 6; s++) for(int v = 0; v < 2; v++) pads &= !CallFor(s, 6, v).punch;
         CHECK(pads, "Pads: nothing is ever written, whatever the style or option");
         CHECK(CallFor(9, 0, 0).punch == CallFor(6, 0, 0).punch && CallFor(-2, 0, 0).mul == 1.f, "styles clamp to 0..6 for the call");
+    }
+    SECTION("the last-note bug (bench, 2026-10-23): a reading off a note centre plays the NEAREST note, not the last one");
+    {
+        int last = -99;
+        KeyOf(St(2), last);
+        CHECK(KeyOf(St(9) + 0.45f / 12.f, last) == 9, "from key 2, J4 at 9.45 st plays 9 (the old window said 2 — the last note)");
+        KeyOf(St(2), last);
+        CHECK(KeyOf(St(9) - 0.45f / 12.f, last) == 9, "…and at 8.55 st, 9");
+        KeyOf(St(2), last);
+        CHECK(KeyOf(St(5) + 0.5f / 12.f, last) == 6, "from 2, a reading on the 5|6 midpoint is a new note (6), never 2");
+        KeyOf(St(9), last);
+        CHECK(KeyOf(St(9) + 0.58f / 12.f, last) == 9, "near the last note the Schmitt band holds it (9.58 st from 9 → 9)");
+        CHECK(KeyOf(St(9) + 0.65f / 12.f, last) == 10, "…and lets go past it (9.65 st → 10)");
+        bool walk = true;
+        for(int k = 0; k < 24; k++) for(float off = -0.45f; off <= 0.451f; off += 0.15f)
+        { int l = -99; KeyOf(St((k + 7) % 24), l); walk &= KeyOf(St(k) + off / 12.f, l) == k; }
+        CHECK(walk, "every key, read up to ±0.45 st off from any other key, is that key");
+    }
+    SECTION("the gate's sample-and-hold: the key is read once J4 has stopped moving");
+    {
+        GateSettle g;
+        for(int i = 0; i < 3; i++) g.Tick(false, false, 2.f);
+        CHECK(g.Tick(true, false, 2.f), "J4 already still at the edge: the call is made on the edge's own poll (no added latency)");
+        g = GateSettle{};
+        for(int i = 0; i < 3; i++) g.Tick(false, false, 2.f);
+        CHECK(!g.Tick(true, false, 5.f) && g.Waiting(), "J4 stepped on the edge's poll: wait");
+        CHECK(!g.Tick(false, false, 8.7f), "…still slewing: wait");
+        CHECK(g.Tick(false, false, 9.f) == false, "…0.3 st more: still moving");
+        CHECK(g.Tick(false, false, 9.02f), "…settled: call now, reading 9");
+        g = GateSettle{};
+        g.Tick(false, false, 0.f);
+        bool fired = g.Tick(true, false, 1.f); int polls = 1;
+        for(float v = 2.f; !fired && polls < 10; v += 1.f, polls++) fired = g.Tick(false, false, v);
+        CHECK(fired && polls == 1 + kSettleMax, "a J4 that never settles still calls after kSettleMax polls (4 ms)");
+        g = GateSettle{};
+        g.Tick(false, false, 0.f);
+        g.Tick(true, false, 3.f);
+        CHECK(!g.Tick(false, true, 6.f), "a 1 ms trigger falls during the wait…");
+        CHECK(g.Tick(false, false, 6.f) && g.FellPending(), "…the call is still made, and the fall is reported with it (held keys release)");
+        CHECK(!g.Tick(false, false, 6.f) && !g.FellPending(), "idle again afterwards");
     }
     SECTION("the tail's J4 millivolts");
     {

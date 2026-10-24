@@ -53,8 +53,16 @@ take's red win over both.
 
 ## One CV keymap (`core/bb_keys.h`)
 
-`KeyOf(volts, last)`: the note-centre quantiser (±0.4 st takes a note,
-between notes the last reading holds), clamped to 0..23. `StyleOf`: the same
+`KeyOf(volts, last)`: the nearest note, with a Schmitt band round the last
+note only (a reading holds it within 0.5 + 0.1 st), clamped to 0..23. *Fixed
+2026-10-23* after Combust's "sometimes playing the last note": the first
+quantiser returned the last note for any reading outside ±0.4 st of a note
+centre, wherever J4 was — a key that read 0.45 st off, or J4 caught mid-step
+on the gate's poll, played the previous key. And the gate is now a
+sample-and-hold (`GateSettle`): the key is read on the first poll from the
+edge on which J4 moved < 0.15 st — the edge's own poll when J4 was already
+still, else a poll or two later, never more than 4 ms; a trigger that falls
+during the wait still plays and releases. `StyleOf`: the same
 with the zero window — under 0.85 st it is 0 and the memory resets.
 `CallFor(style, grammar, voiceSel)`: rate / reverse / ratchet / staccato and
 the punch rule (Pads never writes; Play writes unless style 6; elsewhere the
