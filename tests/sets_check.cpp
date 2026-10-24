@@ -50,11 +50,11 @@ static void TestNaming()
     bb::SetLabel("sets/a b.wav", l, sizeof l);    CHECK(!strcmp(l, "sets/a b.wav"), "foreign file in sets/ shown as is: %s", l);
     bb::SetLabel("sets/amen.wav", l, 8);          CHECK(!strcmp(l, "amen [s"), "label truncates cleanly: %s", l);
     char w[64], j[64];
-    CHECK(bb::SetPaths("amen", w, j, sizeof w) && !strcmp(w, "0:/sets/amen.wav") && !strcmp(j, "0:/sets/amen.json"), "paths: %s %s", w, j);
+    CHECK(bb::SetPaths("amen", w, j, sizeof w) && !strcmp(w, "0:/Audiothurgist/sets/amen.wav") && !strcmp(j, "0:/Audiothurgist/sets/amen.json"), "paths: %s %s", w, j);
     CHECK(!bb::SetPaths("amen", w, j, 17) && !bb::SetPaths("a/b", w, j, sizeof w), "paths refuse a short buffer and a bad name");
-    CHECK(bb::SetLockPath("amen", w, sizeof w) && !strcmp(w, "/sets/amen.wav"), "lock path: %s", w);
-    CHECK(bb::PresetPath(0, w, sizeof w) && !strcmp(w, "0:/presets/0.json") && bb::PresetPath(15, j, sizeof j) && !strcmp(j, "0:/presets/15.json"), "preset paths: %s %s", w, j);
-    CHECK(bb::PresetPath(123, w, sizeof w) && !strcmp(w, "0:/presets/123.json") && !bb::PresetPath(-1, w, sizeof w) && !bb::PresetPath(0, w, 12), "preset path edges");
+    CHECK(bb::SetLockPath("amen", w, sizeof w) && !strcmp(w, "/Audiothurgist/sets/amen.wav"), "lock path: %s", w);
+    CHECK(bb::PresetPath(0, w, sizeof w) && !strcmp(w, "0:/Audiothurgist/presets/0.json") && bb::PresetPath(15, j, sizeof j) && !strcmp(j, "0:/Audiothurgist/presets/15.json"), "preset paths: %s %s", w, j);
+    CHECK(bb::PresetPath(123, w, sizeof w) && !strcmp(w, "0:/Audiothurgist/presets/123.json") && !bb::PresetPath(-1, w, sizeof w) && !bb::PresetPath(0, w, 12), "preset path edges");
 
     static char files[4][128] = {"AMEN_170.WAV", "apache.wav", "sets/amen.wav", "sets/Kit_2.wav"};
     CHECK(bb::FindEntry(&files[0][0], 128, 4, "sets/amen.wav") == 2 && bb::FindEntry(&files[0][0], 128, 4, "SETS/KIT_2.WAV") == 3, "FindEntry case-insensitive");

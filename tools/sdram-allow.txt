@@ -11,3 +11,9 @@ gDet
 #        is a value, not a store target. Arrays cannot have initialisers.
 gLockArena
 gStage
+# gBufAR: no store at all — the pool word 0xc1400000 is -12.0f, P4 Pitch's
+#        Linear(-12, 12) floor, built on the stack for a VirtualKnob. The
+#        float's bit pattern lands in SDRAM's range; which object it "points
+#        into" depends on the layout (gStage until the CARD upload buffer
+#        moved everything up, gBufAR since).
+gBufAR
