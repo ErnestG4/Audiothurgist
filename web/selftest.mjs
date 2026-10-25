@@ -1617,13 +1617,29 @@ const sentAct = (G, ...pre) => G('demoDevice.acts').some(a => pre.every((v, i) =
   G("demoDevice.set.pending = { op: 14, name: 'x' }");
   fireEv(G("$('cd_file')"), 'change', { target: { files: [{ name: 'busy.wav', size: 10 }] } });
   check('busy module: said plainly, Try again offered', await until(() => G("cardJobs.length === 5 && cardJobs[4].state === 'failed'")) && /busy/.test(G('cardJobs[4].stl.textContent')) && !!G("cardJobs[4].btns['Try again']"));
-  G("demoDevice.set.pending = null");
+  G("demoDevice.set.pending = null; demoDevice.set.state = 0");   /* both: a held op the fake had begun would otherwise finish with no op */
   fireEv(G("cardJobs[4].btns['Try again']"), 'click', {});
   check('…Try again once it is free: done', await until(() => G("cardJobs[4].state === 'done'"), 15000));
   /* a file the browser cannot decode */
   G(`cardDecode = async () => { throw new Error('EncodingError'); }`);
   fireEv(G("$('cd_file')"), 'change', { target: { files: [{ name: 'notes.txt', size: 10 }] } });
   check('an undecodable file: said, nothing sent', await until(() => G("cardJobs.length === 6 && cardJobs[5].state === 'failed'")) && /cannot decode/.test(G('cardJobs[5].stl.textContent')) && !G("demoDevice.cardHas('Audiothurgist/breaks/notes.wav')"));
+  /* bench 2026-10-25, "it thinks it fails when it didn't" (the row said it did not finish): the background poll stops
+   * while the tab is hidden, so the old wait never saw the write end. The wait now asks for the state itself. */
+  G(`cardDecode = async f => { const sr = 48000, n = sr; return { numberOfChannels: 1, sampleRate: sr, length: n, getChannelData: () => new Float32Array(n).fill(0.1) }; }`);
+  G("document.visibilityState = 'hidden'");
+  fireEv(G("$('cd_file')"), 'change', { target: { files: [{ name: 'hidden tab.wav', size: 10 }] } });
+  check('a hidden tab (no background polls): the upload still ends "on the card", not "did not finish"', await until(() => G("cardJobs.length === 7 && cardJobs[6].state !== 'queued' && cardJobs[6].state !== 'decoding' && cardJobs[6].state !== 'sending' && cardJobs[6].state !== 'writing'"), 15000) && G('cardJobs[6].state') === 'done' && /on the card/.test(G('cardJobs[6].stl.textContent')), G('cardJobs[6] && cardJobs[6].stl.textContent'));
+  G("document.visibilityState = 'visible'");
+  /* the module's "finished" lost (its seq never moves) but the file is on the card: judged by the card's list */
+  G("cardStallMs = 1500; demoDevice._fin = demoDevice.cardFinish; demoDevice.cardFinish = function (r) { const s = this.cardOp.seq; this._fin(r); this.cardOp.seq = s; }");
+  fireEv(G("$('cd_file')"), 'change', { target: { files: [{ name: 'lost finish.wav', size: 10 }] } });
+  check('…the finish never reported, the break listed: the row says on the card and offers Load it now', await until(() => G("cardJobs.length === 8 && (cardJobs[7].state === 'done' || cardJobs[7].state === 'failed')"), 15000) && G('cardJobs[7].state') === 'done' && !!G("cardJobs[7].btns['Load it now']") && G('cardJobs[7].idx') === G("labels.sample.indexOf('lost finish.wav')"), G('cardJobs[7] && cardJobs[7].stl.textContent'));
+  /* …and the same lost finish on a name already listed (a Replace): it can't vouch, so it says it did not finish */
+  fireEv(G("$('cd_over')"), 'change', {}); G("$('cd_over').checked = true");
+  fireEv(G("$('cd_file')"), 'change', { target: { files: [{ name: 'lost finish.wav', size: 10 }] } });
+  check('…the same on a break already listed: no false "done", it says it did not finish', await until(() => G("cardJobs.length === 9 && (cardJobs[8].state === 'done' || cardJobs[8].state === 'failed')"), 15000) && G('cardJobs[8].state') === 'failed' && /did not finish/.test(G('cardJobs[8].stl.textContent')), G('cardJobs[8] && cardJobs[8].stl.textContent'));
+  G("$('cd_over').checked = false; demoDevice.cardFinish = demoDevice._fin; cardStallMs = 30000");
   check('card page: no unknown ids, no runtime errors', D.unknownIds.size === 0 && D.errors.length === 0, [...D.unknownIds].join(',') + ' ' + D.errors.join(' | ').slice(0, 300));
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
 }

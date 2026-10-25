@@ -1648,6 +1648,7 @@ function buildManual() {
  * and lastIdx is what "Load it now" loads. An old card (WAVs in the root, no Audiothurgist folder) is said so plainly
  * and offered a copy — never a move. */
 let cardOk = false, cardJobs = [], cardCopying = false;
+let cardStallMs = 30000;   /* how long the module's card state may stand still before a wait gives up (the selftest shortens it) */
 const cardRun = HL.serial();
 /* the decoder, a variable so the selftest can stand in for the browser's */
 let cardDecode = async file => {
@@ -1668,16 +1669,25 @@ async function cardRefreshList() {
     if (cur != null) sel.value = cur; $('b_load').disabled = !l.length; fillSetList(); ctlSig = ''; invalidate(D.text | D.controls);
   } catch (e) { warn('card list', e); }
 }
-/* wait for the module to finish the op it took (the tail's card seq moves past seq0 and the state is idle) */
-async function cardSettle(seq0, ms = 60000) {
-  const t0 = performance.now();
-  while (performance.now() - t0 < ms) {
-    const c = cardNow(); if (!link) throw new Error('disconnected');
+/* wait for the module to finish the op it took (the tail's card seq moves past seq0 and the state is idle). It asks
+ * for the state itself: the background poll stops while the tab is hidden, and a finished upload once read as "did
+ * not finish" because nobody was looking (bench, 2026-10-25). It gives up only once the module's state and progress
+ * have stood still for `stallMs`, never after a fixed time: a slow card is slow, not failed. */
+async function cardSettle(seq0, stallMs = cardStallMs) {
+  let last = -1, tMove = performance.now();
+  for (;;) {
+    if (!link) throw new Error('disconnected');
+    let c = null;
+    try { const s = parseState(await link.request(CMD.state, undefined, { key: 'state' })); c = s && s.card; } catch (e) { /* a lost reply: ask again */ }
     if (c && c.seq !== seq0 && c.state === 0) return c;
-    poll.tState = 0; await new Promise(r => setTimeout(r, 60));
+    const mark = c ? c.state * 256 + c.progress : last;
+    if (mark !== last) { last = mark; tMove = performance.now(); }
+    else if (performance.now() - tMove > stallMs) throw new Error('the module did not finish in time');
+    await new Promise(r => setTimeout(r, 60));
   }
-  throw new Error('the module did not finish in time');
 }
+/* after a settle that gave up: is the break on the module's list anyway? (judged by the card, not by one wait) */
+async function cardListed(name) { try { return (await HL.cardList(link)).includes(name + '.wav'); } catch { return false; } }
 function cardRow(job) {
   const li = document.createElement('li'), nm = document.createElement('span'), acts = document.createElement('span'), inf = document.createElement('span'), bar = document.createElement('div'), fill = document.createElement('i'), stl = document.createElement('span');
   nm.className = 'nm'; acts.className = 'acts'; inf.className = 'inf'; bar.className = 'bar'; stl.className = 'st'; stl.style.gridColumn = '1/-1';
@@ -1715,12 +1725,18 @@ async function cardUpload(job) {
   }
   if (job.cancelled) { jobClear(job); jobSay(job, 'cancelled', 'bad'); return; }
   const c0 = cardNow(), seq0 = c0 ? c0.seq : -1;
+  const listedBefore = await cardListed(job.name);   /* a break already listed (a Replace) can't vouch for this upload */
   job.state = 'sending'; jobSay(job, 'sending…'); jobBar(job, 0);
   try {
     const r = await HL.uploadBreak(link, job.name, job.bytes, { overwrite: job.overwrite, maxBody: info && info.maxBody, cancel: () => job.cancelled || !link,
       onProgress: (a, t, kbps) => { jobBar(job, a / t); job.kbps = kbps; jobSay(job, `sending ${Math.round(100 * a / t)} % · ${kbps.toFixed(0)} KB/s`); } });
     job.kbps = r.kbps; job.state = 'writing'; jobClear(job); jobSay(job, `sent ${fmtKB(r.bytes)} at ${r.kbps.toFixed(0)} KB/s — the module is writing it to the card…`);
-    const c = await cardSettle(seq0);
+    let c;
+    try { c = await cardSettle(seq0); }
+    catch (e) {
+      if (e.message === 'disconnected' || listedBefore || !link || !(await cardListed(job.name))) throw e;
+      c = { result: 0, lastIdx: (await HL.cardList(link)).indexOf(job.name + '.wav') };   /* it landed; the wait was what failed */
+    }
     if (c.result) { job.state = 'failed'; jobSay(job, 'the card write failed: ' + (CARD.RESULT[c.result] || 'error ' + c.result), 'bad'); jobButton(job, 'Try again', () => cardRetry(job)); return; }
     job.idx = c.lastIdx; jobBar(job, 1);
     jobSay(job, `on the card as Audiothurgist/breaks/${job.name}.wav · ${fmtKB(r.bytes)} at ${r.kbps.toFixed(0)} KB/s`, 'ok');
@@ -1747,7 +1763,7 @@ async function cardCopy() {
       const c0 = cardNow(), seq0 = c0 ? c0.seq : -1;
       try { await HL.copyOldCard(link); }
       catch (e) { setText('cd_copy_state', e.message === 'BAD_STATE' ? 'the module is busy — try again in a moment' : e.message === 'NO_CARD' ? 'no card in the module' : 'refused: ' + e.message); return; }
-      const c = await cardSettle(seq0, 300000);
+      const c = await cardSettle(seq0, 2 * cardStallMs);
       setText('cd_copy_state', c.result && c.result !== 10 ? 'the copy stopped: ' + (CARD.RESULT[c.result] || c.result) + ` (${c.copied} copied)` : `copied ${c.copied} file${c.copied === 1 ? '' : 's'}${c.skipped ? `, ${c.skipped} already there` : ''} — the originals are where they were`);
       say(`card: ${c.copied} copied into Audiothurgist/${c.skipped ? `, ${c.skipped} already there` : ''}`);
       await cardRefreshList();
