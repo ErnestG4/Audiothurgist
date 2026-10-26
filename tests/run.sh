@@ -19,7 +19,8 @@
 # 6b. card_check   — CARD package: the one folder's paths, the upload name
 #                     rule, the upload receiver, the copy plan, and the FatFs
 #                     half (scan, survey, copy, the upload's write) over
-#                     tests/fatfs_shim.h with a scratch card (ASan/UBSan).
+#                     tests/fatfs_shim.h with a scratch card; beta-sampler's
+#                     Start in file (startup.json) both ways (ASan/UBSan).
 # 6c. pads_check   — PADS package: a drop's receiver and its in-place PCM16 →
 #                     planes conversion, EditOp::Record (one undo step, a
 #                     replaced pad held), the room, recordings at their own

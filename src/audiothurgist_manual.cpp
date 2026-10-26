@@ -37,7 +37,14 @@ static Manual manual =
             "gate pair calls the Kit's keys from a keyboard or sequencer. "
             "**Brain** — it plays the rack: kick, snare and hat gates leave on "
             "J6/J7/J8 as the pattern runs, and a clock on J3 locks the loop "
-            "to your master. The roles run at once; nothing needs a mode.")
+            "to your master. The roles run at once; nothing needs a mode. "
+            "**It powers up as a sampler**: Pads, the pattern stopped (B1 "
+            "breathes) — the 24 keys (J4, the browser's pads) play, nothing "
+            "else does. For a beat, pick a grammar (Classic, Grids…) and hold "
+            "**B1** 600 ms (or ▶ in the browser); it starts on the beat. "
+            "*Start in* (the web app's Options → Start-up, kept in "
+            "`Audiothurgist/startup.json`) = As saved powers up in the boot "
+            "preset's grammar, running, as before.")
         .Section("journey", "The knob journey (P1)",
             "Full right: verbatim. ~4 o'clock: whole beats trade places. "
             "~1 o'clock: one-beat chops — listen for the double-time illusion. "
@@ -146,7 +153,10 @@ static Manual manual =
             "**Sampling** — mono, or stereo planes. **Record Source** — the "
             "inputs, or the module's own output. **Record** — arm a loop "
             "take into the break (see Sampling). **Tap Allowance** — how far "
-            "back a tap-while-playing mark lands (your reaction time): 0–80 ms.")
+            "back a tap-while-playing mark lands (your reaction time): 0–80 ms. "
+            "**Start in** (on the card, not in a preset; the web app sets it) — "
+            "Sampler (Pads, stopped; the default, and with no card) or As "
+            "saved (the boot preset's grammar, running); read at power-up.")
         .Section("sampling", "Sampling (record into a key, loop-record the break)",
             "One buffer, one slice table: a loaded break and a recorded kit "
             "are the same thing. **Into a key** (Voice map): play J5 style "
