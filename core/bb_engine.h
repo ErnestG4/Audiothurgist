@@ -295,7 +295,8 @@ enum class EditOp : uint8_t
     Promote,       // SetBoundary(i, marker t's start)
     Undo,          // EDIT-UNDO: one step back through the journal (no fields)
     Redo,          // EDIT-UNDO: one step forward
-    SetKeyMap      // BETA: the whole key map from `keys` (−1 = the key's default) — KEYS_FROM_MARKERS, Pads
+    SetKeyMap,     // BETA: the whole key map from `keys` (−1 = the key's default) — KEYS_FROM_MARKERS, Pads
+    Record         // PADS: key `key` owns [start, start + len) — a recording (a drop onto a pad), CommitSlice through the journal
 };
 enum class EditStatus : uint8_t
 {
@@ -1063,6 +1064,28 @@ struct Engine
         const int e = slices[idx].start + slices[idx].len;   /* clamped: a torn Slice read must stay in the plane (review L4) */
         return e > bufCap ? bufCap : (e < 0 ? 0 : e);
     }
+    /* PADS (docs/packages/pads.md): a key call on a RECORDING — an entry past the grid that starts at or past the
+     * material's end (a take into a key, a sample dropped onto a pad) — plays at its own rate × pitch × the style's
+     * multiplier, never the tempo's varispeed: a kit is a sampler's, its pads keep their pitch whatever the clock
+     * does. The break's slices and the markers inside it still follow the tempo. recOwnRate = false restores the
+     * v0.13 rule (every call varispeeds). The sequencer's steps (a recording punched into the bar) keep the
+     * varispeed: there the slot's length is the tempo's. */
+    bool recOwnRate = true;
+    bool OwnRate(int idx) const
+    {
+        return recOwnRate && idx >= nSlices && idx < nTable && slices[idx].start >= bufLen;
+    }
+    // AUDIO, at block start. PADS: mono material grows an R plane in place — the shell has copied the L plane
+    // into `bR` over [0, freePos) first, so everything already in the kit sounds the same on both sides; every
+    // voice's R bridge state takes its L twin's, so nothing sounding steps. False (nothing changed) when the
+    // material already has an R plane or bR is null. Recordings, keys, the looper and the undo history stay.
+    bool AdoptR(float* bR)
+    {
+        if(bufR || !bR || !buf) return false;
+        for(int i = 0; i < kVoices; i++) { voices[i].lastOutR = voices[i].lastOut; voices[i].clickCompR = voices[i].clickComp; }
+        bufR = bR;
+        return true;
+    }
     void FireSlice(int idx, float rate, bool rev, float lenMul = 1.f, bool held = false, int key = -1)
     {
         Slice cell = slices[idx];
@@ -1128,7 +1151,9 @@ struct Engine
         if(idx < 0) idx = 0;
         if(idx >= nTable) idx = nTable - 1;
         float gridStepSamp = barSeconds * sr / (float)nSlices;
-        float rate         = pitch * (nativeStep / gridStepSamp) * rateMul;
+        /* PADS: a recording (past the material) plays at its own rate × P4 — the sampler rule; the break's
+         * slices and its markers varispeed with the tempo as ever (OwnRate) */
+        float rate         = OwnRate(idx) ? pitch * rateMul : pitch * (nativeStep / gridStepSamp) * rateMul;
         FireSlice(idx, rate, rev, lenMul, held, key);
         if(punch) PunchStep(curStep, idx, rev);
         if(ratchet)
@@ -1545,6 +1570,7 @@ struct Engine
      * key map they imply. A MARKER is a live entry past the grid, inside the
      * break, owned by no key (a recording is not one, however it was re-keyed). */
     EditStatus EdSetKeyMap(const int8_t* keys);
+    EditStatus EdRecord(const EditReq& r, int& idx);                   // PADS: a keyed recording through the journal
     bool       IsMarker(int t) const;
     bool       IsGrey(int t) const;                                    // a marker that is not orange (FROM_ONSETS / AUTOSLICE own these)
     int        MarkerCount() const;

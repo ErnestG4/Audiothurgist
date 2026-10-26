@@ -20,6 +20,12 @@
 #                     rule, the upload receiver, the copy plan, and the FatFs
 #                     half (scan, survey, copy, the upload's write) over
 #                     tests/fatfs_shim.h with a scratch card (ASan/UBSan).
+# 6c. pads_check   — PADS package: a drop's receiver and its in-place PCM16 →
+#                     planes conversion, EditOp::Record (one undo step, a
+#                     replaced pad held), the room, recordings at their own
+#                     rate, AdoptR, the unsaved note, the loader's same-rate
+#                     path, set round trips of a pads-only kit and of a 17 s
+#                     break plus pads at the 45 s planes (ASan/UBSan).
 # 7. scope_check    — SCOPE package: request parsing and clamps, the trigger
 #                     (crossing, hysteresis, ring age), channel alignment,
 #                     plain / peak decimation, at-pos frames, the old-mode
@@ -72,6 +78,9 @@ $CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $I
 echo; echo "== card_check (ASan/UBSan) =="
 $CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/card_check.cpp -o "$OUT/cardchk" || fail=1
 "$OUT/cardchk" "$OUT" || fail=1
+echo; echo "== pads_check (ASan/UBSan) =="
+$CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/pads_check.cpp -o "$OUT/padschk" || fail=1
+"$OUT/padschk" "$OUT" || fail=1
 echo; echo "== scope_check (ASan/UBSan) =="
 $CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/scope_check.cpp -o "$OUT/scope" || fail=1
 "$OUT/scope" || fail=1

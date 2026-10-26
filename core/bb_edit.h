@@ -207,6 +207,36 @@ inline EditStatus Engine::EdSetKeyMap(const int8_t* keys)
     return EditStatus::Ok;
 }
 
+/* PADS (docs/packages/pads.md): a sample dropped onto a pad — CommitSlice's publication, through the journal so a
+ * drop is one undo step. Key `key` owns [start, start + len): its recording's slot is reused in place (the old
+ * region stays in the planes, orphaned — the room readout says so), else the first free slot; the entry is
+ * white, carries `meta` (kMeta), and freePos moves past it. The span must start at or before freePos (the shell
+ * wrote the samples at freePos, where nothing reads) and end inside bufCap. Undo puts the slot, the key map and
+ * nTable back; freePos stays where it went, so the region a redo needs is still there. */
+inline EditStatus Engine::EdRecord(const EditReq& r, int& idx)
+{
+    if(r.key < 0 || r.key >= kKeys) return EditStatus::BadArgs;
+    if(r.start < 0 || r.len < kRecMin || r.start > freePos || r.start > bufCap || r.len > bufCap - r.start) return EditStatus::BadArgs;
+    int t = RecordedEntry(r.key);
+    if(t < 0) { t = FreeSlot(); if(t < 0) return EditStatus::Full; }
+    const EntryMeta m = (r.flags & EditReq::kMeta) ? r.meta : EntryMeta{3, 0.f, 0.f, false};
+    recMeta[t]    = m;
+    slices[t]     = {r.start, r.len};
+    tableKey[t]   = (int8_t)r.key;
+    stepClass[t]  = m.cls;
+    sliceSal[t]   = m.sal;
+    sliceDens[t]  = m.dens;
+    stepHit[t]    = m.hit;
+    stepBands[t]  = 0;
+    loopState[t]  = 0;
+    tableFlags[t] = 0;   // a recording: neither orange nor a tombstone (a reused slot comes alive here)
+    if(r.start + r.len > freePos) freePos = r.start + r.len;
+    if(t == nTable) nTable = t + 1;
+    keySlice[r.key] = (int8_t)t;
+    idx = t;
+    return EditStatus::Ok;
+}
+
 inline int Engine::FreeSlot() const
 {
     for(int t = nSlices; t < nTable; t++)
@@ -552,6 +582,8 @@ inline EditStatus Engine::EdNudge(int delta, int which)
  *   NudgeAll      a = samples, b = 0 grid / 1 markers  —        grid: linked and clamped; markers: clamped to [0, freePos)
  *   Promote       t, i                         → slice i        SetBoundary(i, marker t's start)
  *   SetKeyMap     keys[kKeys] (−1 = default)   —                BETA: every key at once; each a live entry
+ *   Record        key, start, len              → the entry      PADS: key owns the span (its recording's slot reused,
+ *                                                               else a free one); start ≤ freePos, end ≤ bufCap; freePos follows
  *
  * `meta` is copied verbatim when flags has kMeta (the control thread ran
  * bb::AnalyseEntry on the span first); ops marked — ignore it. The entry a
@@ -579,6 +611,7 @@ inline EditStatus Engine::ApplyEdit(const EditReq& r, int* newIdx)
         case EditOp::SetBoundary: st = EdMoveBoundary(r.i, r.start); who = r.i; break;
         case EditOp::SetEntry:    st = EdSetEntry(r.t, r.start, r.len); who = r.t; break;
         case EditOp::SetKeyMap:   st = EdSetKeyMap(r.keys); break;               /* BETA */
+        case EditOp::Record:      st = EdRecord(r, idx); break;                   /* PADS: meta applied inside */
         case EditOp::AddEntry:    st = EdAdd(r, idx); break;                      // meta and flags applied inside
         case EditOp::Split:       st = EdSplit(r, idx); break;                    // meta → the new half, inside
         case EditOp::Merge:       st = EdMerge(r.t); who = r.t; break;

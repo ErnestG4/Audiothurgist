@@ -286,6 +286,7 @@ inline bool Engine::UndoBegin(const EditReq& r)
         case EditOp::SetEntry:
         case EditOp::Tombstone: idx[0] = r.t; n = 1; break;
         case EditOp::AddEntry:  idx[0] = FreeSlot(); n = 1; break;
+        case EditOp::Record:    idx[0] = (r.key >= 0 && r.key < kKeys && RecordedEntry(r.key) >= 0) ? RecordedEntry(r.key) : FreeSlot(); n = 1; break;   /* PADS */
         case EditOp::Split:     idx[0] = r.t; idx[1] = FreeSlot(); n = 2; break;
         case EditOp::Merge:     idx[0] = r.t; idx[1] = MergeTarget(r.t); n = 2; break;
         case EditOp::SetKey:
