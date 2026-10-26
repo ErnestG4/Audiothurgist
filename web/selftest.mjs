@@ -1889,6 +1889,153 @@ const sentAct = (G, ...pre) => G('demoDevice.acts').some(a => pre.every((v, i) =
   check('pre-pads page: no errors', D.unknownIds.size === 0 && D.errors.length === 0, D.errors.join(' | ').slice(0, 300));
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
 }
+/* ── 9f. beta-sampler: Start in, and "import and play individual samples" end to end. The protocol first (ACTION 40,
+ *        the flags bit, the card file, a power-cycle, the refusals, HL.padNormalize), then the page over
+ *        `?demo=sampler` — the module powering up as a sampler and the Play tab reading as one; Start in on the
+ *        Options tab; a mono WAV and a stereo WAV (real RIFF bytes, decoded by a PCM16 stand-in for the browser's
+ *        decoder) dropped on two pads and arriving sample for sample; both played from the page's pads; the kit turned
+ *        stereo; normalise drops (remembered); the set saved; the module power-cycled on the same card and the page
+ *        reconnected — a sampler again, the pads gone from memory; the set loaded back — the same pads, stereo, playing;
+ *        then the flip to Classic, stopped until ▶ ── */
+{
+  /* the protocol, over HL and the fake */
+  const d = new DEMO.FakeDevice({ latencyMs: 1 }), l = new HL.Link(new DEMO.FakePort(d)); await l.start(); const inf = await HL.hello(l);
+  const ds = await HL.getDescriptor(l, inf);
+  check('START: the descriptor says "startIn": 1 (with "pads")', HL.caps(ds).startIn === 1 && HL.caps(ds).pads === 1);
+  let s = HL.parseState(await l.request(HL.CMD.state));
+  check('START: the fake boots As saved unless asked — Classic, running, flags b5 set', s.grammar === 0 && s.muted === false && s.startSaved === true && (s.flags & 32) === 32);
+  let r = await HL.setStartIn(l, false);
+  s = HL.parseState(await l.request(HL.CMD.state));
+  check('START_IN(0): OK, b5 clear, startup.json on the card says "sampler" — the running module untouched (Classic, running)', r.ok && s.startSaved === false && /"startIn":"sampler"/.test(new TextDecoder().decode(d.cardFs.get('Audiothurgist/startup.json'))) && s.grammar === 0 && !s.muted);
+  const p1 = new DEMO.FakeDevice({ latencyMs: 1, bootCard: d.cardFs }), lp = new HL.Link(new DEMO.FakePort(p1)); await lp.start(); await HL.hello(lp);
+  s = HL.parseState(await lp.request(HL.CMD.state));
+  check('…a power-cycle on that card: Pads (6), stopped, b5 clear, the Voice map (Jacks = Follow grammar)', s.grammar === 6 && s.muted === true && s.startSaved === false && s.jackMap === 1);
+  r = await HL.setStartIn(lp, true); s = HL.parseState(await lp.request(HL.CMD.state));
+  const p2 = new DEMO.FakeDevice({ latencyMs: 1, bootCard: p1.cardFs }), lq = new HL.Link(new DEMO.FakePort(p2)); await lq.start(); await HL.hello(lq);
+  const s2 = HL.parseState(await lq.request(HL.CMD.state));
+  check('START_IN(1) → As saved: b5 set, and the next power-up runs the saved grammar (Classic, running)', r.ok && s.startSaved === true && s2.grammar === 0 && s2.muted === false && s2.startSaved === true);
+  const p3 = new DEMO.FakeDevice({ latencyMs: 1, bootCard: new Map() }), lr = new HL.Link(new DEMO.FakePort(p3)); await lr.start(); await HL.hello(lr);
+  check('a card without startup.json powers up as a sampler (the firmware\'s default)', HL.parseState(await lr.request(HL.CMD.state)).grammar === 6 && p3.muted === true);
+  const fileNow = () => new TextDecoder().decode(d.cardFs.get('Audiothurgist/startup.json')), before = fileNow(), bad = await HL.editOp(l, HL.ACT.startIn, [2]);
+  check('START_IN(2): BAD_ARGS, nothing written', !bad.ok && bad.status === 2 && fileNow() === before, JSON.stringify(bad));
+  const nc = new DEMO.FakeDevice({ latencyMs: 1, nocard: true }), ln = new HL.Link(new DEMO.FakePort(nc)); await ln.start(); await HL.hello(ln);
+  const rn = await HL.setStartIn(ln, true), sn = HL.parseState(await ln.request(HL.CMD.state));
+  check('no card: it powers up a sampler (Pads, stopped); START_IN answers NO_CARD (21) and nothing changes', !rn.ok && rn.status === 21 && sn.startSaved === false && sn.grammar === 6 && sn.muted === true && HL.statusName(21) === 'NO_CARD', JSON.stringify([rn, sn.startSaved, sn.grammar]));
+  const op = new DEMO.FakeDevice({ latencyMs: 1, tail: 293 }), lo = new HL.Link(new DEMO.FakePort(op)); await lo.start(); const io = await HL.hello(lo);
+  const ro = await HL.setStartIn(lo, true), so = HL.parseState(await lo.request(HL.CMD.state));
+  check('a firmware before it (no "pads", no "startIn"): ACTION 40 is BAD_ARGS, b5 never set, it boots as it always did', HL.caps(await HL.getDescriptor(lo, io)).startIn === 0 && !ro.ok && ro.status === 2 && so.startSaved === false && so.grammar === 0 && so.muted === false);
+  for (const x of [l, lp, lq, lr, ln, lo]) await x.close();
+  /* HL.padNormalize: one gain for both channels, −1 dBFS at the peak, only the first `frames`, silence left alone */
+  const L = Float32Array.from({ length: 1000 }, (_, i) => 0.25 * Math.sin(i / 7)), R = Float32Array.from({ length: 1000 }, (_, i) => 0.125 * Math.cos(i / 5));
+  const nz = HL.padNormalize([L, R], 1000, -1), pk = a => a.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
+  check('padNormalize: the louder channel peaks at −1 dBFS (0.891), the other keeps its ratio, the source untouched', nz.applied && Math.abs(pk(nz.planes[0]) - Math.pow(10, -1 / 20)) < 1e-6 && Math.abs(pk(nz.planes[1]) / pk(nz.planes[0]) - pk(R) / pk(L)) < 1e-6 && Math.abs(nz.gainDb - 20 * Math.log10(0.891251 / pk(L))) < 0.01 && pk(L) < 0.26);
+  const loud = Float32Array.from({ length: 100 }, (_, i) => i < 50 ? 0.1 : 1.0), part = HL.padNormalize([loud], 50);
+  check('…only the frames that go (a loud tail past them does not count); silence is left as it is', part.applied && part.planes[0].length === 50 && Math.abs(part.planes[0][0] - 0.891251) < 1e-5 && HL.padNormalize([new Float32Array(64)], 64).applied === false);
+}
+/* the page */
+const ST_SR = 48000;
+function wavFile(name, chans) {   /* a real RIFF/WAVE PCM16 file, as a drop hands the page */
+  const bytes = HL.encodeWav(chans, ST_SR);
+  return { name, size: bytes.length, type: 'audio/wav', arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length) };
+}
+const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a * Math.sin(2 * Math.PI * f * i / ST_SR + ph));
+{
+  const { D, G, ctx } = await loadPage('?demo=sampler');
+  /* the browser's decoder, stood in: it parses the dropped file's RIFF bytes (PCM16, 48 kHz — no resample needed) */
+  G(`cardDecode = async f => { const b = new Uint8Array(await f.arrayBuffer()), dv = new DataView(b.buffer); let at = 12, fmt = null, data = null;
+    while (at + 8 <= b.length) { const id = String.fromCharCode(...b.subarray(at, at + 4)), n = dv.getUint32(at + 4, true); if (id === 'fmt ') fmt = { ch: dv.getUint16(at + 10, true), sr: dv.getUint32(at + 12, true), bits: dv.getUint16(at + 22, true) }; if (id === 'data') data = { at: at + 8, n }; at += 8 + n + (n & 1); }
+    if (!fmt || !data || fmt.bits !== 16) throw new Error('EncodingError');
+    const len = data.n / 2 / fmt.ch, planes = Array.from({ length: fmt.ch }, () => new Float32Array(len));
+    for (let i = 0; i < len; i++) for (let c = 0; c < fmt.ch; c++) planes[c][i] = dv.getInt16(data.at + (i * fmt.ch + c) * 2, true) / 32768;
+    return { numberOfChannels: fmt.ch, sampleRate: fmt.sr, length: len, getChannelData: c => planes[c] }; }`);
+  check('sampler page: the fake powers up as the module does — Pads, stopped, the Voice map', await until(() => G('!!(st && padsOk && table)')) && G('st.grammar') === 6 && G('st.muted') === true && await until(() => G('st.jackMap') === 1), D.errors.join(' | ').slice(0, 300));
+  await sleep(120);
+  check('…the Play tab reads as a sampler: the pads card first (m-sampler), the sampler line with where a drop goes and how it powers up, the transport says "sampler", ▶ not cued (Pads has no pattern), the ring says SAMPLER',
+    await until(() => G("$('play').className").includes('m-sampler') && G("$('pd_sampler').hidden") === false) && /Drop audio files on a pad/.test(G("$('pd_sampler_text').innerHTML")) && /powers up like this/.test(G("$('pd_sampler_text').innerHTML"))
+    && /<b>sampler<\/b>/.test(G("$('t_sub').innerHTML")) && G("$('t_play').textContent") === '▶' && !G("$('t_play').className").includes('cue') && G("$('mode_cue').hidden") === true && G("$('ring')._log").text.includes('SAMPLER'),
+    G("$('play').className") + ' / ' + G("$('t_sub').innerHTML"));
+  check('…the mode chips: Pads lit; the Jacks card says the Voice map; the sampler line\'s Classic / Grids buttons are there', G('modeChips.find(c => c.g === 6).el.className').includes('on') && G("$('jk_map').textContent") === 'Voice map' && G("$('pd_go_classic').hidden") === false && G("$('pd_go_grids').hidden") === false);
+  spyActs(G);
+  /* Start in, on the Options tab */
+  const grp = G("$('optgroups').children.map(c => c._html)");
+  check('Options: a "Start-up (kept on the card)" group beside the 24 (still nothing in "Other"), Start in = Sampler from the state', grp.some(h => /Start-up \(kept on the card\)/.test(h)) && !grp.some(h => h.includes('Other')) && G('startSel.value') === '0' && G('startSel.disabled') === false);
+  G("startSel.value = '1'"); fireEv(G('startSel'), 'change', {});
+  check('Start in → As saved: ACTION 40 (1) on the wire, the card\'s startup.json says "saved", b5 comes back set, the sampler line stops saying it powers up like this',
+    await until(() => sentAct(G, 40, 1)) && await until(() => G('st.startSaved') === true) && /"saved"/.test(G("new TextDecoder().decode(demoDevice.cardFs.get('Audiothurgist/startup.json'))")) && await until(() => !/powers up like this/.test(G("$('pd_sampler_text').innerHTML"))) && /As saved/.test(G("$('msg').textContent")));
+  check('…the running module untouched by it (still Pads, stopped)', G('st.grammar') === 6 && G('st.muted') === true);
+  G("startSel.value = '0'"); fireEv(G('startSel'), 'change', {});
+  check('…and back to Sampler: ACTION 40 (0), the file says "sampler"', await until(() => sentAct(G, 40, 0)) && await until(() => G('st.startSaved') === false) && /"sampler"/.test(G("new TextDecoder().decode(demoDevice.cardFs.get('Audiothurgist/startup.json'))")));
+  G("demoDevice.cardMounted = false"); await until(() => G('st.card && st.card.mounted') === false);
+  check('no card: the select disabled and says why', await until(() => G('startSel.disabled') === true) && /no card/.test(G('startSel.title')));
+  G("demoDevice.cardMounted = true"); await until(() => G('startSel.disabled') === false);
+  /* a pad plays while stopped */
+  const pad = k => G(`padEls[${k}].el`);
+  fireEv(pad(3), 'pointerdown', { pointerId: 31 }); fireEv(pad(3), 'pointerup', { pointerId: 31 });
+  check('stopped, a pad still plays: PLAY_KEY(3) down / up, the flash comes back, the transport still stopped', await until(() => sentAct(G, 32, 3, 1) && sentAct(G, 32, 3, 0)) && await until(() => G('st.keyFlash') === 3) && G('st.muted') === true);
+  /* a mono WAV and a stereo WAV onto two pads */
+  const monoL = tone(24000, 220, 0.5), stL = tone(19200, 330, 0.4), stR = tone(19200, 495, 0.3, 1);
+  G('window.__files = {}'); ctx.__mono = wavFile('kick mono.wav', [monoL]); ctx.__st = wavFile('pad stereo.wav', [stL, stR]);
+  const dropOn = (k, ...fs) => fireEv(pad(k), 'drop', { dataTransfer: { files: fs, types: ['Files'] } });
+  check('the stand-in decoder reads the WAVs as the browser would (mono 0.50 s, stereo 0.40 s)', await G('(async () => { const a = await cardDecode(__mono), b = await cardDecode(__st); return a.numberOfChannels === 1 && a.length === 24000 && b.numberOfChannels === 2 && b.length === 19200; })()'));
+  dropOn(0, ctx.__mono);
+  check('a mono WAV dropped on C1: sent (0x68), placed — the pad says ✓ 0.50 s, the line "mono, 0.50 s"', await until(() => G("padJobs.length === 1 && padJobs[0].state === 'done'"), 15000) && /^C1: kick mono\.wav — mono, 0\.50 s$/.test(G("$('pd_msg').textContent")) && await until(() => (G('st.pads.mask') & 1) === 1), G("$('pd_msg').textContent"));
+  const sameAs = (key, plane, src) => G(`(() => { const e = demoDevice.table[demoDevice.keySlice[${key}]], b = ${plane ? 'demoDevice.bufR' : 'demoDevice.buf'}; if (!b || e.len !== ${src.length}) return 'len ' + (e && e.len); let w = 0; const s = [${Array.from(src).join(',')}]; for (let i = 0; i < s.length; i++) w = Math.max(w, Math.abs(b[e.start + i] - s[i])); return w; })()`);
+  const wm = sameAs(0, 0, monoL);
+  check('…on the module, key 0 holds the file sample for sample (within one PCM16 step)', typeof wm === 'number' && wm <= 1.5 / 32767, String(wm));
+  check('…the kit is still mono', G('st.stereo') === false);
+  dropOn(1, ctx.__st);
+  check('a stereo WAV dropped on C♯1: placed stereo, the line says the kit is stereo now (Options → Sampling: Stereo)', await until(() => G("padJobs.length === 2 && padJobs[1].state === 'done'"), 15000) && /stereo, 0\.40 s — the kit is stereo now/.test(G("$('pd_msg').textContent")) && await until(() => G('st.stereo') === true) && await until(() => G("optByte('sampling')") === 1), G("$('pd_msg').textContent"));
+  const wl = sameAs(1, 0, stL), wr = sameAs(1, 1, stR), w0 = sameAs(0, 1, monoL);
+  check('…L and R arrive apart, each sample for sample; the mono pad now sounds on both sides (R = L)', [wl, wr, w0].every(w => typeof w === 'number' && w <= 2 / 32767), [wl, wr, w0].join(' '));
+  /* both played from the page's pads */
+  fireEv(pad(0), 'pointerdown', { pointerId: 41 });
+  check('pad C1 plays the mono sample: PLAY_KEY(0), the module\'s voice on its span', await until(() => sentAct(G, 32, 0, 1)) && await until(() => G('demoDevice.voice && demoDevice.voice.key') === 0) && G('demoDevice.voice.start') === G('demoDevice.table[demoDevice.keySlice[0]].start') && G('demoDevice.voice.len') === 24000);
+  fireEv(pad(0), 'pointerup', { pointerId: 41 }); fireEv(pad(1), 'pointerdown', { pointerId: 42 });
+  check('pad C♯1 plays the stereo sample', await until(() => sentAct(G, 32, 1, 1)) && await until(() => G('demoDevice.voice && demoDevice.voice.key') === 1) && G('demoDevice.voice.len') === 19200);
+  fireEv(pad(1), 'pointerup', { pointerId: 42 });
+  await until(() => G('padJob[0] === null && padJob[1] === null'), 6000); await sleep(150);
+  check('…the pads show their lengths; the unsaved note is up', /^0\.50 s$/.test(G('padEls[0].sub.textContent')) && /^0\.40 s$/.test(G('padEls[1].sub.textContent')) && G("$('pd_unsaved').hidden") === false);
+  /* normalise drops: off by default, remembered, applied to the next drop */
+  check('normalise drops: off by default', G("$('pd_norm').checked") === false && G('padNorm') === false);
+  G("$('pd_norm').checked = true"); fireEv(G("$('pd_norm')"), 'change', { target: G("$('pd_norm')") });
+  check('…ticked: remembered in this browser', G('padNorm') === true && G("localStorage.getItem('audiothurgist.padNorm')") === '1');
+  const quiet = tone(9600, 440, 0.25); ctx.__q = wavFile('quiet.wav', [quiet]); dropOn(2, ctx.__q);
+  check('…a quiet mono WAV (peak −12 dBFS) arrives peaking at −1 dBFS, and the line says by how much', await until(() => G("padJobs.length === 3 && padJobs[2].state === 'done'"), 15000) && /normalised \+11\.0 dB/.test(G("$('pd_msg').textContent"))
+    && Math.abs(G('(() => { const e = demoDevice.table[demoDevice.keySlice[2]]; let m = 0; for (let i = 0; i < e.len; i++) m = Math.max(m, Math.abs(demoDevice.buf[e.start + i])); return m; })()') - 0.8913) < 0.001, G("$('pd_msg').textContent"));
+  G("$('pd_norm').checked = false"); fireEv(G("$('pd_norm')"), 'change', { target: G("$('pd_norm')") });
+  check('…unticked: remembered off', G("localStorage.getItem('audiothurgist.padNorm')") === '0' && G('padNorm') === false);
+  /* save the set */
+  G("$('s_name').value = 'smp_kit'"); fireEv(G("$('pd_save')"), 'click', {});
+  check('Save set… (named): ACTION 14 "smp_kit", saved, the unsaved note gone', await until(() => sentAct(G, HL.ACT.saveSet)) && await until(() => G('st.setName') === 'smp_kit' && G('st.pads.unsaved') === false, 8000) && await until(() => G("$('pd_unsaved').hidden") === true));
+  /* the power-cycle: a fresh module on the same card; the page reconnects */
+  G('window.__card = demoDevice.cardFs; window.__sets = demoDevice.sets');
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+  await G(`(async () => { const d = new DEMO.FakeDevice({ tail: 315, latencyMs: 6, bootCard: __card }); d.sets = __sets; demoDevice = d; demoPort = new DEMO.FakePort(d); await connectPort(demoPort, true); demoDevice = d; })()`);
+  check('power-cycled on the same card, the page reconnected: a sampler again (Pads, stopped), the sampler line back, the pads empty of drops (they were in memory), nothing unsaved',
+    await until(() => G('!!(st && padsOk && table && st.pads)')) && G('st.grammar') === 6 && G('st.muted') === true && G('st.pads.mask') === 0 && G('st.pads.unsaved') === false && await until(() => G("$('pd_sampler').hidden") === false), D.errors.join(' | ').slice(0, 300));
+  spyActs(G);
+  G("$('s_name').value = 'smp_kit'"); fireEv(G("$('s_load')"), 'click', {});
+  check('Load set "smp_kit": ACTION 15, the three pads back, the kit stereo, nothing unsaved, still Pads and stopped', await until(() => sentAct(G, HL.ACT.loadSet)) && await until(() => G('st.setName') === 'smp_kit' && G('st.pads.mask') === 7, 8000) && await until(() => G('st.stereo') === true) && G('st.pads.unsaved') === false && G('st.grammar') === 6 && G('st.muted') === true);
+  const vl = sameAs(1, 0, stL), vr = sameAs(1, 1, stR), vm = sameAs(0, 0, monoL);
+  check('…sample for sample: the mono pad, and the stereo pad\'s L and R', [vl, vr, vm].every(w => typeof w === 'number' && w <= 2 / 32767), [vl, vr, vm].join(' '));
+  await sleep(250);
+  fireEv(pad(1), 'pointerdown', { pointerId: 51 }); fireEv(pad(1), 'pointerup', { pointerId: 51 });
+  check('…and the stereo pad plays from the page again', await until(() => sentAct(G, 32, 1, 1)) && await until(() => G('demoDevice.voice && demoDevice.voice.key') === 1) && G('demoDevice.voice.len') === 19200);
+  /* the flip: Classic while stopped stays stopped until ▶ */
+  fireEv(G("$('pd_go_classic')"), 'click', {});
+  check('the sampler line\'s Classic: the grammar written (Classic), the transport still stopped', await until(() => G('demoDevice.grammar') === 0 && G('st.grammar') === 0) && !sentAct(G, 35) && G('st.muted') === true);
+  await sleep(300);
+  check('…still stopped a moment later; the cue says ▶ starts it, ▶ is ringed, the sampler line gone, the transport says "stopped"', G('st.muted') === true && await until(() => G("$('mode_cue').hidden") === false && /press ▶ to start Classic/.test(G("$('mode_cue').innerHTML")) && G("$('t_play').className").includes('cue') && G("$('pd_sampler').hidden") === true && /<b>stopped<\/b>/.test(G("$('t_sub').innerHTML"))));
+  fireEv(G("$('t_play')"), 'click', {});
+  check('▶: SET_MUTE(0), the pattern runs, the cue and the ring gone', await until(() => sentAct(G, 35, 0) && G('demoDevice.muted') === false) && await until(() => G("$('mode_cue').hidden") === true && !G("$('t_play').className").includes('cue') && G("$('t_play').textContent") === '■'));
+  check('sampler page: no unknown ids, no runtime errors', D.unknownIds.size === 0 && D.errors.length === 0, [...D.unknownIds].join(',') + ' ' + D.errors.join(' | ').slice(0, 300));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+}
+{ /* normalise drops, remembered: a page opened with it stored starts ticked */
+  const html = readFileSync(path.join(here, 'index.html'), 'utf8'), script = [...html.matchAll(/<script>\n([\s\S]*?)<\/script>/g)].pop()[1];
+  const D = domStub(html); D.sandbox.localStorage.setItem('audiothurgist.padNorm', '1'); const c = vm.createContext(D.sandbox); vm.runInContext(script, c, { filename: 'index.html' });
+  check('normalise drops: a page opened with it remembered starts ticked (and the Demo button powers up a sampler)', vm.runInContext("padNorm === true && $('pd_norm').checked === true", c) && /connectDemo\('sampler'\)/.test(html));
+}
 /* ── 9c. Contrast, measured: every text token against every surface it sits on, in both themes, ≥ 4.5:1; and no
  *        colour outside the token blocks — not in a CSS rule, not in an inline style, not in the script ── */
 {

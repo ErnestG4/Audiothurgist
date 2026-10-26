@@ -95,6 +95,7 @@
   .transport{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:12px;padding:8px 14px;background:var(--panel);border-bottom:1px solid var(--line);box-shadow:0 4px 14px var(--shadow)}
   .tplay{width:56px;height:56px;min-height:56px;border-radius:50%;font-size:22px;line-height:1;padding:0;flex:none;display:grid;place-items:center;border-width:2px}
   .tplay.run{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
+  .tplay.cue{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent)}   /* beta-sampler: stopped in a drum grammar — ▶ is the next move */
   .tinfo{display:flex;flex-direction:column;min-width:0;line-height:1.2}
   .t-bpm{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap} .t-bpm small{font-size:12px;font-weight:500;color:var(--ink2);margin-left:3px}
   .t-sub{font-size:12px;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis} .t-sub b{color:var(--ink);font-weight:600} .t-sub .lk{color:var(--ok-ink)}
@@ -139,6 +140,14 @@
   .pdroom .bar i.held{background:var(--ink3)}
   .pdnote{background:var(--warn-bg);border:1px solid var(--warn-line);color:var(--warn-ink);padding:8px 10px;border-radius:10px;margin:0 0 10px;display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center} .pdnote[hidden]{display:none} .pdnote span{flex:1 1 220px;font-size:13px}
   #play.m-pads .padk{min-height:88px} #padsCard{order:1} .late{order:2} #play.m-pads #padsCard,#play.m-play #padsCard{order:-1} #modesCard{order:-2}
+  /* beta-sampler: the sampler (Pads, stopped — how the module powers up): the pads first, a line on how to get a beat; an
+   * empty pad dashed with the drop it takes; the cue under the modes once a drum grammar waits for ▶ */
+  #play.m-sampler #padsCard{order:-3}
+  .samp{background:var(--raise);border:1px solid var(--line-hi);border-radius:10px;padding:8px 10px;margin:0 0 10px;display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center;font-size:13px;color:var(--ink2)} .samp[hidden]{display:none} .samp>span{flex:1 1 260px} .samp b{color:var(--ink)}
+  .samp .sampgo{flex:0 1 auto;display:flex;flex-wrap:wrap;align-items:center;gap:6px} .samp .chip{flex:0 0 auto;min-height:40px;font-size:14px;padding:6px 14px}
+  .padk.empty{border-style:dashed;border-bottom-style:dashed;background:transparent} .padk.empty small{color:var(--ink3)}
+  .padk.empty::after{content:'+';position:absolute;left:50%;top:50%;transform:translate(-50%,-55%);font-size:24px;font-weight:300;line-height:1;color:var(--ink3);pointer-events:none}
+  .mode-cue{margin:8px 0 0;font-size:13px;color:var(--accent-ink);font-weight:600} .mode-cue[hidden]{display:none}
   .jk{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px 12px;font-size:13px;align-items:baseline}
   .jk .j{font-weight:700;color:var(--ink)} .jk .r{color:var(--ink2)} .jk .r b{color:var(--ink)}
   .j4{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap} .j4 .big{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums} .j4 .v{font-variant-numeric:tabular-nums;color:var(--ink2);min-width:7ch}
@@ -251,19 +260,22 @@
     <h2>Mode <span id="mode_jacks" class="pill">—</span></h2>
     <div id="modes" class="modes"><span class="note">Connect (or press Demo) to see the module's grammars.</span></div>
     <p id="mode_what" class="mode-what"></p>
+    <p id="mode_cue" class="mode-cue" role="status" hidden></p>
   </section>
   <section id="padsCard" class="wide" hidden>
     <h2>Pads — the 24 keys <span class="wvbtns"><span id="pads_follow" class="pill" hidden>keys follow markers</span><span id="pads_plays" class="pill">one-shot</span></span></h2>
+    <div id="pd_sampler" class="samp" role="status" hidden><span id="pd_sampler_text"><b>Sampler</b> — the pads play samples (so do J4 and the Kit); no pattern runs.</span><span class="sampgo">For a beat: <button id="pd_go_classic" class="chip" title="Grammar → Classic (the transport stays stopped until ▶)">Classic</button> <button id="pd_go_grids" class="chip" title="Grammar → Grids (the transport stays stopped until ▶)">Grids</button> then ▶</span></div>
     <div id="pd_bar" class="row pdrow" hidden>
       <div class="pdroom"><div class="bar usage" id="pd_meter" title="the pads' share of the sample memory (what the break leaves): used · held by replaced pads · free"><i class="rec" id="pd_used"></i><i class="held" id="pd_held"></i></div><span id="pd_room" class="note num">pads —</span></div>
       <label class="ctl inl">into<select id="pd_key" class="inline" title="the pad a chosen file goes to — several files fill that pad and the ones after it"></select></label>
       <button id="pd_pick" class="mini primary" title="choose audio files for a pad (on a phone: the way to drop a sample)">Choose samples…</button><input id="pd_file" type="file" accept="audio/*,.wav,.wave,.aif,.aiff,.mp3,.flac,.ogg,.m4a" multiple hidden>
+      <label class="ctl inl" title="peak-normalise each dropped file to −1 dBFS in the browser before it is sent (one gain for both channels; this browser remembers it). Off: the file goes as it is"><input type="checkbox" id="pd_norm"> normalise drops</label>
       <button id="pd_new" class="mini danger" title="NEW_KIT: no break — every pad and marker gone, the whole memory for pads, the module in Pads (asks first)">New empty kit</button>
     </div>
     <div id="pd_unsaved" class="pdnote" role="status" hidden><span id="pd_unsaved_text">Unsaved kit: these sounds live in the module's memory only — a power-off loses them. Save the kit as a set to keep it.</span><button id="pd_save" class="mini primary" title="the Kit tab's Set: name it and save (ACTION 14) — the break, every pad, the table and the options">Save set…</button></div>
     <div id="pads" class="pads"></div>
     <p id="pd_msg" class="note" role="status" hidden></p>
-    <p id="pads_help" class="note">Press to play a key as a CV note would (several fingers at once). In <b>Play</b> what you play is written into the loop; in <b>Pads</b> nothing is written. A pad lights whenever its key is called — from here, the CV jacks or the panel. <span id="pads_drop_help" hidden><b>Drop audio files on a pad</b> to load them into it (several files fill that pad and the next ones): mono or stereo, as the file is — no trim, no normalise.</span></p>
+    <p id="pads_help" class="note">Press to play a key as a CV note would (several fingers at once). In <b>Play</b> what you play is written into the loop; in <b>Pads</b> nothing is written. A pad lights whenever its key is called — from here, the CV jacks or the panel. <span id="pads_drop_help" hidden><b>Drop audio files on a pad</b> to load them into it (several files fill that pad and the next ones): mono or stereo, as the file is — no trim, and no normalise unless <i>normalise drops</i> is ticked (peak to −1 dBFS).</span></p>
   </section>
   <section class="wide">
     <h2>The bar</h2>
@@ -583,6 +595,8 @@ canvases.forEach(sizeCanvas);
 function ctx(c) { if (!c._cw) sizeCanvas(c); const g = c.getContext('2d'); g.setTransform(c._d, 0, 0, c._d, 0, 0); return [g, c._cw, c._ch]; }
 /* the play grammars: Play (the loop is what you play in) and Pads (nothing is written) — the bar there is the kit's */
 const playish = s => !!s && (s.grammar === GR.play || s.grammar === GR.pads);
+/* beta-sampler: Pads with the transport stopped — how the module powers up (Start in = Sampler): a plain sampler */
+const samplerish = s => !!s && s.grammar === GR.pads && !!s.muted;
 /* a step's class (0 kick · 1 snare · 2 hat · 3 other, -1 at rest) and its colour; the strip also letters it, so the class is not told by colour alone */
 function stepCls(s) { if (!st || s >= st.nSlices) return -1; const src = st.src[s]; return src < 0 ? -1 : (src < st.stepClass.length ? st.stepClass[src] : srcClass(src)) & 3; }
 function stepColor(s) { const c = stepCls(s); return c < 0 ? TOK['cv-rest'] : COL[c]; }
@@ -619,7 +633,7 @@ function drawAll(m) {
       if (calledStep(s)) col = TOK['cv-call']; else if (s === cur) col = TOK['cv-play'];
       g.beginPath(); g.arc(cx + Math.cos(a) * R, cy + Math.sin(a) * R, Math.max(4, R * 0.11), 0, Math.PI * 2); g.fillStyle = col; g.globalAlpha = st.muted || pads ? 0.35 : 1; g.fill(); g.globalAlpha = 1; }
     g.fillStyle = TOK['cv-ink']; g.textAlign = 'center'; g.font = '600 20px system-ui'; g.fillText(st.bpm.toFixed(0), cx, cy + 6);
-    g.font = '11px system-ui'; g.fillStyle = TOK['cv-ink2']; g.fillText(st.muted ? 'STOPPED' : pads ? 'PADS' : (st.mult !== 1 ? multLabel(st.mult) : 'BPM'), cx, cy + 22);
+    g.font = '11px system-ui'; g.fillStyle = TOK['cv-ink2']; g.fillText(st.muted && pads ? 'SAMPLER' : st.muted ? 'STOPPED' : pads ? 'PADS' : (st.mult !== 1 ? multLabel(st.mult) : 'BPM'), cx, cy + 22);
     const c = $('strip'); const [g2, w2, h2] = ctx(c); g2.clearRect(0, 0, w2, h2);
     for (let s = 0; s < ns; s++) { const x0 = sliceX(s, w2), x1 = sliceX(s + 1, w2); g2.fillStyle = stepColor(s); g2.globalAlpha = st.muted || pads ? 0.35 : 1; g2.fillRect(x0 + 1, 6, Math.max(1, x1 - x0 - 2), h2 - 12);
       const c = stepCls(s); if (c >= 0 && x1 - x0 >= 9) { g2.fillStyle = TOK['cv-bg']; g2.font = '700 9px system-ui'; g2.textAlign = 'center'; g2.fillText(CLS_NAME[c][0].toUpperCase(), (x0 + x1) / 2, h2 - 10); } g2.globalAlpha = 1;
@@ -739,14 +753,16 @@ const tpMode = () => st ? st.grammar : -1;
 function drawTransport() {
   const on = !!(link && st), run = on && !st.muted, g = tpMode();
   const tp = $('t_play'); tp.disabled = !on; tp.textContent = run ? '■' : '▶'; tp.className = 'tplay' + (run ? ' run' : ''); tp.setAttribute('aria-pressed', run ? 'true' : 'false');
-  tp.title = run ? 'stop the pattern — the clock runs on and the keys still play (B1 held on the panel)' : 'start the pattern (B1 held on the panel)';
+  tp.title = run ? 'stop the pattern — the clock runs on and the keys still play (B1 held on the panel)' : g === GR.pads ? 'start the pattern — Pads has none: pick Classic or Grids first, then ▶ (B1 held on the panel)' : 'start the pattern (B1 held on the panel)';
+  tp.classList.toggle('cue', on && !run && g >= 0 && g !== GR.pads);   /* beta-sampler: a drum grammar waits for ▶ */
   if (!on) { setText('t_bpm', '—'); setText('t_mult', 'BPM'); setText('t_sub', link ? 'connecting…' : 'not connected'); }
   else {
     const bpm = steady(sBpm, st.bpm, 0.1, 2);
     setText('t_bpm', bpm.toFixed(1)); setText('t_mult', st.mult !== 1 ? 'BPM ' + multLabel(st.mult) : 'BPM');
     const gname = modeName(g), clock = st.ext ? (st.locked ? 'locked' : 'following') : 'internal clock';
-    const sub = `${st.muted ? 'stopped' : 'playing'} · ${gname} · ${clock}`;
-    if (lastText.get('t_sub') !== sub) { lastText.set('t_sub', sub); $('t_sub').innerHTML = `<b>${esc(st.muted ? 'stopped' : 'playing')}</b><span class="xs"> · ${esc(gname)} · <span class="${st.locked ? 'lk' : ''}">${esc(clock)}</span></span>`; }
+    const word = samplerish(st) ? 'sampler' : st.muted ? 'stopped' : 'playing';   /* beta-sampler: Pads, stopped, is a sampler, not a stopped beat */
+    const sub = `${word} · ${gname} · ${clock}`;
+    if (lastText.get('t_sub') !== sub) { lastText.set('t_sub', sub); $('t_sub').innerHTML = `<b>${esc(word)}</b><span class="xs"> · ${esc(gname)} · <span class="${st.locked ? 'lk' : ''}">${esc(clock)}</span></span>`; }
   }
   const dice = $('t_dice'), flow = $('t_flow'), rs = $('t_reslice');
   const play = g === GR.play, pads = g === GR.pads, camp = g === GR.camp;
@@ -831,7 +847,10 @@ function drawModes() {
   const html = g >= 0 ? `<b>${esc(modeName(g))}</b> — ${modeLine(g)}` : '';
   if (lastText.get('mode_what') !== html) { lastText.set('mode_what', html); $('mode_what').innerHTML = html; }
   if (st && st.jackMap != null) setPill('mode_jacks', st.jackMap ? 'Voice map' : 'Brain map', st.jackMap ? 'brain' : ''); else setPill('mode_jacks', '—', '');
-  const cls = 'show' + (g === GR.pads ? ' m-pads' : g === GR.play ? ' m-play' : ''), pl = $('play');
+  const cls = 'show' + (g === GR.pads ? ' m-pads' : g === GR.play ? ' m-play' : '') + (samplerish(st) ? ' m-sampler' : ''), pl = $('play');
+  /* beta-sampler: once a drum grammar is picked while stopped, say what starts it */
+  const cue = st && st.muted && g >= 0 && g !== GR.pads ? `Stopped — press ▶ to start ${esc(modeName(g))} (it comes in on the beat; the panel: B1 held 600 ms).` : '';
+  $('mode_cue').hidden = !cue; if (lastText.get('mode_cue') !== cue) { lastText.set('mode_cue', cue); $('mode_cue').innerHTML = cue; }
   if (pl.classList.contains('show')) { const want = cls; if (pl.className !== want) pl.className = want; }
   else pl.className = cls.replace('show', '').trim();
   setText('wave_title', playish(st) ? 'The kit — each key and what it plays, lit as it fires' : 'Slices — click a slice to select it, then click a step above to punch it in');
@@ -863,7 +882,7 @@ const padEls = [], padDown = new Map();
  * key's recording — one undo step. Several files fill the pad and the ones after it. Every card and pad job shares
  * one queue (cardRun): a drop never interleaves with a card upload on the wire. The waits ask for the state themselves
  * (never the background poll, which stops while the tab is hidden) and give up only when the module stands still. */
-let padsOk = false;
+let padsOk = false, startOk = false;   /* startOk — beta-sampler: "startIn" (ACTION 40, flags b5) */
 let padStallMs = 30000;                     /* how long the module's pads state may stand still before a wait gives up (the selftest shortens it) */
 const padJobs = [];                         /* every drop this session, in order */
 const padJob = new Array(24).fill(null);    /* the drop shown on each pad (its progress, then its result for a while) */
@@ -915,8 +934,10 @@ async function padUpload(job) {
   const plan = HL.padPlan(ab.numberOfChannels, ab.sampleRate, ab.length, p0.free); job.plan = plan;
   if (p0.free < HL.PADS.minFrames) { job.state = 'failed'; padShow(job, `no room left for pads (${padSecs(p0.free)} free${p0.held ? `, ${padSecs(p0.held)} held by replaced pads` : ''}) — save the kit, or start a New empty kit`, 'bad', 0); return; }
   if (plan.tooShort) { job.state = 'failed'; padShow(job, `${job.file.name}: too short (${(plan.seconds * 1000).toFixed(0)} ms; a pad needs 10 ms)`, 'bad', 0); return; }
-  const planes = []; for (let c = 0; c < plan.channels; c++) planes.push(ab.getChannelData(c).subarray(0, plan.frames));
-  const bytes = HL.encodePcm16(planes, plan.frames), what = `${plan.channels === 2 ? 'stereo' : 'mono'}, ${padSecs(plan.frames)}${plan.cut ? ` — the first ${padSecs(plan.frames)} of ${plan.sourceSeconds.toFixed(1)} s, all the room left` : ''}`;
+  let planes = []; for (let c = 0; c < plan.channels; c++) planes.push(ab.getChannelData(c).subarray(0, plan.frames));
+  const nz = padNorm ? HL.padNormalize(planes, plan.frames, -1) : null; if (nz) { planes = nz.planes; job.norm = nz; }   /* beta-sampler */
+  const normTxt = !nz ? '' : nz.applied ? `, normalised ${nz.gainDb >= 0 ? '+' : '−'}${Math.abs(nz.gainDb).toFixed(1)} dB` : ', silent (not normalised)';
+  const bytes = HL.encodePcm16(planes, plan.frames), what = `${plan.channels === 2 ? 'stereo' : 'mono'}, ${padSecs(plan.frames)}${normTxt}${plan.cut ? ` — the first ${padSecs(plan.frames)} of ${plan.sourceSeconds.toFixed(1)} s, all the room left` : ''}`;
   job.what = what; job.state = 'sending'; padShow(job, `sending 0 % · ${what}`, 'busy', 0);
   try {
     const r = await HL.uploadPad(link, job.key, plan.channels, bytes, { maxBody: info && info.maxBody, cancel: () => job.cancelled || !link,
@@ -950,6 +971,24 @@ async function padNewKit() {
     padJob.fill(null); refreshLive(); refetchKit();
   }).catch(e => warn('kit', e));
 }
+/* beta-sampler: the sampler line over the pads (Pads, stopped): what plays, where a sample goes, how to get a beat — the two
+ * buttons only write the grammar (the transport stays stopped until ▶, as the module does) */
+const grammarIndex = name => labels.grammar.findIndex(l => baseLabel(l) === name);
+function drawSampler() {
+  const on = samplerish(st); $('pd_sampler').hidden = !on; if (!on) return;
+  const html = `<b>Sampler</b> — the pads play samples (so do J4 and the Kit); no pattern runs.${padsOk ? ' Drop audio files on a pad to load it.' : ''}${startOk && !st.startSaved ? ' The module powers up like this (Options → Start-up).' : ''}`;
+  if (lastText.get('pd_sampler_text') !== html) { lastText.set('pd_sampler_text', html); $('pd_sampler_text').innerHTML = html; }
+  const c = grammarIndex('Classic'), g = grammarIndex('Grids');
+  $('pd_go_classic').hidden = c < 0; $('pd_go_grids').hidden = g < 0; $('pd_go_classic').disabled = $('pd_go_grids').disabled = !link || !opts;
+}
+$('pd_go_classic').onclick = () => { const g = grammarIndex('Classic'); if (g >= 0) setMode(g); };
+$('pd_go_grids').onclick = () => { const g = grammarIndex('Grids'); if (g >= 0) setMode(g); };
+/* beta-sampler: normalise drops — the browser peak-normalises each file to −1 dBFS before it goes (HL.padNormalize); off
+ * by default (a kit's relative levels are the point), remembered per browser */
+let padNorm = false;
+try { padNorm = localStorage.getItem('audiothurgist.padNorm') === '1'; } catch {}
+$('pd_norm').checked = padNorm;
+$('pd_norm').addEventListener('change', e => { padNorm = !!e.target.checked; try { localStorage.setItem('audiothurgist.padNorm', padNorm ? '1' : '0'); } catch {} });
 /* the room, the unsaved note, the controls (drawn with the pads) */
 function drawPadsBar() {
   const p = st && st.pads, on = padsOk && !!p;
@@ -984,11 +1023,12 @@ function drawPads() {
     const what = j ? (j.kind === 'busy' ? (j.state === 'sending' ? `↑ ${Math.round(j.frac * 100)} %` : j.state === 'committing' ? 'placing…' : '…') : j.kind === 'ok' ? '✓ ' + padSecs(j.plan ? j.plan.frames : 0) : '✕ not loaded')
       : !e ? (t >= 0 ? `slice ${t}` : '—') : t < table.nSlices ? (noBreak ? 'empty' : `slice ${t}`) : e.key >= 0 ? padSecs(e.len) : `marker ${t}`, cls = e && !(noBreak && t < table.nSlices) ? e.cls & 3 : -1;
     const sig = what + '|' + cls + '|' + (j ? j.kind + j.frac : ''); if (sig === p.sig) continue; p.sig = sig;
-    p.sub.textContent = what; p.el.className = p.el.className.replace(/\s*(c\d|busy|bad)\b/g, '') + (cls >= 0 ? ' c' + cls : '') + (j && j.kind === 'busy' ? ' busy' : j && j.kind === 'bad' ? ' bad' : '');
+    const empty = !j && padsOk && noBreak && e && t < table.nSlices;   /* beta-sampler: an empty kit's pad says it takes a drop */
+    p.sub.textContent = what; p.el.className = p.el.className.replace(/\s*(c\d|busy|bad|empty)\b/g, '') + (cls >= 0 ? ' c' + cls : '') + (j && j.kind === 'busy' ? ' busy' : j && j.kind === 'bad' ? ' bad' : '') + (empty ? ' empty' : '');
     if (p.fill) { p.fill.style.width = j ? Math.round((j.kind === 'bad' ? 1 : j.frac) * 100) + '%' : '0'; p.fill.className = 'pf' + (j && j.kind === 'ok' ? ' ok' : j && j.kind === 'bad' ? ' bad' : ''); }
     p.el.title = j && j.text ? `${keyName(k)} — ${j.text}` : `key ${k} (${keyName(k)}) — PLAY_KEY${padsOk ? ' · drop an audio file here to load it' : ''}`;
   }
-  drawPadsBar();
+  drawPadsBar(); drawSampler();
   $('pads_follow').hidden = !st.keysFollow;
   setPill('pads_plays', (st.keyPlays != null ? st.keyPlays : optByte('key.plays')) === 1 ? 'held until you let go' : 'one-shot', '');
 }
@@ -1130,6 +1170,7 @@ function onState(b) {
   if (s.keySeq != null && p && p.keySeq != null && s.keySeq !== p.keySeq && s.keyFlash >= 0) flashKey(s.keyFlash);
   if (s.matGen !== envGen && !poll.pEnv) { const gen = s.matGen; poll.pEnv = fetchEnv(link, s.nSlices).then(e => { env = e; envGen = gen; selSlice = -1; invalidate(D.wave); }, e => warn('env', e)).finally(() => { poll.pEnv = null; }); }
   syncKit(s);
+  if (startOk) syncStartIn();   /* beta-sampler */
   if (cardOk) drawCard();
   /* EDIT-PANEL: the module's Edit page publishes its selection (tail byte 257); the editor follows the knobs */
   if (editOk && s.selSlice != null && s.selSlice >= 0 && s.selSlice !== (p ? p.selSlice : -1) && s.selSlice !== ed.selT) ed.select(s.selSlice);
@@ -1740,7 +1781,38 @@ function buildOptions() {
     host.appendChild(g);
   }
   const bars = opts.fields.find(f => f.id === 'bars'); if (bars) { const s = makeOptionSelect(bars); s.className = 'inline'; $('k_bars').appendChild(s); }
+  if (startOk) host.appendChild(buildStartIn());
   syncOptions();
+}
+/* beta-sampler: Start in — not an Options byte (a 25th would move the preset schema and drop every saved slot): the
+ * module keeps it on its card (Audiothurgist/startup.json) and reads it at power-up. ACTION 40 writes it; the state's
+ * flags b5 reads it back, so the select follows the module, not what was last picked here. */
+let startSel = null, startNote = null, startBusy = false;
+function buildStartIn() {
+  const g = document.createElement('div'); g.className = 'grp'; g.innerHTML = '<h3>Start-up (kept on the card)</h3>';
+  const row = document.createElement('div'); row.className = 'opt'; row.innerHTML = '<span title="startIn — Audiothurgist/startup.json, read at power-up">Start in</span>';
+  const sel = document.createElement('select');
+  for (const [v, t] of [[0, 'Sampler — Pads, stopped (the keys play; ▶ starts a beat)'], [1, 'As saved — the boot preset\'s grammar, running']]) { const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o); }
+  sel.onchange = () => writeStartIn(+sel.value);
+  row.appendChild(sel); g.appendChild(row);
+  const n = document.createElement('p'); n.className = 'note'; n.textContent = 'How the module powers up. It lives on the card, not in a preset, so saving or loading a preset never changes it; without a card it starts as a sampler.';
+  g.appendChild(n); startSel = sel; startNote = n; syncStartIn(); return g;
+}
+function syncStartIn() {
+  if (!startSel || !st) return;
+  const v = String(st.startSaved ? 1 : 0), noCard = !!(st.card && !st.card.mounted);
+  if (document.activeElement !== startSel && !startBusy && startSel.value !== v) startSel.value = v;
+  startSel.disabled = noCard || startBusy;
+  startSel.title = noCard ? 'no card in the module — Start in is kept on the card (without one it starts as a sampler)' : 'what the module does at power-up';
+}
+async function writeStartIn(v) {
+  if (!link || !startOk || startBusy) return; startBusy = true; syncStartIn();
+  try {
+    const r = await HL.setStartIn(link, v === 1);
+    if (!r.ok) say(`Start in: ${r.status === 21 ? 'no card in the module — there is nowhere to keep it' : 'refused (' + HL.statusName(r.status) + ')'}`, true);
+    else say(`Start in: ${v === 1 ? 'As saved — the next power-up plays the boot preset\'s grammar' : 'Sampler — the next power-up comes up in Pads, stopped'}`);
+  } catch (e) { say('Start in failed: ' + e.message, true); }
+  finally { startBusy = false; poll.tState = 0; setTimeout(syncStartIn, 400); }
 }
 function makeOptionSelect(f) {
   const sel = document.createElement('select'); const lab = (f.disp && f.disp.labels) || [];
@@ -1978,7 +2050,7 @@ function setDisconnected() {
   table = null; tableSig = ''; bufSig = ''; hits = null; hitsGen = -1; kitOk = false; wave.cache.clear(); wave.queue.length = 0; wave.planSig = ''; keyCells.forEach(c => { c.sig = ''; });
   editOk = false; keysOk = false; copyArm = -1; ed.selT = -1; ed.drag = null; ed.local = null; ed.history = new ED.History(); histSig = fieldSig = ''; closeMenu(); ghost(null); dropHi(-1); setEditorShown(false);
   setsOk = false; setSeqShown = -1; setAsked = null; setPill('s_status', '—', ''); $('s_save').disabled = $('s_load').disabled = true;
-  padsOk = false; for (const j of padJobs) j.cancelled = true; padJob.fill(null); $('pd_bar').hidden = true; $('pd_unsaved').hidden = true; $('pd_msg').hidden = true; $('k_load').hidden = true;
+  padsOk = false; startOk = false; startSel = startNote = null; $('pd_sampler').hidden = true; $('mode_cue').hidden = true; lastText.delete('mode_cue'); for (const j of padJobs) j.cancelled = true; padJob.fill(null); $('pd_bar').hidden = true; $('pd_unsaved').hidden = true; $('pd_msg').hidden = true; $('k_load').hidden = true;
   cardOk = false; for (const j of cardJobs) j.cancelled = true; $('cardCard').hidden = true; $('cardnote').hidden = true; $('p_add').hidden = true;
   scope2Ok = scopeCvOk = false; clearTimeout(sc.timer); sc.timer = null; sc.frames.length = 0; sc.fps = sc.rps = sc.bps = 0; sc.err = ''; invalidate(D.bigscope);
   $('connect').textContent = 'Connect'; $('connect').disabled = !serialApi(); $('demo').disabled = false; $('demo').hidden = false; $('padsCard').hidden = true;
@@ -2021,6 +2093,7 @@ async function connectPort(port, isDemo) {
     setsOk = !!cp.sets;                       /* ACTION 14 / 15 + the 219.. tail */
     cardOk = cp.card >= 1;                    /* CARD: 0x67 (upload, copy an old card in, the list) + the 276.. tail */
     padsOk = keysOk && cp.pads >= 1;          /* PADS: 0x68 (a sample dropped onto a pad, New empty kit) + the 293.. tail */
+    startOk = padsOk && cp.startIn >= 1;      /* beta-sampler: Start in — ACTION 40, GET_STATE flags b5 */
     $('cardCard').hidden = !cardOk; $('p_add').hidden = !cardOk; $('cardnote').hidden = true;
     scope2Ok = cp.scope2 >= 1;                /* SCOPE: the 0x62 body (audio channels) */
     scopeCvOk = cp.scope2 >= 2;               /* SCOPE: … with the J3..J8 ext */
@@ -2105,12 +2178,14 @@ async function connect() {
  * leaves J1/J2 silent, `body512` announces the protocol's default max_body; CARD: `oldcard` the old layout (WAVs in
  * the root, sets/ and presets/ beside them, no Audiothurgist folder), `nocard` no card in, `nocardfw` a 0.13 firmware
  * before the card work (no "card", the 276-byte body), `card` opens the Kit tab's Card panel; PADS: `nopads` a firmware
- * before the pads work (no "pads", the 293-byte body), `emptykit` starts from New empty kit (no break, Pads). */
+ * before the pads work (no "pads", the 293-byte body), `emptykit` starts from New empty kit (no break, Pads); START
+ * (beta-sampler): `sampler` powers the fake up as the firmware does by default — Start in = Sampler: Pads, the transport
+ * stopped (the Demo button does this; a bare `?demo` keeps the old boot, Classic running, that the selftest drives). */
 async function connectDemo(flags = '') {
   if (link) return; notice('');
   const f = new Set(flags.split(',').filter(Boolean));
   const tail = f.has('old') ? 148 : f.has('short') ? 167 : f.has('v099') ? 176 : f.has('nosets') ? 219 : f.has('noedit') ? 255 : f.has('noundo') ? 262 : f.has('old12') ? 263 : f.has('nocardfw') ? 276 : f.has('nopads') ? 293 : 315;
-  demoDevice = new DEMO.FakeDevice({ tail, latencyMs: 6, oldcard: f.has('oldcard'), nocard: f.has('nocard'), kit: f.has('kit') || f.has('pads'), swing: f.has('kit') || f.has('swing'), inputs: !f.has('noin'), maxBody: f.has('body512') ? 512 : DEMO.MAX_BODY, edit: !(f.has('noedit') || f.has('nosets') || f.has('v099') || f.has('short') || f.has('old')) });
+  demoDevice = new DEMO.FakeDevice({ tail, latencyMs: 6, startIn: f.has('sampler') ? 0 : undefined, oldcard: f.has('oldcard'), nocard: f.has('nocard'), kit: f.has('kit') || f.has('pads'), swing: f.has('kit') || f.has('swing'), inputs: !f.has('noin'), maxBody: f.has('body512') ? 512 : DEMO.MAX_BODY, edit: !(f.has('noedit') || f.has('nosets') || f.has('v099') || f.has('short') || f.has('old')) });
   const d = demoDevice;
   if (f.has('scope')) showTab('tab_scope');
   if (f.has('cv')) $('sc_p_cv').onclick(); if (f.has('gates')) $('sc_p_gates').onclick();
@@ -2129,7 +2204,7 @@ async function connectDemo(flags = '') {
   await connectPort(demoPort, true);
   if (!f.size && demoDevice) setInterval(() => { if (!demoDevice) return; const d = demoDevice; d.ext = !d.ext; d.locked = d.ext; d.lockMask = d.ext ? 0x0009 : 0; d.mult = d.ext ? 2 : 1; d.multZone = d.ext ? 3 : 2; d.p2Engaged = d.ext; d.aligned = d.ext; }, 12000);
 }
-$('connect').onclick = connect; $('demo').onclick = () => connectDemo();
+$('connect').onclick = connect; $('demo').onclick = () => connectDemo('sampler');   /* beta-sampler: as the module powers up */
 if (!serialApi()) { notice('Web Serial is not available here (yet: on Android the WebUSB polyfill may still be loading). Use Chrome/Edge/Opera on https:// or http://localhost — file:// will not work. The Demo button works anywhere.'); $('connect').disabled = !(navigator.usb); }
 invalidate(D.transport);
 { const m = /[?&]demo(?:=([^&#]*))?/.exec(location.search); if (m) connectDemo(decodeURIComponent(m[1] || '')); }
