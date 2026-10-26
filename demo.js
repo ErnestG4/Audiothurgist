@@ -106,7 +106,11 @@ const GRID_MIN = 64, MAX_TABLE = 96, F_ORANGE = 1, F_TOMB = 2, MS = 48, TAP_MAX 
 /* KEYS (v0.13): a tap this close to a live marker's start selects that marker instead of stacking another (10 ms);
  * the autoslice count's ceiling. */
 const TAP_REUSE = 10 * MS, AUTO_MAX = 64;
-const EDIT_NEED = [5, 9, 10, 5, 1, 1, 2, 2, 3, 2, 3, 7, 0, 2, 0, 0, 2, 0, 0, 1, 2];   /* field bytes of ACTION 16..36 */
+const EDIT_NEED = [5, 9, 10, 5, 1, 1, 2, 2, 3, 2, 3, 7, 0, 2, 0, 0, 2, 0, 0, 1, 2, 6];   /* field bytes of ACTION 16..37 */
+/* KEYP: one key's settings (core/bb_engine.h KeyParam) — gain in ½ dB −48..+12, cents ±2400, plays 0 follow Key Plays ·
+ * 1 one-shot · 2 held · 3 loop (held, looping the entry); all zero = neutral */
+const KEYP = { gainMin: -48, gainMax: 12, centsMax: 2400, playsMax: 3 };
+const keypNeutral = () => ({ gain: 0, plays: 0, cents: 0 });
 const UNDO_DEPTH = 64;   /* EDIT-UNDO: the journal's ring */
 const EDIT_STATUS = { Ok: 0, BadOp: 2, BadArgs: 2, Full: 3, NotMarker: 2, NotGrid: 2, Tomb: 2, Stale: 3, NoMaterial: 3, Silent: 3 };
 /* SCOPE: the firmware's ring geometry (core/bb_scope.h) and this module's max_body
@@ -133,7 +137,7 @@ const MANUAL = {
 /* opts: { edit: true, keys: true } — keys: false plays a 0.12 firmware (edit 1, no ACTION 32.., the 263-byte body).
  * CARD: `files` the list the firmware scanned at boot (its dropdown; none on a card without the folder), `card` the
  * capability. */
-function buildDescriptor(edit = true, keys = edit, files = FILES, card = keys, pads = card) {
+function buildDescriptor(edit = true, keys = edit, files = FILES, card = keys, pads = card, keyp = pads) {
   const pagerFields = [];
   KNOBS.forEach((page, pg) => page.forEach(([id, name, help], pot) => pagerFields.push({ id, name, off: (pg * 6 + pot) * 4, type: 'f32', page: pg, pot, def: 0.5, disp: pot === 3 && pg === 0 ? { kind: 'linear', lo: -12, hi: 12, unit: 'st' } : pot === 1 && pg === 0 ? { kind: 'linear', lo: 60, hi: 200, unit: 'BPM' } : { kind: 'norm' }, help })));
   return {
@@ -158,7 +162,7 @@ function buildDescriptor(edit = true, keys = edit, files = FILES, card = keys, p
     /* StateExt::DescriptorRootJson: v0.13 adds "keys":1 and bumps "edit" to 2 (TAP_MARK refuses when nothing sounds
      * and reuses a marker within 10 ms) */
     audiothurgist: Object.assign({ ext: 1, state: 96, env: 97, scope: 98, action: 99, wave: 100, table: 101, hits: 102, sets: 1, scope2: 2 },
-      edit ? { edit: keys ? 2 : 1 } : {}, keys ? { keys: 1 } : {}, card ? { card: 1 } : {}, pads ? { pads: 1 } : {}),
+      edit ? { edit: keys ? 2 : 1 } : {}, keys ? { keys: 1 } : {}, card ? { card: 1 } : {}, pads ? { pads: 1 } : {}, keyp ? { keyp: 1 } : {}),
     manual: MANUAL,
   };
 }
@@ -182,10 +186,14 @@ class FakeDevice {
      * 293-byte body. */
     if (this.opts.pads == null) this.opts.pads = this.opts.card && this.opts.tail >= 315;
     if (!this.opts.pads && this.opts.tail > 293) this.opts.tail = 293;
+    /* KEYP: `keyp: false` plays a firmware before the per-key settings — no "keyp", ACTION 37 unknown (BAD_ARGS), 0x69
+     * UNSUPPORTED. No tail bytes: the page reads 0x69 whenever tableGen moves. */
+    if (this.opts.keyp == null) this.opts.keyp = this.opts.pads;
+    this.keyp = Array.from({ length: KEYS }, keypNeutral);
     this.cardInit();
     this.live = new Uint8Array(LIVE_SIZE); this.live.fill(0x80, OFF.pager, OFF.pager + 48);
     OPTION_FIELDS.forEach((f, i) => { this.live[OFF.options + i] = f[3]; });   /* the firmware's live defaults */
-    this.desc = new TextEncoder().encode(JSON.stringify(buildDescriptor(this.opts.edit, this.opts.keys, this.files, this.opts.card, this.opts.pads)));
+    this.desc = new TextEncoder().encode(JSON.stringify(buildDescriptor(this.opts.edit, this.opts.keys, this.files, this.opts.card, this.opts.pads, this.opts.keyp)));
     /* KEYS: the pad / CV voice (the key, when it started, its span, until when it sounds — Infinity while a held key is
      * down), the key-call flash and sequence, the play loop's events (Play: each write, for B2's undo), the autoslice
      * seed and count, the selection the panel publishes (tail 257), and the last position something sounded at
@@ -230,7 +238,8 @@ class FakeDevice {
     return { nSlices: this.nSlices, bufLen: this.bufLen, freePos: this.freePos, table: this.table.map(e => Object.assign({}, e)),
       keySlice: Int8Array.from(this.keySlice), hits: this.hits.slice(), looperEvents: this.looperEvents, options: Uint8Array.from(this.options),
       buf: this.buf.slice(0, this.freePos), src: Int8Array.from(this.src), stepClass: Uint8Array.from(this.stepClass), env: Uint8Array.from(this.env),
-      bufR: this.stereo && this.bufR ? this.bufR.slice(0, this.freePos) : null, stereo: this.stereo, noBreak: this.noBreak };
+      bufR: this.stereo && this.bufR ? this.bufR.slice(0, this.freePos) : null, stereo: this.stereo, noBreak: this.noBreak,
+      keyp: this.keyp.map(p => Object.assign({}, p)) };   /* KEYP: the set JSON's "keyp" */
   }
   restore(sn) {
     this.opts.nSlices = sn.nSlices; this.bufLen = sn.bufLen; this.freePos = sn.freePos; this.table = sn.table.map(e => Object.assign({}, e));
@@ -239,6 +248,7 @@ class FakeDevice {
     /* PADS: a stereo set keeps its R plane (Sampling = Stereo); an empty kit's stub is recognised by its silence */
     this.stereo = !!(sn.stereo && sn.bufR) && this.options[O.sampling] === 1; if (this.stereo) { this.bufR = new Float32Array(BUF_CAP); this.bufR.set(sn.bufR); }
     this.noBreak = !!sn.noBreak; this.onCard = sn.freePos; this.padStereo = false;
+    this.keyp = sn.keyp ? sn.keyp.map(p => Object.assign({}, p)) : Array.from({ length: KEYS }, keypNeutral);   /* KEYP: an old set: neutral */
     this.rec = { state: 0, key: -1, t: 0, pos: 0 }; this.matGen = (this.matGen + 1) & 0xff; this.bumpGen(); this.journal = []; this.redoStack = [];
   }
   /* EDIT: every table change bumps the generation (an edit, a take's commit, a clear, new material, a set load). */
@@ -363,6 +373,7 @@ class FakeDevice {
     for (let s = 0; s < 16; s++) { this.table.push({ start: s * 750, len: 750, key: -1, cls: 3, sal: 0, hit: false, dens: 0, flags: 0 }); this.stepClass[s] = 3; this.src[s] = -1; }
     for (let s = 16; s < 64; s++) { this.stepClass[s] = 0; this.src[s] = 0; }
     this.env.fill(128); for (let k = 0; k < KEYS; k++) this.keySlice[k] = this.spanSlice(k);
+    this.keyp = Array.from({ length: KEYS }, keypNeutral);   /* KEYP: a new kit, every key neutral */
     this.rec = { state: 0, key: -1, t: 0, pos: 0 }; this.loopEvents = []; this.looperEvents = 0; this.journal = []; this.redoStack = [];
     this.noBreak = true; this.onCard = 0; this.padStereo = false; this.file = 255; this.set.name = '';
     const g = this.grammar; this.options[O['grammar.mode']] = GRAM.pads; this.setGrammar(GRAM.pads, g);
@@ -505,7 +516,7 @@ class FakeDevice {
     this.matGen = (this.matGen + 1) & 0xff; this.bumpGen();
   }
   /* PADS: a loose break from the card — new material, on the card, a break again (Sampling decides the planes) */
-  loadBreak() { if (this.noBreak) this.opts.nSlices = 32; this.newMaterial(); this.noBreak = false; this.onCard = this.bufLen; this.padStereo = false; this.stereo = this.options[O.sampling] === 1; if (this.stereo) { this.bufR = this.bufR || new Float32Array(BUF_CAP); this.bufR.set(this.buf.subarray(0, this.bufLen)); } this.journal = []; this.redoStack = []; }
+  loadBreak() { if (this.noBreak) this.opts.nSlices = 32; this.newMaterial(); this.keyp = Array.from({ length: KEYS }, keypNeutral); /* KEYP: new material, every key neutral */ this.noBreak = false; this.onCard = this.bufLen; this.padStereo = false; this.stereo = this.options[O.sampling] === 1; if (this.stereo) { this.bufR = this.bufR || new Float32Array(BUF_CAP); this.bufR.set(this.buf.subarray(0, this.bufLen)); } this.journal = []; this.redoStack = []; }
   /* The span mapping: key k → grid slice k · nSlices / span (Engine::SpanSlice). */
   spanSlice(key) { const n = this.nSlices, span = Math.min(n, KEYS), kk = key >= span ? span - 1 : key; return Math.floor(kk * n / span); }
   /* EDIT: the first tombstone's slot past the grid, else the end (−1 = full) — Engine::FreeSlot. */
@@ -703,8 +714,8 @@ class FakeDevice {
   }
   editBusy() { return !!(this.rec.state || this.set.state || this.set.pending || this.padOp.state >= 2 || this.padOp.job); }
   /* EDIT-UNDO: a snapshot of what an undo restores (the table and the key map), and the generation rule. */
-  tableSnap() { return { table: this.table.map(e => Object.assign({}, e)), keySlice: Int8Array.from(this.keySlice) }; }
-  tableRestore(sn) { this.table = sn.table.map(e => Object.assign({}, e)); this.keySlice.set(sn.keySlice); }
+  tableSnap() { return { table: this.table.map(e => Object.assign({}, e)), keySlice: Int8Array.from(this.keySlice), keyp: this.keyp.map(p => Object.assign({}, p)) }; }   /* KEYP: and the keys' settings */
+  tableRestore(sn) { this.table = sn.table.map(e => Object.assign({}, e)); this.keySlice.set(sn.keySlice); if (sn.keyp) this.keyp = sn.keyp.map(p => Object.assign({}, p)); }
   journalCheck() { if (this.tableGen !== this.journalGen) { this.journal = []; this.redoStack = []; } }   /* something went past the journal */
   journalPush(before) { this.journal.push(before); if (this.journal.length > UNDO_DEPTH) this.journal.shift(); this.redoStack = []; this.journalGen = this.tableGen; }
   undoStep(redo) {
@@ -750,6 +761,13 @@ class FakeDevice {
       case 33: st = this.edKeysFromMarkers(); third = this.lastCount; if (!third) return [0, this.tableGen, 0]; break;
       case 34: st = this.edClearMarkers(); third = this.lastCount; if (!third) return [0, this.tableGen, 0]; break;
       case 36: st = b[1] > AUTO_MAX ? 'BadArgs' : this.edAutoslice(b[1], !!(b[2] & 1)); third = this.lastCount; join = !!(b[2] & 2) && this.autoGen === this.tableGen && this.journal.length > 0; break;
+      case 37: {   /* KEYP: KEY_PARAMS(key, i8 gain, i16 cents, plays, flags b0 join) — the join folds into THIS key's previous step only */
+        const key = b[1], gain = b[2] > 127 ? b[2] - 256 : b[2], cents = I16(3), plays = b[5], fl = b[6];
+        if (key >= KEYS || gain < KEYP.gainMin || gain > KEYP.gainMax || cents < -KEYP.centsMax || cents > KEYP.centsMax || plays > KEYP.playsMax || (fl & ~1)) { st = 'BadArgs'; break; }
+        this.keyp[key] = { gain, plays, cents }; st = 'Ok'; before.kpKey = key;
+        const top = this.journal[this.journal.length - 1];
+        join = !!(fl & 1) && !!top && top.kpKey === key && !this.redoStack.length && this.journalGen === this.tableGen;
+        break; }
       default: st = 'BadOp';
     }
     const status = EDIT_STATUS[st];
@@ -772,12 +790,14 @@ class FakeDevice {
     const now = Date.now();
     if (!down) { if (this.voice && this.voice.key === key && this.voice.until === Infinity) this.voice.until = now; return 0; }
     const t = this.keySlice[key], e = this.table[t]; if (!e || !e.len) return 3;
-    const held = this.options[O['key.plays']] === 1;
-    this.voice = { key, t: now, start: e.start, len: held ? Math.max(e.len, this.freePos - e.start) : e.len, until: held ? Infinity : now + e.len / SR * 1000 };
+    const held = this.keyHeld(key), loop = this.keyp[key].plays === 3;   /* KEYP: the key's own Plays, else the option */
+    this.voice = { key, t: now, start: e.start, len: held && !loop ? Math.max(e.len, this.freePos - e.start) : e.len, until: held ? Infinity : now + e.len / SR * 1000, loop };
     this.keyFlash = key; this.keySeq = (this.keySeq + 1) & 0xff; this.callFlash = t; this.callT = 6;
     if (this.grammar === GRAM.play && t < 128) { const s = this.curStep(); this.loopEvents.push({ s, prev: this.src[s] }); this.src[s] = t; this.looperEvents = Math.min(255, this.looperEvents + 1); }
     return 0;
   }
+  /* KEYP: does a call through `key` hold? Follow → Options → Key Plays; One-shot never; Held and Loop always */
+  keyHeld(key) { const p = this.keyp[key] ? this.keyp[key].plays : 0; return p === 0 ? this.options[O['key.plays']] === 1 : p !== 1; }
   /* LOOPER in Play: B2 / ACTION 12 takes the last write back, B3 / ACTION 13 clears the loop */
   looperUndo() { const ev = this.loopEvents.pop(); if (ev) this.src[ev.s] = ev.prev; this.looperEvents = Math.max(0, this.looperEvents - 1); }
   looperClear() { if (this.grammar === GRAM.play) this.src.fill(-1); this.loopEvents = []; this.looperEvents = 0; }
@@ -1068,6 +1088,10 @@ class FakeDevice {
           case 33: case 34: case 36:
             if (!this.opts.keys) { ok = false; break; }
             return Uint8Array.from(this.applyEdit(op, body));
+          /* KEYP: 37 KEY_PARAMS — unknown before it */
+          case 37:
+            if (!this.opts.keyp) { ok = false; break; }
+            return Uint8Array.from(this.applyEdit(op, body));
           case 32: { if (!this.opts.keys || body.length < 3) { ok = false; break; } const r = this.playKey(a, b); if (r) { U8(r); return Uint8Array.from(w); } break; }
           case 35: if (!this.opts.keys || body.length < 2 || a > 1) ok = false; else this.muted = !!a; break;
           case 27: case 28: {
@@ -1085,6 +1109,11 @@ class FakeDevice {
         U8(ok ? 0 : 2); break; }
       case CMD.card: if (!this.opts.card) { U8(1); break; } this.cardHandle(body, U8, U32); break;   /* CARD; UNSUPPORTED before it */
       case CMD.pads: if (!this.opts.pads) { U8(1); break; } this.padHandle(body, U8, U32); break;   /* PADS; UNSUPPORTED before it */
+      case CMD.keys:   /* KEYP: 0x69 GET_KEYS → status, 24, then i8 gain · u8 plays · i16 cents per key; UNSUPPORTED before it */
+        if (!this.opts.keyp) { U8(1); break; }
+        U8(0); U8(KEYS);
+        for (const p of this.keyp) { U8(p.gain & 0xff); U8(p.plays); U8(p.cents & 0xff); U8((p.cents >> 8) & 0xff); }
+        break;
       default: U8(1);
     }
     return Uint8Array.from(w);
@@ -1111,6 +1140,6 @@ class FakePort {
   unplug() { if (this._ctrl) { try { this._ctrl.close(); } catch {} this._ctrl = null; } }
 }
 
-const api = { FakeDevice, FakePort, buildDescriptor, OPTION_FIELDS, O, GRAM, OPTIONS_HASH, JACKS, KNOBS, FW, FILES, UP_MAX, LIVE_SIZE, SCHEMA, OFF, SR, BUF_CAP, SLICE_LEN, KEYS, MAX_BODY, MAX_TABLE, REC_MIN, GRID_MIN, TAP_REUSE, AUTO_MAX, PAD_STUB };
+const api = { FakeDevice, FakePort, buildDescriptor, OPTION_FIELDS, O, GRAM, OPTIONS_HASH, JACKS, KNOBS, FW, FILES, UP_MAX, LIVE_SIZE, SCHEMA, OFF, SR, BUF_CAP, SLICE_LEN, KEYS, MAX_BODY, MAX_TABLE, REC_MIN, GRID_MIN, TAP_REUSE, AUTO_MAX, PAD_STUB, KEYP };
 if (typeof module === 'object' && module.exports) module.exports = api; else root.DEMO = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

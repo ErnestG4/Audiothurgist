@@ -152,6 +152,7 @@ function histLabel(op, a = {}) {
     case 'mkeys': return a.count == null ? 'markers → keys' : `markers → keys (${a.count})`;
     case 'mclear': return a.count == null ? 'clear markers' : `clear markers (${a.count})`;
     case 'auto': return `autoslice ${a.k}${a.reroll ? ' (re-roll)' : ''}` + (a.count == null ? '' : ` → ${a.count}`);
+    case 'keyp': return `${kn(a.key)} settings: ${(a.p && HL.keypText(a.p)) || 'neutral'}`;   /* KEYP */
     case 'undo': return 'undo'; case 'redo': return 'redo';
     case 'module': return 'changed on the module';
     default: return op;
@@ -463,7 +464,8 @@ class Editor {
         if (op === 'tap' && r.reused) { this.select(r.newIdx); this.cb.status(`tap: marker ${r.newIdx} is already there — selected it`, 'ok'); this.cb.redraw(); return r; }
         const full = op === 'split' || op === 'copy' || op === 'tap' ? histLabel(op, Object.assign({}, args, { newIdx: r.newIdx })) : op === 'onsets' || op === 'mkeys' || op === 'mclear' || op === 'auto' ? histLabel(op, Object.assign({}, args, { count: r.count })) : label;
         if ((op === 'mkeys' || op === 'mclear') && !r.count) { this.cb.status(op === 'mkeys' ? 'no markers to put on keys' : 'no markers to clear', ''); this.cb.redraw(); return r; }
-        if (op === 'undo') this.history.undo(r.tableGen); else if (op === 'redo') this.history.redo(r.tableGen); else if (op === 'auto' && args.join && this.history.joinTop(r.tableGen, full, /^autoslice /)) { /* one line per drag */ } else this.history.push(r.tableGen, full);
+        if (op === 'undo') this.history.undo(r.tableGen); else if (op === 'redo') this.history.redo(r.tableGen); else if (op === 'auto' && args.join && this.history.joinTop(r.tableGen, full, /^autoslice /)) { /* one line per drag */ }
+        else if (op === 'keyp' && args.join && this.history.joinTop(r.tableGen, full, new RegExp('^' + kn(args.key) + ' settings: '))) { /* KEYP: one line per drag */ } else this.history.push(r.tableGen, full);
         this.cb.status(full + (retried ? ' (after a refetch)' : ''), 'ok');
         await this.cb.refetch(); this.local = null; this.cb.redraw();
       } else {
@@ -511,6 +513,8 @@ class Editor {
   /* join: this send continues the last one's drag — the module folds it into that AUTOSLICE's undo step, and the history
    * relabels its line instead of adding one */
   autoslice(k, reroll = false, join = false) { return this.commit('auto', { k, reroll, join }, g => HL.autoslice(this.d.link(), k, reroll, g, join), this.gen(), null, true); }
+  /* KEYP: one key's gain / tune / plays — join: this send continues the last one's drag (one undo step, one history line) */
+  keyParams(key, p, join = false) { return this.commit('keyp', { key, p, join }, g => HL.keyParams(this.d.link(), key, p, join, g), this.gen(), null, true); }
   setKey(key, t) { return this.commit('key', { key, t }, g => HL.editSetKey(this.d.link(), key, t, g), this.gen(), null, true); }
   swapKeys(a, b) { return this.commit('swap', { a, b }, g => HL.editSwapKeys(this.d.link(), a, b, g), this.gen(), null, true); }
   undo() { return this.commit('undo', {}, () => HL.editUndo(this.d.link()), 0, null, true); }
