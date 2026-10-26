@@ -278,7 +278,7 @@ class Gesture {
 function sameTag(a, b) { if (a === b) return true; if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false; return a.zone === b.zone && a.t === b.t && (a.h ? a.h.kind : null) === (b.h ? b.h.kind : null) && (a.h ? a.h.t : null) === (b.h ? b.h.t : null); }
 
 /* ───────────── the Editor ─────────────
- * deps: { link(): Link (null when disconnected), ctx(): { table, st, hits, sampleAt, editOk, tapAllowMs }, view: { a, b }
+ * deps: { link(): Link (null when disconnected), ctx(): { table, st, hits, sampleAt, tapAllowMs }, view: { a, b }
  * (shared with the page), cb: { redraw(), status(msg, kind), select(t), refetch(): Promise, setView(a, b),
  * zoomView(f, at), fitEntry(t), menu(items, x, y), choose(plan, x, y): Promise<id|null>, dropTarget(cx, cy): key|-1 },
  * now(), setTimer / clearTimer }. Pointer events arrive as pointer(kind, { id, x, y, w, h, t, cx, cy }) in canvas px. */
@@ -292,13 +292,12 @@ class Editor {
     this.stats = { auditions: 0, releases: 0, commits: 0, refused: 0, retried: 0 };
     this.size = { w: 1, h: 1 };
   }
-  /* ── layout: the wave, the handle row, the pan / zoom strip (an old firmware: the wave alone, drag = pan) ── */
+  /* ── layout: the wave, the handle row, the pan / zoom strip ── */
   layout(w, h) {
-    this.size = { w, h }; const c = this.d.ctx();
-    if (!c.editOk) return { wave: [0, h], handles: [h, h], strip: [h, h], edit: false };   /* an old firmware: the wave alone; a drag anywhere pans */
-    const hw = Math.max(40, h - K.handlePx - K.stripPx); return { wave: [0, hw], handles: [hw, hw + K.handlePx], strip: [hw + K.handlePx, h], edit: true };
+    this.size = { w, h };
+    const hw = Math.max(40, h - K.handlePx - K.stripPx); return { wave: [0, hw], handles: [hw, hw + K.handlePx], strip: [hw + K.handlePx, h] };
   }
-  zoneAt(y, L) { return L.edit && y >= L.handles[0] && y < L.handles[1] ? 'handles' : y >= L.strip[0] ? 'strip' : 'wave'; }
+  zoneAt(y, L) { return y >= L.handles[0] && y < L.handles[1] ? 'handles' : y >= L.strip[0] ? 'strip' : 'wave'; }
   xOf(p, w = this.size.w) { const v = this.d.view; return (p - v.a) / Math.max(1, v.b - v.a) * w; }
   pOf(x, w = this.size.w) { const v = this.d.view; return v.a + x / w * (v.b - v.a); }
   handles() { const c = this.d.ctx(); return handleList(c.table, this.selT); }
@@ -309,7 +308,7 @@ class Editor {
     const c = this.d.ctx(), L = this.layout(w, h), zone = this.zoneAt(y, L), p = Math.round(this.pOf(x, w));
     if (!c.table) return { zone, h: null, t: -1, p };
     if (zone === 'handles') return { zone, h: hitHandle(this.handles(), x, q => this.xOf(q, w), K.slopPx, this.selT), t: -1, p };
-    if (zone === 'wave') { const hh = L.edit ? hitHandle(this.handles(), x, q => this.xOf(q, w), 6, this.selT) : null; return { zone, h: hh && y >= L.wave[1] - 12 ? hh : null, t: entryAt(c.table, p), p }; }
+    if (zone === 'wave') { const hh = hitHandle(this.handles(), x, q => this.xOf(q, w), 6, this.selT); return { zone, h: hh && y >= L.wave[1] - 12 ? hh : null, t: entryAt(c.table, p), p }; }
     return { zone, h: null, t: -1, p };
   }
   /* ── pointer input from the canvas ── */
@@ -328,7 +327,7 @@ class Editor {
   keyModifier(shift) { this.snapOff = !!shift; }
   /* ── gesture → action (the map of docs/packages/slice-edit-ui.md) ── */
   onGesture(e) {
-    const c = this.d.ctx(), tag = e.tag || {}, L = this.layout(e.w || this.size.w, e.h || this.size.h);
+    const c = this.d.ctx(), tag = e.tag || {};
     switch (e.type) {
       case 'press': break;
       case 'second': this.snapOff = true; if (this.drag) this._dragTo(this.drag.x); break;
@@ -340,8 +339,8 @@ class Editor {
       case 'dragstart':
         if (tag.zone === 'handles' && tag.h) this._dragBegin(tag.h, e.x);
         else if (tag.zone === 'wave' && tag.h) this._dragBegin(tag.h, e.x);
-        else if (tag.zone === 'wave' && tag.t >= 0 && L.edit) { this.drag = { kind: 'toKey', t: tag.t, x: e.x, y: e.y }; this.cb.redraw(); }
-        else if (tag.zone === 'strip' || !L.edit) this.drag = { kind: Math.abs(e.dy) > Math.abs(e.dx) && L.edit ? 'zoom' : 'pan', a: this.d.view.a, b: this.d.view.b, x0: e.x, y0: e.y, at: this.pOf(e.x, e.w) };
+        else if (tag.zone === 'wave' && tag.t >= 0) { this.drag = { kind: 'toKey', t: tag.t, x: e.x, y: e.y }; this.cb.redraw(); }
+        else if (tag.zone === 'strip') this.drag = { kind: Math.abs(e.dy) > Math.abs(e.dx) ? 'zoom' : 'pan', a: this.d.view.a, b: this.d.view.b, x0: e.x, y0: e.y, at: this.pOf(e.x, e.w) };
         break;
       case 'drag': {
         const dr = this.drag; if (!dr) break;
@@ -360,7 +359,7 @@ class Editor {
       case 'tap':
         if (tag.zone === 'handles' && tag.h) { this.select(tag.h.t); this.auditionEntry(tag.h.t); }
         else if (tag.zone === 'wave' && tag.h) { this.select(tag.h.t); this.auditionEntry(tag.h.t); }
-        else if (tag.zone === 'wave' && tag.t >= 0) { if (isMarker(c.table, tag.t) && L.edit) this.splitAt(tag.t, tag.p); else this.select(tag.t); }
+        else if (tag.zone === 'wave' && tag.t >= 0) { if (isMarker(c.table, tag.t)) this.splitAt(tag.t, tag.p); else this.select(tag.t); }
         break;
       case 'dbltap':
         if ((tag.zone === 'handles' || tag.zone === 'wave') && tag.h && isMarker(c.table, tag.h.t)) this.merge(tag.h.t);
@@ -465,7 +464,7 @@ class Editor {
       this.busy = null;   /* the link is free: what follows is a poll */
       if (r.ok) {
         this.stats.commits++;
-        /* v0.13: a tap within 10 ms of a live marker selects it — nothing changed, nothing to label (the gen is the same) */
+        /* a tap within 10 ms of a live marker selects it — nothing changed, nothing to label (the gen is the same) */
         if (op === 'tap' && r.reused) { this.select(r.newIdx); this.cb.status(`tap: marker ${r.newIdx} is already there — selected it`, 'ok'); this.cb.redraw(); return r; }
         const full = op === 'split' || op === 'copy' || op === 'tap' ? histLabel(op, Object.assign({}, args, { newIdx: r.newIdx })) : op === 'onsets' || op === 'mkeys' || op === 'mclear' || op === 'auto' || op === 'spread' ? histLabel(op, Object.assign({}, args, { count: r.count })) : label;
         if (op === 'spread' && gen && r.tableGen === gen) { this.cb.status(`${kn(args.root)} is already spread across the keys — nothing changed`, ''); this.cb.redraw(); return r; }   /* CHROMA: a spread in place moves nothing */
@@ -477,7 +476,7 @@ class Editor {
       } else {
         this.stats.refused++; this.local = null;
         if (r.status === 3 && why === 'stale') why = 'stale: the table changed under you — refetched; the target is gone, try again';
-        else if (r.status !== 3) why = r.status === 2 ? (op === 'undo' || op === 'redo' ? 'refused (BAD_ARGS): nothing to ' + op + ' — the journal is empty, or this firmware has none' : 'refused (BAD_ARGS): the module rejected the span, index or key') : HL.statusName(r.status);
+        else if (r.status !== 3) why = r.status === 2 ? (op === 'undo' || op === 'redo' ? 'refused (BAD_ARGS): nothing to ' + op : 'refused (BAD_ARGS): the module rejected the span, index or key') : HL.statusName(r.status);
         this.lastErr = why; this.cb.status(label + ' — ' + why, 'warn'); this.cb.redraw();
       }
       return r;
@@ -513,7 +512,7 @@ class Editor {
   fromOnsets(thresh, minGapMs = K.minGapMs) { return this.commit('onsets', { thresh }, g => HL.editFromOnsets(this.d.link(), thresh, minGapMs, g), this.gen(), null, true); }
   /* the Chop pad: taps queue behind a pending edit rather than being refused — the module timestamps each at receipt */
   tapMark() { const c = this.d.ctx(); const allow = c.tapAllowMs != null ? c.tapAllowMs : K.tapAllowDefault; return this.commit('tap', {}, () => HL.tapMark(this.d.link(), K.tapSnapMs, allow, 0), 0, null, true); }
-  /* KEYS (v0.13): the marker ops — each one undo step on the module, queued like the panel's other buttons */
+  /* KEYS: the marker ops — each one undo step on the module, queued like the panel's other buttons */
   keysFromMarkers() { return this.commit('mkeys', {}, g => HL.keysFromMarkers(this.d.link(), g), this.gen(), null, true); }
   clearMarkers() { if (this.selT >= 0 && isMarker(this.d.ctx().table, this.selT)) this.select(-1); return this.commit('mclear', {}, g => HL.clearMarkers(this.d.link(), g), this.gen(), null, true); }
   /* join: this send continues the last one's drag — the module folds it into that AUTOSLICE's undo step, and the history

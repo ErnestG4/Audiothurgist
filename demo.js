@@ -1,9 +1,8 @@
 /* demo.js — a fake Audiothurgist on a fake serial port.
  *
- * Answers HostLink frames exactly as the firmware would (same framing, same
- * StateExt layouts including the v0.8.0, CLOCK, SAMPLE and SETS tails — 255 bytes
- * with the record state, key table and set status, or shorter on request — a descriptor in
- * the SDK's shape with the Options block, pager help and the manual), so
+ * Answers HostLink frames exactly as the firmware would (same framing, the same
+ * StateExt body, a descriptor in the SDK's shape with the Options block, pager
+ * help, the manual and the firmware's "api"), so
  * the page can be exercised without hardware — open index.html?demo — and
  * so selftest.mjs can drive the real Link end to end. The port exposes
  * WHATWG `readable`/`writable` streams like a Web Serial SerialPort.
@@ -43,10 +42,11 @@ const OPTION_FIELDS = [
   ['quantize', 'Quantize', ['Off (as played)', '16ths (punch the bar)', '8ths'], 0],
   ['tap.allow', 'Tap Allowance', ['0 ms', '20 ms', '40 ms', '60 ms', '80 ms'], 2],
   ['autosave', 'Autosave', ['Off', 'On (2 s after an edit)'], 1],
+  ['start.in', 'Start In', ['Sampler (Pads, stopped)', 'As saved (the preset\'s grammar, running)'], 0],
 ];
 /* Option bytes the fake reads by name (the page reads them by the descriptor's offsets, never these). */
 const O = Object.fromEntries(OPTION_FIELDS.map((f, i) => [f[0], i]));
-const OPTIONS_HASH = 0x4F505438;   /* 'OPT8' — Options::SchemaHash() */
+const OPTIONS_HASH = 0x4F505439;   /* 'OPT9' — Options::SchemaHash() */
 /* The grammars by index (Options byte 5): Play loops what you play in, Pads plays it and writes nothing. */
 const GRAM = { classic: 0, collins: 1, grids: 2, euclid: 3, camp: 4, play: 5, pads: 6 };
 /* The card's list as the firmware labels it: the breaks of Audiothurgist/breaks, then the sets of Audiothurgist/sets
@@ -58,7 +58,7 @@ const UP_MAX = 17 * 48000 * 4 + 4096, CARD_WRITE_MS = 500, CARD_COPY_MS = 900;
 /* A tiny valid WAV for the fake card's files (the bytes are never played — the fake's material is synthetic). */
 const tinyWav = () => HL.encodeWav([new Float32Array(480)], 48000);
 const SET_NAME_RE = /^[A-Za-z0-9_-]{1,31}$/;
-/* The pager as the VirtualKnob declarations and DescribeManual give it: ident, name, help (v0.13.0-beta's text). */
+/* The pager as the VirtualKnob declarations and DescribeManual give it: ident, name, help (the firmware's text). */
 const KNOBS = [
   [["chop", "Chop", "**Chop character** — the journey from verbatim (full right) to rolls, bursts and reverb (full left)."],
    ["tempo", "Tempo", "**Tempo**, 60–200 BPM, varispeed like vinyl. Snaps to the break's own tempo within ±2 BPM. While following an external clock it becomes a ÷4…×4 multiplier."],
@@ -73,7 +73,7 @@ const KNOBS = [
    ["lang.hat", "Hat", "**Hat density** — Grids threshold / Euclid hits per bar."],
    ["lang.rot", "Rotation", "**Rotation** — Euclid: rotates every class's hits together."]],
 ];
-/* The jacks as declared (Jack jk1 ("audio_l", "Audio In L", …)) with their help (v0.13.0-beta: one keymap). */
+/* The jacks as declared (Jack jk1 ("audio_l", "Audio In L", …)) with their help. */
 const JACKS = [
   ["audio_l", "Audio In L", "audioIn", "**Audio in, left.** The record input: summed with J2 (Sampling: Mono) or the L plane (Stereo); a key take (J5 style 7) or a loop take (Options → Record) hears it unless Record Source = Output."],
   ["audio_r", "Audio In R", "audioIn", "**Audio in, right.** Summed with J1, or the R plane (Sampling: Stereo)."],
@@ -87,12 +87,12 @@ const JACKS = [
   ["out_r", "Audio Out R", "audioOut", "Audio out, right."],
 ];
 
-/* Blob layout, in Manage() order: pager 48 · locks 64 · sample 1 · options 24 · settings 2. */
-const OFF = { pager: 0, locks: 48, sample: 112, options: 113, settings: 137 };
-const N_OPTIONS = OPTION_FIELDS.length;   /* 24, as Options::kBytes */
-const LIVE_SIZE = 139;
-const SCHEMA = 0x0a0d1338;
-const FW = '0.13.0-beta-demo', FW_OLD = '0.12.3-demo';
+/* Blob layout, in Manage() order: pager 48 · locks 64 · sample 1 · options 25 · settings 2. */
+const OFF = { pager: 0, locks: 48, sample: 112, options: 113, settings: 138 };
+const N_OPTIONS = OPTION_FIELDS.length;   /* 25, as Options::kBytes */
+const LIVE_SIZE = 140;
+const SCHEMA = 0x0a0d1339;
+const FW = '0.13.0-beta-demo';
 /* The fake material: 48 kHz, one plane (and an R plane once the kit is stereo), 45 s of capacity; the break fills
  * nSlices × 6000 samples (32 slices = 4 s = two bars at 120 BPM). */
 const SR = 48000, BUF_CAP = SR * 45, SLICE_LEN = 6000, KEYS = 24;   /* PADS: the firmware's planes, 45 s (kMaxSec) */
@@ -103,7 +103,7 @@ const REC_MIN = 480;
 /* EDIT: the engine's table geometry (core/bb_engine.h): the shortest grid slice an edit may leave, the
  * table's capacity, the flag bits, 48 samples per ms, the tap mark's 250 ms cap. */
 const GRID_MIN = 64, MAX_TABLE = 96, F_ORANGE = 1, F_TOMB = 2, MS = 48, TAP_MAX = 250 * MS;
-/* KEYS (v0.13): a tap this close to a live marker's start selects that marker instead of stacking another (10 ms);
+/* KEYS: a tap this close to a live marker's start selects that marker instead of stacking another (10 ms);
  * the autoslice count's ceiling. */
 const TAP_REUSE = 10 * MS, AUTO_MAX = 64;
 const EDIT_NEED = [5, 9, 10, 5, 1, 1, 2, 2, 3, 2, 3, 7, 0, 2, 0, 0, 2, 0, 0, 1, 2, 7, 2];   /* field bytes of ACTION 16..38 */
@@ -113,36 +113,34 @@ const KEYP = { gainMin: -48, gainMax: 12, centsMax: 2400, playsMax: 4, ratMax: 6
 const keypNeutral = () => ({ gain: 0, plays: 0, cents: 0, rat: 0 });
 const UNDO_DEPTH = 64;   /* EDIT-UNDO: the journal's ring */
 const EDIT_STATUS = { Ok: 0, BadOp: 2, BadArgs: 2, Full: 3, NotMarker: 2, NotGrid: 2, Tomb: 2, Stale: 3, NoMaterial: 3, Silent: 3 };
-/* SCOPE: the firmware's ring geometry (core/bb_scope.h) and this module's max_body
- * (1024 in the firmware's Makefile; 512 is the protocol default an older build has). */
+/* SCOPE: the firmware's ring geometry (core/bb_scope.h) and its max_body (1024, the Makefile's). */
 const MAX_BODY = 1024;
 const SC = HL.SCOPE;
 
-/* The manual: src/audiothurgist_manual.cpp as of v0.13.0-beta, verbatim (the module sends its own). */
+/* The manual: src/audiothurgist_manual.cpp, verbatim (the module sends its own). */
 const MANUAL = {
   preamble: "**Audiothurgist chops breaks to a grid and rearranges them** with one knob that travels from *the record, verbatim* to rolls, bursts, and reverb rubble. Patterns hold until you ask for new ones. Every sound is a slice of real material played from its attack, on the grid — no grains, no time-stretch. If you don't like it, re-slice it.",
   sections: [
-    { id: "roles", title: "Three roles, one engine", body: "**Chopper** — the knobs and buttons: slice, rearrange, reroll, flow, history, tempo. **Voice** — the rack plays *it*: a v/oct + gate pair calls the Kit's keys from a keyboard or sequencer. **Brain** — it plays the rack: kick, snare and hat gates leave on J6/J7/J8 as the pattern runs, and a clock on J3 locks the loop to your master. The roles run at once; nothing needs a mode. **It powers up as a sampler**: Pads, the pattern stopped (B1 breathes) — the 24 keys (J4, the browser's pads) play, nothing else does. For a beat, pick a grammar (Classic, Grids…) and hold **B1** 600 ms (or ▶ in the browser); it starts on the beat. *Start in* (the web app's Options → Start-up, kept in `Audiothurgist/startup.json`) = As saved powers up in the boot preset's grammar, running, as before." },
+    { id: "roles", title: "Three roles, one engine", body: "**Chopper** — the knobs and buttons: slice, rearrange, reroll, flow, history, tempo. **Voice** — the rack plays *it*: a v/oct + gate pair calls the Kit's keys from a keyboard or sequencer. **Brain** — it plays the rack: kick, snare and hat gates leave on J6/J7/J8 as the pattern runs, and a clock on J3 locks the loop to your master. The roles run at once; nothing needs a mode. **It powers up as a sampler**: Pads, the pattern stopped (B1 breathes) — the 24 keys (J4, the browser's pads) play, nothing else does. For a beat, pick a grammar (Classic, Grids…) and hold **B1** 600 ms (or ▶ in the browser); it starts on the beat. Options → *Start In* = As saved powers up in the boot preset's grammar, running." },
     { id: "journey", title: "The knob journey (P1)", body: "Full right: verbatim. ~4 o'clock: whole beats trade places. ~1 o'clock: one-beat chops — listen for the double-time illusion. ~11: half-beat motifs. ~9: sixteenth-note dice and reversals. Past 8: the cluster zone — bursts of 32nd rolls, hat-ticks and real silence, reverb blooming toward full left. B3 relocates the burst centres. Chops respect the kit: kicks trade with kicks, snares with snares." },
     { id: "keymap", title: "Playing it from a keyboard (one keymap)", body: "**J4 is the key in every map: 0 V = key 0 (C1)**, a semitone per key to 23, below 0 V = key 0. A key plays what the Kit's key table says (in **Pads** the keys follow the markers: time order on keys 0, 1, 2…). **Voice map**: J6 gate, **J5 = the style** (0 V plain, then reverse · half · double · ratchet · staccato · punch/choke flip · 7 Record · 8 Clear, a semitone each; under ~70 mV is plain). The style is read with the hit; changing it while the key is held re-strikes it. J7 sends a trigger per call, J8 its velocity. **Brain map**: J5 gate, plain calls, class gates on J6/J7/J8. Options → Jacks picks the map; *Follow grammar* gives Play and Pads the Voice map. In Play calls write the loop (punch flips to momentary), in Pads nothing is written, elsewhere the Voice option decides." },
     { id: "buttons", title: "The three buttons", body: "**B1** tap: Perform ↔ Brain page. **B1 held 600 ms, let go** (B1 goes white; no pot, no other button): start / stop — the clock runs on, keys still play; B1 breathes while stopped. **B1 held 300 ms + turn a pot**: record that pot's motion as a loop that replays until you hold and nudge it again (a green pip at 6 o'clock marks a locked pot; *Clear locks* in the web app removes them all). **B2** tap: dice (a new arrangement of the same slices; in Play: undo the last overdub); hold: *flow*, a new bar every loop until released. **B3** tap: reslice (new cell tree; in Play: clear the loop); hold: load the highlighted file. **B2 + B3 held 2 s**: Settings (brightness, preset save/load); B2 or B3 leaves. B1 also shows the clock: white per pulse, green when locked. **B1 held + B3 tap: the Edit page** (B1 amber; B1 tap leaves): P1 selects a slice — its segment pulses on the bar ring as it plays and its keys pulse on P5, a Voice-map note selects too — P2 / P3 nudge its start / end ±50 ms once swept through centre, each move re-playing the new edge; B3 tap drops a marker at the playhead (onset-snapped, Options → Tap Allowance; near a marker it selects it), B3 hold reslices; **P5 = autoslice**: 0–32 grey markers on onsets drawn by loudness — up adds one, down drops one, 0 and back re-draws; B2 tap undoes, B2 hold puts the slice back on the grid (a marker: deletes it). Refusals blink red." },
     { id: "brain", title: "Clock in, gates out", body: "Patch a clock into J3 and set its PPQN in Options; B1 flashes white per pulse and sits green when locked (the loop aligns to the pulse grid at lock). While following, P2 becomes a clock divider/multiplier (÷4 · ÷2 · ×1 · ×2 · ×4, wide ×1 centre) that engages once you move it and switches on the next beat, in phase. Unpatch and the tempo holds until P2 moves. Gates on J6/J7/J8 follow the classifier's labels: *Gate Fires* chooses every step or once per hit (as drums do), *Gate Lanes* can mark every class present in a hit, Gate Length and Gate Level (velocity from loudness, accents to the ceiling) shape them. If a break plays at half or double speed against your clock, set **Bars** in Options — the bar guess is the culprit." },
     { id: "languages", title: "Pattern languages (Grammar, in Options)", body: "**Classic** is BreakFix's Brocot cell grammar. **Collins** adds the breakbeat-science upgrades: faithful early in the phrase, restless toward its end; 3+3+2 odd cuts; a fill on every fourth loop that snaps back on the downbeat; stutter terminators; accelerating rolls. **Grids** speaks Mutable Instruments' drum map through your break's own kicks, snares and hats — Map X/Y and three densities on the **Brain** page (B1). **Euclid** spaces each class's hits evenly with Rotation. In both, the Chop knob sets how faithfully slices are chosen: full right plays each class's own nearest hit, lower swaps within the class; a rest lets the break run on underneath (or gates it: *Rests*). **Camp** rings the bar's cells through change-ringing permutations — deterministic, B2 rings the next change. **Play** has no pattern of its own: the bar is what you play into it from the keyboard or the web page, looped; B3 clears it. With **Quantize** Off (the default) it is a free looper — every hit replays at the exact moment you played it, held notes with their length, overdubbing pass after pass; 8ths snaps hits to the nearest 8th, 16ths writes the bar step by step as before. **B2** tap undoes the last pass's overdub, **B3** tap clears. **Pads** is the instrument with no looper: hits sound as you play them, nothing is written, keeping the beat is yours." },
-    { id: "options", title: "Options, one line each", body: "**Classifier** — which lens labels kick/snare/hat (Hockman 3-band, the legacy hi/lo split, two-band, keyframe density, or Adaptive: each step judged at its hit, clustered per break). **Clock In** — J3 PPQN. **Voice** — Choke or Punch. **Gate Length / Level / Fires / Lanes** — see the Brain section. **Grammar** — the pattern language. **Bars** — override the bar guess (Auto reads the backbeat). **Rests** — continue or gate. **Fades** — fixed, or adaptive to each slice's brightness. **Slice Tail** — what a slot does at pitch: zoom (read on into the next slice, the record's way), gate, loop forward, or ping-pong. **Swaps** — class only, or class + loudness tier (a ghost never replaces a backbeat). **Flow Déjà Vu** — some flow bars replay from history. **Swing** — slice and step at the material's own swing. **Onsets** — the onset detector behind the bar guess and hit gates. **Jacks** — Brain (class gates out) or Voice (two v/oct + gate, hit trigger and velocity out); Follow grammar switches with Play. **Quantize** — Play's looper: Off (as played), 16ths (punch the bar), 8ths. **Autosave** — Off, or On: 2 s after an edit the slice table and key map are written to the set's JSON, or to sets/<file>.slices.json beside a loose WAV, and read back on load. **Key Plays** — one-shot, or held until the gate falls (a key's own Plays, in the Kit, overrides it). **Sampling** — mono, or stereo planes. **Record Source** — the inputs, or the module's own output. **Record** — arm a loop take into the break (see Sampling). **Tap Allowance** — how far back a tap-while-playing mark lands (your reaction time): 0–80 ms. **Start in** (on the card, not in a preset; the web app sets it) — Sampler (Pads, stopped; the default, and with no card) or As saved (the boot preset's grammar, running); read at power-up." },
+    { id: "options", title: "Options, one line each", body: "**Classifier** — which lens labels kick/snare/hat (Hockman 3-band, the legacy hi/lo split, two-band, keyframe density, or Adaptive: each step judged at its hit, clustered per break). **Clock In** — J3 PPQN. **Voice** — Choke or Punch. **Gate Length / Level / Fires / Lanes** — see the Brain section. **Grammar** — the pattern language. **Bars** — override the bar guess (Auto reads the backbeat). **Rests** — continue or gate. **Fades** — fixed, or adaptive to each slice's brightness. **Slice Tail** — what a slot does at pitch: zoom (read on into the next slice, the record's way), gate, loop forward, or ping-pong. **Swaps** — class only, or class + loudness tier (a ghost never replaces a backbeat). **Flow Déjà Vu** — some flow bars replay from history. **Swing** — slice and step at the material's own swing. **Onsets** — the onset detector behind the bar guess and hit gates. **Jacks** — Brain (class gates out) or Voice (two v/oct + gate, hit trigger and velocity out); Follow grammar switches with Play. **Quantize** — Play's looper: Off (as played), 16ths (punch the bar), 8ths. **Autosave** — Off, or On: 2 s after an edit the slice table and key map are written to the set's JSON, or to sets/<file>.slices.json beside a loose WAV, and read back on load. **Key Plays** — one-shot, or held until the gate falls (a key's own Plays, in the Kit, overrides it). **Sampling** — mono, or stereo planes. **Record Source** — the inputs, or the module's own output. **Record** — arm a loop take into the break (see Sampling). **Tap Allowance** — how far back a tap-while-playing mark lands (your reaction time): 0–80 ms. **Start In** — Sampler (Pads, stopped; the default) or As saved (the boot preset's grammar, running); the boot preset's value is read at power-up." },
     { id: "sampling", title: "Sampling (record into a key, loop-record the break)", body: "One buffer, one slice table: a loaded break and a recorded kit are the same thing. **Into a key** (Voice map): play J5 style note **7 = Record** — the buttons go red — and every key you hold on J4 records from the input for as long as its gate stands (release: trim, normalise, analyse, live; the key plays it, its position lights on P5's ring). Style **8 = Clear** puts a key back on its grid slice; any other style disarms. Records are appended after the break; a load clears them. **The break itself**: Options → **Record** = Arm, then **B3 tap** or the first **J6** edge starts a take into the other buffer. With a clock on J3 the take is the **Bars** count of bars at the followed tempo and stops itself on the bar; J6 edges during it drop **slice markers** (two or more replace the grid). Unclocked, B3 or J6 stops it. The take runs the load pipeline and plays; the arm drops after one take, and B3's reslice / load are held off while armed. **Record Source**: J1/J2, or the module's own output — play the keys into a take and chop the chop. **Sampling**: Mono sums J1+J2; Stereo keeps J1 → L, J2 → R (loads, takes and playback in two planes). Loads keep 28 s of the 45 s buffer free for keys and pads; a recording plays at its own pitch (P4 transposes it), the break's slices follow the tempo. **Pads**: drop an audio file on a pad in the browser (Play or Kit) and that key plays it, mono or stereo (a stereo one makes the kit stereo); **New empty kit** clears the break so the whole buffer is for pads. **Each key** has its own gain (−24…+6 dB), tune (±24 semitones) and Plays (follow Key Plays · one-shot · held · loop while held · ratchet while held: the sample again every whole, ½, ¼ or ⅛ of itself, or every 8th / 16th / 32nd at the tempo), set in the browser's Kit tab and saved with the set; they ride every call through the key — CV, the pads, Play's loop — never the pattern's steps. **Spread across keys** (Kit tab) puts one key's sample on all 24, a semitone apart: J4's V/oct plays it as a melody. A dropped sample lives in memory until you save a set. While a take runs the buttons are full red and P6 shows the input level. **Cards**: FAT32 microSD, everything in one folder, `Audiothurgist/`: breaks in `Audiothurgist/breaks` (WAV, PCM 16/24-bit, mono or stereo, the first 17 s used), 1–4 bar breaks are ideal (longer files trim to their first four bars; levels normalise on load). The Kit tab uploads any audio file the browser can open, and copies an old card's root WAVs in. Turn **Sample** (P5) to highlight a file, hold **B3** to load it — or pick it from the Sample dropdown here. New material opens at its own tempo until P2 moves. **Sets** — a break with its recorded keys, the Options and Play's loop — live in `Audiothurgist/sets/` as `<name>.wav` + `<name>.json`, listed as “name [set]” and loaded the same way; the browser's Kit tab saves and loads them by name. Every preset save also writes `Audiothurgist/presets/<slot>.json`; a slot the flash no longer honours after a firmware update comes back from it at boot." },
   ],
   presets: { help: "Preset slots store the complete state of the module. Slot 0 is the boot slot." },
 };
 
-/* opts: { edit: true, keys: true } — keys: false plays a 0.12 firmware (edit 1, no ACTION 32.., the 263-byte body).
- * CARD: `files` the list the firmware scanned at boot (its dropdown; none on a card without the folder), `card` the
- * capability. */
-function buildDescriptor(edit = true, keys = edit, files = FILES, card = keys, pads = card, keyp = pads, spread = keyp) {
+/* `files`: the list the firmware scanned at boot (its dropdown; none on a card without the folder); `api`: what the
+ * descriptor root says (the firmware's, HL.API — another number plays the wrong build). */
+function buildDescriptor(files = FILES, api = HL.API) {
   const pagerFields = [];
   KNOBS.forEach((page, pg) => page.forEach(([id, name, help], pot) => pagerFields.push({ id, name, off: (pg * 6 + pot) * 4, type: 'f32', page: pg, pot, def: 0.5, disp: pot === 3 && pg === 0 ? { kind: 'linear', lo: -12, hi: 12, unit: 'st' } : pot === 1 && pg === 0 ? { kind: 'linear', lo: 60, hi: 200, unit: 'BPM' } : { kind: 'norm' }, help })));
   return {
     dv: 1,
-    module: { id: 'audiothurgist', name: 'Audiothurgist', fw: keys ? FW : FW_OLD, git: 'demo', sdk: 'demo', board: 'v2', tagline: 'A sampling, slicing, and rearranging toolkit' },
+    module: { id: 'audiothurgist', name: 'Audiothurgist', fw: FW, git: 'demo', sdk: 'demo', board: 'v2', tagline: 'A sampling, slicing, and rearranging toolkit' },
     schemaHash: SCHEMA, size: LIVE_SIZE,
     components: [
       { id: 'perf', kind: 'pager', hash: 1, size: 48, off: OFF.pager, pages: 2, pots: 6,
@@ -159,43 +157,25 @@ function buildDescriptor(edit = true, keys = edit, files = FILES, card = keys, p
         fields: [{ id: 'brightness', name: 'Brightness', off: 0, type: 'f32', page: 0, pot: 0, def: 0.7, disp: { kind: 'brightness', lo: 0.1, hi: 1 } }] },
     ],
     jacks: JACKS.map(([id, name, sig, help]) => ({ id, name, sig, help })),
-    /* StateExt::DescriptorRootJson: v0.13 adds "keys":1 and bumps "edit" to 2 (TAP_MARK refuses when nothing sounds
-     * and reuses a marker within 10 ms) */
-    audiothurgist: Object.assign({ ext: 1, state: 96, env: 97, scope: 98, action: 99, wave: 100, table: 101, hits: 102, sets: 1, scope2: 2 },
-      edit ? { edit: keys ? 2 : 1 } : {}, keys ? { keys: 1 } : {}, card ? { card: 1 } : {}, pads ? { pads: 1, startIn: 1 } : {}, keyp ? { keyp: spread ? 2 : 1 } : {}),   /* START: "startIn" came with the pads work's successor; CHROMA: "keyp": 2 = ACTION 38 */
+    audiothurgist: { api },   /* StateExt::DescriptorRootJson */
     manual: MANUAL,
   };
 }
 
 class FakeDevice {
   constructor(opts = {}) {
-    /* EDIT: `edit: false` plays an older firmware — no "edit" capability, the 13-byte table whatever is asked,
-     * the body capped at 255 (no tableGen / srcPos tail), ACTION 16.. unknown (BAD_ARGS). */
-    /* KEYS: `keys: false` (or a body shorter than 276) plays a 0.12 firmware — "edit": 1, no "keys", ACTION 32.. unknown,
-     * TAP_MARK taken whatever sounds. */
-    this.opts = Object.assign({ tail: 315, bpm: 120, nSlices: 32, latencyMs: 8, swing: false, kit: false, maxBody: MAX_BODY, inputs: true, edit: true }, opts);
-    if (!this.opts.edit && this.opts.tail > 255) this.opts.tail = 255;
-    if (this.opts.keys == null) this.opts.keys = this.opts.edit && this.opts.tail >= 276;
-    if (!this.opts.keys && this.opts.tail > 263) this.opts.tail = 263;
-    /* CARD: `card: false` (or a body shorter than 293) plays a 0.13 firmware before the card work — no "card", no 0x67,
-     * the 276-byte body, the list from the card root. `oldcard` lays the card out the old way (WAVs in the root, sets/
-     * and presets/ beside them, no Audiothurgist folder — so this firmware lists nothing); `nocard` has no card in. */
-    if (this.opts.card == null) this.opts.card = this.opts.keys && this.opts.tail >= 293;
-    if (!this.opts.card && this.opts.tail > 276) this.opts.tail = 276;
-    /* PADS: `pads: false` (or a body shorter than 315) plays a firmware before the pads work — no "pads", no 0x68, the
-     * 293-byte body. */
-    if (this.opts.pads == null) this.opts.pads = this.opts.card && this.opts.tail >= 315;
-    if (!this.opts.pads && this.opts.tail > 293) this.opts.tail = 293;
-    /* KEYP: `keyp: false` plays a firmware before the per-key settings — no "keyp", ACTION 37 unknown (BAD_ARGS), 0x69
-     * UNSUPPORTED. No tail bytes: the page reads 0x69 whenever tableGen moves. */
-    if (this.opts.keyp == null) this.opts.keyp = this.opts.pads;
-    /* CHROMA: `spread: false` plays a firmware with the key settings but before SPREAD_KEYS — "keyp": 1, ACTION 38 unknown */
-    if (this.opts.spread == null) this.opts.spread = !!this.opts.keyp;
+    /* the module's situations: `kit` three keys recorded (and a set of them on the card), `swing` a swung grid, `inputs`
+     * signal on J1/J2, `oldcard` the card laid out the old way (WAVs in the root, sets/ and presets/ beside them, no
+     * Audiothurgist folder — so the firmware lists nothing), `nocard` no card in, `startIn` the boot preset's Start In
+     * (0 Sampler: Pads, the transport stopped · 1 As saved, the default here: the preset's grammar, running — what most
+     * checks drive). `api` plays a firmware built for another page. */
+    this.opts = Object.assign({ bpm: 120, nSlices: 32, latencyMs: 8, swing: false, kit: false, inputs: true, startIn: 1, api: HL.API }, opts);
     this.keyp = Array.from({ length: KEYS }, keypNeutral);
     this.cardInit();
     this.live = new Uint8Array(LIVE_SIZE); this.live.fill(0x80, OFF.pager, OFF.pager + 48);
     OPTION_FIELDS.forEach((f, i) => { this.live[OFF.options + i] = f[3]; });   /* the firmware's live defaults */
-    this.desc = new TextEncoder().encode(JSON.stringify(buildDescriptor(this.opts.edit, this.opts.keys, this.files, this.opts.card, this.opts.pads, this.opts.keyp, this.opts.spread)));
+    this.options[O['start.in']] = this.opts.startIn ? 1 : 0;
+    this.desc = new TextEncoder().encode(JSON.stringify(buildDescriptor(this.files, this.opts.api)));
     /* KEYS: the pad / CV voice (the key, when it started, its span, until when it sounds — Infinity while a held key is
      * down), the key-call flash and sequence, the play loop's events (Play: each write, for B2's undo), the autoslice
      * seed and count, the selection the panel publishes (tail 257), and the last position something sounded at
@@ -234,25 +214,18 @@ class FakeDevice {
     this.newMaterial(); this.onCard = this.bufLen;
     if (this.opts.kit) { this.recordKey(3, 0.35, 0); this.recordKey(7, 0.9, 1); this.recordKey(14, 1.6, 2); this.looperEvents = 3; this.sets.set('amen_kit', this.snapshot()); }
     this.blob = null;
-    /* START (beta-sampler): Start in, the module's power-up setting, kept on its card (Audiothurgist/startup.json).
-     * `startIn` 0 Sampler / 1 As saved; `bootCard` (another fake's card — a power-cycle) is read as the firmware reads
-     * it: no file, no card (`nocard` too) = Sampler. Without either the fake boots As saved — the boot every check written before this
-     * branch expects (Classic, running). Sampler: Pads, the transport stopped, as the firmware's boot. */
-    if (this.opts.bootCard) this.cardFs = this.opts.bootCard;
-    this.startIn = !this.opts.pads ? 1 : !this.cardMounted || this.opts.bootCard ? this.startupOnCard() : this.opts.startIn != null ? this.opts.startIn : 1;   /* no card: Sampler, as the firmware */
-    this.lastDrum = this.grammar !== GRAM.pads ? this.grammar : 0;   /* START: ▶ in Pads comes back to this beat */
-    if (this.opts.pads && this.startIn === 0) { const g = this.grammar; this.options[O['grammar.mode']] = GRAM.pads; this.setGrammar(GRAM.pads, g); this.muted = true; }
+    this.boot();
+  }
+  /* START: the firmware's boot after the preset loads — Start In = Sampler puts the grammar on Pads and stops the
+   * transport (the preset's own grammar stays the beat ▶ brings back); As saved leaves the preset as it is, running */
+  boot() {
+    this.lastDrum = this.grammar !== GRAM.pads ? this.grammar : 0;
+    if (this.options[O['start.in']] === 0) { const g = this.grammar; this.options[O['grammar.mode']] = GRAM.pads; this.setGrammar(GRAM.pads, g); this.muted = true; }
   }
   /* START: as the firmware's TransportStart — a start made in Pads brings back the last drum grammar first */
   transportStart() {
     if (this.grammar === GRAM.pads) { const g = this.grammar; this.options[O['grammar.mode']] = this.lastDrum; this.setGrammar(this.lastDrum, g); }
     this.muted = false;
-  }
-  /* START: what the card's startup.json says (the firmware's bb::StartupRead: anything but "saved" is Sampler) */
-  startupOnCard() {
-    if (!this.cardMounted) return 0;
-    const k = this.cardKey('Audiothurgist/startup.json'); if (!k) return 0;
-    try { return JSON.parse(new TextDecoder().decode(this.cardFs.get(k))).startIn === 'saved' ? 1 : 0; } catch { return 0; }
   }
   /* SETS: what sets/<name>.wav + .json would hold. */
   snapshot() {
@@ -484,7 +457,7 @@ class FakeDevice {
         return U8(0);
       case 5: {
         const nf = Math.min(255, this.files.length), first = body.length >= 2 ? body[1] : 0; if (first > nf) return U8(2);
-        let room = this.opts.maxBody - 4, n = 0; const labs = [];
+        let room = MAX_BODY - 4, n = 0; const labs = [];
         for (let i = first; i < nf; i++) { const l = this.files[i].slice(0, 255); if (l.length + 1 > room) break; room -= l.length + 1; labs.push(l); n++; }
         U8(0); U8(nf); U8(first); U8(n); for (const l of labs) { U8(l.length); for (const c of l) U8(c.charCodeAt(0)); } return;
       }
@@ -688,7 +661,7 @@ class FakeDevice {
     if (p + len > this.freePos) { len = this.freePos - p; if (len < REC_MIN) { len = REC_MIN; p = this.freePos - len; if (p < 0) { p = 0; len = this.freePos; } } }
     return { start: p, len };
   }
-  /* ── KEYS (v0.13): the marker ops. A marker is a live keyless entry past the grid (grey or orange); a recording is
+  /* ── KEYS: the marker ops. A marker is a live keyless entry past the grid (grey or orange); a recording is
    * an entry with a key of its own, and the key holding it is never taken over. ── */
   /* a marker is a span of the break: a recording (past the break, even one whose key was cleared) never is */
   liveMarkers() { const out = []; for (let t = this.nSlices; t < this.nTable; t++) { const e = this.table[t]; if (!this.isTomb(t) && e.key < 0 && e.len > 0 && e.start < this.bufLen) out.push(t); } return out; }
@@ -724,13 +697,13 @@ class FakeDevice {
     this.autoK = k; this.lastCount = count;
     return st === 'Ok' || (st === 'Full' && count > 0) ? 'Ok' : st;
   }
-  /* TAP_MARK, v0.13: refused (BAD_STATE) while nothing sounds; within 10 ms of a live marker's start it selects that
-   * marker (the panel's selection, tail 257) instead of stacking another — no edit, no undo step, the reply's flags
+  /* TAP_MARK: refused (BAD_STATE) while nothing sounds; within 10 ms of a live marker's start it selects that marker
+   * (the panel's selection, state byte 257) instead of stacking another — no edit, no undo step, the reply's flags
    * byte b0 says so. */
   edTap(snapMs, allowMs) {
-    if (this.opts.keys && !this.srcValid()) return { st: 'Silent' };
+    if (!this.srcValid()) return { st: 'Silent' };
     const m = this.tapMarkAt(this.srcPos(), allowMs * MS, snapMs * MS);
-    if (this.opts.keys) { const near = this.liveMarkers().find(t => Math.abs(this.table[t].start - m.start) <= TAP_REUSE); if (near != null) { this.selSlice = near; return { st: 'Ok', reused: near }; } }
+    { const near = this.liveMarkers().find(t => Math.abs(this.table[t].start - m.start) <= TAP_REUSE); if (near != null) { this.selSlice = near; return { st: 'Ok', reused: near }; } }
     const st = this.edAdd(-1, m.start, m.len, F_ORANGE); return { st };
   }
   editBusy() { return !!(this.rec.state || this.set.state || this.set.pending || this.padOp.state >= 2 || this.padOp.job); }
@@ -778,7 +751,7 @@ class FakeDevice {
       case 29: {
         const r = this.edTap(b[1], b[2]); st = r.st;
         if (st === 'Ok' && r.reused != null) return [0, this.tableGen, r.reused, 1];   /* selected, nothing changed */
-        third = this.lastIdx; if (this.opts.keys) flags = 0; break; }
+        third = this.lastIdx; flags = 0; break; }
       case 33: st = this.edKeysFromMarkers(); third = this.lastCount; if (!third) return [0, this.tableGen, 0]; break;
       case 34: st = this.edClearMarkers(); third = this.lastCount; if (!third) return [0, this.tableGen, 0]; break;
       case 36: st = b[1] > AUTO_MAX ? 'BadArgs' : this.edAutoslice(b[1], !!(b[2] & 1)); third = this.lastCount; join = !!(b[2] & 2) && this.autoGen === this.tableGen && this.journal.length > 0; break;
@@ -849,7 +822,7 @@ class FakeDevice {
     if (g !== GRAM.pads) this.lastDrum = g;
     if (g === before) return; if (g === GRAM.play) { this.src.fill(-1); this.loopEvents = []; this.looperEvents = 0; } else this.dice();
     /* entering Pads puts the markers on the keys once, as its own undo step */
-    if (g === GRAM.pads && this.opts.keys && this.liveMarkers().length && this.bufLen) { const sn = this.tableSnap(); this.journalCheck(); this.edKeysFromMarkers(); this.bumpGen(); this.journalPush(sn); }
+    if (g === GRAM.pads && this.liveMarkers().length && this.bufLen) { const sn = this.tableSnap(); this.journalCheck(); this.edKeysFromMarkers(); this.bumpGen(); this.journalPush(sn); }
   }
   /* the J4 / J5 jacks: a slow stepped sequence on J4 (one dip below 0 V, which clamps to key 0), J5's style in the
    * Voice map (255 = the Brain map, where J5 is the gate) */
@@ -944,8 +917,8 @@ class FakeDevice {
     switch (type) {
       case CMD.hello: {
         U8(0); U8(1); U8(2); U8(16); U8(0); for (let i = 0; i < 12; i++) U8(0x10 + i);
-        U32(SCHEMA); U32(4096); U32(this.desc.length); U32(crc32(this.desc)); U16(this.opts.maxBody); U16(LIVE_SIZE);
-        STR('audiothurgist'); STR('Audiothurgist'); STR(this.opts.keys ? FW : FW_OLD); STR('demo'); STR('demo'); break; }
+        U32(SCHEMA); U32(4096); U32(this.desc.length); U32(crc32(this.desc)); U16(MAX_BODY); U16(LIVE_SIZE);
+        STR('audiothurgist'); STR('Audiothurgist'); STR(FW); STR('demo'); STR('demo'); break; }
       case CMD.getDescriptor: {
         const off = u32(body, 0), max = u16(body, 4), n = Math.max(0, Math.min(max, this.desc.length - off));
         U8(0); U32(off); U16(n); for (let i = 0; i < n; i++) U8(this.desc[off + i]); break; }
@@ -967,50 +940,46 @@ class FakeDevice {
         if (this.live[OFF.sample] !== this.file) { this.file = this.live[OFF.sample]; this.newMaterial(); }
         U8(0); break; }
       case CMD.state: {
-        if (this.opts.tail >= 223) this.setTick();   /* SETS: the op finishes before the body is built, as the firmware's main loop does */
-        if (this.opts.card) this.cardTick();           /* CARD: the same for an upload's write, a copy, a rescan */
-        if (this.opts.pads) this.padTick();            /* PADS: a drop's commit, New empty kit, a quiet drop dropped */
-        if (this.opts.edit) this.auditionTick();       /* EDIT-AUDITION: a held request whose window has ended */
+        this.setTick();        /* SETS: the op finishes before the body is built, as the firmware's main loop does */
+        this.cardTick();       /* CARD: the same for an upload's write, a copy, a rescan */
+        this.padTick();        /* PADS: a drop's commit, New empty kit, a quiet drop dropped */
+        this.auditionTick();   /* EDIT-AUDITION: a held request whose window has ended */
         if (this.callT > 0 && --this.callT === 0) this.callFlash = 255;
-        const flags = (this.muted ? 1 : 0) | (this.ext ? 2 : 0) | (this.locked ? 4 : 0) | (this.flowing ? 8 : 0) | (this.brain ? 16 : 0)
-          | (this.opts.pads && this.startIn === 1 ? 32 : 0);   /* START: b5 Start in = As saved */
+        const flags = (this.muted ? 1 : 0) | (this.ext ? 2 : 0) | (this.locked ? 4 : 0) | (this.flowing ? 8 : 0) | (this.brain ? 16 : 0);
         U8(0); U8(this.nSlices); U8(this.curStep()); U8(flags); U8(this.matGen); U8(this.grammar); U8(this.options[O['class.mode']]); U8(this.file);
         U8(this.opts.chop != null ? this.opts.chop : 200); U8(this.histN); U8(this.histDepth); U8(this.callFlash);
         F32(this.opts.bpm * this.mult); F32(this.mult);
         for (let i = 0; i < 64; i++) U8(this.src[i]); for (let i = 0; i < 64; i++) U8(this.stepClass[i]);
-        const tail = this.opts.tail;
-        if (tail >= 156) { U16(900 + Math.floor(Math.random() * 300)); U16(180 + Math.floor(Math.random() * 40)); U16(0); U16(this.histN); }
-        if (tail >= 164) { U16(this.lockMask); F32(this.opts.bpm); U8(this.nSlices / 16); U8(this.options[O.bars]); }
-        if (tail >= 167) { U16(this.ext ? 120 + Math.floor(Math.random() * 60) : 0); U8(this.multZone); }
-        if (tail >= 170) { U8(this.clkFlags); U16(this.ext ? 40 + Math.floor(Math.random() * 20) : 0); }
-        if (tail >= 175) { U8(0); U16(0); U16(0); }                       /* v0.9.5 forensics */
-        if (tail >= 176) U8(this.jackMap);                                 /* 175 jack map: 0 Brain · 1 Voice */
-        if (tail >= 177) U8(this.looperEvents);                            /* 176 LOOPER */
-        if (tail >= 194) {                                                 /* 177.. SAMPLE / WEB */
-          this.recTick(); const r = this.rec;
-          U8(r.state); U8(r.state ? r.key : 255); U32(this.freePos); U32(BUF_CAP); U8(this.stereo ? 1 : 0); U8(this.inLevel); U8(this.nTable); U32(this.bufLen);
-        }
-        if (tail >= 218) for (let k = 0; k < KEYS; k++) U8(this.keySlice[k]);
-        if (tail >= 219) U8(this.options[O['key.plays']]);                 /* 218 Key Plays */
-        if (tail >= 223) { const s = this.set, c = this.opts.card && this.cardOp.job && this.cardOp.job !== 'rescan' && !s.state; U8(c ? 3 : s.state); U8(c ? this.cardOp.progress : s.progress); U8(s.result); U8(s.seq); }   /* 219.. SETS; 3 = CARD's write or copy, as the firmware */
-        if (tail >= 255) { const s = this.set; for (let i = 0; i < 32; i++) U8(i < s.name.length ? s.name.charCodeAt(i) : 0); }
-        if (tail >= 258) { this.journalCheck(); U8(this.tableGen); U8(Math.min(255, this.journal.length)); U8(this.selSlice); }   /* 255.. EDIT: tableGen, undoDepth, selSlice */
-        if (tail >= 262) U32(this.srcPos());                                /* 258 EDIT: the position snapshot */
-        if (tail >= 263) U8(Math.min(255, this.redoStack.length));          /* 262 EDIT-UNDO: redoDepth */
-        if (tail >= 276) {                                                  /* 263.. KEYS (v0.13) */
+        U16(900 + Math.floor(Math.random() * 300)); U16(180 + Math.floor(Math.random() * 40)); U16(0); U16(this.histN);   /* 148 diag */
+        U16(this.lockMask); F32(this.opts.bpm); U8(this.nSlices / 16); U8(this.options[O.bars]);                             /* 156 */
+        U16(this.ext ? 120 + Math.floor(Math.random() * 60) : 0); U8(this.multZone);                                         /* 164 CLOCK */
+        U8(this.clkFlags); U16(this.ext ? 40 + Math.floor(Math.random() * 20) : 0);
+        U8(0); U16(0); U16(0);                                             /* 170 the stall forensics */
+        U8(this.jackMap);                                                  /* 175 jack map: 0 Brain · 1 Voice */
+        U8(this.looperEvents);                                             /* 176 LOOPER */
+        { this.recTick(); const r = this.rec;                              /* 177 SAMPLE */
+          U8(r.state); U8(r.state ? r.key : 255); U32(this.freePos); U32(BUF_CAP); U8(this.stereo ? 1 : 0); U8(this.inLevel); U8(this.nTable); U32(this.bufLen); }
+        for (let k = 0; k < KEYS; k++) U8(this.keySlice[k]);              /* 194 the key map */
+        U8(this.options[O['key.plays']]);                                  /* 218 Key Plays */
+        { const s = this.set, c = this.cardOp.job && this.cardOp.job !== 'rescan' && !s.state; U8(c ? 3 : s.state); U8(c ? this.cardOp.progress : s.progress); U8(s.result); U8(s.seq); }   /* 219 SETS; 3 = CARD's write or copy, as the firmware */
+        { const s = this.set; for (let i = 0; i < 32; i++) U8(i < s.name.length ? s.name.charCodeAt(i) : 0); }
+        this.journalCheck(); U8(this.tableGen); U8(Math.min(255, this.journal.length)); U8(this.selSlice);   /* 255 EDIT: tableGen, undoDepth, selSlice */
+        U32(this.srcPos());                                                /* 258 EDIT: the position snapshot */
+        U8(Math.min(255, this.redoStack.length));                          /* 262 EDIT-UNDO: redoDepth */
+        {                                                                  /* 263 KEYS */
           const now = Date.now(), valid = this.srcValid(), nm = this.liveMarkers().length, mv = this.j4mV(now), voice = this.jackMap === 1;
           U8((valid ? 1 : 0) | (this.grammar === GRAM.pads && nm > 0 ? 2 : 0));
           const avg = this.opts.load != null ? this.opts.load : 310 + Math.floor(Math.random() * 40); U16(avg); U16(Math.min(2000, avg + 90 + Math.floor(Math.random() * 120)));
           U16(mv < 0 ? mv + 0x10000 : mv); U8(this.j4Key(mv)); U8(voice ? (Math.floor((now - this.t0) / 6000) % 4 === 3 ? 1 : 0) : 255);
           U8(this.keyFlash); U8(this.keySeq); U8(this.autoK); U8(Math.min(255, nm));
         }
-        if (tail >= 293) {                                                  /* 276.. CARD */
+        {                                                                  /* 276 CARD */
           const o = this.cardOp, v = this.survey;
           U8(o.state); U8(o.progress); U8(o.result); U8(o.seq); U8(this.cardFlags());
           U16(Math.min(65535, v.rootWavs)); U16(Math.min(65535, v.pending)); U16(Math.min(65535, v.breaks));
           U8(o.lastIdx); U16(o.copied); U16(o.skipped); U8(Math.min(255, this.files.length));
         }
-        if (tail >= 315) {                                                  /* 293.. PADS */
+        {                                                                  /* 293 PADS */
           const o = this.padOp, u = this.padUp;
           U8(o.state); U8(o.state === 1 && u.total ? Math.floor(u.have * 255 / u.total) : o.progress); U8(o.result); U8(o.seq); U8(o.key);
           U8((this.kitUnsaved() ? 1 : 0) | (this.noBreak ? 2 : 0) | (this.padStereo ? 4 : 0));
@@ -1032,9 +1001,8 @@ class FakeDevice {
         const first = body.length >= 1 ? body[0] : 0; let count = body.length >= 2 ? body[1] : 39;
         if (first > this.nTable) { U8(2); break; }
         count = Math.min(count, 39, this.nTable - first);
-        const wide = this.opts.edit && body.length >= 3 && body[2] !== 0;   /* EDIT: form 1 → the 14-byte entry */
         U8(0); U8(this.nSlices); U8(this.nTable);
-        for (let t = first; t < first + count; t++) { const e = this.table[t]; U32(e.start); U32(e.len); U8(e.key); U8(e.cls); U8(e.sal); U8(e.hit ? 1 : 0); U8(e.dens); if (wide) U8(e.flags); }
+        for (let t = first; t < first + count; t++) { const e = this.table[t]; U32(e.start); U32(e.len); U8(e.key); U8(e.cls); U8(e.sal); U8(e.hit ? 1 : 0); U8(e.dens); U8(e.flags); }
         break; }
       case CMD.hits: {
         const first = body.length >= 1 ? body[0] : 0, n = this.hits.length;
@@ -1045,7 +1013,7 @@ class FakeDevice {
         const first = body[0] || 0, n = Math.min(body[1] || 30, 30, 64 - first);
         if (first >= 64) { U8(2); break; }
         U8(0); U8(first); U8(n); for (let i = 0; i < n * 16; i++) U8(this.env[first * 16 + i]); break; }
-      /* SCOPE: the firmware's 0x62 — the empty body is the old mono reply, a body is the
+      /* SCOPE: the firmware's 0x62 — the empty body is the small output trace, a body is the
        * ten-channel one with the same parse / clamp / window / trigger / at-pos / decimation
        * rules as core/bb_scope.h (kept in step by hand: selftest.mjs pins both). */
       case CMD.scope: {
@@ -1069,7 +1037,7 @@ class FakeDevice {
         if (!mask && !maskHi) { U8(2); break; }
         const count = m => { let c = 0; for (let i = 0; i < 8; i++) if (m & (1 << i)) c++; return c; }, first = m => { for (let i = 0; i < 8; i++) if (m & (1 << i)) return i; return -1; };
         const hdr = SC.hdr + ((flags & SC.ext) ? SC.hdrExt : 0);
-        n = Math.min(n, SC.maxN, Math.floor((this.opts.maxBody - hdr) / (count(mask) + count(maskHi))));
+        n = Math.min(n, SC.maxN, Math.floor((MAX_BODY - hdr) / (count(mask) + count(maskHi))));
         if (mask) n = Math.min(n, Math.floor(SC.usable / decim)); if (maskHi) n = Math.min(n, Math.floor(SC.cvUsable / cvDecim)); n = Math.max(1, n);
         const spanA = mask ? n * decim : 0, spanC = maskHi ? n * cvDecim : 0;
         const holdsA = p => { const a = HL.scopeAge(wpos, p); return a >= spanA && a <= SC.usable; }, holdsC = k => { const a = HL.scopeAge(cvW, k, SC.cvWrap); return a >= spanC && a <= SC.cvUsable; };
@@ -1108,7 +1076,6 @@ class FakeDevice {
         switch (op) {
           case 0: this.dice(); break;
           case 1: this.newMaterial(); this.histN = Math.min(16, this.histN + 1); break;
-          case 2: if (this.muted) this.transportStart(); else this.muted = true; break;   /* the toggle (0.12's only transport) */
           case 3: if (a < this.nSlices && b < this.nSlices) { this.src[a] = b; this.callFlash = b; this.callT = 4; } break;   /* the flash is the slice */
           case 4: this.flowing = !!a; break;
           case 5: this.histDepth = Math.min(this.histN - 1, a); break;
@@ -1125,31 +1092,14 @@ class FakeDevice {
             if (!SET_NAME_RE.test(name)) { ok = false; break; }
             if (this.set.state || this.set.pending || this.padBusy() || (op === 14 && this.rec.state)) { U8(3); return Uint8Array.from(w); }
             this.set.pending = { op, name }; break; }
-          /* EDIT: 16..29 — unknown to an older firmware (BAD_ARGS); EDIT-UNDO: 30 / 31 */
+          /* EDIT: 16..26, 29; EDIT-UNDO: 30 / 31; KEYS: 33 KEYS_FROM_MARKERS · 34 CLEAR_MARKERS · 36 AUTOSLICE; KEYP: 37
+           * KEY_PARAMS; CHROMA: 38 SPREAD_KEYS */
           case 16: case 17: case 18: case 19: case 20: case 21: case 22: case 23: case 24: case 25: case 26: case 29: case 30: case 31:
-            if (!this.opts.edit) { ok = false; break; }
+          case 33: case 34: case 36: case 37: case 38:
             return Uint8Array.from(this.applyEdit(op, body));
-          /* KEYS (v0.13): 32 PLAY_KEY · 33 KEYS_FROM_MARKERS · 34 CLEAR_MARKERS · 35 SET_MUTE · 36 AUTOSLICE — unknown to 0.12 */
-          case 33: case 34: case 36:
-            if (!this.opts.keys) { ok = false; break; }
-            return Uint8Array.from(this.applyEdit(op, body));
-          /* KEYP: 37 KEY_PARAMS — unknown before it */
-          case 37:
-            if (!this.opts.keyp) { ok = false; break; }
-            return Uint8Array.from(this.applyEdit(op, body));
-          /* CHROMA: 38 SPREAD_KEYS — unknown before it */
-          case 38:
-            if (!this.opts.spread) { ok = false; break; }
-            return Uint8Array.from(this.applyEdit(op, body));
-          case 32: { if (!this.opts.keys || body.length < 3) { ok = false; break; } const r = this.playKey(a, b); if (r) { U8(r); return Uint8Array.from(w); } break; }
-          case 35: if (!this.opts.keys || body.length < 2 || a > 1) ok = false; else if (a) this.muted = true; else this.transportStart(); break;
-          /* START: 40 START_IN(0 Sampler / 1 As saved) — written to the card for the next power-up; NO_CARD without one */
-          case 40: if (!this.opts.pads || body.length < 2 || a > 1) ok = false;
-            else if (!this.cardMounted) { U8(21); return Uint8Array.from(w); }
-            else { this.startIn = a; this.cardPut('Audiothurgist/startup.json', JSON.stringify({ audiothurgist: 1, startIn: a ? 'saved' : 'sampler' }) + '\n'); }
-            break;
+          case 32: { if (body.length < 3) { ok = false; break; } const r = this.playKey(a, b); if (r) { U8(r); return Uint8Array.from(w); } break; }   /* PLAY_KEY */
+          case 35: if (body.length < 2 || a > 1) ok = false; else if (a) this.muted = true; else this.transportStart(); break;   /* SET_MUTE */
           case 27: case 28: {
-            if (!this.opts.edit) { ok = false; break; }
             if (!this.bufLen) { U8(3); return Uint8Array.from(w); }
             if (op === 28) { this.auditionHeld = null; this.audition = null; break; }
             if (body.length < 8) { ok = false; break; }
@@ -1161,10 +1111,9 @@ class FakeDevice {
           default: ok = false;
         }
         U8(ok ? 0 : 2); break; }
-      case CMD.card: if (!this.opts.card) { U8(1); break; } this.cardHandle(body, U8, U32); break;   /* CARD; UNSUPPORTED before it */
-      case CMD.pads: if (!this.opts.pads) { U8(1); break; } this.padHandle(body, U8, U32); break;   /* PADS; UNSUPPORTED before it */
-      case CMD.keys:   /* KEYP: 0x69 GET_KEYS → status, 24, then i8 gain · u8 plays · i16 cents · u8 rat per key; UNSUPPORTED before it */
-        if (!this.opts.keyp) { U8(1); break; }
+      case CMD.card: this.cardHandle(body, U8, U32); break;   /* CARD */
+      case CMD.pads: this.padHandle(body, U8, U32); break;    /* PADS */
+      case CMD.keys:   /* KEYP: 0x69 GET_KEYS → status, 24, then i8 gain · u8 plays · i16 cents · u8 rat per key */
         U8(0); U8(KEYS);
         for (const p of this.keyp) { U8(p.gain & 0xff); U8(p.plays); U8(p.cents & 0xff); U8((p.cents >> 8) & 0xff); U8(p.rat | 0); }
         break;
