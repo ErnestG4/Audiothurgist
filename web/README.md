@@ -102,7 +102,9 @@ root, `sets/` and `presets/` beside them — the banner and *Copy them in*),
 `nocard` has no card in, `nocardfw` plays a 0.13 firmware before the card work
 (no `"card"`, the 276-byte body); **`?demo=emptykit`** starts from New empty kit
 (no break, Pads — drop files on the pads), `nopads` plays a firmware before the
-pads work (no `"pads"`, the 293-byte body). `#kit` / `#scope` / `#opts` / `#man`
+pads work (no `"pads"`, the 293-byte body); **`?demo=keyp`** opens the Kit with
+four keys' own settings set (a gain, a tune with Loop, a ½-sample Ratchet, a
+One-shot), `nokeyp` plays a firmware before them (no `"keyp"`). `#kit` / `#scope` / `#opts` / `#man`
 open a tab directly.
 
 ## What is on the page
@@ -382,8 +384,12 @@ gestures; PADS: the 315-byte tail, the plan and the PCM16 encoder, a drop
 over the fake byte for byte with every refusal both ways, ABORT, the timeout,
 a pads-only kit through a set save, a power-cycle and the load back, and the
 pads through real `dragover` / `drop` / `change` / `click` gestures (then
-`?demo=nopads`); the **contrast** of every text token on every surface in both
-themes, no colour outside the tokens, no duplicate ids. 682 checks. Pass `--golden <path>` if the SDK lives elsewhere (it is found
+`?demo=nopads`); KEYP: GET_KEYS / KEY_PARAMS over the fake (the refusals, a
+drag as one undo step, PLAY_KEY holding as the key says, a set carrying the
+settings) and the Kit's settings row through real `input` / `change` / `click`
+events (then `?demo=nokeyp`); the **contrast** of every text token on every
+surface in both themes, no colour outside the tokens, no duplicate ids. 712
+checks. Pass `--golden <path>` if the SDK lives elsewhere (it is found
 above a worktree too) and `--fw-src <file>` to check the parity against
 another firmware source (`git show beta-fw:src/audiothurgist.cpp > /tmp/f.cpp`).
 
@@ -485,6 +491,24 @@ page shows the old-card banner and **Copy them in** from these. `setState`
 reads 3 while the module writes or copies. LIST is the module's list as it is
 now (the descriptor's dropdown is the boot one). Protocol and reasons:
 `docs/packages/card.md`.
+
+## Each key's own settings (ACTION 37 + 0x69, capability `"keyp": 1`)
+
+The Kit's row under the keys edits the **selected** key: Gain (−24 … +6 dB, ½ dB
+steps), Tune (semitones + cents, ±24 st), Plays (Follow Key Plays · One-shot ·
+Held · Loop · Ratchet, and the ratchet's rate), ▶ hear (held while down) and
+reset. A key cell and a Play pad with settings say them in words in the
+accent's ink. The sliders send live, one request at a time, every send of a
+drag after its first with JOIN — one undo step, one history line. The 24 keys'
+settings are read through `0x69 GET_KEYS` whenever the tail's `tableGen` moves
+(nothing was added to the state tail). Wire format, the join rule, where the
+settings apply and why: `docs/packages/keyp.md`.
+
+```
+ACTION 37 KEY_PARAMS ← u8 key, i8 gain ½ dB, i16 cents, u8 plays 0..4, u8 rate 0..6, u8 flags b0 join [, u8 gen]
+                     → u8 status, u8 tableGen
+0x69 GET_KEYS        → u8 status, u8 24, 24 × { i8 gain, u8 plays, i16 cents, u8 rate }
+```
 
 ## Samples onto pads (0x68, capability `"pads": 1`)
 

@@ -410,7 +410,8 @@ static void TestRatchet()
     bool even = h.size() >= 5;
     for(size_t i = 1; i < h.size(); i++) even = even && abs((h[i] - h[i - 1]) * 24 - len / 2) <= 24;
     CHECK(even, "%zu retriggers in 100 000 samples, each half the entry apart (± one block)", h.size());
-    CHECK(worst < 0.06f, "no clicks at the seams: the worst sample-to-sample step %g (a cut would be ~0.4)", worst);
+    printf("  ratchet seams: worst step %g\n", worst);
+    CHECK(worst < 0.06f, "no clicks at the seams: the worst sample-to-sample step %g (a hard cut at the retrigger: 0.08)", worst);
     int held = 0; for(int i = 0; i < bb::Engine::kVoices; i++) held += e.voices[i].active && e.voices[i].held && e.voices[i].key == 2;
     CHECK(held == 1, "one hit sounds at a time (the last one fades out under the new)");
     e.ReleaseKey(2);
