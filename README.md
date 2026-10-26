@@ -107,7 +107,8 @@ up as the module does by default — Start in = Sampler: Pads, the transport
 stopped (the **Demo** button does this; a bare `?demo` keeps the old boot,
 Classic running, which the selftest drives).; **`?demo=keyp`** opens the Kit with
 four keys' own settings set (a gain, a tune with Loop, a ½-sample Ratchet, a
-One-shot), `nokeyp` plays a firmware before them (no `"keyp"`). `#kit` / `#scope` / `#opts` / `#man`
+One-shot), `nokeyp` plays a firmware before them (no `"keyp"`), `nospread` one with
+them but before Spread across keys (`"keyp": 1`). `#kit` / `#scope` / `#opts` / `#man`
 open a tab directly.
 
 ## What is on the page
@@ -407,7 +408,13 @@ pads through real `dragover` / `drop` / `change` / `click` gestures (then
 `?demo=nopads`); KEYP: GET_KEYS / KEY_PARAMS over the fake (the refusals, a
 drag as one undo step, PLAY_KEY holding as the key says, a set carrying the
 settings) and the Kit's settings row through real `input` / `change` / `click`
-events (then `?demo=nokeyp`); the **contrast** of every text token on every surface in both
+events (then `?demo=nokeyp`); CHROMA (§7f, §9h): SPREAD_KEYS over the fake (the
+tunes, gain and Plays read back, one undo step putting every key's map and
+settings back, keep pads, a spread in place moving nothing, the refusals, a set
+carrying it, a firmware before it) and the Kit's Spread button through real
+`click`s — the pads prompt (keep / over / cancel), the cells' and pads' words,
+the history line, Undo, no prompt with no pads in the way, an empty kit's key
+refused (then `?demo=kit,nospread`); the **contrast** of every text token on every surface in both
 themes, no colour outside the tokens, no duplicate ids; START (§9f): ACTION 40
 and the flags bit over the fake (the card file, two power-cycles, a card
 without the file, BAD_ARGS, NO_CARD, an older firmware), `padNormalize`, then
@@ -416,7 +423,7 @@ tab, a mono and a stereo WAV (real RIFF bytes) dropped on two pads and arriving
 sample for sample, both played from the page's pads, the kit turned stereo,
 normalise drops (remembered), Save set, a power-cycle on the same card with the
 page reconnected, Load set — the same pads, stereo, playing — and the flip to
-Classic, stopped until ▶. 725 checks. Pass `--golden <path>` if the SDK lives elsewhere (it is found
+Classic, stopped until ▶. 792 checks. Pass `--golden <path>` if the SDK lives elsewhere (it is found
 above a worktree too) and `--fw-src <file>` to check the parity against
 another firmware source (`git show beta-fw:src/audiothurgist.cpp > /tmp/f.cpp`).
 
@@ -535,6 +542,21 @@ settings apply and why: `docs/packages/keyp.md`.
 ACTION 37 KEY_PARAMS ← u8 key, i8 gain ½ dB, i16 cents, u8 plays 0..4, u8 rate 0..6, u8 flags b0 join [, u8 gen]
                      → u8 status, u8 tableGen
 0x69 GET_KEYS        → u8 status, u8 24, 24 × { i8 gain, u8 plays, i16 cents, u8 rate }
+```
+
+**Spread across keys** (ACTION 38, `"keyp": 2`): the row's last button,
+"Spread G1 chromatically (C1 … B2)", puts the selected key's sample on all 24
+keys — key j tuned (j − G1) semitones plus G1's cents, with G1's gain and
+Plays; G1 itself stays as it is. When keys that play pads of their own would be
+replaced, the key-drop prompt's red popover asks first: *spread around them*
+(the default — those keys keep their pads and settings), *spread over them too*
+(their samples stay in the kit, unplayed; Undo brings them back) or *cancel*.
+An empty kit's key cannot be spread. One undo step, one history line ("G1
+spread chromatically (23 keys)"). Decisions and the bench check:
+`docs/packages/chroma.md`.
+
+```
+ACTION 38 SPREAD_KEYS ← u8 root 0..23, u8 flags b0 keep pads [, u8 gen] → u8 status, u8 tableGen, u8 count
 ```
 
 ## Samples onto pads (0x68, capability `"pads": 1`)

@@ -31,8 +31,8 @@ const ACT = { dice: 0, reslice: 1, mute: 2, punch: 3, flow: 4, scrub: 5, load: 6
   undoEdit: 30, redoEdit: 31,
   /* KEYS (v0.13, capability "keys": 1): the on-screen pads, the two marker ops, the transport and the autoslice count */
   playKey: 32, keysFromMarkers: 33, clearMarkers: 34, setMute: 35, autoslice: 36,
-  /* KEYP (capability "keyp": 1): one key's gain / tune / plays */
-  keyParams: 37,
+  /* KEYP (capability "keyp": 1): one key's gain / tune / plays; CHROMA ("keyp": 2): one key's sample across all 24 */
+  keyParams: 37, spreadKeys: 38,
   /* START (beta-sampler, capability "startIn": 1): the power-up setting, kept on the card */
   startIn: 40 };
 /* v0.13 "keys": the J5 style the Voice map reads (state byte 271; 255 = the Brain map, where J5 is the gate) and the
@@ -566,6 +566,23 @@ const keypGainText = g => g ? `${g > 0 ? '+' : '−'}${Math.abs(g / 2)} dB` : ''
 const keypTuneText = c => { if (!c) return ''; const a = Math.abs(c); return `${c > 0 ? '+' : '−'}${a % 100 ? (a / 100).toFixed(2).replace(/0$/, '') : a / 100} st`; };
 const keypPlaysText = p => !p.plays ? '' : p.plays === KEYP.ratchet ? `ratchet ${KEYP.RATS[p.rat | 0] || ''}` : (KEYP.PLAYS[p.plays] || '');
 const keypText = p => keypNeutral(p) ? '' : [keypGainText(p.gain), keypTuneText(p.cents), keypPlaysText(p)].filter(Boolean).join(' · ');
+/* CHROMA (ACTION 38, capability "keyp": 2 — docs/packages/chroma.md): "spread across keys". Every key j but the root
+ * plays the root's entry, tuned (j − root) × 100 + the root's cents (clamped to ±24 st), with the root's gain and Plays
+ * (and ratchet rate); keepPads (b0) leaves a key that plays a recording other than the root's as it is. One undo step
+ * (the key map and all 24 keys' settings). → { ok, status, tableGen, count: the keys now on the root's entry besides
+ * it }. A spread already in place answers OK and moves nothing. */
+const CHROMA = { keepPads: 1 };
+const spreadKeys = (link, root, keepPads = false, gen = 0) => editOp(link, ACT.spreadKeys, [root & 0xff, keepPads ? CHROMA.keepPads : 0], gen);
+/* What a spread of `root` would do, from the page's copy of the map and the table: the keys it would re-point and,
+ * among them, the PADS — keys playing a recording (a marker with a recorder) other than the root's entry, which a
+ * spread would leave unplayed (the prompt's question). `entries` = the table's entries (each { key }), nSlices the grid. */
+function spreadPlan(keySlice, entries, nSlices, root) {
+  const t = keySlice[root], pads = [];
+  for (let j = 0; j < 24; j++) { if (j === root) continue; const u = keySlice[j]; if (u !== t && u >= nSlices && entries[u] && entries[u].key >= 0 && entries[u].len > 0) pads.push(j); }
+  return { root, t, pads, n: 23 };
+}
+/* key j's cents after a spread of a root tuned `rootCents` */
+const spreadCents = (j, root, rootCents = 0) => Math.max(-KEYP.centsMax, Math.min(KEYP.centsMax, (j - root) * 100 + rootCents));
 
 /* ───────────── CARD (0x67, capability "card": 1) ─────────────
  * The card is one folder, Audiothurgist/: breaks/*.wav (the list), sets/, presets/. The page turns any file the
@@ -871,6 +888,7 @@ const api = { PROTO, CMD, ACT, REC, NOTE_NAMES, keyName, STATUS, statusName, crc
   KEYS, playKey, keysFromMarkers, clearMarkers, setMute, autoslice, caps, START, setStartIn,
   CARD, breakNameOk, breakName, uploadPlan, encodeWav, serial, uploadBreak, copyOldCard, cardRescan, cardList,
   PADS, padPlan, encodePcm16, padNormalize, uploadPad, newKit,
-  KEYP, keyParams, parseKeyParams, fetchKeyParams, keypNeutral, keypText, keypGainText, keypTuneText };
+  KEYP, keyParams, parseKeyParams, fetchKeyParams, keypNeutral, keypText, keypGainText, keypTuneText,
+  CHROMA, spreadKeys, spreadPlan, spreadCents };
 if (typeof module === 'object' && module.exports) module.exports = api; else root.HL = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
