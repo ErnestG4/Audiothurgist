@@ -19,7 +19,10 @@
 // kSetOptionsToday in use, room for growth). The shell's side: core/bb_sets.h
 // and docs/packages/sample-sets.md. EDIT-PERSIST (docs/packages/
 // slice-edit-persist.md) added per-entry `flags`, the top-level `grid` count
-// and `keys` map — still schema 1: older firmware skips them.
+// and `keys` map — still schema 1: older firmware skips them. KEYP (docs/
+// packages/keyp.md) added `keyp`, the keys that are not neutral — written
+// only when one is, so an untouched kit's JSON is what it always was; still
+// schema 1 (older firmware skips the key, a file without it loads neutral).
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
@@ -59,6 +62,18 @@ struct SetSlice
     char    name[kSetMaxName] = {};
 };
 
+/* KEYP: one key's settings as the file holds them — "keyp":[{"key":3,"gain":-6.5,"cents":700,"plays":2}, …]:
+ * gain in dB (½ dB steps, −24 … +6), cents ±2400, plays 0 follow the option · 1 one-shot · 2 held · 3 loop. A key
+ * absent from the list is neutral. */
+constexpr int kSetGainMin = -48, kSetGainMax = 12, kSetCentsMax = 2400, kSetPlaysMax = 3;   // = bb::KeyParam's
+struct SetKeyParam
+{
+    int8_t  gain  = 0;      // ½ dB
+    uint8_t plays = 0;
+    int16_t cents = 0;
+    bool Neutral() const { return gain == 0 && plays == 0 && cents == 0; }
+};
+
 struct SetLoopEvent
 {
     float   phase = 0.f;    // position in the loop, 0..1 of the bar (unquantized)
@@ -91,6 +106,7 @@ struct SetInfo
     uint8_t options[kSetMaxOptions] = {};
     int     nLooper  = 0;
     SetLoopEvent looper[kSetMaxLooper];
+    SetKeyParam  keyp[kSetKeys];            /* KEYP: every key's settings (neutral unless the file says otherwise) */
 };
 
 struct PresetInfo
@@ -201,6 +217,25 @@ struct SetWriter
         o.Key("keys"); o.BeginArray();
         for(int k = 0; k < kSetKeys; k++) o.Int(s.keys[k]);
         o.EndArray();
+        /* KEYP: the keys that are not neutral, only when there is one (an untouched kit writes what it always wrote) */
+        bool anyKeyp = false;
+        for(int k = 0; k < kSetKeys; k++) anyKeyp = anyKeyp || !s.keyp[k].Neutral();
+        if(anyKeyp)
+        {
+            o.Key("keyp"); o.BeginArray();
+            for(int k = 0; k < kSetKeys; k++)
+            {
+                const SetKeyParam& p = s.keyp[k];
+                if(p.Neutral()) continue;
+                o.BeginObject();
+                o.KeyInt("key", k);
+                o.KeyFloat("gain", 0.5f * (float)p.gain);
+                o.KeyInt("cents", p.cents);
+                o.KeyInt("plays", p.plays);
+                o.EndObject();
+            }
+            o.EndArray();
+        }
         detail::OptionsOut(o, s.options, s.nOptions);
         o.Key("looper"); o.BeginArray();
         for(int i = 0; i < s.nLooper && i < kSetMaxLooper; i++)
@@ -259,6 +294,7 @@ struct SetReader
             else if(!strcmp(key, "grid"))   { if(!in.Int(out.nGrid)) return false; }          /* EDIT-PERSIST */
             else if(!strcmp(key, "slices")) { if(!Slices(in, out)) return false; }
             else if(!strcmp(key, "keys"))   { if(!Keys(in, out)) return false; }              /* EDIT-PERSIST */
+            else if(!strcmp(key, "keyp"))   { if(!KeyParams(in, out)) return false; }         /* KEYP */
             else if(!strcmp(key, "options")){ if(!detail::OptionsIn(in, out.options, out.nOptions)) return false; }
             else if(!strcmp(key, "looper")) { if(!Looper(in, out)) return false; }
             else if(!in.Skip()) return false;
@@ -272,6 +308,36 @@ struct SetReader
     }
 
   private:
+    /* KEYP: "keyp":[{"key","gain","cents","plays"}, …] — a key outside 0..23 (or none) is skipped, values outside the
+     * ranges clamped (an unknown plays → follow), unknown fields skipped, a later entry for the same key wins. */
+    static bool KeyParams(JsonIn& in, SetInfo& out)
+    {
+        if(!in.BeginArray()) return false;
+        while(in.ArrayMore())
+        {
+            if(!in.BeginObject()) return false;
+            int k = -1; float g = 0.f; int c = 0, pl = 0;
+            char key[16];
+            while(in.NextKey(key, sizeof key))
+            {
+                if(!strcmp(key, "key"))        { if(!in.Int(k)) return false; }
+                else if(!strcmp(key, "gain"))  { if(!in.Float(g)) return false; }
+                else if(!strcmp(key, "cents")) { if(!in.Int(c)) return false; }
+                else if(!strcmp(key, "plays")) { if(!in.Int(pl)) return false; }
+                else if(!in.Skip()) return false;
+            }
+            if(!in.ok) return false;
+            if(k < 0 || k >= kSetKeys) continue;
+            if(!(g == g)) g = 0.f;
+            if(g < -1000.f) g = -1000.f; else if(g > 1000.f) g = 1000.f;   // before the cast (no float → int overflow)
+            const int h = (int)(g * 2.f + (g < 0.f ? -0.5f : 0.5f));        // dB → ½ dB, rounded half away from zero
+            SetKeyParam& p = out.keyp[k];
+            p.gain  = (int8_t)(h < kSetGainMin ? kSetGainMin : h > kSetGainMax ? kSetGainMax : h);
+            p.cents = (int16_t)(c < -kSetCentsMax ? -kSetCentsMax : c > kSetCentsMax ? kSetCentsMax : c);
+            p.plays = (uint8_t)(pl < 0 || pl > kSetPlaysMax ? 0 : pl);
+        }
+        return in.ok;
+    }
     /* EDIT-PERSIST: "keys":[…] — one int per Voice key; extras consumed and
      * dropped, a short list leaves the rest at −1 (the default). */
     static bool Keys(JsonIn& in, SetInfo& out)

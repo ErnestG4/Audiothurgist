@@ -43,6 +43,7 @@ struct UndoRec
     static constexpr uint8_t kEntries = 0;   // u.e[0..n): the entries the op touched
     static constexpr uint8_t kStarts  = 1;   // u.nudge: the starts of [first, first + n) with their orange / hit bits
     static constexpr uint8_t kSnap    = 2;   // BETA: u.e[0..n) = every slot of [first, first + n) — the marker range, whole
+    static constexpr uint8_t kKeyP    = 3;   // KEYP: u.kp = every key's settings; `first` = the key the op edited
     uint8_t op;        // the forward EditOp this record undoes (informational)
     uint8_t kind;      // kEntries / kStarts
     uint8_t head;      // 1 = the first record of a step (Undo pops back to a head)
@@ -55,6 +56,7 @@ struct UndoRec
     {
         UndoEntry e[Engine::kMaxTable];   // kEntries: [0, 2) · BETA kSnap: [0, n)
         struct { uint32_t orange[3], hit[3]; int32_t start[Engine::kMaxTable]; } nudge;
+        KeyParam kp[Engine::kKeys];       // KEYP: kKeyP (96 B — inside the union, the record does not grow)
     } u;
     // the bytes a record uses: the header, the keys, then what its kind fills
     size_t Bytes() const
@@ -62,6 +64,7 @@ struct UndoRec
         const size_t head = offsetof(UndoRec, u);
         if(kind == kStarts) return head + sizeof(u.nudge.orange) + sizeof(u.nudge.hit) + sizeof(int32_t) * (size_t)n;
         if(kind == kSnap)   return head + sizeof(UndoEntry) * (size_t)(n > Engine::kMaxTable ? Engine::kMaxTable : n);
+        if(kind == kKeyP)   return head + sizeof(u.kp);
         return head + sizeof(UndoEntry) * (size_t)(n > 2 ? 2 : n);
     }
 };
@@ -194,12 +197,32 @@ inline void Engine::UndoCaptureSnap(UndoRec& r) const
     for(int j = 0; j < r.n; j++) UndoCaptureEntry(r.u.e[j], nSlices + j);
 }
 
+// KEYP: every key's settings, with the key map and nTable (unchanged by the op; the swap below is then a no-op).
+inline void Engine::UndoCaptureKeyP(UndoRec& r, int key) const
+{
+    r.kind = UndoRec::kKeyP;
+    r.first = (uint8_t)(key < 0 ? 0 : key);
+    r.n = 0;
+    r.nTable = (uint8_t)nTable;
+    memcpy(r.keys, keySlice, sizeof r.keys);
+    memcpy(r.u.kp, keyp, sizeof r.u.kp);
+}
+
 // Restore r and leave the state it replaced in r (the record becomes its
 // own inverse). true = a grid entry was touched (the overlay must follow).
 inline bool Engine::UndoSwap(UndoRec& r)
 {
     bool grid = false;
-    if(r.kind == UndoRec::kSnap)
+    if(r.kind == UndoRec::kKeyP)   /* KEYP: the settings trade places; gain and rate worked out again for the keys that moved */
+    {
+        for(int k = 0; k < kKeys; k++)
+        {
+            const KeyParam was = keyp[k], to = r.u.kp[k];
+            if(memcmp(&was, &to, sizeof was) != 0) PutKeyParam(k, to.Valid() ? to : KeyParam{0, 0, 0});
+            r.u.kp[k] = was;
+        }
+    }
+    else if(r.kind == UndoRec::kSnap)
     {
         for(int j = 0; j < r.n && r.first + j < kMaxTable; j++)
         {
@@ -291,6 +314,7 @@ inline bool Engine::UndoBegin(const EditReq& r)
         case EditOp::Merge:     idx[0] = r.t; idx[1] = MergeTarget(r.t); n = 2; break;
         case EditOp::SetKey:
         case EditOp::SetKeyMap: n = 0; break;   // the key map alone (BETA: SetKeyMap too)
+        case EditOp::SetKeyParams: UndoCaptureKeyP(s, r.key); undo->armed = 1; return true;   /* KEYP */
         case EditOp::SwapKeys:
             if(r.a >= 0 && r.a < kKeys) idx[0] = keySlice[r.a];
             if(r.b >= 0 && r.b < kKeys) idx[1] = keySlice[r.b];
@@ -319,6 +343,7 @@ inline bool Engine::UndoQuiet(const EditReq& r) const
     if(undo->gen != tableGen || undo->count <= 0 || undo->cur != undo->count) return false;
     if(r.op == EditOp::SetKeyMap) return true;
     const UndoRec& last = undo->Slot(undo->count - 1);
+    if(r.op == EditOp::SetKeyParams) return last.kind == UndoRec::kKeyP && last.first == r.key;   /* KEYP: a drag of one key's slider */
     if(last.kind != UndoRec::kSnap) return false;
     switch(r.op)
     {
