@@ -100,8 +100,10 @@ opens the Kit tab's Card panel on a fake card (in-memory files: upload, list,
 Load it now), **`?demo=oldcard`** lays the card out the old way (WAVs in the
 root, `sets/` and `presets/` beside them — the banner and *Copy them in*),
 `nocard` has no card in, `nocardfw` plays a 0.13 firmware before the card work
-(no `"card"`, the 276-byte body). `#kit` / `#scope` / `#opts` / `#man` open a tab
-directly.
+(no `"card"`, the 276-byte body); **`?demo=emptykit`** starts from New empty kit
+(no break, Pads — drop files on the pads), `nopads` plays a firmware before the
+pads work (no `"pads"`, the 293-byte body). `#kit` / `#scope` / `#opts` / `#man`
+open a tab directly.
 
 ## What is on the page
 
@@ -375,8 +377,12 @@ the last frame drew); CARD: the WAV encoder, the name rule (fuzzed), the
 upload sequencer and every refusal against the fake, two uploads at once
 (refused mid-stream without the queue, both landing through it), the old
 card's copy, and the Card panel through real `change` / `drop` / `click`
-gestures; the **contrast** of every text token on every surface in both
-themes, no colour outside the tokens, no duplicate ids. 612 checks. Pass `--golden <path>` if the SDK lives elsewhere (it is found
+gestures; PADS: the 315-byte tail, the plan and the PCM16 encoder, a drop
+over the fake byte for byte with every refusal both ways, ABORT, the timeout,
+a pads-only kit through a set save, a power-cycle and the load back, and the
+pads through real `dragover` / `drop` / `change` / `click` gestures (then
+`?demo=nopads`); the **contrast** of every text token on every surface in both
+themes, no colour outside the tokens, no duplicate ids. 682 checks. Pass `--golden <path>` if the SDK lives elsewhere (it is found
 above a worktree too) and `--fw-src <file>` to check the parity against
 another firmware source (`git show beta-fw:src/audiothurgist.cpp > /tmp/f.cpp`).
 
@@ -478,6 +484,41 @@ page shows the old-card banner and **Copy them in** from these. `setState`
 reads 3 while the module writes or copies. LIST is the module's list as it is
 now (the descriptor's dropdown is the boot one). Protocol and reasons:
 `docs/packages/card.md`.
+
+## Samples onto pads (0x68, capability `"pads": 1`)
+
+Drop an audio file on a pad (Play) or a key cell (Kit) — or, on a phone,
+*Choose samples…* (Play, with *into [key]*) / *⤓ Load into …* (Kit, the selected
+key) — and that key plays it. The browser decodes it (the card upload's 48 kHz
+`OfflineAudioContext`), keeps two channels at most, reads the room from the
+state (`pads.free`, asked for fresh, under its own request key) and cuts the
+file to it, saying so ("the first 1.00 s of 3.0 s, all the room left"), then
+sends raw PCM16 (`HL.encodePcm16`, interleaved, no header) one chunk per round
+trip (`HL.uploadPad`):
+
+```
+op 0 BEGIN    ← u8 key, u8 ch, u32 frames → status, u32 room, u32 bufCap
+op 1 DATA     ← u32 total, u32 offset, bytes → status, u32 have, u8 done (1 = the commit is queued)
+op 2 ABORT · op 3 NEW_KIT → status
+statuses: 0 OK · 2 BAD_ARGS · 3 BAD_STATE · 6 TOO_LARGE (more than the room)
+```
+
+The module holds the bytes past freePos, converts them in place and publishes
+the pad (one undo step; the tail's `pads.seq` moves); the page waits by asking
+for the state itself and gives up only when the module stands still. Several
+files fill the pad and the ones after it, through the card's queue
+(`cardRun`), so a drop and a card upload never interleave. Each pad shows the
+drop's progress on its foot ("↑ 40 %", "placing…", "✓ 0.50 s"); the line under
+the pads says what it became, and a stereo file that turned the kit stereo
+says so (Options → Sampling: Stereo). The row above the pads has the room
+meter ("pads: 12.30 s of 28.00 s free · 2.10 s held by replaced pads" — held
+memory comes back only with new material), the picker and **New empty kit**
+(asks first: the break, every pad and marker go, Pads, the whole memory for
+pads); the **Unsaved kit** note (tail `pads.flags` b0) offers **Save set…**,
+which saves at once when the Kit's Set name is filled. Tail 293..314:
+`pads = { state, progress, result, seq, key, unsaved, noBreak, madeStereo,
+free, total, held, mask }` (null on an older body). Protocol and reasons:
+`docs/packages/pads.md`.
 
 ## The slice-editing ops (ACTION 16–29, capability `"edit": 1`)
 

@@ -40,6 +40,30 @@ arm Record and B3 or a J6 edge takes a whole loop into the break, with J6
 edges dropping slice markers while it runs. One buffer, one slice table: a
 break and a kit are the same thing, played by different rules (slice or held).
 
+## Use it as a sampler
+
+The 24 keys (J4, the page's pads, the Kit) are a sampler's pads as much as a
+break's slices. Three ways to put a sound on a pad:
+
+1. **A break, autosliced** — load or upload a break, then **Autoslice** (Kit →
+   Edit, or P5 on the panel's Edit page); in **Pads** the keys follow the
+   markers. BreakFix's way: the slices follow the tempo.
+2. **Record from CV** — Voice map, J5 style 7 (Record), hold the key on J4:
+   the input goes into that key.
+3. **Drop a file on a pad** — drag any audio file the browser can open onto a
+   pad (Play) or a key cell (Kit), or *Choose samples…* on a phone. Mono or
+   stereo, as the file is (no trim, no normalise; a stereo one makes the kit
+   stereo). Several files fill that pad and the next ones.
+
+Recordings and dropped samples play at their own pitch (P4 transposes them);
+the break's slices follow the tempo. The sample memory is 45 s per channel: a
+break takes at most 17 s and the pads get the rest — or press **New empty
+kit** (Play → Pads) for no break at all and 44.75 s of pads, in Pads mode. A
+dropped sample lives in the module's memory; the page shows **Unsaved kit**
+until you **Save set** (the break, every pad, the table and the options, in
+`Audiothurgist/sets/`), and a power-off before that loses it. Details:
+`docs/packages/pads.md`.
+
 ## Flashing
 
 1. Rack and power the module, panel USB-C to the computer.
@@ -64,8 +88,9 @@ Everything the module reads or writes lives in one folder, `Audiothurgist/`:
 
 The folders are made the first time something is written. **What loads:** WAV,
 PCM 16- or 24-bit, mono or stereo, 8 kHz or more, at least ¼ s; the first 17 s
-are used (the rest of the 25 s buffer is kept for takes into keys); any rate is
-converted to 48 kHz on load. **Uploads** from the page (Kit → Card, or *Add
+are used (the rest of the 45 s buffer is kept for takes into keys and samples
+dropped onto pads); any rate is converted to 48 kHz on load (a 192 kHz file:
+its first 8.5 s). **Uploads** from the page (Kit → Card, or *Add
 breaks…* beside the Sample list) take anything the browser can decode — WAV of
 any kind including float, AIFF, MP3, FLAC, OGG — and send it as a 48 kHz PCM16
 WAV, stereo kept, cut to 17 s; the module writes it into `breaks/` while the
