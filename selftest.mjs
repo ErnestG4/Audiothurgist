@@ -1814,7 +1814,7 @@ const sentAct = (G, ...pre) => G('demoDevice.acts').some(a => pre.every((v, i) =
   fireEv(pad(4), 'drop', files('kick 0.5s 48k.wav'));
   check('dropped on E1: decoded, sent (0x68 BEGIN / DATA), placed — the pad says ✓ and its length, the line says what it became',
     await until(() => G("padJobs.length === 1 && padJobs[0].state === 'done'"), 15000) && G('demoDevice.padOps')[0] === HL.PADS.begin && G('demoDevice.padOps').includes(HL.PADS.data) && !pad(4).className.includes('dropover')
-    && await until(() => /^✓ 0\.50 s$/.test(G('padEls[4].sub.textContent'))) && /kick 0\.5s 48k\.wav → E1: mono, 0\.50 s/.test(G("$('pd_msg').textContent")), G("$('pd_msg').textContent") + ' / ' + G('padEls[4].sub.textContent'));
+    && await until(() => /^✓ 0\.50 s$/.test(G('padEls[4].sub.textContent'))) && /^E1: kick 0\.5s 48k\.wav — mono, 0\.50 s/.test(G("$('pd_msg').textContent")), G("$('pd_msg').textContent") + ' / ' + G('padEls[4].sub.textContent'));
   check('…on the module: key 4 owns 24000 frames, the pad\'s fill full, the room meter down by 0.5 s, the unsaved note up',
     await until(() => G('st.pads.mask') === 16) && G('demoDevice.table[demoDevice.keySlice[4]].len') === 24000 && G('padEls[4].fill.style.width') === '100%' && await until(() => /^pads: 40\.50 s of 41\.00 s free$/.test(G("$('pd_room').textContent"))) && G("$('pd_unsaved').hidden") === false);
   check('…one undo step on the module (Undo takes the drop back)', await until(() => G('st.undoDepth') === 1));

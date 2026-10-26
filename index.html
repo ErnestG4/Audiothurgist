@@ -922,7 +922,7 @@ async function padUpload(job) {
     const p = await padSettle(p0.seq);
     if (p.result) { job.state = 'failed'; padShow(job, `not placed: ${HL.PADS.RESULT[p.result] || 'error ' + p.result}${p.result === 1 ? ` (${padSecs(p.free)} free)` : ''}`, 'bad', 0); return; }
     job.state = 'done';
-    padShow(job, `${job.file.name} → ${keyName(job.key)}: ${what}${p.madeStereo && plan.channels === 2 ? ' — the kit is stereo now (Options → Sampling: Stereo)' : ''}`, 'ok', 1);
+    padShow(job, `${job.file.name} — ${what}${p.madeStereo && plan.channels === 2 ? ' — the kit is stereo now (Options → Sampling: Stereo)' : ''}`, 'ok', 1);
     if (p.madeStereo) refreshLive();
     setTimeout(() => { if (padJob[job.key] === job) { padJob[job.key] = null; invalidate(D.pads); } }, 4000);
     refetchKit();
