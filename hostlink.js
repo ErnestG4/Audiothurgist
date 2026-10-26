@@ -29,7 +29,9 @@ const ACT = { dice: 0, reslice: 1, mute: 2, punch: 3, flow: 4, scrub: 5, load: 6
   /* EDIT-UNDO: the journal's two ops (no fields) — the page enables Undo / Redo from the tail's undoDepth / redoDepth */
   undoEdit: 30, redoEdit: 31,
   /* KEYS (v0.13, capability "keys": 1): the on-screen pads, the two marker ops, the transport and the autoslice count */
-  playKey: 32, keysFromMarkers: 33, clearMarkers: 34, setMute: 35, autoslice: 36 };
+  playKey: 32, keysFromMarkers: 33, clearMarkers: 34, setMute: 35, autoslice: 36,
+  /* START (beta-sampler, capability "startIn": 1): the power-up setting, kept on the card */
+  startIn: 40 };
 /* v0.13 "keys": the J5 style the Voice map reads (state byte 271; 255 = the Brain map, where J5 is the gate) and the
  * autoslice count's range (ACTION 36's k). TAP_MARK's fourth reply byte: b0 = an existing marker was reused. */
 const KEYS = { n: 24, autoMax: 64, reroll: 1, join: 2, reused: 1,
@@ -334,6 +336,7 @@ function parseState(b) {
     clkFlags: null, jitterRmsUs: null, p2Engaged: null, multPending: null, aligned: null, extTrans: null,
   };
   st.muted = !!(st.flags & 1); st.ext = !!(st.flags & 2); st.locked = !!(st.flags & 4); st.flowing = !!(st.flags & 8); st.brain = !!(st.flags & 16);
+  st.startSaved = !!(st.flags & 32);   /* START: b5 = Start in is As saved (0 = Sampler; meaningful with "startIn") */
   if (b.length >= 156) st.diag = { gap: u16(b, 148), audio: u16(b, 150), jumps: u16(b, 152), regens: u16(b, 154) };
   if (b.length >= 164) { st.lockMask = u16(b, 156); st.nativeBpm = f32(b, 158); st.gridBars = b[162]; st.barsOpt = b[163]; }
   if (b.length >= 167) { st.jitterUs = u16(b, 164); st.multZone = b[166]; }
@@ -515,10 +518,15 @@ const setMute        = (link, stopped)                     => editOp(link, ACT.s
 /* k 0..64 markers from the seeded draw (0 removes the grey ones); reroll draws a new seed; join folds this apply into the
  * previous AUTOSLICE's undo step (every send of one slider drag after the first: a whole drag is one undo step) */
 const autoslice      = (link, k, reroll = false, gen = 0, join = false) => editOp(link, ACT.autoslice, [Math.max(0, Math.min(KEYS.autoMax, Math.round(k))) & 0xff, (reroll ? KEYS.reroll : 0) | (join ? KEYS.join : 0)], gen);
+/* START (beta-sampler): Start in — 0 Sampler (Pads, the transport stopped; the default) · 1 As saved (the boot preset's
+ * grammar, running). The module writes Audiothurgist/startup.json and reads it at the next power-up; the state's flags
+ * b5 says what it holds. NO_CARD (21) without a card. A bare status reply. */
+const START = { sampler: 0, saved: 1 };
+const setStartIn     = (link, saved)                       => editOp(link, ACT.startIn, [saved ? START.saved : START.sampler]);
 /* What the descriptor's "audiothurgist" object says the firmware can do (each 0 when absent). */
 function caps(desc) {
   const a = (desc && desc.audiothurgist) || {};
-  return { ext: a.ext | 0, table: !!a.table, sets: a.sets | 0, scope2: a.scope2 | 0, edit: a.edit | 0, keys: a.keys | 0, card: a.card | 0, pads: a.pads | 0 };
+  return { ext: a.ext | 0, table: !!a.table, sets: a.sets | 0, scope2: a.scope2 | 0, edit: a.edit | 0, keys: a.keys | 0, card: a.card | 0, pads: a.pads | 0, startIn: a.startIn | 0 };
 }
 
 /* ───────────── CARD (0x67, capability "card": 1) ─────────────
@@ -644,6 +652,18 @@ function encodePcm16(planes, frames) {
     dv.setInt16(at, Math.round(v * 32767), true); at += 2;
   }
   return out;
+}
+/* beta-sampler: the page's optional peak normalise for a drop (off by default; the module never normalises a drop).
+ * New planes scaled so the loudest sample of the first `frames` of any channel sits at `targetDb` dBFS (−1: 0.891);
+ * one gain for both channels, so a stereo image keeps its balance. Silence is left alone. gainDb is what it applied. */
+function padNormalize(planes, frames, targetDb = -1) {
+  const n = frames == null ? Math.min(...planes.map(p => p.length)) : frames;
+  let peak = 0;
+  for (const p of planes) for (let i = 0; i < n; i++) { const a = Math.abs(p[i]); if (a > peak) peak = a; }
+  if (!(peak > 0) || !Number.isFinite(peak)) return { planes, peak: peak || 0, gain: 1, gainDb: 0, applied: false };
+  const gain = Math.pow(10, targetDb / 20) / peak;
+  return { planes: planes.map(p => { const o = new Float32Array(n); for (let i = 0; i < n; i++) o[i] = p[i] * gain; return o; }),
+    peak, gain, gainDb: 20 * Math.log10(gain), applied: true };
 }
 /* Send `bytes` (encodePcm16's) as key `key`'s pad. One chunk per round trip at normal priority (the page's clicks go
  * first, its polls interleave). onProgress(acked, total, kbps). Resolves { bytes, ms, kbps, room } once the module holds
@@ -810,8 +830,8 @@ const api = { PROTO, CMD, ACT, REC, NOTE_NAMES, keyName, STATUS, statusName, crc
   TABLE_ENTRY, TABLE_ENTRY_EDIT, TABLE_CHUNK, fetchWave, parseWave, fetchTable, parseTableChunk, fetchHits, parseHitsChunk,
   SET_STATE, SET_RESULT, setNameOk, setLabelName, nameBytes, saveSet, loadSet,
   EDIT, editOp, editBoundary, editEntry, editAdd, editSplit, editMerge, editTombstone, editSetKey, editSwapKeys, editNudgeAll, editPromote, editFromOnsets, audition, release, tapMark, editUndo, editRedo,
-  KEYS, playKey, keysFromMarkers, clearMarkers, setMute, autoslice, caps,
+  KEYS, playKey, keysFromMarkers, clearMarkers, setMute, autoslice, caps, START, setStartIn,
   CARD, breakNameOk, breakName, uploadPlan, encodeWav, serial, uploadBreak, copyOldCard, cardRescan, cardList,
-  PADS, padPlan, encodePcm16, uploadPad, newKit };
+  PADS, padPlan, encodePcm16, padNormalize, uploadPad, newKit };
 if (typeof module === 'object' && module.exports) module.exports = api; else root.HL = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

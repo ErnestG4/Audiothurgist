@@ -102,7 +102,10 @@ root, `sets/` and `presets/` beside them — the banner and *Copy them in*),
 `nocard` has no card in, `nocardfw` plays a 0.13 firmware before the card work
 (no `"card"`, the 276-byte body); **`?demo=emptykit`** starts from New empty kit
 (no break, Pads — drop files on the pads), `nopads` plays a firmware before the
-pads work (no `"pads"`, the 293-byte body). `#kit` / `#scope` / `#opts` / `#man`
+pads work (no `"pads"`, the 293-byte body); **`?demo=sampler`** powers the fake
+up as the module does by default — Start in = Sampler: Pads, the transport
+stopped (the **Demo** button does this; a bare `?demo` keeps the old boot,
+Classic running, which the selftest drives). `#kit` / `#scope` / `#opts` / `#man`
 open a tab directly.
 
 ## What is on the page
@@ -140,6 +143,17 @@ open a tab directly.
   lights whenever its key is called from anywhere (tail `keyFlash` /
   `keySeq`). First on the tab in Play and Pads; *keys follow markers* shows
   when Pads has put the markers on the keys.
+- **The sampler** (beta-sampler): in Pads with the transport stopped — how
+  the module powers up (Start in = Sampler) — the Play tab reads as a
+  sampler: the pads card first, a line over the pads saying what plays and
+  where a drop goes, with **Classic** / **Grids** buttons ("for a beat: …
+  then ▶") that only write the grammar; the transport says *sampler*, the
+  ring SAMPLER. Once a drum grammar waits, stopped, a line under the modes
+  says ▶ starts it and ▶ is ringed in the accent. An empty kit's pads are
+  dashed with a **+** (they take a drop). **normalise drops** (beside the
+  picker; off by default, remembered per browser) peak-normalises each
+  dropped file to −1 dBFS before it is sent, one gain for both channels
+  (`HL.padNormalize`); the line says by how much.
 - **Jacks**: the applied map and why (the option, the grammar), J4 live as
   a key with its volts (0 V = key 0 = C1, a semitone per key, below 0 V =
   key 0) on a 24-key strip, J5's style in the Voice map, what J6–J8 do.
@@ -269,6 +283,12 @@ open a tab directly.
   (`BLOB_BEGIN 0xFF → DATA → COMMIT`), exactly what `/program` does — it is
   not saved until a preset is saved. If the panel changes an option (a
   preset load), the page notices through the state and re-reads the blob.
+  Under them, **Start-up (kept on the card)**: *Start in* — Sampler (Pads,
+  stopped; the default) or As saved (the boot preset's grammar, running).
+  Not an Options byte: ACTION 40 writes it to the module's card
+  (`Audiothurgist/startup.json`), GET_STATE byte 3 b5 reads it back, so a
+  preset save or load never changes it (`"startIn": 1`; disabled with no
+  card in).
 - **Manual tab:** the descriptor's manual block (tagline, preamble,
   sections), the pager's page and knob help, the jack help and the presets
   help — all firmware-authored (`src/audiothurgist_manual.cpp`). The button
@@ -383,7 +403,15 @@ over the fake byte for byte with every refusal both ways, ABORT, the timeout,
 a pads-only kit through a set save, a power-cycle and the load back, and the
 pads through real `dragover` / `drop` / `change` / `click` gestures (then
 `?demo=nopads`); the **contrast** of every text token on every surface in both
-themes, no colour outside the tokens, no duplicate ids. 682 checks. Pass `--golden <path>` if the SDK lives elsewhere (it is found
+themes, no colour outside the tokens, no duplicate ids; START (§9f): ACTION 40
+and the flags bit over the fake (the card file, two power-cycles, a card
+without the file, BAD_ARGS, NO_CARD, an older firmware), `padNormalize`, then
+the page over `?demo=sampler` — it reads as a sampler, Start in on the Options
+tab, a mono and a stereo WAV (real RIFF bytes) dropped on two pads and arriving
+sample for sample, both played from the page's pads, the kit turned stereo,
+normalise drops (remembered), Save set, a power-cycle on the same card with the
+page reconnected, Load set — the same pads, stereo, playing — and the flip to
+Classic, stopped until ▶. 725 checks. Pass `--golden <path>` if the SDK lives elsewhere (it is found
 above a worktree too) and `--fw-src <file>` to check the parity against
 another firmware source (`git show beta-fw:src/audiothurgist.cpp > /tmp/f.cpp`).
 
@@ -511,7 +539,9 @@ files fill the pad and the ones after it, through the card's queue
 (`cardRun`), so a drop and a card upload never interleave. Each pad shows the
 drop's progress on its foot ("↑ 40 %", "placing…", "✓ 0.50 s"); the line under
 the pads says what it became, and a stereo file that turned the kit stereo
-says so (Options → Sampling: Stereo). The row above the pads has the room
+says so (Options → Sampling: Stereo). With *normalise drops* ticked the page
+peak-normalises the file to −1 dBFS before it goes (off by default, remembered
+per browser; the module itself never normalises a drop). The row above the pads has the room
 meter ("pads: 12.30 s of 28.00 s free · 2.10 s held by replaced pads" — held
 memory comes back only with new material), the picker and **New empty kit**
 (asks first: the break, every pad and marker go, Pads, the whole memory for
@@ -628,7 +658,7 @@ onset table for the current material (`gPendOnsets`, up to 128 positions,
 in material samples), chunked the same way.
 
 `flags`: b0 muted · b1 following an external clock · b2 locked · b3 flow
-held · b4 Brain page. `mult` is the multiplier being *applied*; `multZone`
+held · b4 Brain page · b5 Start in = As saved (`"startIn"`; clear = Sampler). `mult` is the multiplier being *applied*; `multZone`
 is the zone P2 is *requesting* (0..4 = ÷4 ÷2 ×1 ×2 ×4), which differs only
 while a switch waits for its beat. `jitterUs` / `jitterRmsUs` are the peak
 and RMS per-pulse period deviation over the last second. `clkFlags`: b0 P2
@@ -654,6 +684,7 @@ number of bells, B2 rings the next change, Brain knobs unused).
 | slice editing            | `0x63 ACTION` 16–29 (`"edit"`)    | the table ops with a gen, the audition voice, the tap mark — the table above; the Kit tab's editor drives them (`edit.js`) |
 | undo / redo              | `0x63 ACTION` 30 / 31             | the module's journal (EDIT-UNDO); Undo enables from the tail's `undoDepth`, Redo from `redoDepth` |
 | transport, pads, markers | `0x63 ACTION` 32–36 (`"keys"`)    | SET_MUTE · PLAY_KEY per pointer · markers → keys · clear markers · autoslice (JOIN while dragging) |
+| Start in                 | `0x63 ACTION` 40 (`"startIn"`)    | START_IN(u8 0 Sampler / 1 As saved) → the card's `Audiothurgist/startup.json`, read at power-up; NO_CARD (21) without one; flags b5 reads it back |
 | kit waveform             | `0x64 GET_WAVE`                   | on demand, ≤ 3/s, cached windows            |
 | slice table              | `0x65 GET_TABLE`                  | when the state's table signature changes    |
 | onset ticks              | `0x66 GET_HITS`                   | when `matGen` changes                        |
