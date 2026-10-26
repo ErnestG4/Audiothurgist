@@ -101,7 +101,7 @@ static void TestRoundTrip()
     // → SetInfo → JSON → SetInfo
     static bb::SetInfo s, t;
     bb::SetFromEngine(e1, snap, s, false, 48000);
-    strcpy(s.name, "kit_1"); s.bars = 2; s.bpm = 120.f; s.nOptions = bb::kSetOptionsToday;   /* EDIT-PERSIST: 24 (OPT8) */
+    strcpy(s.name, "kit_1"); s.bars = 2; s.bpm = 120.f; s.nOptions = bb::kSetOptionsToday;   /* 25 (OPT9) */
     for(int i = 0; i < bb::kSetOptionsToday; i++) s.options[i] = (uint8_t)(i * 7);
     CHECK(s.nSlices == 34 && s.material == len && s.len == e1.freePos && fabsf(s.swing - 0.6f) < 1e-6f && !s.stereo, "SetFromEngine header: %d entries, material %d, len %d", s.nSlices, s.material, s.len);
     CHECK(s.slices[0].key == -1 && s.slices[31].key == -1 && s.slices[32].key == 5 && s.slices[33].key == 20, "keys: grid -1, recorded their key");

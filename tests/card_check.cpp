@@ -18,10 +18,6 @@
 //    upload written / refused / overwritten / cut short by a full card, the
 //    uploaded file through the firmware's own loader, the yield and the DMA
 //    alignment of every write.
-// 6. beta-sampler: Start in — the file's text both ways (every broken or
-//    foreign reading is Sampler), and the FatFs half: no file, written,
-//    read back, rewritten, no .tmp left, a stale .tmp, a file too big, no
-//    folder, no card (the old setting kept).
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -35,7 +31,6 @@
 #include "bb_card.h"
 #include "bb_cardfs.h"
 #include "bb_wavwrite.h"
-#include "bb_startup.h"   // beta-sampler: Start in (core/bb_startup.h)
 
 static int gFail = 0, gPass = 0;
 #define CHECK(cond, ...) do { if(cond) { gPass++; } else { gFail++; printf("  FAIL %s:%d  ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while(0)
@@ -301,51 +296,6 @@ static void FatFs(const std::string& scratch)
     bb::gYield = nullptr;
 }
 
-/* beta-sampler: Start in (core/bb_startup.h) — Audiothurgist/startup.json */
-static void Startup(const std::string& scratch)
-{
-    SECTION("Start in (startup.json)");
-    char b[bb::kStartupMax];
-    size_t n = bb::StartupJson(bb::kStartSaved, b, sizeof b);
-    CHECK(n > 0 && !strcmp(b, "{\"audiothurgist\":1,\"startIn\":\"saved\"}\n"), "As saved's text: %s", b);
-    CHECK(bb::StartupRead(b, n) == bb::kStartSaved, "…reads back As saved");
-    n = bb::StartupJson(bb::kStartSampler, b, sizeof b);
-    CHECK(n > 0 && strstr(b, "\"sampler\"") && bb::StartupRead(b, n) == bb::kStartSampler, "Sampler's text and its reading: %s", b);
-    CHECK(bb::StartupJson(bb::kStartSaved, b, 20) == 0, "a buffer too small: nothing (0)");
-    CHECK(bb::StartupJson(7, b, sizeof b) > 0 && bb::StartupRead(b, strlen(b)) == bb::kStartSampler, "any other value is written as Sampler");
-    {   /* every strict prefix of As saved's file is broken JSON → Sampler (the default), never a guess */
-        bb::StartupJson(bb::kStartSaved, b, sizeof b); const size_t m = strlen(b) - 1;   /* without the newline */
-        int saved = 0; for(size_t k = 0; k < m; k++) if(bb::StartupRead(b, k) == bb::kStartSaved) saved++;
-        CHECK(saved == 0, "every truncation reads Sampler (%d did not)", saved);
-    }
-    const char* other[] = { "", "{}", "[]", "{\"startIn\":1}", "{\"startIn\":\"Saved\"}", "{\"startIn\":\"later\"}", "not json", "{\"startIn\":\"saved\"" };
-    int bad = 0; for(const char* t : other) if(bb::StartupRead(t, strlen(t)) != bb::kStartSampler) bad++;
-    CHECK(bad == 0, "empty, foreign, a number, another casing, an unknown word, unclosed: all Sampler (%d not)", bad);
-    const char* fut = "{\"audiothurgist\":2,\"brightness\":[1,2],\"startIn\":\"saved\",\"later\":{\"x\":1}}";
-    CHECK(bb::StartupRead(fut, strlen(fut)) == bb::kStartSaved, "a later file with more keys still reads (unknown keys skipped)");
-    CHECK(bb::StartupRead(nullptr, 5) == bb::kStartSampler, "no text: Sampler");
-
-    gShimCard = scratch + "/startup-card";
-    (void)!system(("rm -rf '" + gShimCard + "' && mkdir -p '" + gShimCard + "'").c_str());
-    static FIL f;
-    alignas(32) static char buf[bb::kStartupMax];
-    CHECK(bb::ReadStartup(&f, buf, sizeof buf) == bb::kStartSampler, "a card without the file: Sampler");
-    CHECK(!bb::WriteStartup(&f, bb::kStartSaved, buf, sizeof buf) && !Exists("Audiothurgist/startup.json") && !Exists("Audiothurgist/startup.json.tmp"), "no folder yet: not written, nothing left behind");
-    CHECK(bb::CardMkdirs(), "the folders made");
-    CHECK(bb::WriteStartup(&f, bb::kStartSaved, buf, sizeof buf) && Exists("Audiothurgist/startup.json") && !Exists("Audiothurgist/startup.json.tmp"), "As saved written (tmp + rename, no tmp left)");
-    { const auto t = ReadAll(gShimCard + "/Audiothurgist/startup.json"); CHECK(std::string(t.begin(), t.end()) == "{\"audiothurgist\":1,\"startIn\":\"saved\"}\n", "…the file says so"); }
-    CHECK(bb::ReadStartup(&f, buf, sizeof buf) == bb::kStartSaved, "…and reads back As saved");
-    Put("Audiothurgist/startup.json.tmp", "{half");   /* a power-off mid-write last time */
-    CHECK(bb::WriteStartup(&f, bb::kStartSampler, buf, sizeof buf) && bb::ReadStartup(&f, buf, sizeof buf) == bb::kStartSampler && !Exists("Audiothurgist/startup.json.tmp"), "rewritten as Sampler over a stale tmp");
-    { std::string big(bb::kStartupMax + 10, ' '); big = "{\"startIn\":\"saved\"}" + big; Put("Audiothurgist/startup.json", big.c_str());
-      CHECK(bb::ReadStartup(&f, buf, sizeof buf) == bb::kStartSampler, "a file that fills the buffer is not ours: Sampler"); }
-    Put("Audiothurgist/startup.json", "{\"audiothurgist\":1,\"startIn\":\"saved\"}");
-    CHECK(bb::ReadStartup(&f, buf, sizeof buf) == bb::kStartSaved, "written by hand, no newline: read");
-    { const std::string keep = gShimCard; gShimCard = scratch + "/nowhere/card";
-      CHECK(bb::ReadStartup(&f, buf, sizeof buf) == bb::kStartSampler && !bb::WriteStartup(&f, bb::kStartSaved, buf, sizeof buf), "no card volume: Sampler, the write refused"); gShimCard = keep; }
-    CHECK(bb::ReadStartup(&f, buf, sizeof buf) == bb::kStartSaved, "…and the card's setting untouched by the failed write");
-}
-
 int main(int argc, char** argv)
 {
     const std::string scratch = argc > 1 ? argv[1] : "/tmp";
@@ -354,7 +304,6 @@ int main(int argc, char** argv)
     Receiver();
     Plan();
     FatFs(scratch);
-    Startup(scratch);
     printf("\ncard_check: %d passed, %d failed\n", gPass, gFail);
     return gFail ? 1 : 0;
 }

@@ -48,9 +48,9 @@ constexpr int kSetPots        = 6;     // pots per page
 constexpr int kSetKeys        = 24;    // the key map's width (Engine::kKeys) /* EDIT-PERSIST */
 constexpr uint8_t kSetFlagOrange = 1u; // SetSlice::flags b0: user-placed / user-moved (Engine::kFlagOrange) /* EDIT-PERSIST */
 // The Options block's width today (Options::kBytes in the shell, which
-// static_asserts against this): 24 = OPT8. A set or a preset carries this
+// static_asserts against this): 25 = OPT9. A set or a preset carries this
 // many bytes; an older file's shorter list merges over the live block.
-constexpr int kSetOptionsToday = 24;   /* EDIT-PERSIST: byte 23 Autosave (22 = Tap Allowance, EDIT-PROTO) */
+constexpr int kSetOptionsToday = 25;   /* Options::kBytes: byte 24 Start In, 23 Autosave, 22 Tap Allowance */
 // JSON buffer the shell should lend: a full 96-entry / 256-event set emits
 // under 30 KB (persist_check prints the figure); the reader takes any length.
 constexpr size_t kSetJsonMax  = 32768;   /* SETS: was 24 KiB for 64 slices */

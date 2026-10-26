@@ -19,16 +19,14 @@
 # 6b. card_check   — CARD package: the one folder's paths, the upload name
 #                     rule, the upload receiver, the copy plan, and the FatFs
 #                     half (scan, survey, copy, the upload's write) over
-#                     tests/fatfs_shim.h with a scratch card; beta-sampler's
-#                     Start in file (startup.json) both ways (ASan/UBSan).
+#                     tests/fatfs_shim.h with a scratch card (ASan/UBSan).
 # 6c. pads_check   — PADS package: a drop's receiver and its in-place PCM16 →
 #                     planes conversion, EditOp::Record (one undo step, a
 #                     replaced pad held), the room, recordings at their own
 #                     rate, AdoptR, the unsaved note, the loader's same-rate
 #                     path, set round trips of a pads-only kit and of a 17 s
 #                     break plus pads at the 45 s planes (ASan/UBSan).
-# 6d. keyp_check   — KEYP package: per-key gain / tune / plays — neutral is
-#                     the pre-KEYP golden (a rich session's hash), gain and
+# 6d. keyp_check   — KEYP package: per-key gain / tune / plays — gain and
 #                     tune at the call (steps, keyless calls, auditions
 #                     untouched; a looper replay follows the key), Follow /
 #                     One-shot / Held / Loop, the edit op and its journal (a

@@ -73,7 +73,6 @@
 #include "bb_card.h"     /* CARD: the one folder, upload names, the receiver, the copy plan (docs/packages/card.md) */
 #include "bb_cardfs.h"   /* CARD: scan, survey, copy, the upload's write — FatFs, host-tested over a shim */
 #include "bb_pads.h"     /* PADS: a drop's bytes → planes, the room, the empty kit (docs/packages/pads.md) */
-#include "bb_startup.h"  /* START: Start in — Sampler (Pads, stopped) or As saved, Audiothurgist/startup.json */
 #pragma GCC pop_options
 #ifndef BB_GIT_HASH
 #define BB_GIT_HASH "local"
@@ -279,7 +278,6 @@ static volatile float gLoadFlash = 0.f;
 static bool  gFlowing = false;
 static float gLastP3  = -1.f;
 static int   gSelFile = 0;                       /* P5 highlights this file */
-static const char* gLabelPtrs[kMaxFiles];        /* → gFiles[], for the browser */
 static char ALCHEMY_SDRAM_BSS gSampleDisp[8192];  /* {"kind":"enum","labels":[...]} */
 static constexpr int kMaxDrop = 96;               /* dropdown cap (disp size bound) */
 
@@ -467,6 +465,11 @@ static constexpr uint8_t kTapAllowMs[5] = {0u, 20u, 40u, 60u, 80u};
 static const char* kAutosaveDisp = "{\"kind\":\"enum\",\"labels\":[\"Off\",\"On (2 s after an edit)\"]}";
 static Sel gAutosave = {1};   /* 23 EDIT-PERSIST: control reads .sel */
 /* EDIT-PERSIST end */
+/* START: Start In, what the module does at power-up. Sampler (the default): Pads with the transport stopped — the
+ * keys play samples, a beat waits for a drum grammar and ▶. As saved: the boot preset's grammar, running. Read once,
+ * after the boot preset is loaded; a change takes effect at the next power-up. */
+static const char* kStartInDisp = "{\"kind\":\"enum\",\"labels\":[\"Sampler (Pads, stopped)\",\"As saved (the preset's grammar, running)\"]}";
+static Sel gStartIn;     /* 24 START: boot reads .sel */
 static volatile uint8_t gJackMapCur = 0xFFu;   /* applied map: 0 Brain, 1 Voice */
 static volatile int     gHitCd  = 0;           /* Voice map: J7 hit trigger countdown (audio) */
 static volatile float   gHitVel = 0.f;         /* Voice map: J8 velocity volts */
@@ -478,7 +481,7 @@ static volatile float   gHitVel = 0.f;         /* Voice map: J8 velocity volts *
  * fans them out to the plain structs above and raises their dirty flags. */
 struct Options : Serializable
 {
-    static constexpr size_t kBytes = 24u;   /* SAMPLE: 17 Key Plays · RECORD: 18 Sampling, 19 Record Source, 20 Record · LOOPER: 21 Quantize · EDIT-PROTO: 22 Tap Allowance · EDIT-PERSIST: 23 Autosave */
+    static constexpr size_t kBytes = 25u;   /* SAMPLE: 17 Key Plays · RECORD: 18 Sampling, 19 Record Source, 20 Record · LOOPER: 21 Quantize · EDIT: 22 Tap Allowance, 23 Autosave · START: 24 Start In */
     size_t SerializedSize() const override { return kBytes; }
     void   Serialize(uint8_t* o) const override
     {
@@ -492,6 +495,7 @@ struct Options : Serializable
         o[21] = gQuantize.sel;                                              /* LOOPER */
         o[22] = gTapAllow.sel;                                              /* EDIT */
         o[23] = gAutosave.sel;                                              /* EDIT-PERSIST */
+        o[24] = gStartIn.sel;                                               /* START */
     }
     static void Put(Sel& s, uint8_t v, uint8_t max)
     {
@@ -516,9 +520,10 @@ struct Options : Serializable
         Put(gQuantize, in[21], 2);                                                    /* LOOPER */
         Put(gTapAllow, in[22], 4);                                                    /* EDIT */
         Put(gAutosave, in[23], 1);                                                    /* EDIT-PERSIST */
+        Put(gStartIn, in[24], 1);                                                     /* START */
         return true;
     }
-    uint32_t SchemaHash() const override { return 0x4F505438u; /* 'OPT8' (24 bytes: 22 Tap Allowance, 23 Autosave) */ }
+    uint32_t SchemaHash() const override { return 0x4F505439u; /* 'OPT9' (25 bytes: 24 Start In) */ }
     bool     Describe(hostlink::ComponentWriter& w) const override
     {
         using hostlink::FieldType;
@@ -549,6 +554,7 @@ struct Options : Serializable
         /* LOOPER */ ok &= w.Field("quantize", "Quantize", 21, FieldType::Enum, 0.f, kQuantizeDisp, 3u); /* LOOPER end */
         /* EDIT */   ok &= w.Field("tap.allow", "Tap Allowance", 22, FieldType::Enum, 0.f, kTapAllowDisp, 5u); /* EDIT end */
         /* EDIT-PERSIST */ ok &= w.Field("autosave", "Autosave", 23, FieldType::Enum, 0.f, kAutosaveDisp, 2u); /* EDIT-PERSIST end */
+        /* START */ ok &= w.Field("start.in", "Start In", 24, FieldType::Enum, 0.f, kStartInDisp, 2u);
         return ok;
     }
 };
@@ -755,15 +761,7 @@ static bool             gNoBreak    = false;          /* the material is an empt
 static int              gKitOnCard  = 0;              /* frames per plane the card holds of this kit (the unsaved note) */
 static bool PadBusy() { return gPadState != bb::kPadIdle || gPadReq != 0u; }
 /* ── end PADS ──────────────────────────────────────────────────────────── */
-/* ── START (beta-sampler) ── Start in: what the module does at power-up (core/bb_startup.h). Sampler (the
- * default; no file, no card): Pads with the transport stopped — the keys play samples, a beat waits for a drum
- * grammar and ▶. As saved: the boot preset's grammar, running (v0.13 as it was). A device setting on the card,
- * not an Options byte: a 25th byte would move the preset schema and drop every slot (their locks with them).
- * ACTION 40 sets it (the main loop writes the file), GET_STATE byte 3 b5 reads it back (set = As saved). ── */
-static volatile uint8_t gStartIn      = bb::kStartSampler;   /* what the page sees: the card's, or the change on its way */
-static uint8_t          gStartInCard  = bb::kStartSampler;   /* what the card says (read at boot, then each write) */
-static volatile bool    gStartInWrite = false;               /* HostLink → main loop: write gStartIn to the card */
-/* START: ▶ in Pads plays a beat. Pads writes nothing, so starting the transport there was silent — and after a
+/* ── START ── ▶ in Pads plays a beat. Pads writes nothing, so starting the transport there was silent — and after a
  * sampler power-up the panel had no way to a drum grammar but a preset load. Any start (B1 held, ▶, ACTION 2 / 35)
  * made in Pads brings back the last drum grammar first: the boot preset's, or the one Pads was entered from
  * (Classic if neither). Stopping leaves the grammar where it is. */
@@ -2361,6 +2359,13 @@ static void ServiceRecord()
  * Everything here runs on the control thread from the main loop, under a
  * BusyGuard, off the audio thread; the sink yields (KeepClock runs the whole
  * control loop every 40 ms while a set op is on). ──────────────────────── */
+/* A name into a fixed field: at most cap − 1 characters, always terminated. */
+static void CopyName(char* dst, size_t cap, const char* src)
+{
+    size_t n = 0;
+    while(n + 1 < cap && src[n]) { dst[n] = src[n]; n++; }
+    dst[n] = 0;
+}
 static void SetFinish(uint8_t result)
 {
     gSetResult   = result;
@@ -2472,7 +2477,7 @@ static void SaveSet(const char* name)
     bb::SetInfo& s = *gSet;
     new(&s) bb::SetInfo();
     bb::SetFromEngine(engine, *gSetLooper, s, engine.bufR != nullptr, (int)kSr);   /* EDIT-PERSIST: compacted, with flags, grid and keys */
-    strncpy(s.name, name, sizeof s.name - 1);
+    CopyName(s.name, sizeof s.name, name);
     s.bars     = gGridBars;
     s.bpm      = engine.NativeBpm();
     s.nOptions = (int)Options::kBytes;
@@ -2552,6 +2557,7 @@ static int LoadSet(const char* name, int fileIdx)
     bb::MergeOptions(*gSet, opt, opt, (int)Options::kBytes);
     opt[20] = 0;   /* Record: a load never arms a take */
     opt[23] = gAutosave.sel;   /* EDIT-PERSIST: Autosave is the device's, not the set's */
+    opt[24] = gStartIn.sel;    /* START: so is Start In */
     gOptions.Deserialize(opt);
     gBars.dirty = false; gSwing.dirty = false; gOnsetDet.dirty = false; gSampling.dirty = false; gClass.dirty = false;
     const bool wantR = gSampling.sel == bb::kSampStereo && gSet->stereo;
@@ -2751,7 +2757,7 @@ static bool AutosaveNow()
     {
         if(!SnapshotLooper()) return false;
         bb::SetFromEngine(engine, *gSetLooper, s, gSetWavStereo, (int)kSr, gSetWavLen);
-        strncpy(s.name, gSetCurName, sizeof s.name - 1);
+        CopyName(s.name, sizeof s.name, gSetCurName);
         s.bars     = gGridBars;
         s.bpm      = engine.NativeBpm();
         s.nOptions = (int)Options::kBytes;
@@ -2763,7 +2769,7 @@ static bool AutosaveNow()
     {
         gSetLooper->Clear();   /* the sidecar carries no looper */
         bb::SetFromEngine(engine, *gSetLooper, s, false, (int)kSr, engine.bufLen);
-        strncpy(s.name, gFiles[gCurFile], sizeof s.name - 1);
+        CopyName(s.name, sizeof s.name, gFiles[gCurFile]);
         s.bars = gGridBars;
         s.bpm  = engine.NativeBpm();
         if(!SidecarPath(gFiles[gCurFile], path, sizeof path)) return false;
@@ -2790,25 +2796,9 @@ static void ServiceAutosave()
     gAutoClean = gen;   /* one attempt per generation, success or failure */
     if(!ok) SetFinish(8);
 }
-/* START: ACTION 40's write — startup.json, tmp + rename, under BusyGuard; never during a set op (they share gSetFil).
- * A write that fails puts the page's value back to the card's, so the flag never claims what the card does not say. */
-static void ServiceStartIn()
-{
-    if(!gStartInWrite || gSetState || gSetReq) return;
-    gStartInWrite = false;
-    const uint8_t want = gStartIn;
-    bool ok = false;
-    if(CardReady())
-    {
-        SdCard::BusyGuard busy(sd);
-        ok = SetDirsOk() && bb::WriteStartup(&gSetFil, want, (char*)gSetStage, bb::kStartupMax);
-    }
-    if(ok) gStartInCard = want;
-    else if(!gStartInWrite) gStartIn = gStartInCard;   /* not a newer request meanwhile: back to what the card says */
-}
 /* Main loop: the markers, key table and flags of a loaded set (or a loose
  * file's sidecar) once the audio thread has the planes, ACTION 14 / 15, the
- * autosave, the preset backups, Start in. */
+ * autosave, the preset backups. */
 static void ServiceSets()
 {
     if(gSetPendCommit && !gApply)
@@ -2835,7 +2825,6 @@ static void ServiceSets()
     }
     ServiceAutosave();   /* EDIT-PERSIST */
     ServicePresetBackup();
-    ServiceStartIn();    /* START */
 }
 /* ── end SETS ──────────────────────────────────────────────────────────── */
 
@@ -2916,7 +2905,7 @@ static void ServiceCard()
     else { CardMerge(); CardSurveyNow(); CardFinish(bb::kCardOk); }
     gSetState = 0;
 }
-/* 0x67 CARD (capability "card": 1) — every op answers u8 status first:
+/* 0x67 CARD — every op answers u8 status first:
  *   0 UP_BEGIN  ← u32 total, u8 flags (b0 overwrite), name[1..100] (the stem; ".wav" is the module's)
  *               → status, u32 the most one upload may be. BAD_ARGS a bad name / total 0 · BAD_STATE a set op,
  *               a take, a load, an upload being written or a copy · TOO_LARGE · 20 EXISTS (no overwrite) ·
@@ -3079,7 +3068,7 @@ static void ServiceLoad()
  * HostLink extension claiming 0x60–0x6F. All handlers run on the control
  * thread; engine arrays are read as-is (a torn read is one frame of pixels).
  *   0x60 GET_STATE  → u8 status, u8 nSlices, u8 curStep, u8 flags
- *                     (b0 muted b1 ext b2 locked b3 flowing b4 brainPage · START: b5 Start in = As saved),
+ *                     (b0 muted b1 ext b2 locked b3 flowing b4 brainPage),
  *                     u8 matGen, u8 grammar, u8 classifier, u8 curFile,
  *                     u8 chop(0..255), u8 histN, u8 histDepth, u8 callFlash,
  *                     f32 bpm, f32 mult, i8 stepSrc[64], u8 stepClass[64],
@@ -3091,7 +3080,7 @@ static void ServiceLoad()
  *   0x61 GET_ENV    ← u8 first, u8 count(≤30) → u8 status, u8 first, u8 n,
  *                     then n × (8 × {u8 min, u8 max})
  *   0x62 SCOPE      ← (empty)  → u8 status, u16 n(256), i8 samples[256]: (out L + out R) / 2,
- *                     ×4 decimated, the newest 21 ms — the pre-SCOPE reply, kept for old pages
+ *                     ×4 decimated, the newest 21 ms — the page's small output scope
  *                   ← u8 chanMask (b0 out L · b1 out R · b2 in L · b3 in R), u8 decim (1..16),
  *                     u16 n (samples per channel; clamped to 512, to what fits max_body beside
  *                     the header, and to each tier's ring at its decimation), u8 flags (b0 trigger:
@@ -3116,9 +3105,9 @@ static void ServiceLoad()
  *                     channel the trigger ran on, 255 none)], then n × i8 per selected audio
  *                     channel in mask order, then per selected cv jack J3..J8. BAD_ARGS: no
  *                     channel, mask bits past the channels, decim 0 / > 16, cvDecim 0 / > 64,
- *                     n 0, a bad trigSrc, a short body. Descriptor: "scope2":2 (1 = the audio
- *                     body without ext). core/bb_scope.h has the rules; docs/packages/scope.md.
- *   0x63 ACTION     ← u8 op [,args]: 0 dice · 1 reslice · 2 mute toggle ·
+ *                     n 0, a bad trigSrc, a short body. core/bb_scope.h has the rules;
+ *                     docs/packages/scope.md.
+ *   0x63 ACTION     ← u8 op [,args]: 0 dice · 1 reslice · (2 free: the transport is 35) ·
  *                     3 punch(u8 step, u8 slice) · 4 flow(u8 on) ·
  *                     5 scrub(u8 depth) · 6 load(u8 fileIdx)      → u8 status */
 /* WEB ── sample-mode shell state the browser reads and the flags it raises.
@@ -3135,8 +3124,8 @@ static void ServiceLoad()
  *                     sample of `step` source samples)]
  *                   → u8 status, u32 start, u16 n, u8 step, i8 x[n]   (BAD_ARGS past freePos)
  *   0x65 GET_TABLE  ← [u8 first, u8 count] → u8 status, u8 nSlices, u8 nTable, then per
- *                     entry {u32 start, u32 len, i8 key, u8 cls, u8 sal, u8 hit, u8 dens}
- *                     (13 bytes; ≤39 per reply — chunk with first/count; count from length)
+ *                     entry {u32 start, u32 len, i8 key, u8 cls, u8 sal, u8 hit, u8 dens, u8 flags
+ *                     (b0 orange · b1 tombstone)} (14 bytes; ≤39 per reply — chunk with first/count)
  *   0x66 GET_HITS   ← [u8 first] → u8 status, u8 nTotal, u8 first, u32 pos[…] (≤127 per reply)
  *   0x63 ACTION     9 rec arm(u8 key) · 10 rec clear(u8 key) · 11 key plays(u8 0/1) ·
  *                   12 looper undo · 13 looper clear ·
@@ -3146,11 +3135,11 @@ static void ServiceLoad()
  *                   189 u8 nTable · 190 u32 bufLen · 194 i8 keySlice[24] · 218 u8 keyPlays ·
  *                   SETS: 219 u8 setState · 220 u8 setProgress · 221 u8 setResult ·
  *                   222 u8 setSeq · 223 char setName[32] (ends at 255) ·
- *                   EDIT: 255 u8 tableGen · 256 u8 undoDepth (EDIT-UNDO: journal steps back) · 257 u8 selSlice
- *                   (255 until EDIT-PANEL) · 258 u32 srcPos (the youngest voice's material position,
- *                   snapshotted by the audio thread once per block) · EDIT-UNDO: 262 u8 redoDepth — ends at 263
- *   EDIT (docs/packages/slice-edit-proto.md; capability "edit":1; every body may carry a
- *   trailing u8 gen, 0 = unchecked, else it must equal tableGen or the op is BAD_STATE):
+ *                   EDIT: 255 u8 tableGen · 256 u8 undoDepth (journal steps back) · 257 u8 selSlice (the panel's,
+ *                   255 none) · 258 u32 srcPos (the youngest voice's material position, snapshotted by the audio
+ *                   thread once per block) · 262 u8 redoDepth
+ *   EDIT (docs/packages/slice-edit-proto.md; every body may carry a trailing u8 gen, 0 = unchecked, else it
+ *   must equal tableGen or the op is BAD_STATE):
  *   0x63 ACTION     16 SET_BOUNDARY(u8 i, u32 pos) · 17 SET_ENTRY(u8 t, u32 start, u32 len) ·
  *                   18 ADD_ENTRY(u8 key | 255 none, u32 start, u32 len, u8 flags b0 orange) ·
  *                   19 SPLIT(u8 t, u32 pos) · 20 MERGE(u8 t) · 21 TOMBSTONE(u8 t) ·
@@ -3161,25 +3150,24 @@ static void ServiceLoad()
  *                   u16 lenMs, u8 flags b0 from-end: start is the END, play the last lenMs up to it ·
  *                   b1 loop until RELEASE; ≤ 10/s, a later one replaces) · 28 RELEASE · 29 TAP_MARK
  *                   (u8 snapMs, u8 allowMs: srcPos at receipt − allow, snapped to an onset within ±snap,
- *                   to the next onset or 250 ms, orange)
+ *                   to the next onset or 250 ms, orange; BAD_STATE when nothing sounds — tail 263 b0 clear —
+ *                   and a mark within 10 ms of a live marker selects that marker: a fourth reply byte, u8
+ *                   flags b0 = an existing marker reused, the table unmoved)
  *                   → u8 status (0 OK · 2 BAD_ARGS · 3 BAD_STATE: a stale gen, a take in flight, a set
  *                   op, a swap pending, the table full, no material), then on success u8 tableGen, then
  *                   for 18 / 19 / 29 u8 newIdx, for 26 u8 count. 27 / 28 answer u8 status alone.
  *   EDIT-UNDO (docs/packages/slice-edit-undo.md): 30 UNDO_EDIT · 31 REDO_EDIT — no fields (an optional
  *                   trailing gen as the others); one journal step either way → u8 status (2 BAD_ARGS = nothing to
  *                   undo / redo, or a history something went past; 3 BAD_STATE as the other ops), u8 tableGen.
- *   BETA (docs/packages/beta-fw.md; capabilities "edit":2, "keys":1):
- *   0x63 ACTION     29 TAP_MARK as before, but BAD_STATE when nothing sounds (tail 263 b0 clear), and a mark
- *                   within 10 ms of a live marker selects that marker: reply u8 status, u8 tableGen, u8 idx,
- *                   u8 flags (b0 = an existing marker reused; the table did not move)
- *                   32 PLAY_KEY(u8 key 0..23, u8 down 1 / up 0) → u8 status: the key as a CV note plays it (plain,
+ *   BETA (docs/packages/beta-fw.md):
+ *   0x63 ACTION     32 PLAY_KEY(u8 key 0..23, u8 down 1 / up 0) → u8 status: the key as a CV note plays it (plain,
  *                   Key Plays honoured), any grammar; an up releases a held key, a no-op for one-shot
  *                   33 KEYS_FROM_MARKERS([u8 gen]) → u8 status, u8 tableGen, u8 count: live markers in time order →
  *                   keys 0.. (keys holding a recording skipped and kept, the rest back to their span slice); one
  *                   undo step (none when the map already follows)
  *                   34 CLEAR_MARKERS([u8 gen]) → u8 status, u8 tableGen, u8 count: every live marker, grey and
  *                   orange, tombstoned (recordings stay); keys on them go back to their grid slices; one undo step
- *                   35 SET_MUTE(u8 1 stopped / 0 running) → u8 status (op 2 still toggles)
+ *                   35 SET_MUTE(u8 1 stopped / 0 running) → u8 status (a start in Pads brings the last beat back)
  *                   36 AUTOSLICE(u8 k 0..64, u8 flags b0 re-roll · b1 join [, u8 gen]) → u8 status, u8 tableGen,
  *                   u8 count: the grey markers become the first k onsets of a seeded salience-weighted draw (k
  *                   nested in k + 1), orange markers stay; k = 0 removes the grey ones; one undo step (b1: folded
@@ -3189,25 +3177,23 @@ static void ServiceLoad()
  *   state tail      263 u8 flags2 (b0 srcValid · b1 keys follow markers) · 264 u16 loadAvg · 266 u16 loadMax (‰ of
  *                   the 24-sample block budget, the last second) · 268 i16 j4mV · 270 u8 j4Key · 271 u8 j5Style (255 in
  *                   the Brain map) · 272 u8 keyFlash (255 none) · 273 u8 keySeq · 274 u8 autoK · 275 u8 nMarkers — ends at 276
- *   CARD (docs/packages/card.md; capability "card": 1): 0x67 CARD — upload a break, copy an old card in, rescan,
+ *   CARD (docs/packages/card.md): 0x67 CARD — upload a break, copy an old card in, rescan,
  *                   the list (HandleCard has the ops); state tail 276..292 (StateExt's 0x60 has the bytes) — ends at 293
- *   PADS (docs/packages/pads.md; capability "pads": 1): 0x68 PADS — a PCM16 sample dropped onto a pad (BEGIN / DATA /
+ *   PADS (docs/packages/pads.md): 0x68 PADS — a PCM16 sample dropped onto a pad (BEGIN / DATA /
  *                   ABORT, committed as EditOp::Record: one undo step), NEW_KIT (no break, Pads); state tail 293..314
  *                   (state, progress, result, seq, key, flags, free, total, held, the pads' key mask) — ends at 315
- *   KEYP (docs/packages/keyp.md; capability "keyp": 1): per-key gain / tune / plays —
+ *   KEYP (docs/packages/keyp.md): per-key gain / tune / plays —
  *   0x63 ACTION     37 KEY_PARAMS(u8 key 0..23, i8 gain ½ dB −48..+12, i16 cents ±2400, u8 plays 0 follow Key
  *                   Plays · 1 one-shot · 2 held · 3 loop · 4 ratchet, u8 rate 0 the entry · 1 ½ · 2 ¼ · 3 ⅛ · 4 an 8th
  *                   · 5 a 16th · 6 a 32nd, u8 flags b0 join [, u8 gen]) → u8 status, u8 tableGen; one undo step
  *                   (b0: folded into this key's previous step — a slider's drag)
  *   0x69 GET_KEYS   → u8 status, u8 n = 24, n × {i8 gain, u8 plays, i16 cents, u8 rate}
- *   CHROMA (docs/packages/chroma.md; capability "keyp": 2): one sample played chromatically —
+ *   CHROMA (docs/packages/chroma.md): one sample played chromatically —
  *   0x63 ACTION     38 SPREAD_KEYS(u8 root 0..23, u8 flags b0 keep pads [, u8 gen]) → u8 status, u8 tableGen, u8 count:
  *                   every key j ≠ root plays the root's entry, tuned (j − root) × 100 + the root's cents (clamped to
  *                   ±2400), the root's gain and Plays (and ratchet rate); b0 leaves a key that plays a recording other
  *                   than the root's as it is. count = the keys on the root's entry besides it. One undo step (the key
- *                   map and all 24 keys' settings); a spread that changes nothing posts nothing (no empty step)
- *   0x65 GET_TABLE  ← [u8 first, u8 count, u8 form] — form 1 = entries carry a trailing u8 flags
- *                   (b0 orange · b1 tombstone), 14 bytes each; absent / 0 = the 13-byte form. */
+ *                   map and all 24 keys' settings); a spread that changes nothing posts nothing (no empty step) */
 /* WEB → RECORD: ACTION 9 / 10. -1 = nothing requested; the consumer clears
  * the flag after acting on it (the same path as the panel's record gestures). */
 static volatile int8_t  gWebRecArm   = -1;    /* WEB → RECORD: arm a take into this key */
@@ -3853,7 +3839,7 @@ static void ServicePads()
     if(req == 1u) PadCommit();
     else if(req == 2u) PadNewKit();
 }
-/* 0x68 PADS (capability "pads": 1) — every op answers u8 status first:
+/* 0x68 PADS — every op answers u8 status first:
  *   0 BEGIN    ← u8 key (0..23), u8 ch (1 | 2), u32 frames (48 kHz) → status, u32 room (frames free past freePos
  *              now), u32 bufCap. BAD_ARGS a key / channel count / fewer than 480 frames · TOO_LARGE more frames
  *              than the room (the reply says how many fit) · BAD_STATE a set op, a load, a take (armed, running,
@@ -3933,22 +3919,11 @@ struct StateExt : hostlink::IHostlinkExtension
     uint8_t LastCmd()  const override { return 0x6Fu; }
     const char* DescriptorRootJson() const override
     {
-        /* WEB: wave/table/hits (0x64..0x66) advertised so the page can feature-detect the Kit tab. */
-        /* SETS: "sets":1 = ACTION 14 / 15 and the 219.. state tail. */
-        /* SCOPE: "scope2":2 = the 0x62 body (chanMask / decim / n / flags) beside the empty-body reply, with the
-         * ext form (J3..J8 as CV channels, cvDecim, trigger level and source); 1 was the audio-only body. */
-        /* EDIT: "edit":1 = ACTION 16..29, the 255.. state tail, GET_TABLE's flags form. BETA: "edit":2 = TAP_MARK
-         * refuses with nothing sounding and reuses a marker within 10 ms (a fourth reply byte). */
-        /* BETA: "keys":1 = ACTION 32..36 (PLAY_KEY, KEYS_FROM_MARKERS, CLEAR_MARKERS, SET_MUTE, AUTOSLICE) and the
-         * state tail from 263 (flags2, load, J4 → key, J5 style, key flash, autoK, nMarkers). */
-        /* CARD: "card":1 = everything under 0:/Audiothurgist, the 0x67 command (upload, copy an old card in, rescan,
-         * list) and the state tail from 276. */
-        /* PADS: "pads":1 = 0x68 (a sample dropped onto a pad, New empty kit), the 45 s planes, recordings at their
-         * own rate, and the state tail from 293. */
-        /* START: "startIn":1 = ACTION 40 and GET_STATE byte 3 b5 (Start in = As saved). */
-        /* KEYP: "keyp":1 = per-key gain / tune / plays — ACTION 37 KEY_PARAMS and 0x69 GET_KEYS (no tail bytes).
-         * CHROMA: "keyp":2 = and ACTION 38 SPREAD_KEYS (one sample across the keys, a semitone a key). */
-        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102,\"sets\":1,\"scope2\":2,\"edit\":2,\"keys\":1,\"card\":1,\"pads\":1,\"startIn\":1,\"keyp\":2}";
+        /* The page (web/) ships with this firmware and checks one number on connect: "api", the version of
+         * everything below (the commands, the ops, the state body). It refuses any other with one message —
+         * flash the matching .bin — so there is no partial mode to keep working. Bump it with any change to the
+         * wire, and HL.API in web/hostlink.js with it (the selftest's descriptor parity holds them equal). */
+        return "\"audiothurgist\":{\"api\":1}";
     }
     /* WEB: one float → i8 (±127), saturating. */
     static int8_t ToI8(float v)
@@ -3968,8 +3943,7 @@ struct StateExt : hostlink::IHostlinkExtension
                 int cur = (int)(engine.barPhase * (double)(ns > 0 ? ns : 1)); if(cur >= ns) cur = ns > 0 ? ns - 1 : 0;
                 uint8_t flags = (engine.muted ? 1u : 0u) | (gWasExt ? 2u : 0u)
                               | ((gWasExt && gFollower.Locked()) ? 4u : 0u)
-                              | (gFlowing ? 8u : 0u) | (pager.Page() ? 16u : 0u)
-                              | (gStartIn == bb::kStartSaved ? 32u : 0u);   /* START: b5 Start in = As saved */
+                              | (gFlowing ? 8u : 0u) | (pager.Page() ? 16u : 0u);
                 w.U8((uint8_t)ns); w.U8((uint8_t)cur); w.U8(flags); w.U8(gMatGen);
                 w.U8(gGrammar.mode); w.U8(gClass.mode); w.U8((uint8_t)(gCurFile < 0 ? 255 : gCurFile));
                 w.U8((uint8_t)(k_chop.Norm() * 255.f));
@@ -4115,7 +4089,6 @@ struct StateExt : hostlink::IHostlinkExtension
                 {
                     case 0: gPendReroll = true; break;
                     case 1: gPendReslice = true; break;
-                    case 2: TransportToggle(); break;   /* START: a start in Pads brings the last beat back */
                     case 3:
                         if(f.len >= 3 && f.body[1] < engine.nSlices && f.body[2] < engine.nSlices)
                         {
@@ -4209,16 +4182,9 @@ struct StateExt : hostlink::IHostlinkExtension
                         }
                         break;
                     }
-                    case 35:   /* BETA: SET_MUTE(u8 1 stopped / 0 running) — the transport; op 2 still toggles */
+                    case 35:   /* BETA: SET_MUTE(u8 1 stopped / 0 running) — the transport */
                         if(f.len < 2 || f.body[1] > 1u) { w.U8(2u); return; }
                         if(f.body[1]) engine.muted = true; else TransportStart();   /* START: in Pads, the last beat */
-                        break;
-                    case 40:   /* START: START_IN(u8 0 Sampler / 1 As saved) — the next power-up; the main loop writes
-                                * Audiothurgist/startup.json. NO_CARD (21) without a card: there is nowhere to keep it.
-                                * (37..39 left free for the per-key work beside this branch.) */
-                        if(f.len < 2 || f.body[1] > 1u) { w.U8(2u); return; }
-                        if(!CardReady()) { w.U8(bb::kStNoCard); return; }
-                        gStartIn = f.body[1]; gStartInWrite = true;
                         break;
                     default: w.U8(2u); return;   /* BAD_ARGS */
                 }
@@ -4266,7 +4232,6 @@ struct StateExt : hostlink::IHostlinkExtension
                 const int nt = engine.nTable;
                 int first = f.len >= 1 ? f.body[0] : 0;
                 int count = f.len >= 2 ? f.body[1] : 39;
-                const bool wide = f.len >= 3 && f.body[2] != 0u;   /* EDIT */
                 if(first > nt) { w.U8(2u); return; }   /* BAD_ARGS (first == nt → empty reply) */
                 if(count > 39) count = 39;
                 if(first + count > nt) count = nt - first;
@@ -4282,7 +4247,7 @@ struct StateExt : hostlink::IHostlinkExtension
                     /* sliceDens is keyframes per sample; the adaptive fade spans 0.02 (sparse) .. 0.2 (dense) */
                     float d = engine.sliceDens[t] * 5.f; if(d < 0.f) d = 0.f; if(d > 1.f) d = 1.f;
                     w.U8((uint8_t)(d * 255.f + 0.5f));
-                    if(wide) w.U8(engine.TableFlags(t));   /* EDIT */
+                    w.U8(engine.TableFlags(t));   /* EDIT: b0 orange · b1 tombstone */
                 }
                 return;
             }
@@ -4501,14 +4466,13 @@ int main()
      * the boot preset's whatever was restored. */
     if(RestorePresetBackups() > 0 && presets.HasValid(0)) presets.Load(0);
     PrimePresetSeq();
-    /* START: Start in, from the card (no card, no file: Sampler). Sampler puts the live grammar on Pads — the
-     * main loop applies it as any grammar change (patternMode, the Voice map under Jacks = Follow grammar, the keys
-     * onto the markers if there are any) — and stops the transport before the first block, so nothing plays until
-     * a key does. The boot preset itself is not touched: As saved, or a preset load later, brings its grammar
-     * back; ▶ / B1 held starts the pattern on the beat (the playhead ran on underneath). */
-    if(CardReady()) { SdCard::BusyGuard busy(sd); gStartIn = gStartInCard = bb::ReadStartup(&gSetFil, (char*)gSetStage, bb::kStartupMax); }
+    /* START: Start In, the boot preset's (Options byte 24). Sampler puts the live grammar on Pads — the main loop
+     * applies it as any grammar change (patternMode, the Voice map under Jacks = Follow grammar, the keys onto the
+     * markers if there are any) — and stops the transport before the first block, so nothing plays until a key
+     * does. The preset itself is not touched: a preset load brings its grammar back; ▶ / B1 held starts the
+     * preset's beat on the beat (the playhead ran on underneath). */
     if(gGrammar.mode != 6u) gLastDrum = gGrammar.mode;   /* START: the boot preset's beat, for ▶ in Pads */
-    if(gStartIn == bb::kStartSampler) { gGrammar.mode = 6u; gGrammar.dirty = true; engine.muted = true; }
+    if(gStartIn.sel == 0u) { gGrammar.mode = 6u; gGrammar.dirty = true; engine.muted = true; }
 
     hw.StartAudio(AudioCb);
 

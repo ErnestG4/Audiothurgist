@@ -42,9 +42,8 @@ static Manual manual =
             "breathes) — the 24 keys (J4, the browser's pads) play, nothing "
             "else does. For a beat, pick a grammar (Classic, Grids…) and hold "
             "**B1** 600 ms (or ▶ in the browser); it starts on the beat. "
-            "*Start in* (the web app's Options → Start-up, kept in "
-            "`Audiothurgist/startup.json`) = As saved powers up in the boot "
-            "preset's grammar, running, as before.")
+            "Options → *Start In* = As saved powers up in the boot preset's "
+            "grammar, running.")
         .Section("journey", "The knob journey (P1)",
             "Full right: verbatim. ~4 o'clock: whole beats trade places. "
             "~1 o'clock: one-beat chops — listen for the double-time illusion. "
@@ -157,9 +156,9 @@ static Manual manual =
             "inputs, or the module's own output. **Record** — arm a loop "
             "take into the break (see Sampling). **Tap Allowance** — how far "
             "back a tap-while-playing mark lands (your reaction time): 0–80 ms. "
-            "**Start in** (on the card, not in a preset; the web app sets it) — "
-            "Sampler (Pads, stopped; the default, and with no card) or As "
-            "saved (the boot preset's grammar, running); read at power-up.")
+            "**Start In** — Sampler (Pads, stopped; the default) or As saved "
+            "(the boot preset's grammar, running); the boot preset's value is "
+            "read at power-up.")
         .Section("sampling", "Sampling (record into a key, loop-record the break)",
             "One buffer, one slice table: a loaded break and a recorded kit "
             "are the same thing. **Into a key** (Voice map): play J5 style "

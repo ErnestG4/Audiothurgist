@@ -5,7 +5,7 @@
  * request Link with a priority queue and round-trip measurement, the
  * standard commands the page needs (HELLO, GET_DESCRIPTOR, GET_LIVE, live
  * BLOB writes) and the firmware's StateExt parsers (0x60–0x66: state, envelope,
- * scope — the old mono reply and the four-channel SCOPE body —, actions, the
+ * scope — the small output trace and the ten-channel SCOPE body —, actions, the
  * sample-mode wave / table / hits reads, the set save / load, and CARD's 0x67:
  * a break uploaded from a file the browser decoded, an old card copied in).
  *
@@ -16,30 +16,33 @@
 'use strict';
 
 const PROTO = 1;
+/* The version of the firmware's side of everything below (the commands, the ops, the state body), from its descriptor
+ * ("audiothurgist": { "api": n }, StateExt::DescriptorRootJson). The page and the firmware ship together; on connect the
+ * page refuses any other number with one message — flash the matching .bin. Bump both with any change to the wire. */
+const API = 1;
+const apiOf = desc => (desc && desc.audiothurgist && Number.isInteger(desc.audiothurgist.api)) ? desc.audiothurgist.api : null;
 const CMD = {
   hello: 0x01, getDescriptor: 0x02, blobBegin: 0x12, blobData: 0x13, blobCommit: 0x14,
   getLive: 0x20, reboot: 0x40,
   state: 0x60, env: 0x61, scope: 0x62, action: 0x63, wave: 0x64, table: 0x65, hits: 0x66, card: 0x67, pads: 0x68,
   keys: 0x69,   /* KEYP: GET_KEYS — every key's gain / tune / plays */
 };
-const ACT = { dice: 0, reslice: 1, mute: 2, punch: 3, flow: 4, scrub: 5, load: 6, clearLocks: 7, page: 8,
+const ACT = { dice: 0, reslice: 1, punch: 3, flow: 4, scrub: 5, load: 6, clearLocks: 7, page: 8,
   recArm: 9, recClear: 10, keyPlays: 11, looperUndo: 12, looperClear: 13, saveSet: 14, loadSet: 15,
-  /* EDIT (capability "edit": 1): the slice-editing ops, the audition voice, the tap mark */
+  /* EDIT: the slice-editing ops, the audition voice, the tap mark */
   setBoundary: 16, setEntry: 17, addEntry: 18, split: 19, merge: 20, tombstone: 21, setKey: 22, swapKeys: 23,
   nudgeAll: 24, promote: 25, fromOnsets: 26, audition: 27, release: 28, tapMark: 29,
   /* EDIT-UNDO: the journal's two ops (no fields) — the page enables Undo / Redo from the tail's undoDepth / redoDepth */
   undoEdit: 30, redoEdit: 31,
-  /* KEYS (v0.13, capability "keys": 1): the on-screen pads, the two marker ops, the transport and the autoslice count */
+  /* KEYS: the on-screen pads, the two marker ops, the transport and the autoslice count */
   playKey: 32, keysFromMarkers: 33, clearMarkers: 34, setMute: 35, autoslice: 36,
-  /* KEYP (capability "keyp": 1): one key's gain / tune / plays; CHROMA ("keyp": 2): one key's sample across all 24 */
-  keyParams: 37, spreadKeys: 38,
-  /* START (beta-sampler, capability "startIn": 1): the power-up setting, kept on the card */
-  startIn: 40 };
-/* v0.13 "keys": the J5 style the Voice map reads (state byte 271; 255 = the Brain map, where J5 is the gate) and the
+  /* KEYP: one key's gain / tune / plays; CHROMA: one key's sample across all 24 */
+  keyParams: 37, spreadKeys: 38 };
+/* KEYS: the J5 style the Voice map reads (state byte 271; 255 = the Brain map, where J5 is the gate) and the
  * autoslice count's range (ACTION 36's k). TAP_MARK's fourth reply byte: b0 = an existing marker was reused. */
 const KEYS = { n: 24, autoMax: 64, reroll: 1, join: 2, reused: 1,
   styles: ['plain', 'reverse', 'half speed', 'double', 'ratchet', 'staccato', 'punch / choke flip', 'record', 'clear'] };
-/* EDIT: flag bits and constants. Table flags (GET_TABLE's 14-byte form, ADD_ENTRY's flags): orange = user-placed
+/* EDIT: flag bits and constants. Table flags (GET_TABLE's last byte, ADD_ENTRY's flags): orange = user-placed
  * or user-moved, tomb = deleted (len 0, skipped by everything). AUDITION flags: fromEnd = `start` is the region's
  * END (the last lenMs up to it), loop = repeat until RELEASE. NUDGE_ALL's `which`: grid or markers. */
 const EDIT = { orange: 1, tomb: 2, fromEnd: 1, loop: 2, grid: 0, markers: 1, noKey: 255, maxNudgeMs: 32767, maxAuditionMs: 65535,
@@ -321,90 +324,75 @@ async function setLive(link, info, bytes) {
 function concat(parts) { const all = new Uint8Array(parts.reduce((s, p) => s + p.length, 0)); let o = 0; for (const p of parts) { all.set(p, o); o += p.length; } return all; }
 
 /* ───────────── StateExt (0x60–0x63) ─────────────
- * GET_STATE body (after status): fixed 148 bytes, then append-only tails
- * parsed by length — diag (v0.7.3, → 156), locks/native/bars (v0.8.0, → 164),
- * clock jitter + REQUESTED multiplier zone (CLOCK package, → 167; `mult`
- * above is the applied multiplier), clock flags + RMS jitter (→ 170):
- * clkFlags b0 P2 engaged · b1 multiplier switch pending · b2 lock alignment
- * just happened (~2 s) · b4–7 external-clock transitions mod 16. */
-const STATE_MIN = 148;
+ * GET_STATE body (after status), STATE_LEN bytes, every field always there: anything else is not this firmware's
+ * (null). */
+const STATE_LEN = 315;
 const ZONE_MULT = [0.25, 0.5, 1, 2, 4];   /* P2 zones 0..4 while following: ÷4 ÷2 ×1 ×2 ×4 */
 function parseState(b) {
-  if (!b || b.length < STATE_MIN) return null;
+  if (!b || b.length < STATE_LEN) return null;
   const st = {
     nSlices: b[1], cur: b[2], flags: b[3], matGen: b[4], grammar: b[5], cls: b[6], file: b[7], chop: b[8],
     histN: b[9], histDepth: b[10], callFlash: b[11], bpm: f32(b, 12), mult: f32(b, 16),
     src: Int8Array.from(b.subarray(20, 84)), stepClass: Uint8Array.from(b.subarray(84, 148)),
-    diag: null, lockMask: null, nativeBpm: null, gridBars: null, barsOpt: null, jitterUs: null, multZone: null,
-    clkFlags: null, jitterRmsUs: null, p2Engaged: null, multPending: null, aligned: null, extTrans: null,
   };
+  /* flags: b0 muted (the transport stopped) · b1 following an external clock · b2 locked to it · b3 flowing · b4 the
+   * Brain page */
   st.muted = !!(st.flags & 1); st.ext = !!(st.flags & 2); st.locked = !!(st.flags & 4); st.flowing = !!(st.flags & 8); st.brain = !!(st.flags & 16);
-  st.startSaved = !!(st.flags & 32);   /* START: b5 = Start in is As saved (0 = Sampler; meaningful with "startIn") */
-  if (b.length >= 156) st.diag = { gap: u16(b, 148), audio: u16(b, 150), jumps: u16(b, 152), regens: u16(b, 154) };
-  if (b.length >= 164) { st.lockMask = u16(b, 156); st.nativeBpm = f32(b, 158); st.gridBars = b[162]; st.barsOpt = b[163]; }
-  if (b.length >= 167) { st.jitterUs = u16(b, 164); st.multZone = b[166]; }
-  if (b.length >= 170) {
-    st.clkFlags = b[167]; st.jitterRmsUs = u16(b, 168);
-    st.p2Engaged = !!(st.clkFlags & 1); st.multPending = !!(st.clkFlags & 2); st.aligned = !!(st.clkFlags & 4); st.extTrans = st.clkFlags >> 4;
-  }
-  if (b.length >= 175) {   // v0.9.5 forensics
-    st.stallPhase = b[170]; st.gateLateUs = u16(b, 171); st.overruns = u16(b, 173);
-  }
-  if (b.length >= 176) {   // v0.9.9 jack map
-    st.jackMap = b[175];
-  }
-  if (b.length >= 177) st.looperEvents = b[176];   // LOOPER: events on the bar strip
-  if (b.length >= 194) {   // SAMPLE / WEB: record state, buffer bookkeeping
-    st.recState = b[177]; st.recKey = b[178] === 255 ? -1 : b[178];
-    st.freePos = u32(b, 179); st.bufCap = u32(b, 183); st.stereo = !!b[187]; st.inLevel = b[188];
-    st.nTable = b[189]; st.bufLen = u32(b, 190);
-  }
-  if (b.length >= 218) st.keySlice = Int8Array.from(b.subarray(194, 218));   // table entry each key plays
-  if (b.length >= 219) st.keyPlays = b[218];                                  // Options → Key Plays (0 one-shot, 1 held)
-  if (b.length >= 223) { st.setState = b[219]; st.setProgress = b[220]; st.setResult = b[221]; st.setSeq = b[222]; }   // SETS
-  if (b.length >= 255) { let n = 223; while (n < 255 && b[n]) n++; st.setName = new TextDecoder('ascii').decode(b.subarray(223, n)); }
-  /* EDIT tail: 255 tableGen (never 0; carry it back as an op's gen), 256 undoDepth (EDIT-UNDO: journal steps back; 0
-   * on a firmware without the journal), 257 selSlice (the panel's selection, 255 = none, until EDIT-PANEL), 258..261
-   * srcPos (the youngest voice's material position). EDIT-UNDO tail: 262 redoDepth (steps forward) — its presence is
-   * how the page knows the journal exists (a 262-byte body is EDIT-PROTO without package 6). */
-  if (b.length >= 258) { st.tableGen = b[255]; st.undoDepth = b[256]; st.selSlice = b[257] === 255 ? -1 : b[257]; }
-  if (b.length >= 262) st.srcPos = u32(b, 258);
-  if (b.length >= 263) st.redoDepth = b[262];
-  /* KEYS tail (v0.13, → 276): 263 flags2 (b0 srcValid: a voice sounds, so TAP_MARK will be taken · b1 keys follow
-   * markers: Pads with markers), 264 loadAvg / 266 loadMax (the audio callback, ‰ of the block budget, mean and peak
-   * over the last second), 268 j4mV (i16, J4 now), 270 j4Key (the key J4 would play), 271 j5Style (0..8; 255 in the
-   * Brain map → -1), 272 keyFlash (the last key called by any source, 255 none → -1), 273 keySeq (bumps per call),
-   * 274 autoK (the autoslice count last applied, 0 none), 275 nMarkers. An older body leaves them all undefined. */
-  if (b.length >= 276) {
-    st.flags2 = b[263]; st.srcValid = !!(b[263] & 1); st.keysFollow = !!(b[263] & 2);
-    st.loadAvg = u16(b, 264); st.loadMax = u16(b, 266);
-    const mv = u16(b, 268); st.j4mV = mv > 0x7fff ? mv - 0x10000 : mv; st.j4Key = b[270]; st.j5Style = b[271] === 255 ? -1 : b[271];
-    st.keyFlash = b[272] === 255 ? -1 : b[272]; st.keySeq = b[273]; st.autoK = b[274]; st.nMarkers = b[275];
-  }
-  /* CARD tail (→ 293, capability "card": 1): 276 state (CARD.STATE), 277 progress 0..255, 278 result of the last op
-   * (CARD.RESULT), 279 seq (bumps per finished op), 280 flags (CARD.F), 281 rootWavs, 283 pending (old files not in the
-   * folder yet), 285 breaks (WAVs in Audiothurgist/breaks), 287 lastIdx (the last upload's list index, -1 none), 288 copied
-   * · 290 skipped (the last copy), 292 nFiles. An older body leaves st.card null. */
-  st.card = null;
-  if (b.length >= 293) {
-    const f = b[280];
+  /* 148 the diagnostics: the poll gap and the audio callback (µs), clock jumps, pattern regens */
+  st.diag = { gap: u16(b, 148), audio: u16(b, 150), jumps: u16(b, 152), regens: u16(b, 154) };
+  /* 156 the motion locks (bit page·6 + pot), the material's own tempo, the grid's bars and Options → Bars */
+  st.lockMask = u16(b, 156); st.nativeBpm = f32(b, 158); st.gridBars = b[162]; st.barsOpt = b[163];
+  /* 164 CLOCK: jitter peak, the REQUESTED multiplier zone (`mult` above is the applied one), 167 clkFlags (b0 P2 engaged
+   * · b1 a multiplier switch pending · b2 a lock alignment just happened (~2 s) · b4–7 external-clock transitions mod
+   * 16), RMS jitter */
+  st.jitterUs = u16(b, 164); st.multZone = b[166];
+  st.clkFlags = b[167]; st.jitterRmsUs = u16(b, 168);
+  st.p2Engaged = !!(st.clkFlags & 1); st.multPending = !!(st.clkFlags & 2); st.aligned = !!(st.clkFlags & 4); st.extTrans = st.clkFlags >> 4;
+  /* 170 the stall forensics: the main loop's phase at the worst stall, the gate's lateness, audio overruns */
+  st.stallPhase = b[170]; st.gateLateUs = u16(b, 171); st.overruns = u16(b, 173);
+  st.jackMap = b[175];                                 /* 0 Brain · 1 Voice */
+  st.looperEvents = b[176];                            /* LOOPER: events on the bar strip */
+  /* 177 SAMPLE: the record state, the buffer's bookkeeping */
+  st.recState = b[177]; st.recKey = b[178] === 255 ? -1 : b[178];
+  st.freePos = u32(b, 179); st.bufCap = u32(b, 183); st.stereo = !!b[187]; st.inLevel = b[188];
+  st.nTable = b[189]; st.bufLen = u32(b, 190);
+  st.keySlice = Int8Array.from(b.subarray(194, 218));  /* the table entry each key plays */
+  st.keyPlays = b[218];                                /* Options → Key Plays (0 one-shot, 1 held) */
+  /* 219 SETS: the op's state, progress, the last result, a sequence that bumps per finished op; 223 the set's name */
+  st.setState = b[219]; st.setProgress = b[220]; st.setResult = b[221]; st.setSeq = b[222];
+  { let n = 223; while (n < 255 && b[n]) n++; st.setName = new TextDecoder('ascii').decode(b.subarray(223, n)); }
+  /* 255 EDIT: tableGen (never 0; carry it back as an op's gen), undoDepth / 262 redoDepth (journal steps back and
+   * forward), 257 selSlice (the panel's selection, 255 = none), 258 srcPos (the youngest voice's material position) */
+  st.tableGen = b[255]; st.undoDepth = b[256]; st.selSlice = b[257] === 255 ? -1 : b[257];
+  st.srcPos = u32(b, 258); st.redoDepth = b[262];
+  /* 263 KEYS: flags2 (b0 srcValid: a voice sounds, so TAP_MARK will be taken · b1 keys follow markers: Pads with
+   * markers), 264 loadAvg / 266 loadMax (the audio callback, ‰ of the block budget, mean and peak over the last
+   * second), 268 j4mV (i16, J4 now), 270 j4Key (the key J4 would play), 271 j5Style (0..8; 255 in the Brain map → -1),
+   * 272 keyFlash (the last key called by any source, 255 none → -1), 273 keySeq (bumps per call), 274 autoK (the
+   * autoslice count last applied, 0 none), 275 nMarkers */
+  st.flags2 = b[263]; st.srcValid = !!(b[263] & 1); st.keysFollow = !!(b[263] & 2);
+  st.loadAvg = u16(b, 264); st.loadMax = u16(b, 266);
+  { const mv = u16(b, 268); st.j4mV = mv > 0x7fff ? mv - 0x10000 : mv; }
+  st.j4Key = b[270]; st.j5Style = b[271] === 255 ? -1 : b[271];
+  st.keyFlash = b[272] === 255 ? -1 : b[272]; st.keySeq = b[273]; st.autoK = b[274]; st.nMarkers = b[275];
+  /* 276 CARD: state (CARD.STATE), progress 0..255, the last op's result (CARD.RESULT), seq (bumps per finished op),
+   * 280 flags (CARD.F), 281 rootWavs, 283 pending (old files not in the folder yet), 285 breaks (WAVs in
+   * Audiothurgist/breaks), 287 lastIdx (the last upload's list index, -1 none), 288 copied · 290 skipped (the last
+   * copy), 292 nFiles */
+  { const f = b[280];
     st.card = { state: b[276], progress: b[277], result: b[278], seq: b[279], flags: f, mounted: !!(f & CARD.F.mounted),
       oldRoot: !!(f & CARD.F.rootWavs), oldSets: !!(f & CARD.F.oldSets), oldPresets: !!(f & CARD.F.oldPresets),
       hasBreaks: !!(f & CARD.F.breaks), rootWavs: u16(b, 281), pending: u16(b, 283), breaks: u16(b, 285),
-      lastIdx: b[287] === 255 ? -1 : b[287], copied: u16(b, 288), skipped: u16(b, 290), nFiles: b[292] };
-  }
-  /* PADS tail (→ 315, capability "pads": 1): 293 state (PADS.STATE), 294 progress 0..255, 295 result of the last op
-   * (PADS.RESULT), 296 seq (bumps per finished op), 297 key (the drop's, -1 none), 298 flags (PADS.F: the kit holds audio
-   * the card does not · an empty kit, no break · the last drop made the kit stereo), 299 free (frames past freePos),
-   * 303 total (the pads' share: bufCap − bufLen), 307 held (frames below freePos that replaced or undone recordings
-   * still hold — not reclaimed until new material), 311 the pads (bit k = key k holds a recording). Older: null. */
-  st.pads = null;
-  if (b.length >= 315) {
-    const f = b[298];
+      lastIdx: b[287] === 255 ? -1 : b[287], copied: u16(b, 288), skipped: u16(b, 290), nFiles: b[292] }; }
+  /* 293 PADS: state (PADS.STATE), progress 0..255, the last op's result (PADS.RESULT), seq (bumps per finished op), 297
+   * key (the drop's, -1 none), 298 flags (PADS.F: the kit holds audio the card does not · an empty kit, no break · the
+   * last drop made the kit stereo), 299 free (frames past freePos), 303 total (the pads' share: bufCap − bufLen), 307
+   * held (frames below freePos that replaced or undone recordings still hold — not reclaimed until new material), 311
+   * the pads (bit k = key k holds a recording) */
+  { const f = b[298];
     st.pads = { state: b[293], progress: b[294], result: b[295], seq: b[296], key: b[297] === 255 ? -1 : b[297], flags: f,
       unsaved: !!(f & PADS.F.unsaved), noBreak: !!(f & PADS.F.noBreak), madeStereo: !!(f & PADS.F.madeStereo),
-      free: u32(b, 299), total: u32(b, 303), held: u32(b, 307), mask: u32(b, 311) };
-  }
+      free: u32(b, 299), total: u32(b, 303), held: u32(b, 307), mask: u32(b, 311) }; }
   return st;
 }
 /* GET_WAVE: one window of the material buffer — n ≤ 480 output bytes, each
@@ -418,27 +406,21 @@ async function fetchWave(link, start, n = 480, plane = 0, step = 1, opts = {}) {
   return parseWave(b);
 }
 function parseWave(b) { const n = u16(b, 5); return { start: u32(b, 1), n, step: b[7] || 1, data: Int8Array.from(b.subarray(8, 8 + n)) }; }
-/* GET_TABLE: every table entry (grid [0, nSlices) then markers [nSlices, nTable): recordings and,
- * with "edit", spans of the break), 13 bytes each, ≤ 39 per reply. Resolves { nSlices, nTable,
- * entries[] } with entries of { start, len, key (-1 grid / keyless), cls, sal, hit, dens, flags }.
- * EDIT: a firmware with "edit": 1 answers a third request byte (form 1) with a trailing u8 flags
- * per entry (EDIT.orange · EDIT.tomb) — 14 bytes; pass { edit: true } to fetchTable (the page does
- * when the capability is present) or the entry size to parseTableChunk. Without it the 13-byte form
- * comes back with flags 0, whatever the firmware — an old page keeps working against a new module. */
-const TABLE_ENTRY = 13, TABLE_ENTRY_EDIT = 14, TABLE_CHUNK = 39;
-function parseTableChunk(b, entrySize = TABLE_ENTRY) {
-  const n = Math.floor((b.length - 3) / entrySize), entries = [];
-  for (let i = 0; i < n; i++) { const at = 3 + i * entrySize; const k = b[at + 8];
+/* GET_TABLE: every table entry (grid [0, nSlices) then the entries past it: recordings, markers inside the break,
+ * tombstones), 14 bytes each, ≤ 39 per reply. Resolves { nSlices, nTable, entries[] } with entries of { start, len, key
+ * (-1 grid / keyless), cls, sal, hit, dens, flags (EDIT.orange · EDIT.tomb) }. */
+const TABLE_ENTRY = 14, TABLE_CHUNK = 39;
+function parseTableChunk(b) {
+  const n = Math.floor((b.length - 3) / TABLE_ENTRY), entries = [];
+  for (let i = 0; i < n; i++) { const at = 3 + i * TABLE_ENTRY; const k = b[at + 8];
     entries.push({ start: u32(b, at), len: u32(b, at + 4), key: k > 127 ? k - 256 : k, cls: b[at + 9], sal: b[at + 10], hit: !!b[at + 11], dens: b[at + 12],
-      flags: entrySize >= TABLE_ENTRY_EDIT ? b[at + 13] : 0 }); }
+      flags: b[at + 13] }); }
   return { nSlices: b[1], nTable: b[2], entries };
 }
 async function fetchTable(link, opts = {}) {
   let first = 0, out = null;
-  const edit = !!opts.edit, size = edit ? TABLE_ENTRY_EDIT : TABLE_ENTRY;
   do {
-    const req = edit ? Uint8Array.of(first, TABLE_CHUNK, 1) : Uint8Array.of(first, TABLE_CHUNK);
-    const c = parseTableChunk(await link.request(CMD.table, req, Object.assign({ key: 'table' + first }, opts)), size);
+    const c = parseTableChunk(await link.request(CMD.table, Uint8Array.of(first, TABLE_CHUNK), Object.assign({ key: 'table' + first }, opts)));
     if (!out) out = { nSlices: c.nSlices, nTable: c.nTable, entries: [] };
     out.entries.push(...c.entries); first += c.entries.length;
     if (!c.entries.length) break;
@@ -463,7 +445,7 @@ async function fetchHits(link, opts = {}) {
  * in its main loop and the state tail (setState / setProgress / setResult / setSeq) tells. */
 function saveSet(link, name) { if (!setNameOk(name)) return Promise.reject(new Error('bad set name')); return link.request(CMD.action, Uint8Array.of(ACT.saveSet, ...nameBytes(name)), { urgent: true }); }
 function loadSet(link, name) { if (!setNameOk(name)) return Promise.reject(new Error('bad set name')); return link.request(CMD.action, Uint8Array.of(ACT.loadSet, ...nameBytes(name)), { urgent: true }); }
-/* ───────────── EDIT (ACTION 16..29, capability "edit": 1) ─────────────
+/* ───────────── EDIT (ACTION 16..31) ─────────────
  * Every op's body is its fields, little-endian, then an optional trailing u8 gen: the tableGen the
  * page last saw (state byte 255), 0 = unchecked. A stale gen is BAD_STATE — refetch the table and
  * retry; the design sends it for split / merge / delete, not for drags. The reply is u8 status,
@@ -480,7 +462,7 @@ async function editOp(link, op, fields, gen = 0) {
   try {
     const b = await link.request(CMD.action, body, { urgent: true });
     const third = b.length > 2 ? b[2] : null;
-    const flags = b.length > 3 ? b[3] : 0;   /* v0.13 TAP_MARK: b0 = an existing marker was reused (selected, nothing added) */
+    const flags = b.length > 3 ? b[3] : 0;   /* TAP_MARK: b0 = an existing marker was reused (selected, nothing added) */
     return { status: 0, ok: true, tableGen: b.length > 1 ? b[1] : null, newIdx: third === 255 ? -1 : third, count: third, flags, reused: !!(flags & KEYS.reused) };
   } catch (e) {
     const s = STATUS.indexOf(e.message); if (s < 0) throw e;
@@ -506,13 +488,12 @@ const audition       = (link, start, lenMs, flags = 0)     => editOp(link, ACT.a
 const release        = link                                => editOp(link, ACT.release, []);
 /* the firmware timestamps: srcPos at receipt − allowMs, snapped to an onset within ±snapMs; an orange marker */
 const tapMark        = (link, snapMs, allowMs, gen = 0)    => editOp(link, ACT.tapMark, [snapMs & 0xff, allowMs & 0xff], gen);
-/* EDIT-UNDO: one journal step either way → { ok, tableGen }; BAD_ARGS = nothing to undo / redo (or a firmware without the journal) */
+/* EDIT-UNDO: one journal step either way → { ok, tableGen }; BAD_ARGS = nothing to undo / redo */
 const editUndo       = link                                => editOp(link, ACT.undoEdit, []);
 const editRedo       = link                                => editOp(link, ACT.redoEdit, []);
-/* ───────────── KEYS (ACTION 32..36, capability "keys": 1, v0.13) ─────────────
+/* ───────────── KEYS (ACTION 32..36) ─────────────
  * Same reply shape as the edit ops. PLAY_KEY and SET_MUTE answer a bare status; the marker ops and AUTOSLICE answer
- * status, tableGen, count (one undo step each). An older firmware answers BAD_ARGS (unknown op) — the page hides
- * them unless the descriptor says "keys". */
+ * status, tableGen, count (one undo step each). */
 const playKey        = (link, key, down)                   => editOp(link, ACT.playKey, [key & 0xff, down ? 1 : 0]);
 const keysFromMarkers = (link, gen = 0)                    => editOp(link, ACT.keysFromMarkers, [], gen);
 const clearMarkers   = (link, gen = 0)                     => editOp(link, ACT.clearMarkers, [], gen);
@@ -521,23 +502,13 @@ const setMute        = (link, stopped)                     => editOp(link, ACT.s
 /* k 0..64 markers from the seeded draw (0 removes the grey ones); reroll draws a new seed; join folds this apply into the
  * previous AUTOSLICE's undo step (every send of one slider drag after the first: a whole drag is one undo step) */
 const autoslice      = (link, k, reroll = false, gen = 0, join = false) => editOp(link, ACT.autoslice, [Math.max(0, Math.min(KEYS.autoMax, Math.round(k))) & 0xff, (reroll ? KEYS.reroll : 0) | (join ? KEYS.join : 0)], gen);
-/* START (beta-sampler): Start in — 0 Sampler (Pads, the transport stopped; the default) · 1 As saved (the boot preset's
- * grammar, running). The module writes Audiothurgist/startup.json and reads it at the next power-up; the state's flags
- * b5 says what it holds. NO_CARD (21) without a card. A bare status reply. */
-const START = { sampler: 0, saved: 1 };
-const setStartIn     = (link, saved)                       => editOp(link, ACT.startIn, [saved ? START.saved : START.sampler]);
-/* What the descriptor's "audiothurgist" object says the firmware can do (each 0 when absent). */
-function caps(desc) {
-  const a = (desc && desc.audiothurgist) || {};
-  return { ext: a.ext | 0, table: !!a.table, sets: a.sets | 0, scope2: a.scope2 | 0, edit: a.edit | 0, keys: a.keys | 0, card: a.card | 0, pads: a.pads | 0, startIn: a.startIn | 0, keyp: a.keyp | 0 };
-}
 
-/* ───────────── KEYP (ACTION 37 + 0x69 GET_KEYS, capability "keyp": 1) ─────────────
+/* ───────────── KEYP (ACTION 37 + 0x69 GET_KEYS) ─────────────
  * Each of the 24 keys has a gain (½ dB steps, −24 … +6 dB), a tune (cents, ±24 semitones) and how it plays: 0 follow
  * Options → Key Plays · 1 one-shot · 2 held (until the gate falls / the pad comes up) · 3 loop (held, the entry looping)
  * · 4 ratchet (held, the entry again from its start every `rat`: 0 its whole length · 1 ½ · 2 ¼ · 3 ⅛ of it · 4 an 8th
  * · 5 a 16th · 6 a 32nd at the tempo).
- * All zero = neutral: the key plays exactly as it always did. They ride every call made through the key — the CV keys,
+ * All zero = neutral: unity, untuned, Plays as Options → Key Plays says. They ride every call made through the key — the CV keys,
  * the pads, Play's loop replaying a key (with the settings as they are now) — never the pattern's steps. KEY_PARAMS is
  * an edit (the journal: one undo step; `join` = every send of one slider drag after the first, folded into this key's
  * step) and answers like one: { ok, status, tableGen }. GET_KEYS reads all 24; the tableGen in the state tail moves with
@@ -566,7 +537,7 @@ const keypGainText = g => g ? `${g > 0 ? '+' : '−'}${Math.abs(g / 2)} dB` : ''
 const keypTuneText = c => { if (!c) return ''; const a = Math.abs(c); return `${c > 0 ? '+' : '−'}${a % 100 ? (a / 100).toFixed(2).replace(/0$/, '') : a / 100} st`; };
 const keypPlaysText = p => !p.plays ? '' : p.plays === KEYP.ratchet ? `ratchet ${KEYP.RATS[p.rat | 0] || ''}` : (KEYP.PLAYS[p.plays] || '');
 const keypText = p => keypNeutral(p) ? '' : [keypGainText(p.gain), keypTuneText(p.cents), keypPlaysText(p)].filter(Boolean).join(' · ');
-/* CHROMA (ACTION 38, capability "keyp": 2 — docs/packages/chroma.md): "spread across keys". Every key j but the root
+/* CHROMA (ACTION 38 — docs/packages/chroma.md): "spread across keys". Every key j but the root
  * plays the root's entry, tuned (j − root) × 100 + the root's cents (clamped to ±24 st), with the root's gain and Plays
  * (and ratchet rate); keepPads (b0) leaves a key that plays a recording other than the root's as it is. One undo step
  * (the key map and all 24 keys' settings). → { ok, status, tableGen, count: the keys now on the root's entry besides
@@ -584,7 +555,7 @@ function spreadPlan(keySlice, entries, nSlices, root) {
 /* key j's cents after a spread of a root tuned `rootCents` */
 const spreadCents = (j, root, rootCents = 0) => Math.max(-KEYP.centsMax, Math.min(KEYP.centsMax, (j - root) * 100 + rootCents));
 
-/* ───────────── CARD (0x67, capability "card": 1) ─────────────
+/* ───────────── CARD (0x67) ─────────────
  * The card is one folder, Audiothurgist/: breaks/*.wav (the list), sets/, presets/. The page turns any file the
  * browser can decode into what the module loads — at most 17 s, 48 kHz, mono or stereo, PCM16 WAV — and sends it in
  * order from byte 0, one chunk per round trip: UP_BEGIN(total, overwrite, name), then UP_DATA(total, offset, bytes)
@@ -677,7 +648,7 @@ async function cardList(link) {
   return out;
 }
 
-/* ───────────── PADS (0x68, capability "pads": 1) ─────────────
+/* ───────────── PADS (0x68) ─────────────
  * A sample dropped onto a pad: the page decodes the file (48 kHz, as the card upload does), keeps two channels at most,
  * cuts it to the room the module has left past freePos (the state tail's pads.free) and sends raw PCM16 — little-endian,
  * interleaved L R for stereo, no header — in order from byte 0, one chunk per round trip: BEGIN(key, ch, frames), then
@@ -757,7 +728,7 @@ async function fetchEnv(link, n) {
 }
 const parseScope = b => Int8Array.from(b.subarray(3, 3 + u16(b, 1)));
 
-/* ───────────── SCOPE (0x62 with a body; descriptor "scope2": 1 audio, 2 + cv) ─────────────
+/* ───────────── SCOPE (0x62 with a body) ─────────────
  * Ten channels on one sample clock in the firmware's rings: four audio at
  * 48 kHz — out L · out R · in L (J1) · in R (J2), 64 K samples — and six CV
  * jacks J3..J8 DC-coupled at ±5 V = ±127, one sample per audio block (2 kHz,
@@ -767,8 +738,8 @@ const parseScope = b => Int8Array.from(b.subarray(3, 3 + u16(b, 1)));
  * (as clamped), u8 flags (triggered · pos honoured · ext header · detached),
  * u32 pos (on the audio clock, wrapping at 24·2^26; the cv start is pos / 24),
  * [u8 maskHi, u8 cvDecim, u8 cvDiv, u8 trigSrc], then n × i8 per audio channel
- * in mask order, then per cv jack in bit order. An empty body is the old
- * reply (parseScope). */
+ * in mask order, then per cv jack in bit order. An empty body is the small
+ * output scope's reply (parseScope: 256 × (L + R) / 2, ×4 decimated). */
 const SCOPE_CH = ['out L', 'out R', 'in L', 'in R', 'J3', 'J4', 'J5', 'J6', 'J7', 'J8'];
 /* The jacks' roles under each map (state byte 175: 0 Brain, 1 Voice) and which of them are inputs. */
 const SCOPE_JACK_ROLE = [['clock in', 'v/oct in', 'gate in', 'kick gate out', 'snare gate out', 'hat gate out'],
@@ -808,7 +779,7 @@ function parseScope2(b) {
  * requests as hold the largest n — the later requests are pinned to the first
  * one's pos so the tiers stay time-aligned. n is held to each tier's ring
  * (n · decim ≤ 65280 audio, n · cvDecim ≤ 16368 cv). Returns { n, reqs:
- * [{ mask, maskHi }], ext, masks } (masks: the audio masks, for old callers). */
+ * [{ mask, maskHi }], ext, masks } (masks: the audio masks). */
 function scopePlan(maskOrMaxBody, maskArg, decimArg, nWant = SCOPE.maxN, minN = 200, maskHi = 0, cvDecim = 1) {
   const maxBody = maskOrMaxBody, mask = maskArg & 0x0f, decim = decimArg; maskHi &= 0x3f;
   const chans = []; for (let c = 0; c < 4; c++) if (mask & (1 << c)) chans.push(c); for (let c = 0; c < 6; c++) if (maskHi & (1 << c)) chans.push(4 + c);
@@ -879,13 +850,13 @@ function manualInfo(desc) {
            presetsHelp: (m && m.presets && m.presets.help) || '', jacks: desc.jacks || [] };
 }
 
-const api = { PROTO, CMD, ACT, REC, NOTE_NAMES, keyName, STATUS, statusName, crc32, cobsEncode, cobsDecode, buildFrame, FrameParser, kMaxFrameBytes, Link, SerialTransport, WsTransport, asTransport,
+const api = { PROTO, API, apiOf, CMD, ACT, REC, NOTE_NAMES, keyName, STATUS, statusName, crc32, cobsEncode, cobsDecode, buildFrame, FrameParser, kMaxFrameBytes, Link, SerialTransport, WsTransport, asTransport,
   u16, u32, f32, readStr, hello, getDescriptor, getLive, setLive, concat,
-  STATE_MIN, ZONE_MULT, parseState, fetchEnv, parseScope, SCOPE, SCOPE_CH, SCOPE_JACK_ROLE, SCOPE_JACK_IN, scopeVolts, scopeCvCode, scopeAge, scopeReq, parseScope2, scopePlan, fetchScopeFrame, allFields, findField, fieldLabels, pagerInfo, optionsInfo, manualInfo,
-  TABLE_ENTRY, TABLE_ENTRY_EDIT, TABLE_CHUNK, fetchWave, parseWave, fetchTable, parseTableChunk, fetchHits, parseHitsChunk,
+  STATE_LEN, ZONE_MULT, parseState, fetchEnv, parseScope, SCOPE, SCOPE_CH, SCOPE_JACK_ROLE, SCOPE_JACK_IN, scopeVolts, scopeCvCode, scopeAge, scopeReq, parseScope2, scopePlan, fetchScopeFrame, allFields, findField, fieldLabels, pagerInfo, optionsInfo, manualInfo,
+  TABLE_ENTRY, TABLE_CHUNK, fetchWave, parseWave, fetchTable, parseTableChunk, fetchHits, parseHitsChunk,
   SET_STATE, SET_RESULT, setNameOk, setLabelName, nameBytes, saveSet, loadSet,
   EDIT, editOp, editBoundary, editEntry, editAdd, editSplit, editMerge, editTombstone, editSetKey, editSwapKeys, editNudgeAll, editPromote, editFromOnsets, audition, release, tapMark, editUndo, editRedo,
-  KEYS, playKey, keysFromMarkers, clearMarkers, setMute, autoslice, caps, START, setStartIn,
+  KEYS, playKey, keysFromMarkers, clearMarkers, setMute, autoslice,
   CARD, breakNameOk, breakName, uploadPlan, encodeWav, serial, uploadBreak, copyOldCard, cardRescan, cardList,
   PADS, padPlan, encodePcm16, padNormalize, uploadPad, newKit,
   KEYP, keyParams, parseKeyParams, fetchKeyParams, keypNeutral, keypText, keypGainText, keypTuneText,
