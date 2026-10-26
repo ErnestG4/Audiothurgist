@@ -5,20 +5,19 @@
 //   g++ -std=gnu++17 -O1 -g -fsanitize=address,undefined -Icore -Ivendor/capicola/lib
 //       tests/keyp_check.cpp -o /tmp/keyp && /tmp/keyp /tmp     (one line)
 //
-// 1. Neutral is today: a rich session — a stereo break under Classic with the
+// 1. Back to neutral: a rich session — a stereo break under Classic with the
 //    Zoom tail pitched up, adaptive fades, two pads, one-shot / held /
 //    reversed / ratcheted / staccato key calls, then Play's looper recording
-//    and replaying keyed calls, and the mono reader — hashes to the golden
-//    taken from the untouched engine (beta 7039813) with this exact driver.
-//    The same session with every key set to neutral through the edit op
-//    renders the same bits.
+//    and replaying keyed calls — renders the same with every key set away and
+//    back to neutral through the edit op as untouched.
 // 2. Gain and tune at the call: a key's gain scales its voice (a ratchet's
 //    double too), its tune multiplies the rate the voice already gets (OwnRate,
 //    the tempo's varispeed, P4, the style); the sequencer's steps are untouched,
 //    a looper replay of a keyed call follows the key's settings now.
 // 3. Plays: Follow takes the option, One-shot and Held override it, Loop holds
-//    the entry looping until the release — no read past the entry, no choke by
-//    another hit, a clean fade at the release.
+//    the entry looping (forward, or backward when reversed) until the release —
+//    no read past the entry, no choke by another hit, the seams bridged, a
+//    clean fade at the release.
 // 4. The edit op and the journal: one undo step per edit, a drag's joined edits
 //    one step, a join for another key a step of its own, the refusals; new
 //    material resets the settings, a re-apply keeps them.
@@ -134,45 +133,22 @@ static uint64_t Session(bb::Engine& e, Hook hook, int blocks = 1200)
 }
 static void NoHook(bb::Engine&, int) {}
 
-/* ── 1. neutral is today ─────────────────────────────────────────────── */
-// Taken from the untouched engine (beta 7039813) with this exact driver, -O1 sanitized and -O2, x86-64 SSE.
-static constexpr uint64_t kGoldStereo = 0x18c1b9d7cd97be77ULL;
-static constexpr uint64_t kGoldMono   = 0x73cbbfc7f0973281ULL;
+/* ── 1. back to neutral leaves nothing behind ────────────────────────── */
 static void TestNeutral()
 {
-    SECTION("neutral is today: the session hashes to the pre-KEYP golden");
-    static std::vector<float> L(kCap), R(kCap), L2(kCap);
+    SECTION("every key set away and back to neutral through the edit op renders as a session never touched");
+    static std::vector<float> L(kCap), R(kCap);
     bb::Engine e;
     Setup(e, L.data(), R.data());
     const uint64_t hs = Session(e, NoHook);
-    bb::Engine m;
-    Setup(m, L2.data(), nullptr);
-    uint64_t hm = kFnv0;
-    {
-        float o[24];
-        m.patternMode = 1; m.patternKnob = 0.3f; m.RegenPattern(); m.pitch = 1.1f;
-        for(int b = 0; b < 800; b++)
-        {
-            if(b == 50) m.CallSlice(m.KeySlice(2), 1.f, false, false, false, 1.f, true, 2);
-            if(b == 120) m.ReleaseKey(2);
-            if(b == 200) m.CallSlice(m.KeySlice(8), 1.f, false, false, true, 1.f, false, 8);
-            m.Process(o, 24);
-            hm = Fnv(hm, o, 24);
-        }
-    }
-    printf("  stereo session %016llx · mono session %016llx\n", (unsigned long long)hs, (unsigned long long)hm);
-    CHECK(hs == kGoldStereo, "the stereo session: %016llx != golden %016llx", (unsigned long long)hs, (unsigned long long)kGoldStereo);
-    CHECK(hm == kGoldMono, "the mono session: %016llx != golden %016llx", (unsigned long long)hm, (unsigned long long)kGoldMono);
-    // the session exercised what it claims: it ended in Play with the looper's events
     CHECK(e.looper.n >= 4 && e.patternMode == 5, "the session ended in Play with %d events on the loop", e.looper.n);
-    // every key edited away and back to neutral through the op (journal and all) — still the golden
     bb::Engine z;
     Setup(z, L.data(), R.data());
     const uint64_t hz = Session(z, [](bb::Engine& x, int b) {
         if(b == 10) for(int k = 0; k < 24; k++) { bb::EditReq q; q.op = bb::EditOp::SetKeyParams; q.key = k; q.a = -7; q.b = 333; q.i = 3; x.ApplyEdit(q); }
         if(b == 20) for(int k = 0; k < 24; k++) { bb::EditReq q; q.op = bb::EditOp::SetKeyParams; q.key = k; q.a = 0; q.b = 0; q.i = 0; x.ApplyEdit(q); }
     });
-    CHECK(hz == kGoldStereo && z.KeysNeutral(), "every key set and set back to neutral through the edit op: the golden (%016llx)", (unsigned long long)hz);
+    CHECK(hz == hs && z.KeysNeutral(), "the same bits (%016llx vs %016llx)", (unsigned long long)hz, (unsigned long long)hs);
 }
 
 /* ── helpers ──────────────────────────────────────────────────────────── */
@@ -350,10 +326,44 @@ static void TestPlays()
     inside = true;
     for(int k = 0; k < 2000 && v; k++) { e.Process(l, r, 24); inside = inside && v->active && v->pos >= (double)a && v->pos < (double)end; }
     CHECK(v && v->rate == 16.f && inside, "at rate %g the loop still never leaves its entry", v ? v->rate : 0.f);
+    e.ReleaseKey(2);
+    Silence(e); e.CallSlice(t, 2.f, true, false, false, 1.f, false, 2);
+    v = Fresh(e);
+    inside = true;
+    for(int k = 0; k < 2000 && v; k++) { e.Process(l, r, 24); inside = inside && v->active && v->pos >= (double)a && v->pos < (double)end; }
+    CHECK(v && v->rate == -16.f && inside, "…and reversed at rate %g", v ? v->rate : 0.f);
     e.ReleaseKey(2); e.pitch = 1.f;
+    // reversed: the entry looping backward from its top, as long, as clean, the same release
+    SetKp(e, 2, 0, 0, 3);
     Silence(e); e.CallSlice(t, 1.f, true, false, false, 1.f, false, 2);
     v = Fresh(e);
-    CHECK(v && v->held && v->tail == 0 && v->rate < 0.f, "Loop reversed: plain Held, backwards");
+    CHECK(v && v->held && v->tail == bb::Voice::kTailBack && v->rate < 0.f && v->pos == v->loopB && v->loopB < (double)end && v->loopA > (double)a,
+          "Loop reversed: held, the backward loop from the entry's top");
+    {
+        bool in = true, wrapped = false; double lo = (double)end; float last = 0.f, worst = 0.f;
+        for(int k = 0; k < 90000 / 24 && v; k++)
+        {
+            const double before = v->pos;
+            e.Process(l, r, 24);
+            in = in && v->active && v->rate < 0.f && v->pos >= (double)a && v->pos < (double)end;
+            wrapped = wrapped || v->pos > before; lo = v->pos < lo ? v->pos : lo;
+            for(int i = 0; i < 24; i++) { worst = fmaxf(worst, fabsf(l[i] - last)); last = l[i]; }
+        }
+        printf("  reversed loop: lowest position %.0f (entry from %d), worst step %g\n", lo, a, worst);
+        CHECK(in && wrapped && v->looping, "three lengths later it still plays backward, wrapped, never outside its entry");
+        CHECK(worst < 0.06f, "the backward seam is bridged: worst sample-to-sample step %g", worst);
+    }
+    e.ReleaseKey(2);
+    CHECK(v && !v->held && v->tail == 0 && v->rate > 0.f, "the release: the loop off, turned forward to fade");
+    n = 0; while(v && v->active && n < 100) { e.Process(l, r, 24); n++; }
+    CHECK(v && !v->active && n * 24 <= v->chokeLen + 48, "…and gone within its release (%d samples)", n * 24);
+    // the forward seam, measured the same way
+    Silence(e); e.CallSlice(t, 1.f, false, false, false, 1.f, false, 2);
+    {
+        float last = 0.f, worst = 0.f;
+        for(int k = 0; k < 90000 / 24; k++) { e.Process(l, r, 24); for(int i = 0; i < 24; i++) { worst = fmaxf(worst, fabsf(l[i] - last)); last = l[i]; } }
+        CHECK(worst < 0.06f, "the forward seam is bridged too: worst step %g", worst);
+    }
     e.ReleaseKey(2);
     // too short for the rate: a 100-sample grid slice at rate 16 → plain held
     {

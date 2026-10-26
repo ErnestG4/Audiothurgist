@@ -19,7 +19,7 @@
 // 4. The room: free / total / held after drops, a replace, an undo, a split
 //    (overlap counted once), a marker inside the break (not a pad).
 // 5. OwnRate: a pad plays at its own rate at any tempo, the break's slices
-//    varispeed; recOwnRate = false restores the v0.13 rule. AdoptR: a mono
+//    varispeed. AdoptR: a mono
 //    kit grows an R plane under a sounding voice without a step.
 // 6. KitUnsaved and the empty kit's stub.
 // 7. The loader's same-rate path: a 48 kHz file longer than the staging loads
@@ -318,9 +318,6 @@ static void TestRateAndPlanes()
     bb::EditReq m; m.op = bb::EditOp::AddEntry; m.start = 12000; m.len = 6000;
     int mi = -1; e.ApplyEdit(m, &mi);
     CHECK(!e.OwnRate(mi) && fabsf(rateOf(mi) - 1.25f) < 1e-3f, "a marker inside the break follows the tempo");
-    e.recOwnRate = false;
-    CHECK(fabsf(rateOf(t) - 1.25f) < 1e-3f, "recOwnRate = false: the v0.13 rule (every call varispeeds)");
-    e.recOwnRate = true;
 
     // AdoptR: a voice sounding on a pad while the kit grows an R plane — L unchanged, R = L, no step
     bb::Engine a; a.Init(17); a.SetUndoJournal(&gJ2);
