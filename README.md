@@ -199,9 +199,10 @@ open a tab directly.
   tab is the view-only one above, `?demo=noedit`): the waveform below the
   keys is the **Sample Drum surface**. Its top band is the material from
   `GET_WAVE` windows with every edge of the table drawn over it — grid
-  boundaries white, recordings yellow, markers grey until touched and
-  **orange** once you placed or moved them (the table's flags byte), blue
-  onset ticks, a green playhead from `srcPos`. Under it a 44 px row of
+  boundaries white, recordings gold, markers grey (dotted, a hollow handle)
+  until touched and **orange** once you placed or moved them (the table's
+  flags byte), pale blue onset ticks, a pale grey playhead from `srcPos`
+  (the colours: `docs/colors.md`). Under it a 44 px row of
   **lollipop handles**, one per grid boundary and marker start, and a square
   at the selected marker's end; under that a **strip** with the whole buffer
   and the view's window (drag = pan, drag up / down or pinch or wheel = zoom,
@@ -221,7 +222,7 @@ open a tab directly.
   bar:beat:16th, typed values commit. **Keys:** tap a cell to hear it and
   select it (cell and handle pulse together); drag a cell onto another to
   **swap** (a *swap / replace / cancel* prompt when the target is taken —
-  **red**, swap by default, when a recording would lose its only key);
+  **magenta**, swap by default, when a recording would lose its only key);
   long-press a cell, then drop it on or tap another, to **copy** the entry
   there (many keys may play one entry); drag a slice up from the waveform
   onto a cell to assign it. The **Edit** panel has the big **Chop** pad
