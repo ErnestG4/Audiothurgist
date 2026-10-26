@@ -73,6 +73,7 @@
 #include "bb_card.h"     /* CARD: the one folder, upload names, the receiver, the copy plan (docs/packages/card.md) */
 #include "bb_cardfs.h"   /* CARD: scan, survey, copy, the upload's write — FatFs, host-tested over a shim */
 #include "bb_pads.h"     /* PADS: a drop's bytes → planes, the room, the empty kit (docs/packages/pads.md) */
+#include "bb_startup.h"  /* START: Start in — Sampler (Pads, stopped) or As saved, Audiothurgist/startup.json */
 #pragma GCC pop_options
 #ifndef BB_GIT_HASH
 #define BB_GIT_HASH "local"
@@ -754,6 +755,15 @@ static bool             gNoBreak    = false;          /* the material is an empt
 static int              gKitOnCard  = 0;              /* frames per plane the card holds of this kit (the unsaved note) */
 static bool PadBusy() { return gPadState != bb::kPadIdle || gPadReq != 0u; }
 /* ── end PADS ──────────────────────────────────────────────────────────── */
+/* ── START (beta-sampler) ── Start in: what the module does at power-up (core/bb_startup.h). Sampler (the
+ * default; no file, no card): Pads with the transport stopped — the keys play samples, a beat waits for a drum
+ * grammar and ▶. As saved: the boot preset's grammar, running (v0.13 as it was). A device setting on the card,
+ * not an Options byte: a 25th byte would move the preset schema and drop every slot (their locks with them).
+ * ACTION 40 sets it (the main loop writes the file), GET_STATE byte 3 b5 reads it back (set = As saved). ── */
+static volatile uint8_t gStartIn      = bb::kStartSampler;   /* what the page sees: the card's, or the change on its way */
+static uint8_t          gStartInCard  = bb::kStartSampler;   /* what the card says (read at boot, then each write) */
+static volatile bool    gStartInWrite = false;               /* HostLink → main loop: write gStartIn to the card */
+/* ── end START ─────────────────────────────────────────────────────────── */
 /* ── CLOCK ── control-thread clock state; the math is core/bb_clockmath.h ── */
 static volatile float gClkFlash = 0.f;   /* B1 white flash per detected pulse */
 static volatile float gClkMult  = 1.f;   /* APPLIED multiplier (telemetry mirror of gMap.mult) */
@@ -2768,9 +2778,25 @@ static void ServiceAutosave()
     gAutoClean = gen;   /* one attempt per generation, success or failure */
     if(!ok) SetFinish(8);
 }
+/* START: ACTION 40's write — startup.json, tmp + rename, under BusyGuard; never during a set op (they share gSetFil).
+ * A write that fails puts the page's value back to the card's, so the flag never claims what the card does not say. */
+static void ServiceStartIn()
+{
+    if(!gStartInWrite || gSetState || gSetReq) return;
+    gStartInWrite = false;
+    const uint8_t want = gStartIn;
+    bool ok = false;
+    if(CardReady())
+    {
+        SdCard::BusyGuard busy(sd);
+        ok = SetDirsOk() && bb::WriteStartup(&gSetFil, want, (char*)gSetStage, bb::kStartupMax);
+    }
+    if(ok) gStartInCard = want;
+    else if(!gStartInWrite) gStartIn = gStartInCard;   /* not a newer request meanwhile: back to what the card says */
+}
 /* Main loop: the markers, key table and flags of a loaded set (or a loose
  * file's sidecar) once the audio thread has the planes, ACTION 14 / 15, the
- * autosave, the preset backups. */
+ * autosave, the preset backups, Start in. */
 static void ServiceSets()
 {
     if(gSetPendCommit && !gApply)
@@ -2793,6 +2819,7 @@ static void ServiceSets()
     }
     ServiceAutosave();   /* EDIT-PERSIST */
     ServicePresetBackup();
+    ServiceStartIn();    /* START */
 }
 /* ── end SETS ──────────────────────────────────────────────────────────── */
 
@@ -3036,7 +3063,7 @@ static void ServiceLoad()
  * HostLink extension claiming 0x60–0x6F. All handlers run on the control
  * thread; engine arrays are read as-is (a torn read is one frame of pixels).
  *   0x60 GET_STATE  → u8 status, u8 nSlices, u8 curStep, u8 flags
- *                     (b0 muted b1 ext b2 locked b3 flowing b4 brainPage),
+ *                     (b0 muted b1 ext b2 locked b3 flowing b4 brainPage · START: b5 Start in = As saved),
  *                     u8 matGen, u8 grammar, u8 classifier, u8 curFile,
  *                     u8 chop(0..255), u8 histN, u8 histDepth, u8 callFlash,
  *                     f32 bpm, f32 mult, i8 stepSrc[64], u8 stepClass[64],
@@ -3850,7 +3877,8 @@ struct StateExt : hostlink::IHostlinkExtension
          * list) and the state tail from 276. */
         /* PADS: "pads":1 = 0x68 (a sample dropped onto a pad, New empty kit), the 45 s planes, recordings at their
          * own rate, and the state tail from 293. */
-        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102,\"sets\":1,\"scope2\":2,\"edit\":2,\"keys\":1,\"card\":1,\"pads\":1}";
+        /* START: "startIn":1 = ACTION 40 and GET_STATE byte 3 b5 (Start in = As saved). */
+        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102,\"sets\":1,\"scope2\":2,\"edit\":2,\"keys\":1,\"card\":1,\"pads\":1,\"startIn\":1}";
     }
     /* WEB: one float → i8 (±127), saturating. */
     static int8_t ToI8(float v)
@@ -3870,7 +3898,8 @@ struct StateExt : hostlink::IHostlinkExtension
                 int cur = (int)(engine.barPhase * (double)(ns > 0 ? ns : 1)); if(cur >= ns) cur = ns > 0 ? ns - 1 : 0;
                 uint8_t flags = (engine.muted ? 1u : 0u) | (gWasExt ? 2u : 0u)
                               | ((gWasExt && gFollower.Locked()) ? 4u : 0u)
-                              | (gFlowing ? 8u : 0u) | (pager.Page() ? 16u : 0u);
+                              | (gFlowing ? 8u : 0u) | (pager.Page() ? 16u : 0u)
+                              | (gStartIn == bb::kStartSaved ? 32u : 0u);   /* START: b5 Start in = As saved */
                 w.U8((uint8_t)ns); w.U8((uint8_t)cur); w.U8(flags); w.U8(gMatGen);
                 w.U8(gGrammar.mode); w.U8(gClass.mode); w.U8((uint8_t)(gCurFile < 0 ? 255 : gCurFile));
                 w.U8((uint8_t)(k_chop.Norm() * 255.f));
@@ -4111,6 +4140,13 @@ struct StateExt : hostlink::IHostlinkExtension
                     case 35:   /* BETA: SET_MUTE(u8 1 stopped / 0 running) — the transport; op 2 still toggles */
                         if(f.len < 2 || f.body[1] > 1u) { w.U8(2u); return; }
                         engine.muted = f.body[1] != 0u;
+                        break;
+                    case 40:   /* START: START_IN(u8 0 Sampler / 1 As saved) — the next power-up; the main loop writes
+                                * Audiothurgist/startup.json. NO_CARD (21) without a card: there is nowhere to keep it.
+                                * (37..39 left free for the per-key work beside this branch.) */
+                        if(f.len < 2 || f.body[1] > 1u) { w.U8(2u); return; }
+                        if(!CardReady()) { w.U8(bb::kStNoCard); return; }
+                        gStartIn = f.body[1]; gStartInWrite = true;
                         break;
                     default: w.U8(2u); return;   /* BAD_ARGS */
                 }
@@ -4381,6 +4417,13 @@ int main()
      * the boot preset's whatever was restored. */
     if(RestorePresetBackups() > 0 && presets.HasValid(0)) presets.Load(0);
     PrimePresetSeq();
+    /* START: Start in, from the card (no card, no file: Sampler). Sampler puts the live grammar on Pads — the
+     * main loop applies it as any grammar change (patternMode, the Voice map under Jacks = Follow grammar, the keys
+     * onto the markers if there are any) — and stops the transport before the first block, so nothing plays until
+     * a key does. The boot preset itself is not touched: As saved, or a preset load later, brings its grammar
+     * back; ▶ / B1 held starts the pattern on the beat (the playhead ran on underneath). */
+    if(CardReady()) { SdCard::BusyGuard busy(sd); gStartIn = gStartInCard = bb::ReadStartup(&gSetFil, (char*)gSetStage, bb::kStartupMax); }
+    if(gStartIn == bb::kStartSampler) { gGrammar.mode = 6u; gGrammar.dirty = true; engine.muted = true; }
 
     hw.StartAudio(AudioCb);
 

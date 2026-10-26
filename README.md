@@ -15,9 +15,13 @@ played; the manual is in the firmware and on the page's Manual tab.
 
 **Quick start:** flash `audiothurgist.bin` (below), put breaks on a FAT32
 card, and open the page — [ernestg4.github.io/Audiothurgist](https://ernestg4.github.io/Audiothurgist/)
-in Chrome or Edge — then Connect. Press **▶/■** to start and stop, pick a
-mode (Classic · Grids · Loop · Pads), and play the 24 pads or the J4 keys.
-No module? Add `?demo` to the page's address.
+in Chrome or Edge — then Connect. **It powers up as a sampler**: Pads, the
+pattern stopped — play the 24 pads or the J4 keys, drop your own samples on
+the pads. For a beat, pick a mode (Classic · Grids · Loop) and press **▶**
+(or hold **B1** on the panel); ▶/■ starts and stops it from then on.
+Options → Start-up → *As saved* powers up in the saved preset's mode,
+running, instead. No module? Press **Demo** (or add `?demo=sampler` to the
+page's address).
 
 ## Three roles, one engine
 
@@ -43,7 +47,9 @@ break and a kit are the same thing, played by different rules (slice or held).
 ## Use it as a sampler
 
 The 24 keys (J4, the page's pads, the Kit) are a sampler's pads as much as a
-break's slices. Three ways to put a sound on a pad:
+break's slices — and the module powers up as one (**Start in = Sampler**:
+Pads, the pattern stopped; the page opens on the pads). Three ways to put a
+sound on a pad:
 
 1. **A break, autosliced** — load or upload a break, then **Autoslice** (Kit →
    Edit, or P5 on the panel's Edit page); in **Pads** the keys follow the
@@ -52,8 +58,10 @@ break's slices. Three ways to put a sound on a pad:
    the input goes into that key.
 3. **Drop a file on a pad** — drag any audio file the browser can open onto a
    pad (Play) or a key cell (Kit), or *Choose samples…* on a phone. Mono or
-   stereo, as the file is (no trim, no normalise; a stereo one makes the kit
-   stereo). Several files fill that pad and the next ones.
+   stereo, as the file is (no trim; a stereo one makes the kit stereo); tick
+   **normalise drops** to bring each file's peak to −1 dBFS first (off by
+   default, remembered by the browser). Several files fill that pad and the
+   next ones.
 
 Recordings and dropped samples play at their own pitch (P4 transposes them);
 the break's slices follow the tempo. The sample memory is 45 s per channel: a
@@ -61,8 +69,9 @@ break takes at most 17 s and the pads get the rest — or press **New empty
 kit** (Play → Pads) for no break at all and 44.75 s of pads, in Pads mode. A
 dropped sample lives in the module's memory; the page shows **Unsaved kit**
 until you **Save set** (the break, every pad, the table and the options, in
-`Audiothurgist/sets/`), and a power-off before that loses it. Details:
-`docs/packages/pads.md`.
+`Audiothurgist/sets/`), and a power-off before that loses it. To play a
+beat with your kit, pick Classic or Grids (the line over the pads has both)
+and press ▶ — it comes in on the beat. Details: `docs/packages/pads.md`.
 
 ## Flashing
 
@@ -85,6 +94,7 @@ Everything the module reads or writes lives in one folder, `Audiothurgist/`:
 | `Audiothurgist/breaks/*.wav` | the breaks P5 and the page's Sample list show, sorted |
 | `Audiothurgist/sets/` | sets (`<name>.wav` + `<name>.json`) and the loose files' edits (`<wav>.slices.json`) |
 | `Audiothurgist/presets/` | preset backups (`<slot>.json`) |
+| `Audiothurgist/startup.json` | *Start in* (Sampler / As saved), the one setting kept on the card rather than in a preset |
 
 The folders are made the first time something is written. **What loads:** WAV,
 PCM 16- or 24-bit, mono or stereo, 8 kHz or more, at least ¼ s; the first 17 s
@@ -171,6 +181,7 @@ In **Pads** the keys follow the markers (time order on keys 0, 1, 2…).
 | Quantize | **Off (as played)** · 16ths · 8ths — Play's looper |
 | Tap Allowance | 0 · 20 · **40** · 60 · 80 ms — a tap-while-playing mark lands this far back (slice editing) |
 | Autosave | Off · **On (2 s after an edit)** — the slice table and key map to the set's JSON, or a `sets/<file>.slices.json` sidecar beside a loose WAV |
+| Start in | **Sampler (Pads, stopped)** · As saved (the boot preset's mode, running) — the web app's Options → Start-up; kept on the card (`startup.json`), not in a preset, so presets are untouched by it; no card = Sampler |
 
 ## The web app
 
