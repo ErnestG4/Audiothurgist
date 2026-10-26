@@ -56,7 +56,7 @@ struct UndoRec
     {
         UndoEntry e[Engine::kMaxTable];   // kEntries: [0, 2) · BETA kSnap: [0, n)
         struct { uint32_t orange[3], hit[3]; int32_t start[Engine::kMaxTable]; } nudge;
-        KeyParam kp[Engine::kKeys];       // KEYP: kKeyP (96 B — inside the union, the record does not grow)
+        KeyParam kp[Engine::kKeys];       // KEYP: kKeyP (144 B — inside the union, the record does not grow)
     } u;
     // the bytes a record uses: the header, the keys, then what its kind fills
     size_t Bytes() const
@@ -218,7 +218,7 @@ inline bool Engine::UndoSwap(UndoRec& r)
         for(int k = 0; k < kKeys; k++)
         {
             const KeyParam was = keyp[k], to = r.u.kp[k];
-            if(memcmp(&was, &to, sizeof was) != 0) PutKeyParam(k, to.Valid() ? to : KeyParam{0, 0, 0});
+            if(memcmp(&was, &to, sizeof was) != 0) { PutKeyParam(k, to.Valid() ? to : KeyParam{0, 0, 0, 0, 0}); if(keyp[k].plays != KeyParam::kRatchet) keyRatOn &= ~(1u << k); }
             r.u.kp[k] = was;
         }
     }

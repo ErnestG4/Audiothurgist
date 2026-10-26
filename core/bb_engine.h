@@ -308,7 +308,7 @@ enum class EditOp : uint8_t
     Redo,          // EDIT-UNDO: one step forward
     SetKeyMap,     // BETA: the whole key map from `keys` (−1 = the key's default) — KEYS_FROM_MARKERS, Pads
     Record,        // PADS: key `key` owns [start, start + len) — a recording (a drop onto a pad), CommitSlice through the journal
-    SetKeyParams   // KEYP: key `key`'s settings — a = gain (½ dB), b = cents, i = plays (KeyParam)
+    SetKeyParams   // KEYP: key `key`'s settings — a = gain (½ dB), b = cents, i = plays, len = the ratchet's rate (KeyParam)
 };
 /* KEYP (docs/packages/keyp.md): one key's settings — how loud, how far tuned, how it plays. All zero is
  * neutral: the key plays exactly as before this package. A POD (it lives in the journal's union). */
@@ -316,17 +316,22 @@ struct KeyParam
 {
     static constexpr int kGainMin = -48, kGainMax = 12;   // ½ dB steps: −24 … +6 dB
     static constexpr int kCentsMax = 2400;                // ±24 semitones
-    static constexpr uint8_t kFollow = 0, kOneShot = 1, kHeld = 2, kLoop = 3;   // plays
+    static constexpr uint8_t kFollow = 0, kOneShot = 1, kHeld = 2, kLoop = 3, kRatchet = 4;   // plays
+    /* the ratchet's rate: a fraction of the entry's own length (as it plays, after the tune) or a note value at the
+     * tempo (the grid's 16th = 1/16) */
+    static constexpr uint8_t kRatFull = 0, kRatHalf = 1, kRatQuarter = 2, kRatEighth = 3, kRat8th = 4, kRat16th = 5, kRat32nd = 6, kRatMax = 6;
     int8_t  gain;    // ½ dB
-    uint8_t plays;   // kFollow (Options → Key Plays) · kOneShot · kHeld · kLoop (held, looping the entry)
+    uint8_t plays;   // kFollow (Options → Key Plays) · kOneShot · kHeld · kLoop (held, looping the entry) · kRatchet (held, retriggering)
     int16_t cents;   // tune
-    bool Neutral() const { return gain == 0 && plays == 0 && cents == 0; }
-    bool Valid() const { return gain >= kGainMin && gain <= kGainMax && plays <= kLoop && cents >= -kCentsMax && cents <= kCentsMax; }
+    uint8_t rat;     // kRatchet's rate (kRatFull … kRat32nd); kept, and ignored, in the other modes
+    uint8_t spare;   // 0
+    bool Neutral() const { return gain == 0 && plays == 0 && cents == 0 && rat == 0; }
+    bool Valid() const { return gain >= kGainMin && gain <= kGainMax && plays <= kRatchet && cents >= -kCentsMax && cents <= kCentsMax && rat <= kRatMax; }
     // linear gain and rate; exactly 1 when neutral (no transcendental, no rounding)
     float GainLin() const { return gain == 0 ? 1.f : exp2f((float)gain * 0.0830482024f); }   // 10^(gain/40) = 2^(gain·log2(10)/40)
     float RateMul() const { return cents == 0 ? 1.f : exp2f((float)cents * (1.f / 1200.f)); }
 };
-static_assert(sizeof(KeyParam) == 4, "KeyParam packs to 4 bytes");
+static_assert(sizeof(KeyParam) == 6, "KeyParam packs to 6 bytes");
 enum class EditStatus : uint8_t
 {
     Ok = 0,
@@ -1014,6 +1019,7 @@ struct Engine
          * itself when the count is unchanged, else the span default). */
         if(samePlanes) RestoreKeyTable(oldKeys, map, oldN, oldTable);
         else         { DefaultKeyTable(); ResetKeyParams(); }   /* KEYP: new material, a new kit: every key neutral (a set's own follow its load) */
+        keyRatOn = 0;                                            /* KEYP: the voices go below; their ratchets with them */
         SetBpm(0.f); // every load opens at ITS OWN tempo — inheriting the
                      // previous break's BPM chipmunks the new one (field bug)
         RegenPattern();
@@ -1140,7 +1146,8 @@ struct Engine
         {
             v->held = true;
             v->key  = (int8_t)key;
-            if(!rev && keyed && keyp[key].plays == KeyParam::kLoop && LoopHeld(*v, cell, bound)) {}   /* KEYP: Loop — the entry, until the release */
+            if(keyed && keyp[key].plays == KeyParam::kRatchet) {}   /* KEYP: a ratchet's hit plays its entry, as a one-shot (the next hit or the release fades it) */
+            else if(!rev && keyed && keyp[key].plays == KeyParam::kLoop && LoopHeld(*v, cell, bound)) {}   /* KEYP: Loop — the entry, until the release */
             else if(!rev) { v->natEnd = bound; v->end = bound; }
             else v->start = idx >= nSlices ? cell.start : 0;   /* backwards to the material's start */
         }
@@ -1189,6 +1196,7 @@ struct Engine
         float rate         = OwnRate(idx) ? pitch * rateMul : pitch * (nativeStep / gridStepSamp) * rateMul;
         if(key >= 0 && key < kKeys) rate *= keyRate[key];   /* KEYP: the key's tune multiplies whatever rate it gets (×1 neutral) */
         FireSlice(idx, rate, rev, lenMul, held, key);
+        if(key >= 0 && key < kKeys && keyp[key].plays == KeyParam::kRatchet) RatchetStart(key, idx, rate, rev, held, gridStepSamp);   /* KEYP */
         if(punch) PunchStep(curStep, idx, rev);
         if(ratchet)
         {
@@ -1235,6 +1243,7 @@ struct Engine
     }
     void ReleaseKeyRaw(int key)
     {
+        if(key >= 0 && key < kKeys) keyRatOn &= ~(1u << key);   /* KEYP: the key came up — its ratchet stops */
         for(int i = 0; i < kVoices; i++)
             if(voices[i].active && voices[i].held && voices[i].key == key) voices[i].Release();
     }
@@ -1586,7 +1595,7 @@ struct Engine
     }
     BB_COLD void ResetKeyParams()
     {
-        const KeyParam z = {0, 0, 0};
+        const KeyParam z = {0, 0, 0, 0, 0};
         for(int k = 0; k < kKeys; k++) PutKeyParam(k, z);
     }
     // A set's (or the sidecar's) settings wholesale, after its load — out-of-range values clamped. CONTROL (the
@@ -1601,12 +1610,60 @@ struct Engine
             if(q.gain > KeyParam::kGainMax) q.gain = KeyParam::kGainMax;
             if(q.cents < -KeyParam::kCentsMax) q.cents = -KeyParam::kCentsMax;
             if(q.cents > KeyParam::kCentsMax) q.cents = KeyParam::kCentsMax;
-            if(q.plays > KeyParam::kLoop) q.plays = KeyParam::kFollow;
+            if(q.plays > KeyParam::kRatchet) q.plays = KeyParam::kFollow;
+            if(q.rat > KeyParam::kRatMax) q.rat = 0;
+            q.spare = 0;
             PutKeyParam(k, q);
         }
         BumpGen();
     }
     bool KeysNeutral() const { for(int k = 0; k < kKeys; k++) if(!keyp[k].Neutral()) return false; return true; }
+    /* KEYP: Ratchet — while the key is held its entry retriggers from its start every `period` output samples: the
+     * entry's own length as it plays (its length ÷ the rate: full, ½, ¼, ⅛) or a note value at the tempo (1/8, 1/16,
+     * 1/32 of the grid's bar, the 16th = one grid step), never under kRatMin (5 ms). Each retrigger is a FireSlice:
+     * the previous hit is released with the choke geometry (the fade every steal uses) while the new one attacks
+     * beside it — a crossfade, no step. Worked out at the call and at each retrigger, never per sample; block-
+     * accurate (the countdown carries the remainder, so the period is exact on average, each hit ≤ one 24-sample
+     * block late). The release (the gate's fall, the pad's up, the looper's release event) stops it. With no gate
+     * to go by — a looper replay of an event recorded without a hold — it FILLS THE STEP: as many hits as fit one
+     * grid step at the tempo, at least two. A held one gives up after eight bars without a release (a release the
+     * looper could not record must not leave it running forever). */
+    static constexpr int kRatMin = 240;
+    struct KeyRatchet { int idx = 0, period = kRatMin, countdown = 0, left = 0; float rate = 1.f; bool rev = false; };
+    KeyRatchet keyRat[kKeys];
+    uint32_t   keyRatOn = 0;   // bit k: key k's ratchet runs (AUDIO only)
+    BB_COLD void RatchetStart(int key, int idx, float rate, bool rev, bool held, float gridStepSamp)
+    {
+        const float r = rate < 0.f ? -rate : rate;
+        const uint8_t div = keyp[key].rat;
+        float per = div <= KeyParam::kRatEighth ? (float)(slices[idx].len >> div) / (r > 1e-3f ? r : 1e-3f)
+                                                : gridStepSamp * (div == KeyParam::kRat8th ? 2.f : div == KeyParam::kRat16th ? 1.f : 0.5f);
+        if(!(per < 4.0e6f)) per = 4.0e6f;
+        int p = (int)(per + 0.5f);
+        if(p < kRatMin) p = kRatMin;
+        int left;
+        if(held) { const float cap = 8.f * barSeconds * sr / (float)p; left = cap > 100000.f ? 100000 : (int)cap + 1; }
+        else     { const int hits = (int)(gridStepSamp / (float)p); left = (hits < 2 ? 2 : hits) - 1; }
+        KeyRatchet& k = keyRat[key];
+        k.idx = idx; k.period = p; k.countdown = p; k.left = left; k.rate = rate; k.rev = rev;
+        keyRatOn |= 1u << key;
+    }
+    void RatchetTick(int n)
+    {
+        for(uint32_t m = keyRatOn; m; m &= m - 1u)
+        {
+            const int k = __builtin_ctz(m);
+            KeyRatchet& r = keyRat[k];
+            r.countdown -= n;
+            if(r.countdown >= 0) continue;
+            for(int i = 0; i < kVoices; i++)   /* the previous hit fades as the next attacks */
+                if(voices[i].active && voices[i].held && voices[i].key == k) voices[i].Release();
+            if(r.idx < nTable) FireSlice(r.idx, r.rate, r.rev, 1.f, true, k);
+            r.countdown += r.period;
+            if(r.countdown < 0) r.countdown = 0;
+            if(--r.left <= 0) keyRatOn &= ~(1u << k);
+        }
+    }
     /* KEYP: a held call on a Loop key loops its entry [start, end) — the tail mechanism (loop forward, the wrap's
      * click bridge), the loop point a rate's step plus two short of the end so the reader never reaches the end
      * between two wraps; the release fades forward from wherever it is, never past the entry's end. An entry too
@@ -1740,6 +1797,7 @@ struct Engine
             callCountdown -= n;
             if(callCountdown < 0 && callIdx >= 0) FireSlice(callIdx, callRate, callRev, callLenMul, callHeld, callKey);
         }
+        if(keyRatOn) RatchetTick(n);   /* KEYP: the Ratchet keys' retriggers (nothing at all while none runs) */
 
         // Quantized cell sequencing: the grid clock runs at OUR tempo; the
         // pattern (a Brocot tiling of cells) says which source cell each grid

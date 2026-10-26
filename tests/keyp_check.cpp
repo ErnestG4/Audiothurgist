@@ -176,9 +176,9 @@ static void TestNeutral()
 }
 
 /* ── helpers ──────────────────────────────────────────────────────────── */
-static bb::EditStatus SetKp(bb::Engine& e, int key, int gain, int cents, int plays, bool join = false)
+static bb::EditStatus SetKp(bb::Engine& e, int key, int gain, int cents, int plays, bool join = false, int rat = 0)
 {
-    bb::EditReq q; q.op = bb::EditOp::SetKeyParams; q.key = key; q.a = gain; q.b = cents; q.i = plays;
+    bb::EditReq q; q.op = bb::EditOp::SetKeyParams; q.key = key; q.a = gain; q.b = cents; q.i = plays; q.len = rat;
     if(join) q.flags = bb::EditReq::kQuiet;
     return e.ApplyEdit(q);
 }
@@ -379,6 +379,114 @@ static void TestPlays()
     }
 }
 
+/* ── 3b. ratchet ─────────────────────────────────────────────────────── */
+// the blocks at which a call (a FireSlice) landed while `blocks` blocks render; worst sample-to-sample step of L
+static std::vector<int> Hits(bb::Engine& e, int blocks, float* worst = nullptr, int releaseAt = -1, int key = -1)
+{
+    std::vector<int> at; float l[24], r[24], last = 0.f, w = 0.f;
+    for(int b = 0; b < blocks; b++)
+    {
+        if(b == releaseAt) e.ReleaseKey(key);
+        const uint8_t h0 = e.callHits;
+        e.Process(l, r, 24);
+        if(e.callHits != h0) at.push_back(b);
+        for(int i = 0; i < 24; i++) { w = fmaxf(w, fabsf(l[i] - last)); last = l[i]; }
+    }
+    if(worst) *worst = w;
+    return at;
+}
+static void TestRatchet()
+{
+    SECTION("ratchet: while held the entry retriggers at its rate (½ ¼ ⅛ of itself, or 1/8 1/16 1/32 at the tempo), crossfaded, until the release");
+    static std::vector<float> L(kCap), R(kCap);
+    bb::Engine e; Setup(e, L.data(), R.data()); e.muted = true;
+    const int t = e.KeySlice(2), len = e.slices[t].len;   // the 30 000-sample pad
+    CHECK(SetKp(e, 2, 0, 0, 4, false, 1) == bb::EditStatus::Ok && e.KeyHeld(2, false), "key 2: Ratchet at ½ — it holds whatever the option says");
+    Silence(e); e.callHits = 0;
+    e.CallSlice(t, 1.f, false, false, false, 1.f, false, 2);
+    CHECK((e.keyRatOn & (1u << 2)) && e.keyRat[2].period == len / 2, "the call starts it: a period of half the entry (%d)", e.keyRat[2].period);
+    float worst = 0.f;
+    std::vector<int> h = Hits(e, 100000 / 24, &worst);
+    bool even = h.size() >= 5;
+    for(size_t i = 1; i < h.size(); i++) even = even && abs((h[i] - h[i - 1]) * 24 - len / 2) <= 24;
+    CHECK(even, "%zu retriggers in 100 000 samples, each half the entry apart (± one block)", h.size());
+    CHECK(worst < 0.06f, "no clicks at the seams: the worst sample-to-sample step %g (a cut would be ~0.4)", worst);
+    int held = 0; for(int i = 0; i < bb::Engine::kVoices; i++) held += e.voices[i].active && e.voices[i].held && e.voices[i].key == 2;
+    CHECK(held == 1, "one hit sounds at a time (the last one fades out under the new)");
+    e.ReleaseKey(2);
+    h = Hits(e, 4000);
+    bool quiet = true; for(int i = 0; i < bb::Engine::kVoices; i++) quiet = quiet && !e.voices[i].active;
+    CHECK(h.empty() && !(e.keyRatOn & (1u << 2)) && quiet, "the release stops it: no more hits, the last one faded");
+    // the other rates; the tune shortens a period of the entry's own length (it plays faster)
+    const float step = e.barSeconds * e.sr / (float)e.nSlices;
+    struct R0 { int rat, cents; float want; } rr[] = {{0, 0, (float)len}, {2, 0, len / 4.f}, {3, 0, len / 8.f}, {0, 1200, len / 2.f}, {4, 0, 2.f * step}, {5, 0, step}, {6, 0, step / 2.f}};
+    bool rates = true;
+    for(const R0& q : rr) { SetKp(e, 2, 0, q.cents, 4, false, q.rat); Silence(e); e.CallSlice(t, 1.f, false, false, false, 1.f, false, 2); rates = rates && abs(e.keyRat[2].period - (int)(q.want + 0.5f)) <= 1; e.ReleaseKey(2); }
+    CHECK(rates, "full, ¼, ⅛, full an octave up (= ½ the time), and 1/8, 1/16, 1/32 at the tempo: the periods as asked");
+    SetKp(e, 2, 0, 0, 4, false, 3); e.pitch = 2.f;
+    Silence(e); e.CallSlice(t, 2.f, false, false, false, 1.f, false, 2);
+    CHECK(e.keyRat[2].period == bb::Engine::kRatMin || e.keyRat[2].period == (int)(len / 8 / 4.f + 0.5f), "fast: ⅛ of the entry at rate 4 (%d, never under 5 ms)", e.keyRat[2].period);
+    e.ReleaseKey(2); e.pitch = 1.f;
+    // the gain on every hit
+    SetKp(e, 2, -12, 0, 4, false, 1);
+    Silence(e); e.CallSlice(t, 1.f, false, false, false, 1.f, false, 2);
+    Hits(e, 15000 / 24 + 2);
+    bool gained = true; int n = 0; for(int i = 0; i < bb::Engine::kVoices; i++) if(e.voices[i].active && e.voices[i].key == 2) { n++; gained = gained && Near(e.voices[i].gain, e.keyGain[2]); }
+    CHECK(n == 1 && gained, "a retrigger carries the key's gain");
+    // leaving the mode stops it (an edit, or its undo)
+    SetKp(e, 2, -12, 0, 2);
+    CHECK(!(e.keyRatOn & (1u << 2)), "the key set to Held while it ratchets: the ratchet stops (the sounding hit stays held)");
+    e.ReleaseKey(2);
+    SetKp(e, 2, 0, 0, 4, false, 1);
+    Silence(e); e.CallSlice(t, 1.f, false, false, false, 1.f, false, 2);
+    Undo(e);
+    CHECK(e.keyp[2].plays == 2 && !(e.keyRatOn & (1u << 2)), "…and an undo back out of Ratchet stops it too");
+    e.ReleaseKey(2);
+    // no gate to go by: a looper replay of an event recorded without a hold — it fills the step
+    SetKp(e, 2, 0, 0, 4, false, 6);   // 1/32: two to a step
+    Silence(e); e.callHits = 0;
+    e.CallSliceRaw(t, 1.f, false, false, false, 1.f, false, 2);
+    h = Hits(e, 4000);
+    CHECK(e.keyRat[2].period == (int)(step / 2.f + 0.5f) && h.size() == 1 && !(e.keyRatOn & (1u << 2)), "an un-held call at 1/32: the call and one retrigger fill the 16th (%zu more), then it stops by itself", h.size());
+    SetKp(e, 2, 0, 0, 4, false, 0);   // the whole entry: longer than a step — still two hits
+    Silence(e); e.CallSliceRaw(t, 1.f, false, false, false, 1.f, false, 2);
+    h = Hits(e, 4000);
+    CHECK(h.size() == 1, "…a period longer than the step: at least two hits (%zu more)", h.size());
+    // a held one gives up after eight bars with no release
+    SetKp(e, 2, 0, 0, 4, false, 5);
+    Silence(e); e.CallSlice(t, 1.f, false, false, false, 1.f, false, 2);
+    const int bars8 = (int)(8.f * e.barSeconds * e.sr / 24.f) + 400;
+    h = Hits(e, bars8);
+    CHECK(!(e.keyRatOn & (1u << 2)) && (int)h.size() >= 8 * e.nSlices - 2 && (int)h.size() <= 8 * e.nSlices + 2, "held with no release: 1/16 for eight bars (%zu hits), then it stops", h.size());
+    e.ReleaseKey(2);
+    // Play's looper: the held ratchet is recorded held with its release, and the replay ratchets until the release
+    {
+        bb::Engine p; Setup(p, L.data(), R.data());
+        p.patternMode = 5; p.looperQuant = 0; p.RegenPattern(); p.extPhase = true; p.barPhase = 0.;
+        float o[24], o2[24];
+        p.Process(o, o2, 24);
+        SetKp(p, 2, 0, 0, 4, false, 6);
+        p.barPhase = 0.25; p.CallSlice(p.KeySlice(2), 1.f, false, true, false, 1.f, false, 2);
+        p.barPhase = 0.50; p.ReleaseKey(2);
+        CHECK(p.looper.n == 2 && (p.looper.ev[0].style & bb::Looper::kHeld), "Play: recorded held, with its release");
+        Silence(p); p.keyRatOn = 0; p.callHits = 0;
+        int got = 0; bool stopped = false;
+        const double dp = 24.0 / (double)(p.barSeconds * p.sr);
+        for(int k = 0; k < 9000; k++)
+        {
+            p.barPhase += dp; if(p.barPhase >= 1.0) p.barPhase -= 1.0;
+            const uint8_t h0 = p.callHits; p.Process(o, o2, 24); if(p.callHits != h0) got++;
+            if(got > 2 && !(p.keyRatOn & (1u << 2))) { stopped = true; break; }
+        }
+        const int want = (int)(0.25 * p.nSlices * 2);   // a quarter bar of 32nds
+        CHECK(stopped && abs(got - want) <= 2, "the replay ratchets from the event to its release (%d hits, ~%d)", got, want);
+    }
+    // neutral is untouched: a key never set to Ratchet never starts one
+    bb::Engine z; Setup(z, L.data(), R.data());
+    Session(z, NoHook, 900);
+    CHECK(z.keyRatOn == 0, "an untouched session never starts a ratchet");
+}
+
 /* ── 4. the edit op and the journal ──────────────────────────────────── */
 static void TestJournal()
 {
@@ -389,10 +497,11 @@ static void TestJournal()
     uint8_t g = e.tableGen;
     CHECK(SetKp(e, 3, -13, 250, 2) == bb::EditStatus::Ok && e.tableGen != g && e.UndoDepth() == d0 + 1, "an edit: Ok, the generation moves, one undo step");
     CHECK(e.keyp[3].gain == -13 && e.keyp[3].cents == 250 && e.keyp[3].plays == 2, "the settings are in");
-    struct Bad { int key, gain, cents, plays; } bad[] = {{24, 0, 0, 0}, {-1, 0, 0, 0}, {3, -49, 0, 0}, {3, 13, 0, 0}, {3, 0, 2401, 0}, {3, 0, -2401, 0}, {3, 0, 0, 4}, {3, 0, 0, -1}};
+    struct Bad { int key, gain, cents, plays, rat; } bad[] = {{24, 0, 0, 0, 0}, {-1, 0, 0, 0, 0}, {3, -49, 0, 0, 0}, {3, 13, 0, 0, 0}, {3, 0, 2401, 0, 0}, {3, 0, -2401, 0, 0},
+                                                         {3, 0, 0, 5, 0}, {3, 0, 0, -1, 0}, {3, 0, 0, 4, 7}, {3, 0, 0, 4, -1}};
     bool refused = true;
-    for(const Bad& b : bad) { g = e.tableGen; refused = refused && SetKp(e, b.key, b.gain, b.cents, b.plays) == bb::EditStatus::BadArgs && e.tableGen == g; }
-    CHECK(refused && e.keyp[3].gain == -13 && e.UndoDepth() == d0 + 1, "out of range (key, gain, cents, plays): BadArgs, nothing written, no step");
+    for(const Bad& b : bad) { g = e.tableGen; refused = refused && SetKp(e, b.key, b.gain, b.cents, b.plays, false, b.rat) == bb::EditStatus::BadArgs && e.tableGen == g; }
+    CHECK(refused && e.keyp[3].gain == -13 && e.UndoDepth() == d0 + 1, "out of range (key, gain, cents, plays, the ratchet's rate): BadArgs, nothing written, no step");
     { bb::EditReq q; q.op = bb::EditOp::SetKeyParams; q.key = 3; q.gen = (uint8_t)(e.tableGen + 1); CHECK(e.ApplyEdit(q) == bb::EditStatus::Stale, "a stale gen: Stale"); }
     CHECK(Undo(e) == bb::EditStatus::Ok && e.keyp[3].Neutral() && e.keyGain[3] == 1.f && e.keyRate[3] == 1.f, "Undo: key 3 neutral again, gain and rate exactly 1");
     CHECK(Undo(e, true) == bb::EditStatus::Ok && e.keyp[3].gain == -13 && Near(e.keyRate[3], powf(2.f, 2.5f / 12.f), 1e-5f), "Redo: back, the rate worked out again");
@@ -442,10 +551,10 @@ static void TestJournal()
     CHECK(e.KeysNeutral() && e.keyGain[2] == 1.f && e.keyRate[3] == 1.f, "new material (a load, a loop take, New empty kit): every key neutral");
     // wholesale (a set's load), clamped
     bb::KeyParam w[24] = {};
-    w[1] = {-100, 9, 30000}; w[5] = {10, 3, -700};
+    w[1] = {-100, 9, 30000, 9, 3}; w[5] = {10, 4, -700, 2, 0};
     e.SetKeyParams(w);
-    CHECK(e.keyp[1].gain == -48 && e.keyp[1].cents == 2400 && e.keyp[1].plays == 0 && e.keyp[5].plays == 3 && Near(e.keyRate[5], powf(2.f, -7.f / 12.f), 1e-5f),
-          "SetKeyParams: out of range clamped (an unknown plays → Follow), the rest as given");
+    CHECK(e.keyp[1].gain == -48 && e.keyp[1].cents == 2400 && e.keyp[1].plays == 0 && e.keyp[1].rat == 0 && e.keyp[1].spare == 0 && e.keyp[5].plays == 4 && e.keyp[5].rat == 2
+          && Near(e.keyRate[5], powf(2.f, -7.f / 12.f), 1e-5f), "SetKeyParams: out of range clamped (an unknown plays → Follow, rate → full), the rest as given");
     CHECK(sizeof(bb::UndoRec) == 2336, "the journal's record did not grow (%zu B)", sizeof(bb::UndoRec));
 }
 
@@ -470,7 +579,7 @@ static void TestJson()
     CHECK(bb::SetReader::Json(neutral.data(), neutral.size(), t), "…and it reads");
     bool allNeutral = true; for(int k = 0; k < 24; k++) allNeutral = allNeutral && t.keyp[k].Neutral();
     CHECK(allNeutral, "an old file (no \"keyp\"): every key neutral");
-    SetKp(e, 3, -13, 700, 2); SetKp(e, 23, 12, -2400, 3); SetKp(e, 0, 0, 1, 0); SetKp(e, 11, 0, 0, 1);
+    SetKp(e, 3, -13, 700, 2); SetKp(e, 23, 12, -2400, 3); SetKp(e, 0, 0, 1, 0); SetKp(e, 11, 0, 0, 1); SetKp(e, 15, -2, 0, 4, false, 5);
     new(&s) bb::SetInfo(); bb::SetFromEngine(e, none, s, true, kSr);
     const std::string js = Emit(s);
     const size_t at = js.find("\"keyp\"");
@@ -479,7 +588,10 @@ static void TestJson()
     CHECK(bb::SetReader::Json(js.data(), js.size(), t), "it reads back");
     bool same = true;
     for(int k = 0; k < 24; k++) same = same && t.keyp[k].gain == e.keyp[k].gain && t.keyp[k].cents == e.keyp[k].cents && t.keyp[k].plays == e.keyp[k].plays;
-    CHECK(same, "every key exactly as it was (four set, twenty neutral)");
+    for(int k = 0; k < 24; k++) same = same && t.keyp[k].rat == e.keyp[k].rat;
+    CHECK(same, "every key exactly as it was (five set — one a 1/16 ratchet — nineteen neutral)");
+    CHECK(js.find("{\"key\":15,\"gain\":-1,\"cents\":0,\"plays\":4,\"rat\":5}") != std::string::npos && js.find("\"plays\":2,\"rat\"") == std::string::npos,
+          "\"rat\" written only for a key that has one");
     // what an older firmware does with it: an unknown key, skipped
     std::string old = js; if(at != std::string::npos) old.replace(at, 6, "\"keyq\"");
     CHECK(bb::SetReader::Json(old.data(), old.size(), t) && t.keyp[3].Neutral() && t.nSlices == s.nSlices, "a reader that does not know \"keyp\" skips it whole (the rest intact)");
@@ -500,7 +612,7 @@ static void TestJson()
     {
         static std::vector<float> L2(kCap), R2(kCap);
         bb::Engine a; Setup(a, L.data(), R.data());
-        SetKp(a, 2, -9, 1200, 3); SetKp(a, 7, 4, -300, 2); SetKp(a, 5, -30, 50, 1); SetKp(a, 9, 0, 0, 2);
+        SetKp(a, 2, -9, 1200, 3); SetKp(a, 7, 4, -300, 2); SetKp(a, 5, -30, 50, 1); SetKp(a, 9, 0, 0, 2); SetKp(a, 11, -3, 200, 4, false, 2); SetKp(a, 13, 0, 0, 4, false, 5);
         new(&s) bb::SetInfo(); bb::SetFromEngine(a, none, s, true, kSr);
         s.bars = 1; s.bpm = a.NativeBpm();
         const std::string j = Emit(s);
@@ -519,7 +631,7 @@ static void TestJson()
         if(p.hasKeys) b.SetKeyTable(live);
         bb::KeyParam kp[24]; bb::KeyParamsFromSet(t, kp); b.SetKeyParams(kp);
         bool kps = true; for(int k = 0; k < 24; k++) kps = kps && memcmp(&a.keyp[k], &b.keyp[k], sizeof(bb::KeyParam)) == 0 && a.keyGain[k] == b.keyGain[k] && a.keyRate[k] == b.keyRate[k];
-        CHECK(kps, "every key's settings, gain and rate identical after the load");
+        CHECK(kps, "every key's settings, gain and rate identical after the load (two Ratchet keys among them)");
         float al[24], ar[24], bl[24], br[24];
         a.muted = b.muted = true;
         bool bits = true;
@@ -530,7 +642,7 @@ static void TestJson()
             a.Process(al, ar, 24); b.Process(bl, br, 24);
             bits = !memcmp(al, bl, sizeof al) && !memcmp(ar, br, sizeof ar);
         }
-        CHECK(bits, "every key called (Held and Loop released) renders the same bits, both planes");
+        CHECK(bits, "every key called (Held, Loop and Ratchet released) renders the same bits, both planes");
     }
 }
 
@@ -540,6 +652,7 @@ int main(int argc, char** argv)
     TestNeutral();
     TestGainTune();
     TestPlays();
+    TestRatchet();
     TestJournal();
     TestJson();
     printf("\nkeyp_check: %d passed, %d failed\n", gPass, gFail);

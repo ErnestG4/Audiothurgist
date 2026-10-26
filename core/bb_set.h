@@ -68,15 +68,17 @@ struct SetSlice
 };
 
 /* KEYP: one key's settings as the file holds them — "keyp":[{"key":3,"gain":-6.5,"cents":700,"plays":2}, …]:
- * gain in dB (½ dB steps, −24 … +6), cents ±2400, plays 0 follow the option · 1 one-shot · 2 held · 3 loop. A key
- * absent from the list is neutral. */
-constexpr int kSetGainMin = -48, kSetGainMax = 12, kSetCentsMax = 2400, kSetPlaysMax = 3;   // = bb::KeyParam's
+ * gain in dB (½ dB steps, −24 … +6), cents ±2400, plays 0 follow the option · 1 one-shot · 2 held · 3 loop ·
+ * 4 ratchet, and "rat" (only when not 0) the ratchet's rate: 0 the whole entry · 1 ½ · 2 ¼ · 3 ⅛ of it · 4 an 8th ·
+ * 5 a 16th · 6 a 32nd at the tempo. A key absent from the list is neutral. */
+constexpr int kSetGainMin = -48, kSetGainMax = 12, kSetCentsMax = 2400, kSetPlaysMax = 4, kSetRatMax = 6;   // = bb::KeyParam's
 struct SetKeyParam          // all zero = neutral (SetInfo value-initialises the array: one clear, no per-field code)
 {
     int8_t  gain;           // ½ dB
     uint8_t plays;
     int16_t cents;
-    bool Neutral() const { return gain == 0 && plays == 0 && cents == 0; }
+    uint8_t rat;            // the ratchet's rate
+    bool Neutral() const { return gain == 0 && plays == 0 && cents == 0 && rat == 0; }
 };
 
 struct SetLoopEvent
@@ -259,6 +261,7 @@ struct SetWriter
             o.KeyFloat("gain", 0.5f * (float)p.gain);
             o.KeyInt("cents", p.cents);
             o.KeyInt("plays", p.plays);
+            if(p.rat) o.KeyInt("rat", p.rat);
             o.EndObject();
         }
         o.EndArray();
@@ -324,7 +327,7 @@ struct SetReader
         while(in.ArrayMore())
         {
             if(!in.BeginObject()) return false;
-            int k = -1; float g = 0.f; int c = 0, pl = 0;
+            int k = -1; float g = 0.f; int c = 0, pl = 0, rt = 0;
             char key[16];
             while(in.NextKey(key, sizeof key))
             {
@@ -332,6 +335,7 @@ struct SetReader
                 else if(!strcmp(key, "gain"))  { if(!in.Float(g)) return false; }
                 else if(!strcmp(key, "cents")) { if(!in.Int(c)) return false; }
                 else if(!strcmp(key, "plays")) { if(!in.Int(pl)) return false; }
+                else if(!strcmp(key, "rat"))   { if(!in.Int(rt)) return false; }
                 else if(!in.Skip()) return false;
             }
             if(!in.ok) return false;
@@ -343,6 +347,7 @@ struct SetReader
             p.gain  = (int8_t)(h < kSetGainMin ? kSetGainMin : h > kSetGainMax ? kSetGainMax : h);
             p.cents = (int16_t)(c < -kSetCentsMax ? -kSetCentsMax : c > kSetCentsMax ? kSetCentsMax : c);
             p.plays = (uint8_t)(pl < 0 || pl > kSetPlaysMax ? 0 : pl);
+            p.rat   = (uint8_t)(rt < 0 || rt > kSetRatMax ? 0 : rt);
         }
         return in.ok;
     }

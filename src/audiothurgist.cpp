@@ -3158,9 +3158,10 @@ static void ServiceLoad()
  *                   (state, progress, result, seq, key, flags, free, total, held, the pads' key mask) — ends at 315
  *   KEYP (docs/packages/keyp.md; capability "keyp": 1): per-key gain / tune / plays —
  *   0x63 ACTION     37 KEY_PARAMS(u8 key 0..23, i8 gain ½ dB −48..+12, i16 cents ±2400, u8 plays 0 follow Key
- *                   Plays · 1 one-shot · 2 held · 3 loop, u8 flags b0 join [, u8 gen]) → u8 status, u8 tableGen;
- *                   one undo step (b0: folded into this key's previous step — a slider's drag)
- *   0x69 GET_KEYS   → u8 status, u8 n = 24, n × {i8 gain, u8 plays, i16 cents}
+ *                   Plays · 1 one-shot · 2 held · 3 loop · 4 ratchet, u8 rate 0 the entry · 1 ½ · 2 ¼ · 3 ⅛ · 4 an 8th
+ *                   · 5 a 16th · 6 a 32nd, u8 flags b0 join [, u8 gen]) → u8 status, u8 tableGen; one undo step
+ *                   (b0: folded into this key's previous step — a slider's drag)
+ *   0x69 GET_KEYS   → u8 status, u8 n = 24, n × {i8 gain, u8 plays, i16 cents, u8 rate}
  *   0x65 GET_TABLE  ← [u8 first, u8 count, u8 form] — form 1 = entries carry a trailing u8 flags
  *                   (b0 orange · b1 tombstone), 14 bytes each; absent / 0 = the 13-byte form. */
 /* WEB → RECORD: ACTION 9 / 10. -1 = nothing requested; the consumer clears
@@ -3184,7 +3185,7 @@ struct EditBody
 };
 static const uint8_t kEditNeed[22] = {5u, 9u, 10u, 5u, 1u, 1u, 2u, 2u, 3u, 2u, 3u, 7u, 0u, 2u, 0u, 0u,   /* field bytes of ops 16..31 */
                                       2u, 0u, 0u, 1u, 2u,                                                 /* BETA: 32..36 */
-                                      6u};                                                                /* KEYP: 37 */
+                                      7u};                                                                /* KEYP: 37 */
 /* HostLink status for an EditStatus: Ok → 0; a refusal of the arguments → BAD_ARGS; a refusal of the
  * moment (stale gen, no room, no material) → BAD_STATE. */
 static uint8_t EditToStatus(bb::EditStatus s)
@@ -3493,12 +3494,13 @@ static void HandleEdit(uint8_t op, const hostlink::ParsedFrame& f, hostlink::Fra
         }
         case 37:
         {
-            /* KEYP (docs/packages/keyp.md): KEY_PARAMS(u8 key, i8 gain ½ dB −48..12, i16 cents ±2400, u8 plays 0..3,
-             * u8 flags b0 join [, u8 gen]) → status, gen. One undo step; b0 (every send of one slider drag after the
-             * first) folds into the previous step when it is this key's settings and nothing else moved since. */
-            const int key = b.U8(); const int gain = (int8_t)b.U8(); const int cents = (int16_t)b.U16(); const int plays = b.U8(); const uint8_t fl = b.U8();
+            /* KEYP (docs/packages/keyp.md): KEY_PARAMS(u8 key, i8 gain ½ dB −48..12, i16 cents ±2400, u8 plays 0..4,
+             * u8 ratchet rate 0..6, u8 flags b0 join [, u8 gen]) → status, gen. One undo step; b0 (every send of one
+             * slider drag after the first) folds into the previous step when it is this key's settings and nothing
+             * else moved since. */
+            const int key = b.U8(); const int gain = (int8_t)b.U8(); const int cents = (int16_t)b.U16(); const int plays = b.U8(); const int rat = b.U8(); const uint8_t fl = b.U8();
             if(fl & ~1u) { w.U8(2u); return; }
-            r.op = EditOp::SetKeyParams; r.key = key; r.a = gain; r.b = cents; r.i = plays;
+            r.op = EditOp::SetKeyParams; r.key = key; r.a = gain; r.b = cents; r.i = plays; r.len = rat;
             if(fl & 1u) r.flags = EditReq::kQuiet;
             break;
         }
@@ -4216,7 +4218,7 @@ struct StateExt : hostlink::IHostlinkExtension
             }
             case 0x67u: HandleCard(f, w); return;   /* CARD: uploads, the old card copied in, the list */
             case 0x68u: HandlePads(f, w); return;   /* PADS: a sample dropped onto a pad, New empty kit */
-            /* KEYP: 0x69 GET_KEYS → u8 status, u8 n (24), then per key i8 gain (½ dB), u8 plays, i16 cents (4 bytes).
+            /* KEYP: 0x69 GET_KEYS → u8 status, u8 n (24), then per key i8 gain (½ dB), u8 plays, i16 cents, u8 ratchet rate (5 bytes).
              * The page reads it again whenever tableGen moves (every KEY_PARAMS, undo, load bumps it). */
             case 0x69u:
             {
@@ -4224,7 +4226,7 @@ struct StateExt : hostlink::IHostlinkExtension
                 for(int k = 0; k < bb::Engine::kKeys; k++)
                 {
                     const bb::KeyParam p = engine.keyp[k];
-                    w.U8((uint8_t)p.gain); w.U8(p.plays); w.U16((uint16_t)p.cents);
+                    w.U8((uint8_t)p.gain); w.U8(p.plays); w.U16((uint16_t)p.cents); w.U8(p.rat);
                 }
                 return;
             }
