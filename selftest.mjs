@@ -1151,7 +1151,10 @@ const ED = require('./edit.js');
     h.undo(11); check('History: a second undo strikes the next', h.list()[1].undone === true && h.list()[2].undone === false);
     h.redo(12); check('History: redo un-marks the oldest undone', h.list()[1].undone === false && h.list()[0].undone === true);
     h.push(13, 'c'); check('History: a new op drops the undone entries (the redo half is gone)', h.list().map(x => x.label).join('|') === 'c|a|split 7' && h.items.every(x => !x.undone));
-    h.undo(14); h.note(14, 2, 0); check('History: the tail\'s redo depth 0 drops the marks the page still had', h.items.every(x => !x.undone) && h.items.length === 2); }
+    h.undo(14); h.note(14, 2, 0); check('History: the tail\'s redo depth 0 drops the marks the page still had', h.items.every(x => !x.undone) && h.items.length === 2);
+    h.push(15, 'd'); h.undo(16); check('History: a stale state (gen 15, redo 0) after the undo\'s reply (16) changes nothing — no module line, the mark kept', h.note(15, 3, 0) === false && h.list()[0].label === 'd' && h.list()[0].undone === true && h.gen === 16 && h.undoDepth === 2);
+    check('…and the next state (16, redo 1) is quiet; a gen past the wrap (16 → 3) is a new one', h.note(16, 2, 1) === false && h.list()[0].undone === true && new ED.History(3).note(250) === false);
+    { const w = new ED.History(3); w.note(250); check('History: gens wrap at 256 (250 → 3 is forward: the module\'s)', w.note(3) === true && w.gen === 3); } }
   /* the drop rule */
   const ks = Int8Array.from({ length: 24 }, (_, k) => ED.spanSlice(k, 4)); ks[3] = 6;   /* key 3 plays its recording (entry 6) */
   const dctx = { table: tb, keySlice: ks, nSlices: 4 };
