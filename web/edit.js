@@ -153,6 +153,7 @@ function histLabel(op, a = {}) {
     case 'mclear': return a.count == null ? 'clear markers' : `clear markers (${a.count})`;
     case 'auto': return `autoslice ${a.k}${a.reroll ? ' (re-roll)' : ''}` + (a.count == null ? '' : ` → ${a.count}`);
     case 'keyp': return `${kn(a.key)} settings: ${(a.p && HL.keypText(a.p)) || 'neutral'}`;   /* KEYP */
+    case 'spread': return `${kn(a.root)} spread chromatically` + (a.count == null ? (a.keep ? ' (pads kept)' : '') : ` (${a.count} key${a.count === 1 ? '' : 's'}${a.keep ? ', pads kept' : ''})`);   /* CHROMA */
     case 'undo': return 'undo'; case 'redo': return 'redo';
     case 'module': return 'changed on the module';
     default: return op;
@@ -466,7 +467,8 @@ class Editor {
         this.stats.commits++;
         /* v0.13: a tap within 10 ms of a live marker selects it — nothing changed, nothing to label (the gen is the same) */
         if (op === 'tap' && r.reused) { this.select(r.newIdx); this.cb.status(`tap: marker ${r.newIdx} is already there — selected it`, 'ok'); this.cb.redraw(); return r; }
-        const full = op === 'split' || op === 'copy' || op === 'tap' ? histLabel(op, Object.assign({}, args, { newIdx: r.newIdx })) : op === 'onsets' || op === 'mkeys' || op === 'mclear' || op === 'auto' ? histLabel(op, Object.assign({}, args, { count: r.count })) : label;
+        const full = op === 'split' || op === 'copy' || op === 'tap' ? histLabel(op, Object.assign({}, args, { newIdx: r.newIdx })) : op === 'onsets' || op === 'mkeys' || op === 'mclear' || op === 'auto' || op === 'spread' ? histLabel(op, Object.assign({}, args, { count: r.count })) : label;
+        if (op === 'spread' && gen && r.tableGen === gen) { this.cb.status(`${kn(args.root)} is already spread across the keys — nothing changed`, ''); this.cb.redraw(); return r; }   /* CHROMA: a spread in place moves nothing */
         if ((op === 'mkeys' || op === 'mclear') && !r.count) { this.cb.status(op === 'mkeys' ? 'no markers to put on keys' : 'no markers to clear', ''); this.cb.redraw(); return r; }
         if (op === 'undo') this.history.undo(r.tableGen); else if (op === 'redo') this.history.redo(r.tableGen); else if (op === 'auto' && args.join && this.history.joinTop(r.tableGen, full, /^autoslice /)) { /* one line per drag */ }
         else if (op === 'keyp' && args.join && this.history.joinTop(r.tableGen, full, new RegExp('^' + kn(args.key) + ' settings: '))) { /* KEYP: one line per drag */ } else this.history.push(r.tableGen, full);
@@ -519,6 +521,8 @@ class Editor {
   autoslice(k, reroll = false, join = false) { return this.commit('auto', { k, reroll, join }, g => HL.autoslice(this.d.link(), k, reroll, g, join), this.gen(), null, true); }
   /* KEYP: one key's gain / tune / plays — join: this send continues the last one's drag (one undo step, one history line) */
   keyParams(key, p, join = false) { return this.commit('keyp', { key, p, join }, g => HL.keyParams(this.d.link(), key, p, join, g), this.gen(), null, true); }
+  /* CHROMA: the root's sample on every key, a semitone a key (keep = leave the keys that play their own pads) — one step */
+  spreadKeys(root, keep = false) { return this.commit('spread', { root, keep }, g => HL.spreadKeys(this.d.link(), root, keep, g), this.gen(), null, true); }
   setKey(key, t) { return this.commit('key', { key, t }, g => HL.editSetKey(this.d.link(), key, t, g), this.gen(), null, true); }
   swapKeys(a, b) { return this.commit('swap', { a, b }, g => HL.editSwapKeys(this.d.link(), a, b, g), this.gen(), null, true); }
   undo() { return this.commit('undo', {}, () => HL.editUndo(this.d.link()), 0, null, true); }

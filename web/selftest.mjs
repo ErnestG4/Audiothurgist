@@ -1118,7 +1118,7 @@ await link.start();
   const keys = () => HL.fetchKeyParams(l);
   const err = async f => { try { await f(); return 'ok'; } catch (e) { return e.message; } };
   let k = await keys();
-  check('keyp: "keyp": 1; GET_KEYS: 24 keys, 5 bytes each, every one neutral', HL.caps(desc).keyp === 1 && k.length === 24 && k.every(HL.keypNeutral) && (await l.request(HL.CMD.keys, new Uint8Array(0))).length === 2 + 24 * 5);
+  check('keyp: "keyp": 2 (CHROMA: ≥ 1 is the settings); GET_KEYS: 24 keys, 5 bytes each, every one neutral', HL.caps(desc).keyp === 2 && k.length === 24 && k.every(HL.keypNeutral) && (await l.request(HL.CMD.keys, new Uint8Array(0))).length === 2 + 24 * 5);
   let s0 = await state();
   let r = await HL.keyParams(l, 3, { gain: -12, cents: 700, plays: 2 });
   k = await keys(); let s = await state();
@@ -1162,6 +1162,60 @@ await link.start();
   const of = new DEMO.FakeDevice({ latencyMs: 1, keyp: false }), lf = new HL.Link(new DEMO.FakePort(of)); await lf.start(); const iof = await HL.hello(lf);
   const cf = HL.caps(await HL.getDescriptor(lf, iof));
   check('a firmware before the key settings: no "keyp", 0x69 UNSUPPORTED, ACTION 37 BAD_ARGS', cf.keyp === 0 && cf.pads === 1 && await err(() => HL.fetchKeyParams(lf)) === 'UNSUPPORTED' && (await HL.keyParams(lf, 3, { gain: -2 })).status === 2);
+  await lf.close();
+}
+
+/* ── 7f. CHROMA (ACTION 38 SPREAD_KEYS, capability "keyp": 2): one key's sample on all 24 keys, a semitone a key — the
+ *        tunes, gain and Plays read back, one undo step that puts every key's map and settings back, keep pads, a
+ *        spread in place moving nothing, the refusals, a set carrying it, the plan the page asks first, and a firmware
+ *        with the settings but before the spread ── */
+{
+  const d = new DEMO.FakeDevice({ latencyMs: 1, kit: true });   /* the kit: recordings on D♯1 (3), G1 (7), D2 (14) */
+  const l = new HL.Link(new DEMO.FakePort(d)); await l.start();
+  const info = await HL.hello(l), desc = await HL.getDescriptor(l, info);
+  const state = async () => HL.parseState(await l.request(HL.CMD.state));
+  const keys = () => HL.fetchKeyParams(l);
+  const table = async () => HL.fetchTable(l, { edit: true });
+  const snap = async () => JSON.stringify({ k: await keys(), m: Array.from((await state()).keySlice) });
+  check('chroma: "keyp": 2', HL.caps(desc).keyp === 2);
+  await HL.keyParams(l, 3, { gain: -12, cents: 30, plays: 2 });   /* the root: −6 dB, +30 cents, Held */
+  await HL.keyParams(l, 11, { gain: 6, cents: -500, plays: 1 });
+  let s0 = await state(); const before = await snap(), tb = await table(), t = s0.keySlice[3];
+  const plan = HL.spreadPlan(s0.keySlice, tb.entries, tb.nSlices, 3);
+  check('the page\'s plan for D♯1: the two other pads (G1, D2) would be replaced', JSON.stringify(plan.pads) === '[7,14]' && plan.t === t, JSON.stringify(plan));
+  check('spreadCents: (j − root) × 100 + the root\'s cents, clamped at ±2400', HL.spreadCents(0, 3, 30) === -270 && HL.spreadCents(23, 0, 500) === 2400 && HL.spreadCents(0, 23, -200) === -2400);
+  let r = await HL.spreadKeys(l, 3);
+  let s = await state(), k = await keys();
+  check('SPREAD_KEYS(D♯1): OK, count 23, the new tableGen, one undo step', r.ok && r.count === 23 && r.tableGen === s.tableGen && r.tableGen !== s0.tableGen && s.undoDepth === s0.undoDepth + 1, JSON.stringify(r));
+  check('…every key plays D♯1\'s pad', Array.from(s.keySlice).every(x => x === t));
+  check('…key j: (j − 3) semitones + 30 cents, −6 dB, Held; D♯1 itself as it was', k.every((p, j) => p.cents === (j - 3) * 100 + 30 && p.gain === -12 && p.plays === 2 && p.rat === 0), JSON.stringify(k.map(p => p.cents)));
+  check('…the words: C1 "−6 dB · −2.7 st · held", C2 "−6 dB · +9.3 st · held"', HL.keypText(k[0]) === '−6 dB · −2.7 st · held' && HL.keypText(k[12]) === '−6 dB · +9.3 st · held', HL.keypText(k[0]) + ' | ' + HL.keypText(k[12]));
+  const spread = await snap();
+  r = await HL.spreadKeys(l, 3);
+  check('the same spread again: OK, nothing moves (the gen and the undo depth as they were)', r.ok && r.count === 23 && r.tableGen === s.tableGen && (await state()).undoDepth === s.undoDepth);
+  r = await HL.editUndo(l);
+  check('Undo: every key\'s map and settings exactly as before (the pads on G1 and D2 back, key 11\'s own settings back)', r.ok && await snap() === before && (await state()).undoDepth === s0.undoDepth);
+  r = await HL.editRedo(l);
+  check('Redo: the spread again, exactly', r.ok && await snap() === spread);
+  await HL.editUndo(l);
+  r = await HL.spreadKeys(l, 3, true); s = await state(); k = await keys();
+  check('keep pads (b0): 21 keys spread, G1 and D2 keep their own pads and settings', r.ok && r.count === 21 && s.keySlice[7] !== t && s.keySlice[14] !== t && s.keySlice[0] === t && k[11].cents === 830 && JSON.stringify(k[7]) === JSON.stringify(JSON.parse(before).k[7]));
+  await HL.editUndo(l);
+  check('…undone: as before', await snap() === before);
+  const raw = async b => (await HL.editOp(l, HL.ACT.spreadKeys, b)).status;
+  check('SPREAD_KEYS: root 24, an unknown flag, a short body → BAD_ARGS; nothing moved', await raw([24, 0]) === 2 && await raw([3, 2]) === 2 && await raw([3]) === 2 && await snap() === before);
+  check('a stale gen → BAD_STATE', (await HL.spreadKeys(l, 3, false, ((await state()).tableGen % 255) + 1)).status === 3 && await snap() === before);
+  /* a set carries the spread: the map onto D♯1's pad, 24 tunes */
+  const setOp = async (fn, name) => { const q = (await state()).setSeq; await fn(l, name); for (let i = 0; i < 100; i++) { d.set.t -= 1000; const x = await state(); if (x.setSeq !== q && !x.setState) return x; } return null; };
+  await HL.spreadKeys(l, 3); const want = await snap();
+  check('Save set with a spread: done', !!(await setOp(HL.saveSet, 'chroma_kit')));
+  await HL.editUndo(l);
+  check('Load set: the spread comes back (the map and every tune)', !!(await setOp(HL.loadSet, 'chroma_kit')) && await snap() === want);
+  await l.close();
+  /* a firmware with the settings but before the spread */
+  const of = new DEMO.FakeDevice({ latencyMs: 1, spread: false }), lf = new HL.Link(new DEMO.FakePort(of)); await lf.start(); const iof = await HL.hello(lf);
+  const cf = HL.caps(await HL.getDescriptor(lf, iof));
+  check('a firmware before SPREAD_KEYS: "keyp": 1, ACTION 38 BAD_ARGS', cf.keyp === 1 && (await HL.spreadKeys(lf, 3)).status === 2);
   await lf.close();
 }
 
@@ -2158,6 +2212,57 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
   const { D, G } = await loadPage('?demo=nokeyp');
   check('a firmware before the key settings: no row, no words on the cells, 0x69 never asked', await until(() => G('!!(st && table && keysOk)')) && await sleep(150).then(() => true) && G('keypOk') === false
     && G("$('kp_row').hidden") === true && G('keyCells[0].kp.hidden') === true && !G('demoDevice.log').includes(0x69) && D.errors.length === 0, D.errors.join(' | ').slice(0, 300));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+}
+/* ── 9h. CHROMA, the page: the Kit's "Spread D♯1 chromatically (C1 … B2)" under the settings row — a key whose spread
+ *        would replace pads asks first (the key-drop prompt's red popover: keep them, the default · over them · cancel),
+ *        the cells and the pads then say each key's tune, one history line, Undo puts every key back; a key with no pads
+ *        in the way spreads at once; an empty kit's key cannot be spread; a firmware before it shows no button ── */
+{
+  const { D, G } = await loadPage('?demo=kit');
+  G("showTab('tab_kit')");
+  check('chroma page: connected with "keyp": 2, the button shown in the settings row', await until(() => G('!!(st && keypOk && spreadOk && keyp && table)')) && G("$('kp_spread').hidden") === false, D.errors.join(' | ').slice(0, 300));
+  G('selectKey(3)'); G('invalidate(D.kit)'); await sleep(80);
+  check('D♯1 selected: "Spread D♯1 chromatically (C1 … B2)", enabled', G("$('kp_spread').textContent") === 'Spread D♯1 chromatically (C1 … B2)' && G("$('kp_spread').disabled") === false, G("$('kp_spread').textContent"));
+  spyActs(G);
+  const before = G('JSON.stringify({ m: Array.from(demoDevice.keySlice), k: demoDevice.keyp })'), d0 = G('st.undoDepth');
+  fireEv(G("$('kp_spread')"), 'click', { clientX: 200, clientY: 40 }); await sleep(40);
+  const menu = () => G("$('ed_menu')");
+  check('two other pads (G1, D2) in the way: the red prompt asks first, "keep" the default, nothing sent yet',
+    !menu().hidden && menu().className.includes('red') && /G1, D2/.test(menu().children[0].textContent) && menu().children.some(b => b.className === 'primary' && /keep G1, D2/.test(b.textContent)) && !sentAct(G, 38), menu().children.map(b => b.textContent).join(' | '));
+  menu().children.find(b => /^cancel$/.test(b.textContent)).onclick(); await sleep(60);
+  check('cancel: nothing sent, nothing moved', !sentAct(G, 38) && G('JSON.stringify({ m: Array.from(demoDevice.keySlice), k: demoDevice.keyp })') === before);
+  fireEv(G("$('kp_spread')"), 'click', { clientX: 200, clientY: 40 }); await sleep(40);
+  menu().children.find(b => /keep G1, D2/.test(b.textContent)).onclick();
+  check('keep: SPREAD_KEYS(3, keep pads) — 21 keys on D♯1\'s pad, G1 and D2 kept', await until(() => sentAct(G, 38, 3, 1)) && await until(() => G('demoDevice.keySlice[0] === demoDevice.keySlice[3] && demoDevice.keySlice[23] === demoDevice.keySlice[3]')) && G('demoDevice.keySlice[7] !== demoDevice.keySlice[3] && demoDevice.keySlice[14] !== demoDevice.keySlice[3]'));
+  check('…the cells say the tunes (C1 −3 st, E1 +1 st, D♯2 +12 st), G1 and D2 say nothing new, D♯1 its own (none)',
+    await until(() => G('keyCells[0].kp.textContent') === '−3 st' && G('keyCells[4].kp.textContent') === '+1 st' && G('keyCells[15].kp.textContent') === '+12 st') && G('keyCells[7].kp.hidden') === true && G('keyCells[3].kp.hidden') === true, [0, 4, 15, 7].map(k => G(`keyCells[${k}].kp.textContent`)).join(' | '));
+  check('…and so do the Play pads (D♯2 "+12 st")', await until(() => G('padEls[15].kp.textContent') === '+12 st'));
+  check('…one undo step, one history line ("D♯1 spread chromatically (21 keys, pads kept)")', await until(() => G('st.undoDepth') === d0 + 1) && await until(() => G('ed.history.list()[0].label') === 'D♯1 spread chromatically (21 keys, pads kept)'), G("ed.history.list().map(x => x.label).join(' | ')"));
+  fireEv(G("$('ed_undo')"), 'click', {});
+  check('Undo: every key\'s map and settings back, the words gone', await until(() => G('JSON.stringify({ m: Array.from(demoDevice.keySlice), k: demoDevice.keyp })') === before) && await until(() => G('keyCells[0].kp.hidden') === true && G('keyCells[15].kp.hidden') === true));
+  await until(() => !G('ed.busy') && G('st.undoDepth') === d0);
+  fireEv(G("$('kp_spread')"), 'click', { clientX: 200, clientY: 40 }); await sleep(40);
+  menu().children.find(b => /spread over them too/.test(b.textContent)).onclick();
+  check('over them: SPREAD_KEYS(3, 0) — all 23 on D♯1\'s pad, G1 now +4 st', await until(() => sentAct(G, 38, 3, 0)) && await until(() => G('demoDevice.keySlice[7] === demoDevice.keySlice[3] && demoDevice.keySlice[14] === demoDevice.keySlice[3]')) && await until(() => G('keyCells[7].kp.textContent') === '+4 st'));
+  /* a key with no pads in the way: no prompt — C1 (a slice of the break; the spread follows the tempo) */
+  fireEv(G("$('ed_undo')"), 'click', {}); await until(() => G('JSON.stringify({ m: Array.from(demoDevice.keySlice), k: demoDevice.keyp })') === before);
+  await until(() => !G('ed.busy'));
+  G('demoDevice.keySlice[7] = demoDevice.keySlice[3]; demoDevice.keySlice[14] = demoDevice.keySlice[3]'); await until(() => G('st.keySlice[14] === st.keySlice[3]'));   /* (the fake re-pointed by hand: the pads out of the way) */
+  G('selectKey(3)'); G('invalidate(D.kit)'); await sleep(60); G('demoDevice.acts = []');
+  fireEv(G("$('kp_spread')"), 'click', { clientX: 200, clientY: 40 }); await sleep(40);
+  check('no pads in the way: no prompt, sent at once', G("$('ed_menu').hidden") === true && await until(() => sentAct(G, 38, 3, 0)));
+  check('chroma page: no errors, no unknown ids', D.unknownIds.size === 0 && D.errors.length === 0, D.errors.join(' | ').slice(0, 300) + [...D.unknownIds].join(','));
+  /* an empty kit's key: nothing to spread */
+  G('demoDevice.padNewKit()'); await until(() => G('!!(st && st.pads && st.pads.noBreak && table && table.nSlices === 16)')); await sleep(200); G('selectKey(0)'); G('invalidate(D.kit)'); await sleep(60);
+  check('an empty kit\'s key: the button off, its title says to drop a sample first', G("$('kp_spread').disabled") === true && /empty — drop a sample on it first/.test(G("$('kp_spread').title")));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+  check('disconnect: the button hidden', G("$('kp_spread').hidden") === true && G('spreadOk') === false);
+}
+{
+  const { D, G } = await loadPage('?demo=kit,nospread');
+  await until(() => G('!!(st && keypOk && table)'));
+  check('a firmware with the settings but before SPREAD_KEYS: the row, no spread button', G('spreadOk') === false && G("$('kp_spread').hidden") === true && D.errors.length === 0, D.errors.join(' | ').slice(0, 300));
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
 }
 /* ── 9c. Contrast, measured: every text token against every surface it sits on, in both themes, ≥ 4.5:1; and no
