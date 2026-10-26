@@ -106,11 +106,11 @@ const GRID_MIN = 64, MAX_TABLE = 96, F_ORANGE = 1, F_TOMB = 2, MS = 48, TAP_MAX 
 /* KEYS (v0.13): a tap this close to a live marker's start selects that marker instead of stacking another (10 ms);
  * the autoslice count's ceiling. */
 const TAP_REUSE = 10 * MS, AUTO_MAX = 64;
-const EDIT_NEED = [5, 9, 10, 5, 1, 1, 2, 2, 3, 2, 3, 7, 0, 2, 0, 0, 2, 0, 0, 1, 2, 6];   /* field bytes of ACTION 16..37 */
+const EDIT_NEED = [5, 9, 10, 5, 1, 1, 2, 2, 3, 2, 3, 7, 0, 2, 0, 0, 2, 0, 0, 1, 2, 7];   /* field bytes of ACTION 16..37 */
 /* KEYP: one key's settings (core/bb_engine.h KeyParam) — gain in ½ dB −48..+12, cents ±2400, plays 0 follow Key Plays ·
- * 1 one-shot · 2 held · 3 loop (held, looping the entry); all zero = neutral */
-const KEYP = { gainMin: -48, gainMax: 12, centsMax: 2400, playsMax: 3 };
-const keypNeutral = () => ({ gain: 0, plays: 0, cents: 0 });
+ * 1 one-shot · 2 held · 3 loop (held, looping the entry) · 4 ratchet (held, retriggering at `rat` 0..6); all zero = neutral */
+const KEYP = { gainMin: -48, gainMax: 12, centsMax: 2400, playsMax: 4, ratMax: 6 };
+const keypNeutral = () => ({ gain: 0, plays: 0, cents: 0, rat: 0 });
 const UNDO_DEPTH = 64;   /* EDIT-UNDO: the journal's ring */
 const EDIT_STATUS = { Ok: 0, BadOp: 2, BadArgs: 2, Full: 3, NotMarker: 2, NotGrid: 2, Tomb: 2, Stale: 3, NoMaterial: 3, Silent: 3 };
 /* SCOPE: the firmware's ring geometry (core/bb_scope.h) and this module's max_body
@@ -761,10 +761,10 @@ class FakeDevice {
       case 33: st = this.edKeysFromMarkers(); third = this.lastCount; if (!third) return [0, this.tableGen, 0]; break;
       case 34: st = this.edClearMarkers(); third = this.lastCount; if (!third) return [0, this.tableGen, 0]; break;
       case 36: st = b[1] > AUTO_MAX ? 'BadArgs' : this.edAutoslice(b[1], !!(b[2] & 1)); third = this.lastCount; join = !!(b[2] & 2) && this.autoGen === this.tableGen && this.journal.length > 0; break;
-      case 37: {   /* KEYP: KEY_PARAMS(key, i8 gain, i16 cents, plays, flags b0 join) — the join folds into THIS key's previous step only */
-        const key = b[1], gain = b[2] > 127 ? b[2] - 256 : b[2], cents = I16(3), plays = b[5], fl = b[6];
-        if (key >= KEYS || gain < KEYP.gainMin || gain > KEYP.gainMax || cents < -KEYP.centsMax || cents > KEYP.centsMax || plays > KEYP.playsMax || (fl & ~1)) { st = 'BadArgs'; break; }
-        this.keyp[key] = { gain, plays, cents }; st = 'Ok'; before.kpKey = key;
+      case 37: {   /* KEYP: KEY_PARAMS(key, i8 gain, i16 cents, plays, rat, flags b0 join) — the join folds into THIS key's previous step only */
+        const key = b[1], gain = b[2] > 127 ? b[2] - 256 : b[2], cents = I16(3), plays = b[5], rat = b[6], fl = b[7];
+        if (key >= KEYS || gain < KEYP.gainMin || gain > KEYP.gainMax || cents < -KEYP.centsMax || cents > KEYP.centsMax || plays > KEYP.playsMax || rat > KEYP.ratMax || (fl & ~1)) { st = 'BadArgs'; break; }
+        this.keyp[key] = { gain, plays, cents, rat }; st = 'Ok'; before.kpKey = key;
         const top = this.journal[this.journal.length - 1];
         join = !!(fl & 1) && !!top && top.kpKey === key && !this.redoStack.length && this.journalGen === this.tableGen;
         break; }
@@ -796,7 +796,7 @@ class FakeDevice {
     if (this.grammar === GRAM.play && t < 128) { const s = this.curStep(); this.loopEvents.push({ s, prev: this.src[s] }); this.src[s] = t; this.looperEvents = Math.min(255, this.looperEvents + 1); }
     return 0;
   }
-  /* KEYP: does a call through `key` hold? Follow → Options → Key Plays; One-shot never; Held and Loop always */
+  /* KEYP: does a call through `key` hold? Follow → Options → Key Plays; One-shot never; Held, Loop and Ratchet always */
   keyHeld(key) { const p = this.keyp[key] ? this.keyp[key].plays : 0; return p === 0 ? this.options[O['key.plays']] === 1 : p !== 1; }
   /* LOOPER in Play: B2 / ACTION 12 takes the last write back, B3 / ACTION 13 clears the loop */
   looperUndo() { const ev = this.loopEvents.pop(); if (ev) this.src[ev.s] = ev.prev; this.looperEvents = Math.max(0, this.looperEvents - 1); }
@@ -1109,10 +1109,10 @@ class FakeDevice {
         U8(ok ? 0 : 2); break; }
       case CMD.card: if (!this.opts.card) { U8(1); break; } this.cardHandle(body, U8, U32); break;   /* CARD; UNSUPPORTED before it */
       case CMD.pads: if (!this.opts.pads) { U8(1); break; } this.padHandle(body, U8, U32); break;   /* PADS; UNSUPPORTED before it */
-      case CMD.keys:   /* KEYP: 0x69 GET_KEYS → status, 24, then i8 gain · u8 plays · i16 cents per key; UNSUPPORTED before it */
+      case CMD.keys:   /* KEYP: 0x69 GET_KEYS → status, 24, then i8 gain · u8 plays · i16 cents · u8 rat per key; UNSUPPORTED before it */
         if (!this.opts.keyp) { U8(1); break; }
         U8(0); U8(KEYS);
-        for (const p of this.keyp) { U8(p.gain & 0xff); U8(p.plays); U8(p.cents & 0xff); U8((p.cents >> 8) & 0xff); }
+        for (const p of this.keyp) { U8(p.gain & 0xff); U8(p.plays); U8(p.cents & 0xff); U8((p.cents >> 8) & 0xff); U8(p.rat | 0); }
         break;
       default: U8(1);
     }
