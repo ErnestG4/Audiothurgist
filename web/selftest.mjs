@@ -1916,6 +1916,15 @@ const sentAct = (G, ...pre) => G('demoDevice.acts').some(a => pre.every((v, i) =
   check('START_IN(1) → As saved: b5 set, and the next power-up runs the saved grammar (Classic, running)', r.ok && s.startSaved === true && s2.grammar === 0 && s2.muted === false && s2.startSaved === true);
   const p3 = new DEMO.FakeDevice({ latencyMs: 1, bootCard: new Map() }), lr = new HL.Link(new DEMO.FakePort(p3)); await lr.start(); await HL.hello(lr);
   check('a card without startup.json powers up as a sampler (the firmware\'s default)', HL.parseState(await lr.request(HL.CMD.state)).grammar === 6 && p3.muted === true);
+  {
+    /* ▶ in Pads plays a beat: a start made in Pads brings back the last drum grammar (the boot preset's here, Classic) */
+    const rs = await HL.setMute(lr, false), ss = HL.parseState(await lr.request(HL.CMD.state));
+    const rt = await HL.setMute(lr, true), st2 = HL.parseState(await lr.request(HL.CMD.state));
+    check('START: ▶ (SET_MUTE 0) in Pads after a sampler power-up → the boot preset\'s Classic, running; ■ leaves Classic, stopped', rs.ok && ss.grammar === 0 && ss.muted === false && rt.ok && st2.grammar === 0 && st2.muted === true, JSON.stringify([ss.grammar, ss.muted, st2.grammar, st2.muted]));
+    p3.options[5] = 2; p3.setGrammar(2, 0); p3.options[5] = 6; p3.setGrammar(6, 2);   /* Options byte 5 = grammar.mode */
+    await HL.editOp(lr, HL.ACT.mute, []); const su = HL.parseState(await lr.request(HL.CMD.state));
+    check('…Grids → Pads, then the toggle (ACTION 2): Grids comes back, running', su.grammar === 2 && su.muted === false, JSON.stringify([su.grammar, su.muted]));
+  }
   const fileNow = () => new TextDecoder().decode(d.cardFs.get('Audiothurgist/startup.json')), before = fileNow(), bad = await HL.editOp(l, HL.ACT.startIn, [2]);
   check('START_IN(2): BAD_ARGS, nothing written', !bad.ok && bad.status === 2 && fileNow() === before, JSON.stringify(bad));
   const nc = new DEMO.FakeDevice({ latencyMs: 1, nocard: true }), ln = new HL.Link(new DEMO.FakePort(nc)); await ln.start(); await HL.hello(ln);

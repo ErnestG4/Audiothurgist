@@ -71,6 +71,8 @@ static Manual manual =
             "**B1** tap: Perform ↔ Brain page. **B1 held 600 ms, let go** "
             "(B1 goes white; no pot, no other button): start / stop — the "
             "clock runs on, keys still play; B1 breathes while stopped. "
+            "A start in Pads (as the module powers up) brings back the last "
+            "beat — the boot preset's grammar, or the one you left. "
             "**B1 held 300 ms + turn a pot**: "
             "record that pot's motion as a loop that replays until you hold "
             "and nudge it again (a green pip at 6 o'clock marks a locked pot; "

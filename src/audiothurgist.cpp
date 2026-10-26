@@ -763,6 +763,17 @@ static bool PadBusy() { return gPadState != bb::kPadIdle || gPadReq != 0u; }
 static volatile uint8_t gStartIn      = bb::kStartSampler;   /* what the page sees: the card's, or the change on its way */
 static uint8_t          gStartInCard  = bb::kStartSampler;   /* what the card says (read at boot, then each write) */
 static volatile bool    gStartInWrite = false;               /* HostLink → main loop: write gStartIn to the card */
+/* START: ▶ in Pads plays a beat. Pads writes nothing, so starting the transport there was silent — and after a
+ * sampler power-up the panel had no way to a drum grammar but a preset load. Any start (B1 held, ▶, ACTION 2 / 35)
+ * made in Pads brings back the last drum grammar first: the boot preset's, or the one Pads was entered from
+ * (Classic if neither). Stopping leaves the grammar where it is. */
+static uint8_t gLastDrum = 0u;
+static void TransportStart()
+{
+    if(gGrammar.mode == 6u) { gGrammar.mode = gLastDrum; gGrammar.dirty = true; }
+    engine.muted = false;
+}
+static void TransportToggle() { if(engine.muted) TransportStart(); else engine.muted = true; }
 /* ── end START ─────────────────────────────────────────────────────────── */
 /* ── CLOCK ── control-thread clock state; the math is core/bb_clockmath.h ── */
 static volatile float gClkFlash = 0.f;   /* B1 white flash per detected pulse */
@@ -1797,7 +1808,7 @@ static void OnPoll(uint32_t /*t_ms*/)
         if(b1.RisingEdge()) bb::panel::HoldPress(gHold, pots, !gEdit && !settings.IsActive());
         if(b1.Pressed() && bb::panel::HoldPoll(gHold, b1.TimeHeldMs(), pots, b2.Pressed() || b3.Pressed() || gEdit || settings.IsActive()))
             pager.ConsumeButton();
-        if(b1.FallingEdge() && bb::panel::HoldRelease(gHold)) engine.muted = !engine.muted;
+        if(b1.FallingEdge() && bb::panel::HoldRelease(gHold)) TransportToggle();   /* START: in Pads, the last beat */
     }
     /* B1 belongs to the Pager + ParamLock. B2+B3 together is the Settings
      * chord: while both are down (or Settings is open) none of the single-
@@ -4045,7 +4056,7 @@ struct StateExt : hostlink::IHostlinkExtension
                 {
                     case 0: gPendReroll = true; break;
                     case 1: gPendReslice = true; break;
-                    case 2: engine.muted = !engine.muted; break;
+                    case 2: TransportToggle(); break;   /* START: a start in Pads brings the last beat back */
                     case 3:
                         if(f.len >= 3 && f.body[1] < engine.nSlices && f.body[2] < engine.nSlices)
                         {
@@ -4139,7 +4150,7 @@ struct StateExt : hostlink::IHostlinkExtension
                     }
                     case 35:   /* BETA: SET_MUTE(u8 1 stopped / 0 running) — the transport; op 2 still toggles */
                         if(f.len < 2 || f.body[1] > 1u) { w.U8(2u); return; }
-                        engine.muted = f.body[1] != 0u;
+                        if(f.body[1]) engine.muted = true; else TransportStart();   /* START: in Pads, the last beat */
                         break;
                     case 40:   /* START: START_IN(u8 0 Sampler / 1 As saved) — the next power-up; the main loop writes
                                 * Audiothurgist/startup.json. NO_CARD (21) without a card: there is nowhere to keep it.
@@ -4423,6 +4434,7 @@ int main()
      * a key does. The boot preset itself is not touched: As saved, or a preset load later, brings its grammar
      * back; ▶ / B1 held starts the pattern on the beat (the playhead ran on underneath). */
     if(CardReady()) { SdCard::BusyGuard busy(sd); gStartIn = gStartInCard = bb::ReadStartup(&gSetFil, (char*)gSetStage, bb::kStartupMax); }
+    if(gGrammar.mode != 6u) gLastDrum = gGrammar.mode;   /* START: the boot preset's beat, for ▶ in Pads */
     if(gStartIn == bb::kStartSampler) { gGrammar.mode = 6u; gGrammar.dirty = true; engine.muted = true; }
 
     hw.StartAudio(AudioCb);
@@ -4526,6 +4538,7 @@ int main()
         if(gGrammar.dirty && !gPendReroll)
         {
             gGrammar.dirty     = false;
+            if(gGrammar.mode != 6u) gLastDrum = gGrammar.mode;   /* START: ▶ in Pads comes back to this */
             engine.patternMode = gGrammar.mode;
             engine.restSustain = (gGrammar.mode == 2 || gGrammar.mode == 3) && gRests.sel == 0;   /* Grids/Euclid rests continue the break */
             gPendReroll        = true;
