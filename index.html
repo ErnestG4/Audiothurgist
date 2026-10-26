@@ -192,6 +192,12 @@
   @keyframes pulse{0%,100%{box-shadow:0 0 0 0 transparent}50%{box-shadow:0 0 0 4px var(--warn-line)}}
   .key.drop{outline:2px dashed var(--ok-ink);outline-offset:-1px} .key.drop.red{outline-color:var(--bad-ink);background:var(--bad-bg)}
   .key.arm{outline:2px dashed var(--accent);outline-offset:-1px}
+  /* KEYP: a key's own gain / tune / plays — the words in the accent's ink ("yours", as a placed marker), only when set */
+  .key .kp,.padk em{font-style:normal;font-size:10.5px;font-weight:600;line-height:1.25;color:var(--accent-ink);overflow:hidden;max-width:100%;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow-wrap:anywhere}
+  .key .kp[hidden],.padk em[hidden]{display:none}
+  .kprow{margin-top:8px;gap:10px;align-items:center;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--raise)}
+  .kprow .kpk{min-width:3.2em} .kprow input[type=range]{width:120px;vertical-align:middle} .kprow .kpv{display:inline-block;min-width:4.6em;text-align:right;color:var(--ink)}
+  .kprow .kpc{width:4.2em} .kprow.set{border-color:var(--accent)} @media(max-width:640px){.kprow input[type=range]{width:96px}}
   #kitwave,#onsethist{touch-action:none}
   .edmenu{position:absolute;z-index:5;background:var(--btn);border:1px solid var(--line-hi);border-radius:10px;padding:6px;display:flex;flex-direction:column;gap:4px;min-width:200px;box-shadow:0 6px 24px var(--shadow)}
   .edmenu .t{font-size:12px;color:var(--ink2);padding:2px 6px;max-width:260px} .edmenu.red .t{color:var(--bad-ink)} .edmenu button{text-align:left;min-height:44px}
@@ -355,6 +361,16 @@
       <label class="ctl inl">Key plays<select id="k_plays" class="inline" title="Options → Key Plays (ACTION 11): one-shot plays the slice; held reads on until the gate falls"><option value="0">One-shot (the slice)</option><option value="1">Held (until the gate falls)</option></select></label>
       <span id="k_recstate" class="pill">record —</span>
       <div class="bar meterbar idle" id="k_meterbox" title="input peak, last audio block"><i id="k_meter"></i></div>
+    </div>
+    <div id="kp_row" class="row kprow" hidden>
+      <b id="kp_key" class="kpk" title="the selected key — tap a key above to pick another">—</b>
+      <label class="ctl inl" title="this key's gain, −24 … +6 dB in ½ dB steps (KEY_PARAMS, ACTION 37) — a drag is one undo step">Gain <input id="kp_gain" type="range" min="-48" max="12" step="1" value="0"><span id="kp_gain_v" class="num kpv">0 dB</span></label>
+      <label class="ctl inl" title="this key's tune in semitones, ±24 — on top of whatever it plays at (P4, a recording's own rate, the tempo's varispeed, the style)">Tune <input id="kp_semi" type="range" min="-24" max="24" step="1" value="0"><span id="kp_semi_v" class="num kpv">0 st</span></label>
+      <label class="ctl inl" title="fine tune, cents (−99 … +99) on top of the semitones">cents <input id="kp_cents" type="number" class="inline num kpc" min="-99" max="99" step="1" value="0" inputmode="numeric"></label>
+      <label class="ctl inl" title="how this key plays: as Options → Key Plays says, or its own — one-shot, held while down, or held with its sample looping">Plays <select id="kp_plays" class="inline"><option value="0">Follow Key Plays</option><option value="1">One-shot</option><option value="2">Held (while down)</option><option value="3">Loop (while held)</option><option value="4">Ratchet (while held)</option></select></label>
+      <label id="kp_rat_l" class="ctl inl" hidden title="the ratchet's rate: the sample again from its start every whole, ½, ¼ or ⅛ of its own length (as it plays), or every 8th / 16th / 32nd at the tempo">every <select id="kp_rat" class="inline"><option value="0">whole sample</option><option value="1">½ sample</option><option value="2">¼ sample</option><option value="3">⅛ sample</option><option value="4">8th (tempo)</option><option value="5">16th (tempo)</option><option value="6">32nd (tempo)</option></select></label>
+      <button id="kp_hear" class="mini" title="play the key as a pad does (hold for a held or looping key)">▶ hear</button>
+      <button id="kp_reset" class="mini" title="this key back to neutral: 0 dB, no tune, Follow Key Plays (one undo step)">reset</button>
     </div>
     <p id="kit_help" class="note">Click a key to see its material below (on a phone, ● and ✕ act on the selected key). An empty key plays its span of the break; a recorded key plays its take. ● arms a take into that key (the next gate on J6 / the panel gesture starts it); ✕ clears a recording.</p>
     <p id="kit_help_edit" class="note" hidden><b>Keys:</b> tap one to hear it and see it below · drag a key onto another to <b>swap</b> (a prompt when the target is taken; <span class="bad">magenta</span> when a recording would lose its only key) · long-press a key, then drop or tap another, to <b>copy</b> it there · drag a slice up from the waveform onto a key to assign it.</p>
@@ -864,7 +880,7 @@ const padEls = [], padDown = new Map();
   const host = $('pads');
   for (let k = 0; k < 24; k++) {
     const el = document.createElement('button'); el.className = 'padk' + ([1, 3, 6, 8, 10].includes(k % 12) ? ' sh' : ''); el.dataset.k = k;
-    el.innerHTML = `<span>${keyName(k)}</span><small>—</small>`; el.title = `key ${k} (${keyName(k)}) — PLAY_KEY`;
+    el.innerHTML = `<span>${keyName(k)}</span><em hidden></em><small>—</small>`; el.title = `key ${k} (${keyName(k)}) — PLAY_KEY`;
     const up = e => { if (padDown.get(e.pointerId) !== k) return; padDown.delete(e.pointerId); el.classList.remove('down'); if (link && keysOk) playKey(link, k, false).catch(() => {}); };
     el.addEventListener('pointerdown', e => {
       e.preventDefault(); if (!link || !keysOk) return; try { el.setPointerCapture(e.pointerId); } catch {}
@@ -872,7 +888,7 @@ const padEls = [], padDown = new Map();
       playKey(link, k, true).then(r => { if (r && !r.ok) say(`${keyName(k)}: ${r.status === 3 ? 'nothing loaded to play' : HL.statusName(r.status)}`, true); }, () => {});
     });
     el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up); el.addEventListener('lostpointercapture', up);
-    host.appendChild(el); padEls.push({ el, sub: el.querySelector('small'), sig: '' });
+    host.appendChild(el); padEls.push({ el, sub: el.querySelector('small'), kp: el.querySelector('em'), sig: '' });
   }
 })();
 /* ───────────── PADS (0x68, capability "pads": 1): a sample dropped onto a pad ─────────────
@@ -1022,11 +1038,12 @@ function drawPads() {
     const j = padJob[k], noBreak = !!(st.pads && st.pads.noBreak);
     const what = j ? (j.kind === 'busy' ? (j.state === 'sending' ? `↑ ${Math.round(j.frac * 100)} %` : j.state === 'committing' ? 'placing…' : '…') : j.kind === 'ok' ? '✓ ' + padSecs(j.plan ? j.plan.frames : 0) : '✕ not loaded')
       : !e ? (t >= 0 ? `slice ${t}` : '—') : t < table.nSlices ? (noBreak ? 'empty' : `slice ${t}`) : e.key >= 0 ? padSecs(e.len) : `marker ${t}`, cls = e && !(noBreak && t < table.nSlices) ? e.cls & 3 : -1;
-    const sig = what + '|' + cls + '|' + (j ? j.kind + j.frac : ''); if (sig === p.sig) continue; p.sig = sig;
+    const kpt = keypOf(k);   /* KEYP */
+    const sig = what + '|' + cls + '|' + (j ? j.kind + j.frac : '') + '|' + kpt; if (sig === p.sig) continue; p.sig = sig;
     const empty = !j && padsOk && noBreak && e && t < table.nSlices;   /* beta-sampler: an empty kit's pad says it takes a drop */
-    p.sub.textContent = what; p.el.className = p.el.className.replace(/\s*(c\d|busy|bad|empty)\b/g, '') + (cls >= 0 ? ' c' + cls : '') + (j && j.kind === 'busy' ? ' busy' : j && j.kind === 'bad' ? ' bad' : '') + (empty ? ' empty' : '');
+    p.sub.textContent = what; p.kp.textContent = kpt; p.kp.hidden = !kpt; p.el.className = p.el.className.replace(/\s*(c\d|busy|bad|empty)\b/g, '') + (cls >= 0 ? ' c' + cls : '') + (j && j.kind === 'busy' ? ' busy' : j && j.kind === 'bad' ? ' bad' : '') + (empty ? ' empty' : '');
     if (p.fill) { p.fill.style.width = j ? Math.round((j.kind === 'bad' ? 1 : j.frac) * 100) + '%' : '0'; p.fill.className = 'pf' + (j && j.kind === 'ok' ? ' ok' : j && j.kind === 'bad' ? ' bad' : ''); }
-    p.el.title = j && j.text ? `${keyName(k)} — ${j.text}` : `key ${k} (${keyName(k)}) — PLAY_KEY${padsOk ? ' · drop an audio file here to load it' : ''}`;
+    p.el.title = j && j.text ? `${keyName(k)} — ${j.text}` : `key ${k} (${keyName(k)}) — PLAY_KEY${kpt ? ' · ' + kpt + ' (its own settings: Kit tab)' : ''}${padsOk ? ' · drop an audio file here to load it' : ''}`;
   }
   drawPadsBar(); drawSampler();
   $('pads_follow').hidden = !st.keysFollow;
@@ -1213,13 +1230,13 @@ const keyCells = [];
   const host = $('keys');
   for (let k = 0; k < 24; k++) {
     const el = document.createElement('div'); el.className = 'key'; el.dataset.k = k;
-    el.innerHTML = `<div class="nm"><span>${keyName(k)}</span><i>${k}</i></div><div class="info">—</div><div class="meta"></div><div class="kb"><button class="mini rec" title="arm a take into ${keyName(k)} (ACTION 9)">●</button><button class="mini clr" title="clear ${keyName(k)}'s recording (ACTION 10)">✕</button></div>`;
+    el.innerHTML = `<div class="nm"><span>${keyName(k)}</span><i>${k}</i></div><div class="info">—</div><div class="meta"></div><div class="kp" hidden></div><div class="kb"><button class="mini rec" title="arm a take into ${keyName(k)} (ACTION 9)">●</button><button class="mini clr" title="clear ${keyName(k)}'s recording (ACTION 10)">✕</button></div>`;
     const rec = el.querySelector('.rec'), clr = el.querySelector('.clr');
     rec.onclick = e => { e.stopPropagation(); selectKey(k); action(ACT.recArm, k); };
     clr.onclick = e => { e.stopPropagation(); selectKey(k); action(ACT.recClear, k); };
     for (const b of [rec, clr]) b.addEventListener('pointerdown', e => e.stopPropagation());
     cellPointer(el, k); padDropTarget(el, k);   /* PADS: a file dropped on a key cell loads it into that key */
-    host.appendChild(el); keyCells.push({ el, info: el.querySelector('.info'), meta: el.querySelector('.meta'), rec, clr, sig: '' });
+    host.appendChild(el); keyCells.push({ el, info: el.querySelector('.info'), meta: el.querySelector('.meta'), kp: el.querySelector('.kp'), rec, clr, sig: '' });
   }
 })();
 const secs = n => (n / SR).toFixed(n < SR ? 3 : 2) + ' s';
@@ -1298,9 +1315,11 @@ function drawKit() {
     else if (st.keySlice) info = `slice ${st.keySlice[k]}`;
     const rstate = rk === k && rs ? REC[rs] : '';
     const pulse = editOk && e && ed.selT >= 0 && e.t === ed.selT, arm = copyArm === k, mark = !!(e && keyMarker(e)), orange = !!(e && ED.isOrange(e));
-    const sig = [info, meta, cls, rec, k === selKey, rstate, rs, pulse, arm, mark, orange].join('|');
+    const kpt = keypOf(k);   /* KEYP: the key's own settings, in words — only when set */
+    const sig = [info, meta, cls, rec, k === selKey, rstate, rs, pulse, arm, mark, orange, kpt].join('|');
     if (sig === c.sig) continue; c.sig = sig;
     c.info.textContent = info; c.meta.textContent = rstate ? rstate.toUpperCase() : meta;
+    c.kp.textContent = kpt; c.kp.hidden = !kpt; c.el.title = kpt ? `${keyName(k)}: ${kpt} (its own settings — select it to change them)` : '';
     c.el.className = 'key' + (rec ? ' rec' : '') + (k === selKey ? ' sel' : '') + (rstate ? ' ' + rstate : '') + (pulse ? ' pulse' : '') + (arm ? ' arm' : '');
     c.el.style.borderLeftStyle = mark ? (orange ? 'solid' : 'dotted') : 'solid';
     c.el.style.borderLeftColor = cls >= 0 ? COL[cls] : (e ? COL[e.cls & 3] + '66' : '');
@@ -1323,6 +1342,7 @@ function drawKit() {
     if (pp && pp.noBreak) setText('u_break', 'none — an empty kit (¼ s of silence holds the grid)');
     setText('u_table', table ? tableLine() : (st.nTable != null ? `${st.nTable} entries` : '—'));
   }
+  drawKeyp();   /* KEYP */
   if (editOk) drawEditor();
   const le = st.looperEvents; setText('l_count', le == null ? '—' : String(le)); setText('l_label', le == null ? 'needs LOOPER firmware (state byte 176)' : (le === 1 ? 'event on the bar' : 'events on the bar'));
   $('l_undo').disabled = !le; $('l_clear').disabled = !le;
@@ -1492,6 +1512,7 @@ async function refetchKit() {
   try { if (poll.pState) await poll.pState; else { const b = await link.request(CMD.state, undefined, { key: 'state', urgent: true }); onState(b); } } catch (e) { warn('state', e); }
   if (poll.pTable) { try { await poll.pTable; } catch {} }
   tableSig = ''; if (st) syncKit(st); if (poll.pTable) { try { await poll.pTable; } catch {} }
+  if (poll.pKeyp) { try { await poll.pKeyp; } catch {} }   /* KEYP */
 }
 /* the long-press menu and the drop prompt share one popover inside the waveform's wrapper */
 let choiceResolve = null;
@@ -1558,6 +1579,65 @@ function drawEditor() {
 $('k_rec').onclick = () => action(ACT.recArm, selKey); $('k_clr').onclick = () => action(ACT.recClear, selKey);
 $('k_plays').onchange = async e => { await action(ACT.keyPlays, +e.target.value); refreshLive(); };
 $('l_undo').onclick = () => action(ACT.looperUndo); $('l_clear').onclick = () => action(ACT.looperClear);
+/* ───────────── KEYP (ACTION 37 + 0x69, capability "keyp": 1): each key's own gain / tune / plays ─────────────
+ * The selected key's settings in the row under the keys; the cells (and the Play pads) show a key's settings in words
+ * when it has any. The sliders play live: each value goes out while you drag (one at a time — the newest waits for the
+ * last reply), every send after the drag's first with JOIN, so a whole drag is one undo step (the autoslice slider's
+ * way). The module's answer is the truth: the row follows the settings read back, except while you hold a control. */
+let keypOk = false, keyp = null, keypGen = -1;
+let kpBusy = false, kpWant = null, kpDrag = false, kpSent = 0, kpKey = -1, kpTouch = 0;
+const keypOf = k => keypOk && keyp && keyp[k] ? HL.keypText(keyp[k]) : '';
+const kpGainText = g => g ? HL.keypGainText(g) : '0 dB';
+const kpSemiText = c => { const s = Math.trunc(c / 100); return (s > 0 ? '+' : s < 0 ? '−' : '') + Math.abs(s) + ' st'; };
+/* what the row's controls say now, as a key's settings */
+function kpFromRow() {
+  const semi = +$('kp_semi').value, fine = Math.max(-99, Math.min(99, Math.round(+$('kp_cents').value || 0)));
+  return { gain: +$('kp_gain').value, cents: Math.max(-HL.KEYP.centsMax, Math.min(HL.KEYP.centsMax, semi * 100 + fine)), plays: +$('kp_plays').value, rat: +$('kp_rat').value };
+}
+function drawKeyp() {
+  const row = $('kp_row'); row.hidden = !keypOk; if (!keypOk) return;
+  const k = selKey, p = keyp && keyp[k] ? keyp[k] : { gain: 0, cents: 0, plays: 0, rat: 0 }, held = kpDrag || performance.now() - kpTouch < 1500 || kpBusy || kpWant;
+  setText('kp_key', keyName(k)); row.classList.toggle('set', !HL.keypNeutral(p));
+  const busy = !link || !st || !st.bufLen; for (const id of ['kp_gain', 'kp_semi', 'kp_cents', 'kp_plays', 'kp_rat', 'kp_hear', 'kp_reset']) $(id).disabled = busy;
+  $('kp_rat_l').hidden = +$('kp_plays').value !== HL.KEYP.ratchet;
+  $('kp_reset').disabled = busy || HL.keypNeutral(p);
+  if (held && kpKey === k) return;   /* your hand is on it: the reply will come round */
+  const semi = Math.trunc(p.cents / 100), fine = p.cents - semi * 100;
+  if (document.activeElement !== $('kp_gain') && +$('kp_gain').value !== p.gain) $('kp_gain').value = String(p.gain);
+  if (document.activeElement !== $('kp_semi') && +$('kp_semi').value !== semi) $('kp_semi').value = String(semi);
+  if (document.activeElement !== $('kp_cents') && +$('kp_cents').value !== fine) $('kp_cents').value = String(fine);
+  if (document.activeElement !== $('kp_plays') && +$('kp_plays').value !== p.plays) $('kp_plays').value = String(p.plays);
+  if (document.activeElement !== $('kp_rat') && +$('kp_rat').value !== (p.rat | 0)) $('kp_rat').value = String(p.rat | 0);
+  $('kp_rat_l').hidden = +$('kp_plays').value !== HL.KEYP.ratchet;
+  setText('kp_gain_v', kpGainText(p.gain)); setText('kp_semi_v', kpSemiText(p.cents));
+}
+function kpLabels() { const p = kpFromRow(); setText('kp_gain_v', kpGainText(p.gain)); setText('kp_semi_v', kpSemiText(p.cents)); }
+/* one send at a time; `join` for every send of a drag after its first */
+function kpQueue(p, join) {
+  if (!link || !keypOk) return;
+  const key = selKey;
+  if (kpBusy) { kpWant = { p, join: true, key }; return; }
+  kpBusy = true; kpKey = key; kpTouch = performance.now();
+  const j = join && kpSent > 0; kpSent++;
+  Promise.resolve(ed.keyParams(key, p, j)).catch(() => {}).finally(() => {
+    kpBusy = false;
+    if (kpWant) { const w = kpWant; kpWant = null; if (w.key === key) { kpBusy = false; kpQueue(w.p, w.join); return; } }
+    if (!kpDrag) kpSent = 0;
+    invalidate(D.kit | D.pads);
+  });
+}
+for (const id of ['kp_gain', 'kp_semi']) {
+  $(id).addEventListener('input', () => { if (!kpDrag) { kpDrag = true; kpSent = 0; } kpTouch = performance.now(); kpLabels(); kpQueue(kpFromRow(), true); });
+  $(id).addEventListener('change', () => { const was = kpDrag; kpDrag = false; kpTouch = performance.now(); kpLabels(); kpQueue(kpFromRow(), was); });
+}
+$('kp_cents').addEventListener('change', () => { kpTouch = performance.now(); kpSent = 0; kpLabels(); kpQueue(kpFromRow(), false); });
+$('kp_plays').addEventListener('change', () => { kpTouch = performance.now(); kpSent = 0; $('kp_rat_l').hidden = +$('kp_plays').value !== HL.KEYP.ratchet; kpQueue(kpFromRow(), false); });
+$('kp_rat').addEventListener('change', () => { kpTouch = performance.now(); kpSent = 0; kpQueue(kpFromRow(), false); });
+$('kp_reset').onclick = () => { kpSent = 0; $('kp_gain').value = '0'; $('kp_semi').value = '0'; $('kp_cents').value = '0'; $('kp_plays').value = '0'; $('kp_rat').value = '0'; $('kp_rat_l').hidden = true; kpLabels(); kpTouch = 0; kpQueue({ gain: 0, cents: 0, plays: 0, rat: 0 }, false); };
+{ const b = $('kp_hear'); let down = -1;
+  const up = () => { if (down < 0) return; const k = down; down = -1; if (link && keysOk) playKey(link, k, false).catch(() => {}); };
+  b.addEventListener('pointerdown', e => { e.preventDefault(); if (!link || !keysOk) return; try { b.setPointerCapture(e.pointerId); } catch {} down = selKey; flashKey(down); playKey(link, down, true).catch(() => {}); });
+  b.addEventListener('pointerup', up); b.addEventListener('pointercancel', up); b.addEventListener('lostpointercapture', up); }
 /* The table follows the state: refetched when the material, the table size,
  * the free position or the key map changes (a take, a clear, a re-slice). */
 function syncKit(s) {
@@ -1574,6 +1654,8 @@ function syncKit(s) {
       fieldSig = ''; invalidate(D.kit | D.kitwave | D.bar | D.wave);
     }, e => warn('table', e)).finally(() => { poll.pTable = null; });
   }
+  /* KEYP: the 24 keys' settings (0x69), read again whenever tableGen moves — every KEY_PARAMS, undo and load bumps it */
+  if (keypOk && s.tableGen !== keypGen && !poll.pKeyp) { const g = s.tableGen; poll.pKeyp = HL.fetchKeyParams(link, { key: 'keyp' }).then(a => { keyp = a; keypGen = g; invalidate(D.kit | D.pads); }, e => warn('keys', e)).finally(() => { poll.pKeyp = null; }); }
   if (s.matGen !== hitsGen && !poll.pHits) { const gen = s.matGen; poll.pHits = fetchHits(link).then(hh => { hits = hh; hitsGen = gen; invalidate(D.kitwave | D.wave); }, e => warn('hits', e)).finally(() => { poll.pHits = null; }); }
 }
 
@@ -2039,7 +2121,7 @@ function clearReadouts() {
   for (const [id, s] of [['modpill', 'not connected'], ['pagepill', 'page —'], ['syncpill', 'clock —'], ['linkpill', 'link —'], ['jackpill', 'jacks —'], ['diagpill', 'diag —'], ['kit_status', '—'], ['ctl_page', '—'], ['jk_map', '—'], ['mode_jacks', '—'], ['mk_n', '—'], ['ed_gen', '—'], ['k_recstate', 'record —']]) setPill(id, s, '');
   clearCpu(); for (const sv of [sBpm, sJit, sJitR, sLoad, sLoadMax]) sv.avg = sv.shown = null;
   if (jkLit >= 0) { jkStrip[jkLit].classList.remove('on'); jkLit = -1; }
-  padEls.forEach(p => { p.sig = ''; p.sub.textContent = '—'; p.el.classList.remove('down', 'flash', 'busy', 'bad', 'dropover'); if (p.fill) p.fill.style.width = '0'; }); padDown.clear(); flashAt.fill(0);
+  padEls.forEach(p => { p.sig = ''; p.sub.textContent = '—'; if (p.kp) { p.kp.textContent = ''; p.kp.hidden = true; } p.el.classList.remove('down', 'flash', 'busy', 'bad', 'dropover'); if (p.fill) p.fill.style.width = '0'; }); padDown.clear(); flashAt.fill(0);
   modeChips.forEach(c => { c.el.classList.remove('on'); c.el.disabled = true; });
   $('chop_why').hidden = true; $('mk_follow').hidden = true; $('pads_follow').hidden = true;
   for (const id of ['ring', 'strip', 'wave', 'outscope']) { const [g, w, h] = ctx($(id)); g.clearRect(0, 0, w, h); }
@@ -2050,6 +2132,7 @@ function setDisconnected() {
   table = null; tableSig = ''; bufSig = ''; hits = null; hitsGen = -1; kitOk = false; wave.cache.clear(); wave.queue.length = 0; wave.planSig = ''; keyCells.forEach(c => { c.sig = ''; });
   editOk = false; keysOk = false; copyArm = -1; ed.selT = -1; ed.drag = null; ed.local = null; ed.history = new ED.History(); histSig = fieldSig = ''; closeMenu(); ghost(null); dropHi(-1); setEditorShown(false);
   setsOk = false; setSeqShown = -1; setAsked = null; setPill('s_status', '—', ''); $('s_save').disabled = $('s_load').disabled = true;
+  keypOk = false; keyp = null; keypGen = -1; kpWant = null; kpBusy = false; kpDrag = false; $('kp_row').hidden = true;   /* KEYP */
   padsOk = false; startOk = false; startSel = startNote = null; $('pd_sampler').hidden = true; $('mode_cue').hidden = true; lastText.delete('mode_cue'); for (const j of padJobs) j.cancelled = true; padJob.fill(null); $('pd_bar').hidden = true; $('pd_unsaved').hidden = true; $('pd_msg').hidden = true; $('k_load').hidden = true;
   cardOk = false; for (const j of cardJobs) j.cancelled = true; $('cardCard').hidden = true; $('cardnote').hidden = true; $('p_add').hidden = true;
   scope2Ok = scopeCvOk = false; clearTimeout(sc.timer); sc.timer = null; sc.frames.length = 0; sc.fps = sc.rps = sc.bps = 0; sc.err = ''; invalidate(D.bigscope);
@@ -2094,6 +2177,7 @@ async function connectPort(port, isDemo) {
     cardOk = cp.card >= 1;                    /* CARD: 0x67 (upload, copy an old card in, the list) + the 276.. tail */
     padsOk = keysOk && cp.pads >= 1;          /* PADS: 0x68 (a sample dropped onto a pad, New empty kit) + the 293.. tail */
     startOk = padsOk && cp.startIn >= 1;      /* beta-sampler: Start in — ACTION 40, GET_STATE flags b5 */
+    keypOk = editOk && cp.keyp >= 1;          /* KEYP: ACTION 37 KEY_PARAMS + 0x69 GET_KEYS (no tail bytes) */
     $('cardCard').hidden = !cardOk; $('p_add').hidden = !cardOk; $('cardnote').hidden = true;
     scope2Ok = cp.scope2 >= 1;                /* SCOPE: the 0x62 body (audio channels) */
     scopeCvOk = cp.scope2 >= 2;               /* SCOPE: … with the J3..J8 ext */
@@ -2180,12 +2264,13 @@ async function connect() {
  * before the card work (no "card", the 276-byte body), `card` opens the Kit tab's Card panel; PADS: `nopads` a firmware
  * before the pads work (no "pads", the 293-byte body), `emptykit` starts from New empty kit (no break, Pads); START
  * (beta-sampler): `sampler` powers the fake up as the firmware does by default — Start in = Sampler: Pads, the transport
- * stopped (the Demo button does this; a bare `?demo` keeps the old boot, Classic running, that the selftest drives). */
+ * stopped (the Demo button does this; a bare `?demo` keeps the old boot, Classic running, that the selftest drives). KEYP: `keyp`
+ * opens the Kit with four keys' settings set (gain, tune, loop, a ½ ratchet), `nokeyp` a firmware before them. */
 async function connectDemo(flags = '') {
   if (link) return; notice('');
   const f = new Set(flags.split(',').filter(Boolean));
   const tail = f.has('old') ? 148 : f.has('short') ? 167 : f.has('v099') ? 176 : f.has('nosets') ? 219 : f.has('noedit') ? 255 : f.has('noundo') ? 262 : f.has('old12') ? 263 : f.has('nocardfw') ? 276 : f.has('nopads') ? 293 : 315;
-  demoDevice = new DEMO.FakeDevice({ tail, latencyMs: 6, startIn: f.has('sampler') ? 0 : undefined, oldcard: f.has('oldcard'), nocard: f.has('nocard'), kit: f.has('kit') || f.has('pads'), swing: f.has('kit') || f.has('swing'), inputs: !f.has('noin'), maxBody: f.has('body512') ? 512 : DEMO.MAX_BODY, edit: !(f.has('noedit') || f.has('nosets') || f.has('v099') || f.has('short') || f.has('old')) });
+  demoDevice = new DEMO.FakeDevice({ tail, latencyMs: 6, startIn: f.has('sampler') ? 0 : undefined, oldcard: f.has('oldcard'), nocard: f.has('nocard'), kit: f.has('kit') || f.has('pads'), swing: f.has('kit') || f.has('swing'), inputs: !f.has('noin'), maxBody: f.has('body512') ? 512 : DEMO.MAX_BODY, keyp: f.has('nokeyp') ? false : undefined, edit: !(f.has('noedit') || f.has('nosets') || f.has('v099') || f.has('short') || f.has('old')) });
   const d = demoDevice;
   if (f.has('scope')) showTab('tab_scope');
   if (f.has('cv')) $('sc_p_cv').onclick(); if (f.has('gates')) $('sc_p_gates').onclick();
@@ -2199,6 +2284,7 @@ async function connectDemo(flags = '') {
   if (f.has('play')) { d.setGrammar(DEMO.GRAM.play, d.grammar); d.options[G] = DEMO.GRAM.play; }
   if (f.has('pads')) { d.options[G] = DEMO.GRAM.pads; d.applyEdit(36, Uint8Array.of(36, 6, 0)); }
   if (f.has('emptykit')) d.padNewKit();
+  if (f.has('keyp')) { d.keyp[0] = { gain: -6, plays: 0, cents: 0, rat: 0 }; d.keyp[3] = { gain: 0, plays: 3, cents: 700, rat: 0 }; d.keyp[7] = { gain: 4, plays: 4, cents: -1200, rat: 1 }; d.keyp[12] = { gain: 0, plays: 1, cents: 25, rat: 0 }; showTab('tab_kit'); }   /* KEYP: four keys with settings */
   if (f.has('locks')) d.lockMask = 0x0049;
   demoPort = new DEMO.FakePort(d);
   await connectPort(demoPort, true);
