@@ -62,7 +62,7 @@ regression*: a break at **192 kHz** now loads its first 8.5 s (the staging is
 17 s at 96 kHz), where it got 12.5 s before; 96 kHz and below still get 17 s,
 and everything the page uploads is 48 kHz.
 
-## Protocol — `0x68 PADS`, capability `"pads": 1`
+## Protocol — `0x68 PADS`
 
 A new command beside `0x67 CARD` (whose machinery it reuses: `bb::UploadRx`,
 the `max_body − 24` chunks, the 5 s silence drop, `HL.serial`), because a drop
@@ -99,7 +99,7 @@ op 3 NEW_KIT  → status (the main loop does it; the tail's pads seq says when)
   the begin; a wrong offset, a changed total or bytes past the end is
   BAD_ARGS and drops the drop.
 
-### State tail, appended after byte 292 (the page gates on length ≥ 315)
+### State bytes 293..314 (the end of the 315-byte body)
 
 ```
 293 u8 padState (0 idle · 1 receiving · 2 committing · 3 clearing: New empty kit)   294 u8 progress 0..255
@@ -237,14 +237,12 @@ stand still — the 548a842 lesson.
   **pads-only kit end to end** (New empty kit, a mono and a stereo pad,
   PLAY_KEY, Save set, a power-cycle — a fresh fake on the same card — Load
   set: the same pads, stereo, nothing unsaved; a drop after: unsaved again),
-  a pre-pads firmware; then the page through real `dragover` / `drop` /
+  then the page through real `dragover` / `drop` /
   `change` / `click` events (a Play pad, three files onto one pad, the last
   pad, a Kit cell, both pickers, a stereo file, a file longer than the room,
   no room, a busy module, a hidden tab, an undecodable file, the unsaved
   note's Save set with and without a name, New empty kit's "no" and "yes", a
-  drop onto the empty kit) and `?demo=nopads`.
-- Parity: the descriptor's `"pads": 1` and the 45 s planes are checked
-  against the firmware source as every other capability.
+  drop onto the empty kit).
 
 ## Sizes (release build, the same SDK)
 
@@ -263,14 +261,14 @@ the card code), DTCM 111 488 → 111 544 B, SDRAM 42 837 064 → 52 053 064 B
   drops*, beta-sampler, below); the module still never normalises a drop.
 - A 192 kHz break loads 8.5 s (above).
 
-## Start in — the module powers up as a sampler (2026-10-25, branch `beta-sampler`)
+## Start In — the module powers up as a sampler (2026-10-25, branch `beta-sampler`; an Option since `beta-clean`)
 
 *Combust, verbatim: "I need to test importing and playing individual samples,
 and it may be nice to actually start in "sampler" mode and let the user flip
 into Breakfix/drum mode and press play on their own."* Nothing here has run on
 hardware; the bench steps are `docs/hardware-pass-beta.md` §10d.
 
-**What it does.** Start in = **Sampler** (the default): at power-up, after the
+**What it does.** Start In = **Sampler** (the default): at power-up, after the
 boot preset and the card backups have been applied, the live grammar goes to
 **Pads** and the transport is **stopped** before the first audio block. The
 24 keys (J4, the page's pads, the Kit) play; nothing else does. The main loop
@@ -278,63 +276,48 @@ applies the grammar as any grammar change (patternMode, the Voice map under
 Jacks = Follow grammar, the keys onto the markers if the material has any).
 Pick a drum grammar (the page's chips, or the sampler line's Classic / Grids)
 and the transport stays stopped; ▶ / B1 held starts it — the playhead ran on
-underneath, so it comes in on the beat (BETA-FW's mute rule, unchanged).
-Start in = **As saved**: the boot preset's grammar, running — v0.13 as it was.
-The boot preset itself is never rewritten: a preset load later, or As saved,
-brings its grammar back.
+underneath, so it comes in on the beat. A start made in Pads first brings back
+the last drum grammar — the boot preset's, or the one Pads was entered from
+(`TransportStart` / `gLastDrum`) — so on the panel alone B1 held after a
+sampler power-up plays the preset's beat. Start In = **As saved**: the boot
+preset's grammar, running. The preset itself is never rewritten: a preset load
+later brings its grammar back.
 
-**Where it lives, and why not in Options.** The Options block is 24 bytes
-under `'OPT8'`, managed by the SDK's presets, whose slot hash is the XOR of
-every managed component's hash. A 25th byte moves that hash and the SDK then
-drops **every** slot as empty. `RestorePresetBackups` brings a slot back only
-if its `presets/<slot>.json` is on the card, and a backup carries options,
-knobs, the sample and the name — **not the motion locks and not the
-brightness** (`docs/packages/sample-sets.md`). So an Options byte would have
-cost Combust's beta4 presets their locks at best, and any slot without a
-backup outright. A new managed component or a Settings control moves the same
-hash. So Start in is a **device setting on the card**:
-`Audiothurgist/startup.json`, `{"audiothurgist":1,"startIn":"sampler"}` (or
-`"saved"`). It is a power-up behaviour of the module rather than of a preset,
-which suits it anyway: saving or loading a preset never changes it.
+**Where it lives.** Options byte 24 (`start.in`, "Start In": *Sampler (Pads,
+stopped)* · *As saved (the preset's grammar, running)*), in the preset-managed
+`Options` block — 25 bytes under `'OPT9'`. It shows in the page's Options
+(under *Power-up*) and in `/program` like every other field, and a preset save
+keeps it. Boot reads it once, after `presets.BootLoad()` and the backup
+restore; changing it does nothing until the next power-up. A set load keeps
+the device's value (as it keeps Autosave): a set is material, not how the
+module starts.
 
-- `core/bb_startup.h`: the text both ways (`StartupJson` / `StartupRead`:
-  no file, a broken or foreign file, an unknown word, no card → **Sampler**,
-  the safe reading) and the FatFs half (`ReadStartup` at boot;
-  `WriteStartup` — tmp + rename, so a power-off mid-write keeps the old
-  setting; the caller lends the FIL and an AXI buffer: `gSetFil`,
-  `gSetStage`, under `BusyGuard`).
-- Boot: `ReadStartup` right after `RestorePresetBackups` / `PrimePresetSeq`,
-  before `StartAudio`.
-- `ACTION 40 START_IN (u8 0 Sampler / 1 As saved)` → OK, BAD_ARGS (> 1),
-  NO_CARD (21) without a card. The handler only records it; the main loop
-  (`ServiceStartIn`, beside the preset backups, never during a set op — they
-  share `gSetFil`) writes the file; a failed write puts the reported value
-  back to the card's. 37..39 are left free for the per-key branch.
-- `GET_STATE` byte 3 (`flags`) **b5** = Start in is As saved (clear =
-  Sampler). No bytes added to the 0x60 tail. The descriptor's root says
-  `"startIn":1`.
-- Presets, sets, the Options block, the schema, the tail: unchanged. A
-  beta4 card needs nothing; the file appears the first time Start in is set.
+It was a file on the card (`Audiothurgist/startup.json`, ACTION 40, GET_STATE
+byte 3 b5) for one beta, only so that adding it would not move the preset
+schema; the page and the firmware now ship together and the presets are
+allowed to move once. **Flashing this build drops the flash slots once** (the
+SDK's slot hash is the XOR of every managed component's hash, and 'OPT9' moves
+it); `RestorePresetBackups` brings each slot with a `presets/<slot>.json` back —
+options, knobs, the sample and the name, **not the motion locks and not the
+brightness** (`docs/packages/sample-sets.md`). A backup written before this
+build has 24 option bytes; the 25th (Start In) takes its default, Sampler.
 
 **The panel at a fresh boot** (the existing language, nothing new): B1
 breathes cool white (stopped), the P1 bar ring dimmed to a quarter with only
 the playhead step going round (Pads' pattern is all rests), no gates out;
-Edit's amber and a take's red still win. There is no panel control for Start
-in or for the grammar: on the panel the way to a beat after a sampler boot is
-a preset load (Settings) then B1 held — see the call below.
+Edit's amber and a take's red still win.
 
 **The page, sampler-first** (polish, no new hues): in Pads with the transport
 stopped (`samplerish`) the Play tab puts the pads card first and shows a line
 over the pads — what plays, where a drop goes, **Classic** / **Grids**
 buttons ("for a beat: … then ▶") that only write the grammar, and, when Start
-in is Sampler, that the module powers up like this. The transport reads
+In is Sampler, that the module powers up like this. The transport reads
 *sampler*, the ring SAMPLER, ▶'s title says Pads has no pattern. Once a drum
 grammar waits, stopped, a line under the modes says ▶ starts it and ▶ is
 ringed in the accent. An empty kit's pads are dashed with a centred **+**
-(the sub-text stays "empty"). Options gains **Start-up (kept on the card)**:
-the Start in select, read back from b5, disabled with no card in.
-`?demo=sampler` (and the Demo button) power the fake up this way; a bare
-`?demo` keeps the old boot (Classic, running) the earlier checks drive.
+(the sub-text stays "empty"). `?demo=sampler` (and the Demo button) power the
+fake up with Start In = Sampler; without it the fake's boot preset says As
+saved (Classic, running), which the selftest drives.
 
 **Normalise drops** (page only): a checkbox beside *Choose samples…*, **off by
 default**, remembered per browser (`localStorage audiothurgist.padNorm`).
@@ -344,33 +327,23 @@ stereo image keeps its balance); silence is left alone; the line says
 "normalised +11.0 dB". It applies to every drop path (a Play pad, a Kit cell,
 both pickers). The module is unchanged: a drop is still placed as it comes.
 
-**Tests.** `tests/card_check.cpp` 94 → **114** (the text both ways, every
-truncation and foreign file read as Sampler, the FatFs half: no file, no
-folder, written, read back, rewritten over a stale tmp, a file too big, no
-card). `web/selftest.mjs` §9f, 682 → **725**: ACTION 40 and b5 over the fake,
-the card file, two power-cycles, a card without the file, BAD_ARGS, NO_CARD,
-an older firmware; `padNormalize`; then the page over `?demo=sampler` — it
-reads as a sampler, Start in on the Options tab, **a mono WAV and a stereo
-WAV** (real RIFF bytes, through a PCM16 stand-in for the browser's decoder)
-dropped on two pads and arriving sample for sample, both **played from the
-page's pads**, **the kit turned stereo**, normalise (remembered), **Save
-set**, a **power-cycle** on the same card with the page reconnected (a
-sampler again, the drops gone from memory), **Load set** — the same three
-pads sample for sample, stereo, playing — and the flip to Classic, stopped
-until ▶. Checked to bite (the normalise and the sampler detection removed:
-three checks fail). Not covered by anything automated: the boot itself on
-the module, and ▶ landing on the beat (the fake has no audio clock).
+**Tests.** `tests/persist_check.cpp` pins the 25 option bytes (a set and a
+preset backup carry them). `web/selftest.mjs` §9f: Start In is Options byte 24
+(Sampler the default), written through the live blob without touching the
+running module, a power-up with each value (Sampler: Pads, stopped, the Voice
+map, the preset's beat kept for ▶), ▶ in Pads bringing Classic back and Grids
+→ Pads → ▶ bringing Grids back, ACTION 40 gone; `padNormalize`; then the page
+over `?demo=sampler` — it reads as a sampler, Start In on the Options tab (both
+ways, through the live blob), **a mono WAV and a stereo WAV** (real RIFF
+bytes, through a PCM16 stand-in for the browser's decoder) dropped on two pads
+and arriving sample for sample, both **played from the page's pads**, **the
+kit turned stereo**, normalise (remembered), **Save set**, a **power-cycle**
+on the same card with the page reconnected (a sampler again, the drops gone
+from memory), **Load set** — the same three pads sample for sample, stereo,
+playing — and the flip to Classic, stopped until ▶. Not covered by anything
+automated: the boot itself on the module, and ▶ landing on the beat (the fake
+has no audio clock).
 
-**Sizes** (release build, the same SDK): SRAM 461 376 → 463 232 B (93.87 →
-94.24 %: the reader / writer, the action, the service and ~600 B of manual
-text), DTCM 111 544 → 111 552 B, SDRAM unchanged (52 053 064 B, 77.57 %).
-
-**Calls left to Combust.**
-- A panel-only start: with Start in = Sampler and no computer, the grammar
-  can only come from a preset load, and B1 held in Pads starts nothing
-  audible. Proposal (not built): the first B1 hold / ▶ after a sampler
-  power-up brings the boot preset's grammar back and starts it.
-- The Demo button now powers the fake up as a sampler; a bare `?demo` URL
-  keeps the old running demo.
-- Start in sits on the card, so it is not in `/program` and not in a
-  preset; with no card the module always starts as a sampler.
+**Sizes.** As an Option it costs less than the card file did: the reader /
+writer, ACTION 40 and its service are gone (with the rest of `beta-clean`,
+SRAM 469 664 → 469 216 B).

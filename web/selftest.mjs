@@ -48,45 +48,42 @@ else {
   if (g.descriptor) { const d = unhex(g.descriptor.hex); check('descriptor crc', HL.crc32(d) === g.descriptor.crc); let j = null; try { j = JSON.parse(new TextDecoder().decode(d)); } catch {} check('descriptor json', j && j.dv === 1 && Array.isArray(j.components)); check('descriptor pagerInfo', !!HL.pagerInfo(j)); }
 }
 
-/* ── 2. StateExt parsing on synthetic bodies (v0.7.2 → CLOCK tails, 148/156/164/167/170) ── */
-function stateBody(len) {
+/* ── 2. StateExt parsing on a synthetic body: every field where the firmware puts it ── */
+function stateBody(len = HL.STATE_LEN) {
   const b = new Uint8Array(len); b[0] = 0; b[1] = 32; b[2] = 7; b[3] = 0b10110; b[4] = 9; b[5] = 2; b[6] = 1; b[7] = 3; b[8] = 200; b[9] = 5; b[10] = 2; b[11] = 255;
   const dv = new DataView(b.buffer); dv.setFloat32(12, 174.5, true); dv.setFloat32(16, 0.5, true);
   for (let i = 0; i < 64; i++) { b[20 + i] = i < 32 ? (i % 5 === 0 ? 0xff : i) : 0; b[84 + i] = i % 4; }
-  if (len >= 156) { dv.setUint16(148, 1234, true); dv.setUint16(150, 210, true); dv.setUint16(152, 3, true); dv.setUint16(154, 17, true); }
-  if (len >= 164) { dv.setUint16(156, 0x0041, true); dv.setFloat32(158, 172.25, true); b[162] = 2; b[163] = 3; }
-  if (len >= 167) { dv.setUint16(164, 350, true); b[166] = 1; }
-  if (len >= 170) { b[167] = 0x33; dv.setUint16(168, 120, true); }   /* engaged · pending · 3 ext transitions; 120 µs rms */
-  if (len >= 175) { b[170] = 4; dv.setUint16(171, 1500, true); dv.setUint16(173, 2, true); }
-  if (len >= 176) b[175] = 1;                                             /* Voice jack map */
-  if (len >= 177) b[176] = 5;                                             /* LOOPER: five events */
-  if (len >= 194) { b[177] = 2; b[178] = 7; dv.setUint32(179, 250000, true); dv.setUint32(183, 480000, true); b[187] = 1; b[188] = 180; b[189] = 35; dv.setUint32(190, 192000, true); }
-  if (len >= 218) { for (let k = 0; k < 24; k++) b[194 + k] = k === 7 ? 34 : Math.floor(k * 32 / 24); }
-  if (len >= 219) b[218] = 1;                                             /* Key Plays = Held */
-  if (len >= 223) { b[219] = 1; b[220] = 128; b[221] = 2; b[222] = 9; }   /* SETS: saving, 50 %, last result card full, seq 9 */
-  if (len >= 255) { const nm = 'Amen_kit-2'; for (let i = 0; i < nm.length; i++) b[223 + i] = nm.charCodeAt(i); }
-  if (len >= 258) { b[255] = 77; b[256] = 3; b[257] = 255; }              /* EDIT: tableGen 77, undo depth 3, no selection */
-  if (len >= 262) dv.setUint32(258, 123456, true);                        /* EDIT: srcPos */
-  if (len >= 263) b[262] = 2;                                             /* EDIT-UNDO: redo depth 2 */
-  if (len >= 276) { b[263] = 3; dv.setUint16(264, 412, true); dv.setUint16(266, 905, true); dv.setInt16(268, -250, true); b[270] = 0; b[271] = 255; b[272] = 255; b[273] = 17; b[274] = 12; b[275] = 5; }   /* KEYS v0.13 */
+  if (len < HL.STATE_LEN) return b;
+  dv.setUint16(148, 1234, true); dv.setUint16(150, 210, true); dv.setUint16(152, 3, true); dv.setUint16(154, 17, true);
+  dv.setUint16(156, 0x0041, true); dv.setFloat32(158, 172.25, true); b[162] = 2; b[163] = 3;
+  dv.setUint16(164, 350, true); b[166] = 1;
+  b[167] = 0x33; dv.setUint16(168, 120, true);   /* engaged · pending · 3 ext transitions; 120 µs rms */
+  b[170] = 4; dv.setUint16(171, 1500, true); dv.setUint16(173, 2, true);
+  b[175] = 1;                                     /* Voice jack map */
+  b[176] = 5;                                     /* LOOPER: five events */
+  b[177] = 2; b[178] = 7; dv.setUint32(179, 250000, true); dv.setUint32(183, 480000, true); b[187] = 1; b[188] = 180; b[189] = 35; dv.setUint32(190, 192000, true);
+  for (let k = 0; k < 24; k++) b[194 + k] = k === 7 ? 34 : Math.floor(k * 32 / 24);
+  b[218] = 1;                                     /* Key Plays = Held */
+  b[219] = 1; b[220] = 128; b[221] = 2; b[222] = 9;   /* SETS: saving, 50 %, last result card full, seq 9 */
+  { const nm = 'Amen_kit-2'; for (let i = 0; i < nm.length; i++) b[223 + i] = nm.charCodeAt(i); }
+  b[255] = 77; b[256] = 3; b[257] = 255;          /* EDIT: tableGen 77, undo depth 3, no selection */
+  dv.setUint32(258, 123456, true);                /* EDIT: srcPos */
+  b[262] = 2;                                     /* EDIT-UNDO: redo depth 2 */
+  b[263] = 3; dv.setUint16(264, 412, true); dv.setUint16(266, 905, true); dv.setInt16(268, -250, true); b[270] = 0; b[271] = 255; b[272] = 255; b[273] = 17; b[274] = 12; b[275] = 5;   /* KEYS */
+  b[287] = 255; b[297] = 255;                     /* CARD: no last upload · PADS: no drop */
   return b;
 }
 {
-  check('state too short → null', HL.parseState(stateBody(100)) === null);
-  const s0 = HL.parseState(stateBody(148));
-  check('state v0.7.2 fixed part', s0 && s0.nSlices === 32 && s0.cur === 7 && s0.ext && s0.locked && !s0.muted && !s0.flowing && s0.brain && s0.grammar === 2 && s0.cls === 1 && s0.file === 3 && s0.chop === 200 && s0.histN === 5 && s0.histDepth === 2 && s0.callFlash === 255);
+  check('state too short → null (not this firmware\'s body)', HL.parseState(stateBody(100)) === null && HL.parseState(stateBody(HL.STATE_LEN - 1)) === null && HL.STATE_LEN === 315);
+  const s0 = HL.parseState(stateBody());
+  check('state fixed part', s0 && s0.nSlices === 32 && s0.cur === 7 && s0.ext && s0.locked && !s0.muted && !s0.flowing && s0.brain && s0.grammar === 2 && s0.cls === 1 && s0.file === 3 && s0.chop === 200 && s0.histN === 5 && s0.histDepth === 2 && s0.callFlash === 255);
   check('state floats', Math.abs(s0.bpm - 174.5) < 1e-4 && s0.mult === 0.5);
   check('state src signed', s0.src[0] === -1 && s0.src[1] === 1 && s0.src[5] === -1 && s0.stepClass[7] === 3);
-  check('state no tails', s0.diag === null && s0.lockMask === null && s0.jitterUs === null);
-  const s1 = HL.parseState(stateBody(156));
-  check('state diag tail', s1.diag && s1.diag.gap === 1234 && s1.diag.audio === 210 && s1.diag.jumps === 3 && s1.diag.regens === 17 && s1.lockMask === null);
-  const s2 = HL.parseState(stateBody(164));
-  check('state v0.8.0 tail', s2.lockMask === 0x41 && Math.abs(s2.nativeBpm - 172.25) < 1e-4 && s2.gridBars === 2 && s2.barsOpt === 3 && s2.jitterUs === null);
-  const s3 = HL.parseState(stateBody(167));
-  check('state CLOCK tail', s3.jitterUs === 350 && s3.multZone === 1 && s3.clkFlags === null && s3.jitterRmsUs === null && s3.multPending === null);
-  const s4 = HL.parseState(stateBody(170));
-  check('state CLOCK flags tail', s4.clkFlags === 0x33 && s4.jitterRmsUs === 120 && s4.p2Engaged === true && s4.multPending === true && s4.aligned === false && s4.extTrans === 3);
-  check('state longer body still parses', HL.parseState(stateBody(180)).jitterRmsUs === 120);
+  check('state diag', s0.diag.gap === 1234 && s0.diag.audio === 210 && s0.diag.jumps === 3 && s0.diag.regens === 17);
+  check('state locks, native tempo, bars', s0.lockMask === 0x41 && Math.abs(s0.nativeBpm - 172.25) < 1e-4 && s0.gridBars === 2 && s0.barsOpt === 3);
+  check('state CLOCK: jitter, the requested zone, the flags', s0.jitterUs === 350 && s0.multZone === 1 && s0.clkFlags === 0x33 && s0.jitterRmsUs === 120 && s0.p2Engaged === true && s0.multPending === true && s0.aligned === false && s0.extTrans === 3);
+  check('state stall forensics', s0.stallPhase === 4 && s0.gateLateUs === 1500 && s0.overruns === 2);
+  const s4 = s0;
   check('zone table', HL.ZONE_MULT.length === 5 && HL.ZONE_MULT[2] === 1 && HL.ZONE_MULT[s4.multZone] === 0.5);
   const sc = HL.parseScope(Uint8Array.of(0, 4, 0, 1, 0xff, 0x7f, 0x80)); check('scope signed', sc.length === 4 && sc[1] === -1 && sc[2] === 127 && sc[3] === -128);
   /* SCOPE: the four-channel body — request builder, reply parser, the frame planner. */
@@ -130,36 +127,21 @@ function stateBody(len) {
     check('scope plan: one channel at 512 → 502', p6.n === 502 && p6.masks.length === 1);
     check('scope plan: empty mask → nothing', HL.scopePlan(1024, 0, 4).masks.length === 0);
     check('scope channel names', HL.SCOPE_CH.length === 10 && HL.SCOPE_CH[2] === 'in L' && HL.SCOPE_CH[4] === 'J3'); }
-  /* SAMPLE / WEB tails: 176 (looper), 177..193 (record + buffer), 194..217 (key table). */
-  const s5 = HL.parseState(stateBody(176));
-  check('state 176: jack map, no looper', s5.jackMap === 1 && s5.looperEvents === undefined && s5.recState === undefined && s5.keySlice === undefined);
-  const s6 = HL.parseState(stateBody(177));
-  check('state 177: looper events, no record tail', s6.looperEvents === 5 && s6.recState === undefined);
-  check('state 180: record tail needs all 17 bytes', HL.parseState(stateBody(180)).recState === undefined);
-  const s7 = HL.parseState(stateBody(194));
-  check('state 194: record + buffer tail', s7.recState === 2 && HL.REC[s7.recState] === 'taking' && s7.recKey === 7 && s7.freePos === 250000 && s7.bufCap === 480000 && s7.stereo === true && s7.inLevel === 180 && s7.nTable === 35 && s7.bufLen === 192000 && s7.keySlice === undefined);
-  const s8 = HL.parseState(stateBody(218));
-  check('state 218: key table', s8.keySlice && s8.keySlice.length === 24 && s8.keySlice[7] === 34 && s8.keySlice[23] === 30 && s8.keySlice[0] === 0 && s8.keyPlays === undefined);
-  check('state 219: key plays', HL.parseState(stateBody(219)).keyPlays === 1);
-  /* SETS tail: 219..222 the op, 223..254 the name. */
-  const s9 = HL.parseState(stateBody(219)); check('state 219: no sets tail', s9.setState === undefined && s9.setName === undefined);
-  const s10 = HL.parseState(stateBody(223));
-  check('state 223: set op tail', s10.setState === 1 && HL.SET_STATE[s10.setState] === 'saving' && s10.setProgress === 128 && s10.setResult === 2 && HL.SET_RESULT[s10.setResult] === 'card full' && s10.setSeq === 9 && s10.setName === undefined);
-  const s11 = HL.parseState(stateBody(255)); check('state 255: set name', s11.setName === 'Amen_kit-2');
-  { const b = stateBody(255); b[223] = 0; check('state 255: empty name', HL.parseState(b).setName === ''); }
+  /* SAMPLE: the jack map, the looper, the record state, the buffer, the key map, Key Plays; SETS: the op, the name */
+  const s7 = HL.parseState(stateBody());
+  check('state: jack map, looper events', s7.jackMap === 1 && s7.looperEvents === 5);
+  check('state: record + buffer', s7.recState === 2 && HL.REC[s7.recState] === 'taking' && s7.recKey === 7 && s7.freePos === 250000 && s7.bufCap === 480000 && s7.stereo === true && s7.inLevel === 180 && s7.nTable === 35 && s7.bufLen === 192000);
+  check('state: key table, key plays', s7.keySlice.length === 24 && s7.keySlice[7] === 34 && s7.keySlice[23] === 30 && s7.keySlice[0] === 0 && s7.keyPlays === 1);
+  check('state: set op', s7.setState === 1 && HL.SET_STATE[s7.setState] === 'saving' && s7.setProgress === 128 && s7.setResult === 2 && HL.SET_RESULT[s7.setResult] === 'card full' && s7.setSeq === 9);
+  check('state: set name', s7.setName === 'Amen_kit-2');
+  { const b = stateBody(); b[223] = 0; check('state: empty name', HL.parseState(b).setName === ''); }
   check('set names', HL.setNameOk('amen') && HL.setNameOk('Amen_170-v2') && HL.setNameOk('a'.repeat(31)) && !HL.setNameOk('') && !HL.setNameOk('a'.repeat(32)) && !HL.setNameOk('a b') && !HL.setNameOk('a/b') && !HL.setNameOk('a.wav') && !HL.setNameOk(null));
   check('set labels', HL.setLabelName('amen [set]') === 'amen' && HL.setLabelName('AMEN_170.WAV') === null && HL.setLabelName('a b [set]') === null && HL.setLabelName('sets/amen.wav') === null);
   check('name bytes', HL.nameBytes('ab').length === 2 && HL.nameBytes('ab')[0] === 97 && HL.ACT.saveSet === 14 && HL.ACT.loadSet === 15);
-  { const b = stateBody(218); b[178] = 255; check('recKey 255 → -1', HL.parseState(b).recKey === -1); }
+  { const b = stateBody(); b[178] = 255; check('recKey 255 → -1', HL.parseState(b).recKey === -1); }
   /* GET_WAVE / GET_TABLE / GET_HITS bodies. */
   const wv = HL.parseWave(Uint8Array.of(0, 0x10, 0x27, 0, 0, 3, 0, 4, 0x7f, 0x81, 0));
   check('wave body', wv.start === 10000 && wv.n === 3 && wv.step === 4 && wv.data.length === 3 && wv.data[0] === 127 && wv.data[1] === -127 && wv.data[2] === 0);
-  { const t = new Uint8Array(3 + 2 * HL.TABLE_ENTRY); t[0] = 0; t[1] = 32; t[2] = 34; const dv = new DataView(t.buffer);
-    dv.setUint32(3, 100, true); dv.setUint32(7, 6000, true); t[11] = 0xff; t[12] = 0; t[13] = 240; t[14] = 1; t[15] = 60;
-    dv.setUint32(16, 192000, true); dv.setUint32(20, 48000, true); t[24] = 7; t[25] = 2; t[26] = 255; t[27] = 0; t[28] = 210;
-    const tb = HL.parseTableChunk(t);
-    check('table chunk', tb.nSlices === 32 && tb.nTable === 34 && tb.entries.length === 2 && tb.entries[0].key === -1 && tb.entries[0].start === 100 && tb.entries[0].len === 6000 && tb.entries[0].hit === true && tb.entries[0].sal === 240 && tb.entries[1].key === 7 && tb.entries[1].cls === 2 && tb.entries[1].hit === false && tb.entries[1].dens === 210);
-    check('table chunk: 39 entries fit 512', 3 + 39 * HL.TABLE_ENTRY <= 512 && 3 + 40 * HL.TABLE_ENTRY > 512); }
   { const h = new Uint8Array(3 + 8); h[0] = 0; h[1] = 130; h[2] = 128; new DataView(h.buffer).setUint32(3, 1, true); new DataView(h.buffer).setUint32(7, 0xfffffffe, true);
     const hc = HL.parseHitsChunk(h); check('hits chunk', hc.total === 130 && hc.first === 128 && hc.positions.length === 2 && hc.positions[1] === 0xfffffffe); }
   check('key names: two octaves from C', HL.keyName(0) === 'C1' && HL.keyName(11) === 'B1' && HL.keyName(12) === 'C2' && HL.keyName(23) === 'B2' && HL.keyName(1) === 'C♯1');
@@ -175,7 +157,7 @@ function stateBody(len) {
   for (const b of HL.buildFrame(HL.CMD.hello, 7, new Uint8Array(0))) fp.push(b, f => { got++; check('frame after resync parses', f.ok && f.seq === 7); });
   check('junk produced no frame', got === 1);
   /* a module holding half a frame: write half a HELLO into the fake port before the link starts */
-  const half = new DEMO.FakeDevice({ tail: 170, latencyMs: 2 }); const hp = new DEMO.FakePort(half);
+  const half = new DEMO.FakeDevice({ latencyMs: 2 }); const hp = new DEMO.FakePort(half);
   const w0 = hp.writable.getWriter(); const fr = HL.buildFrame(HL.CMD.hello, 1, new Uint8Array(0)); await w0.write(fr.subarray(0, fr.length >> 1)); w0.releaseLock();
   const hl = new HL.Link(hp); await hl.start();
   const t0 = Date.now(); const info = await HL.hello(hl); const dt = Date.now() - t0;
@@ -206,27 +188,27 @@ function stateBody(len) {
 }
 
 /* ── 3. The Link end to end over the fake module: priority, coalescing, RTT, live blob ── */
-const dev = new DEMO.FakeDevice({ tail: 170, latencyMs: 3 });
+const dev = new DEMO.FakeDevice({ latencyMs: 3 });
 const link = new HL.Link(new DEMO.FakePort(dev));
 await link.start();
 {
   const info = await HL.hello(link);
   check('hello', info.name === 'Audiothurgist' && info.maxBody === DEMO.MAX_BODY && info.maxBody === 1024 && info.liveSize === DEMO.LIVE_SIZE && info.schema === DEMO.SCHEMA);
   const desc = await HL.getDescriptor(link, info);
-  check('descriptor crc+json', desc && desc.dv === 1);
+  check('descriptor crc+json, the firmware\'s api = the page\'s', desc && desc.dv === 1 && HL.apiOf(desc) === HL.API && Object.keys(desc.audiothurgist).join() === 'api');
   const opts = HL.optionsInfo(desc);
   const wantIds = DEMO.OPTION_FIELDS.map(f => f[0]);
-  check('options block: 24 enum fields with the firmware ids (OPT8: Jacks, Key Plays, the record trio, Quantize, Tap Allowance, Autosave)', opts && opts.fields.length === DEMO.OPTION_FIELDS.length && opts.fields.length === 24 && opts.comp.hash === 0x4F505438 && ['jacks', 'sampling', 'rec.src', 'record', 'quantize', 'autosave'].every(id => opts.fields.some(f => f.id === id)) && opts.fields.some(f => f.id === 'tap.allow') && wantIds.every(id => opts.fields.some(f => f.id === id)) && opts.fields.some(f => f.id === 'key.plays'));
+  check('options block: 25 enum fields with the firmware ids (OPT9: Jacks, Key Plays, the record trio, Quantize, Tap Allowance, Autosave, Start In)', opts && opts.fields.length === DEMO.OPTION_FIELDS.length && opts.fields.length === 25 && opts.comp.hash === 0x4F505439 && ['jacks', 'sampling', 'rec.src', 'record', 'quantize', 'autosave', 'start.in'].every(id => opts.fields.some(f => f.id === id)) && opts.fields.some(f => f.id === 'tap.allow') && wantIds.every(id => opts.fields.some(f => f.id === id)) && opts.fields.some(f => f.id === 'key.plays'));
   const gl = HL.fieldLabels(desc, 'grammar.mode');
   check('labels from disp', gl[3] === 'Euclid' && HL.fieldLabels(desc, 'sample.idx').length === DEMO.FILES.length);
   check('grammar has seven labels: Camp at 4, Play at 5, Pads at 6', gl.length === 7 && gl[4] === 'Camp' && /^Play/.test(gl[5]) && /^Pads/.test(gl[6]) && opts.fields.find(f => f.id === 'grammar.mode').zones === 7);
   const pg = HL.pagerInfo(desc); check('pager: 2 pages × 6 knobs with help', pg && pg.pages === 2 && Object.keys(pg.knobs).length === 12 && /Grids/.test(pg.knobs['1:0'].help));
-  const man = HL.manualInfo(desc); check('manual block (v0.13.0-beta text)', man && man.sections.length >= 5 && man.sections.some(s => s.id === 'keymap' && /0 V = key 0/.test(s.body)) && man.sections.some(s => s.id === 'buttons' && /start \/ stop/.test(s.body)) && man.jacks.length === 10 && man.tagline);
+  const man = HL.manualInfo(desc); check('manual block', man && man.sections.length >= 5 && man.sections.some(s => s.id === 'keymap' && /0 V = key 0/.test(s.body)) && man.sections.some(s => s.id === 'buttons' && /start \/ stop/.test(s.body)) && man.jacks.length === 10 && man.tagline);
 
   /* Priority: queue five polls, then an urgent action → the action reaches the device before the polls still queued. */
   dev.log.length = 0;
   const polls = []; for (let i = 0; i < 5; i++) polls.push(link.request(HL.CMD.state));
-  const act = link.request(HL.CMD.action, Uint8Array.of(HL.ACT.mute), { urgent: true });
+  const act = link.request(HL.CMD.action, Uint8Array.of(HL.ACT.setMute, 1), { urgent: true });
   await Promise.all([...polls, act]);
   const iAct = dev.log.indexOf(HL.CMD.action);
   check('urgent action jumps the poll queue', iAct === 1, 'device saw ' + dev.log.map(t => t.toString(16)).join(','));
@@ -238,10 +220,11 @@ await link.start();
   /* Status errors surface by name; unknown ops are BAD_ARGS. */
   let err = null; try { await link.request(HL.CMD.action, Uint8Array.of(99), { urgent: true }); } catch (e) { err = e; }
   check('device status → error', err && /BAD_ARGS/.test(err.message));
-  /* State through the real parser, all tails. */
+  check('ACTION 2 (the old mute toggle) is gone: BAD_ARGS', await link.request(HL.CMD.action, Uint8Array.of(2), { urgent: true }).then(() => false, e => /BAD_ARGS/.test(e.message)));
+  /* State through the real parser. */
   const st = HL.parseState(await link.request(HL.CMD.state));
-  check('demo state parses with CLOCK tail', st && st.muted && st.nSlices === 32 && st.nativeBpm === 120 && st.gridBars === 2 && st.multZone === 2 && st.jitterUs === 0);
-  check('demo state carries the 170-byte flags', st.clkFlags === 0 && st.jitterRmsUs === 0 && st.p2Engaged === false && st.extTrans === 0);
+  check('demo state parses: tempo, bars, clock', st && st.muted && st.nSlices === 32 && st.nativeBpm === 120 && st.gridBars === 2 && st.multZone === 2 && st.jitterUs === 0);
+  check('demo state carries the clock flags', st.clkFlags === 0 && st.jitterRmsUs === 0 && st.p2Engaged === false && st.extTrans === 0);
   /* Flip the fake module onto a clock with a pending ×4 switch: engaged + pending + one ext transition. */
   dev.ext = true; dev.locked = true; dev.mult = 2; dev.multZone = 4; dev.p2Engaged = true; dev.pending = true;
   const se = HL.parseState(await link.request(HL.CMD.state));
@@ -258,16 +241,14 @@ await link.start();
   bytes[opts.comp.off + gf.off] = 4; await HL.setLive(link, info, bytes);
   const stc = HL.parseState(await link.request(HL.CMD.state)); check('Camp selectable: state grammar 4 labelled Camp', stc.grammar === 4 && gl[stc.grammar] === 'Camp');
   check('rtt measured', link.stats.rtt > 0 && link.stats.reqs > 10);
-  check('demo 170-byte body carries no sample tail', st.recState === undefined && st.keySlice === undefined && st.setState === undefined);
   await link.close();
 }
 
 /* ── 4. The Kit: table / wave / hits and the record + looper actions over a 64-slice kit demo ── */
 {
-  const kit = new DEMO.FakeDevice({ tail: 219, kit: true, nSlices: 64, latencyMs: 2, swing: true });   /* 219: the pre-SETS body */
+  const kit = new DEMO.FakeDevice({ kit: true, nSlices: 64, latencyMs: 2, swing: true });
   const kl = new HL.Link(new DEMO.FakePort(kit)); await kl.start();
   const info = await HL.hello(kl); const desc = await HL.getDescriptor(kl, info);
-  check('kit demo advertises wave/table/hits', desc.audiothurgist.wave === 100 && desc.audiothurgist.table === 101 && desc.audiothurgist.hits === 102);
   const s = HL.parseState(await kl.request(HL.CMD.state));
   check('kit state tail', s.nSlices === 64 && s.nTable === 67 && s.bufLen === 64 * DEMO.SLICE_LEN && s.freePos > s.bufLen && s.bufCap === DEMO.BUF_CAP && s.recState === 0 && s.recKey === -1 && s.looperEvents === 3 && s.keySlice.length === 24 && s.keyPlays === 0);
   check('kit keys: recorded keys point past the grid, others at their span slice', s.keySlice[3] === 64 && s.keySlice[7] === 65 && s.keySlice[14] === 66 && s.keySlice[0] === 0 && s.keySlice[23] === 61);
@@ -275,6 +256,7 @@ await link.start();
   kit.log.length = 0;
   const tb = await HL.fetchTable(kl);
   check('table fetched in two chunks', kit.log.filter(t => t === HL.CMD.table).length === 2 && tb.nSlices === 64 && tb.nTable === 67 && tb.entries.length === 67);
+  check('39 × 14 fit max_body 1024', 3 + 39 * HL.TABLE_ENTRY <= 1024 && HL.TABLE_CHUNK === 39 && HL.TABLE_ENTRY === 14);
   check('table: grid entries keyless and contiguous, swung odd boundaries', tb.entries[0].key === -1 && tb.entries[1].start === DEMO.SLICE_LEN + 900 && tb.entries[0].len === DEMO.SLICE_LEN + 900 && tb.entries[2].start === 2 * DEMO.SLICE_LEN && tb.entries.slice(0, 64).every((e, i, a) => i === 0 || e.start === a[i - 1].start + a[i - 1].len));
   check('table: recorded entries carry their key, class, hit', tb.entries[64].key === 3 && tb.entries[64].cls === 0 && tb.entries[65].key === 7 && tb.entries[65].len === Math.round(0.9 * DEMO.SR) && tb.entries[66].key === 14 && tb.entries[66].hit === true && tb.entries[64].start === s.bufLen);
   { let bad = null; try { await kl.request(HL.CMD.table, Uint8Array.of(70, 10)); } catch (e) { bad = e; } check('table: first past nTable → BAD_ARGS', bad && /BAD_ARGS/.test(bad.message)); }
@@ -322,16 +304,14 @@ await link.start();
   check('looper undo', HL.parseState(await kl.request(HL.CMD.state)).looperEvents === 2);
   await kl.request(HL.CMD.action, Uint8Array.of(HL.ACT.looperClear), { urgent: true });
   check('looper clear', HL.parseState(await kl.request(HL.CMD.state)).looperEvents === 0);
-  check('kit demo 219-byte body carries no sets tail', HL.parseState(await kl.request(HL.CMD.state)).setState === undefined);
   await kl.close();
 }
 
-/* ── 5. Sets over the demo (the 255-byte body): save, refusals, load, not found ── */
+/* ── 5. Sets over the demo: save, refusals, load, not found ── */
 {
-  const d = new DEMO.FakeDevice({ tail: 255, kit: true, nSlices: 64, latencyMs: 2, swing: true });
+  const d = new DEMO.FakeDevice({ kit: true, nSlices: 64, latencyMs: 2, swing: true });
   const l = new HL.Link(new DEMO.FakePort(d)); await l.start();
   const info = await HL.hello(l); const desc = await HL.getDescriptor(l, info);
-  check('demo advertises sets', desc.audiothurgist.sets === 1);
   const labs = HL.fieldLabels(desc, 'sample.idx');
   check('sample list carries the set label', labs.includes('amen_kit [set]') && labs.map(HL.setLabelName).filter(Boolean).join() === 'amen_kit');
   /* an op starts on the first state poll after its request and finishes 600 ms later: poll, rewind, poll */
@@ -376,16 +356,16 @@ await link.start();
   await l.close();
 }
 
-/* ── 6. SCOPE over the demo: the old reply unchanged, the four-channel body, trigger, at-pos frames, BAD_ARGS, the split plan at 512 ── */
+/* ── 6. SCOPE over the demo: the small output trace, the four-channel body, trigger, at-pos frames, BAD_ARGS, the jacks ── */
 {
-  const d = new DEMO.FakeDevice({ tail: 255, latencyMs: 1 }); d.t0 -= 2000;   /* two seconds of signal in the rings */
+  const d = new DEMO.FakeDevice({ latencyMs: 1 }); d.t0 -= 2000;   /* two seconds of signal in the rings */
   const l = new HL.Link(new DEMO.FakePort(d)); await l.start();
   const info = await HL.hello(l); const desc = await HL.getDescriptor(l, info);
-  check('demo advertises scope2 = 2 (jacks) and max_body 1024', desc.audiothurgist.scope2 === 2 && desc.audiothurgist.scope === 98 && info.maxBody === 1024);
-  /* the empty body: the pre-SCOPE reply, 256 × ×4 of the mono sum */
+  check('max_body 1024', info.maxBody === 1024);
+  /* the empty body: the Play tab's trace, 256 × ×4 of the mono sum */
   const old = await l.request(HL.CMD.scope);
   const os = HL.parseScope(old);
-  check('empty body → the old reply (u16 256, 256 × i8)', old.length === 259 && HL.u16(old, 1) === 256 && os.length === 256 && os.some(v => v !== 0));
+  check('empty body → the output trace (u16 256, 256 × i8)', old.length === 259 && HL.u16(old, 1) === 256 && os.length === 256 && os.some(v => v !== 0));
   /* one four-channel frame: 253 × 4 in one request, triggered on out L, four distinct traces */
   const plan = HL.scopePlan(info.maxBody, 0x0f, 4);
   const f = await HL.fetchScopeFrame(l, plan, 4, HL.SCOPE.trig);
@@ -411,17 +391,8 @@ await link.start();
   { const back = k => fa.pos >= k ? fa.pos - k : fa.pos + HL.SCOPE.wrap - k; const full = HL.parseScope2(await l.request(HL.CMD.scope, HL.scopeReq(0x01, 16, 512, 0, back(50000)))); check('a pos 50 000 samples back at ×16 × 512 (8192 span, 65 280 usable) is honoured', full.atHonoured); }
   { const gone = HL.parseScope2(await l.request(HL.CMD.scope, HL.scopeReq(0x01, 16, 512, 0, HL.scopeAge(fa.pos, 70000) >= 0 ? (fa.pos >= 70000 ? fa.pos - 70000 : fa.pos + HL.SCOPE.wrap - 70000) : 0))); check('a pos 70 000 samples back has left the audio ring: not honoured', !gone.atHonoured); }
   check('peak decimation keeps at least the energy plain picking sees', energy(bPeak.ch[0]) >= energy(bPlain.ch[0]) && bPeak.ch[0].every((v, i) => Math.abs(v) >= Math.abs(bPlain.ch[0][i])));
-  /* the split plan (a 512-byte module): two requests of two channels pinned to one pos */
-  const d5 = new DEMO.FakeDevice({ tail: 255, latencyMs: 1, maxBody: 512 }); d5.t0 -= 2000;
-  const l5 = new HL.Link(new DEMO.FakePort(d5)); await l5.start(); const i5 = await HL.hello(l5);
-  check('a 512-byte module says so in HELLO', i5.maxBody === 512);
-  d5.log.length = 0;
-  const p5 = HL.scopePlan(i5.maxBody, 0x0f, 4), f5 = await HL.fetchScopeFrame(l5, p5, 4, HL.SCOPE.trig);
-  check('512: a four-channel frame is two requests of 251, both ≤ 512 bytes', f5.reqs === 2 && f5.n === 251 && d5.log.filter(t => t === HL.CMD.scope).length === 2 && f5.bytes === 2 * (10 + 2 * 251) && Object.keys(f5.ch).length === 4);
-  check('512: the second request was pinned to the first pos (channels aligned)', f5.triggered && f5.ch[2].length === 251 && f5.ch[3].length === 251);
   /* a pos the ring no longer holds is not honoured → the frame is reported torn */
-  { let bad = null; try { const t = HL.parseScope2(await l5.request(HL.CMD.scope, HL.scopeReq(0x0c, 4, 251, 0, f5.pos >= 100000 ? f5.pos - 100000 : f5.pos + HL.SCOPE.wrap - 100000))); if (!t.atHonoured) bad = 'not honoured'; } catch (e) { bad = e.message; } check('a stale pos is answered but not honoured', bad === 'not honoured'); }
-  await l5.close();
+  { let bad = null; try { const t = HL.parseScope2(await l.request(HL.CMD.scope, HL.scopeReq(0x0c, 4, 251, 0, f.pos >= 100000 ? f.pos - 100000 : f.pos + HL.SCOPE.wrap - 100000))); if (!t.atHonoured) bad = 'not honoured'; } catch (e) { bad = e.message; } check('a stale pos is answered but not honoured', bad === 'not honoured'); }
   /* BAD_ARGS: mask 0, mask 16, decim 0 / 17, n 0, a short body, at without pos */
   const bad = async body => { try { await l.request(HL.CMD.scope, body); return null; } catch (e) { return e.message; } };
   check('scope2 BAD_ARGS: mask 0', /BAD_ARGS/.test(await bad(HL.scopeReq(0, 4, 100))));
@@ -459,7 +430,7 @@ await link.start();
   const one = HL.parseScope2(await l.request(HL.CMD.scope, HL.scopeReq(0x01, 1, 9999)));
   check('scope2 clamps n to 512 for one channel', one.n === 512);
   /* silent inputs: the traces are flat, the outputs still play */
-  const dq = new DEMO.FakeDevice({ tail: 255, latencyMs: 1, inputs: false }); dq.t0 -= 2000;
+  const dq = new DEMO.FakeDevice({ latencyMs: 1, inputs: false }); dq.t0 -= 2000;
   const lq = new HL.Link(new DEMO.FakePort(dq)); await lq.start();
   const fq = await HL.fetchScopeFrame(lq, HL.scopePlan(1024, 0x0f, 4), 4, HL.SCOPE.trig);
   check('noin: inputs flat, outputs alive', fq.ch[2].every(v => v === 0) && fq.ch[3].every(v => v === 0) && fq.ch[0].some(v => v !== 0));
@@ -467,32 +438,24 @@ await link.start();
   d.muted = true; const fm = await HL.fetchScopeFrame(l, plan, 4, HL.SCOPE.trig);
   check('muted: outputs flat and untriggered, inputs still there', fm.ch[0].every(v => v === 0) && !fm.triggered && fm.ch[2].some(v => v !== 0));
   d.muted = false;
-  /* and the Play tab's page-side path: the old request still coalesces on its key beside the new ones */
+  /* and the Play tab's page-side path: its request coalesces on its own key beside the Scope tab's */
   d.log.length = 0; await Promise.all([l.request(HL.CMD.scope, undefined, { key: 'scope' }), l.request(HL.CMD.scope, undefined, { key: 'scope' }), l.request(HL.CMD.scope, HL.scopeReq(0x0f, 4, 253), { key: 'scope15' })]);
-  check('old and new scope requests keep their own keys', d.log.filter(t => t === HL.CMD.scope).length === 2);
+  check('the two scope requests keep their own keys', d.log.filter(t => t === HL.CMD.scope).length === 2);
   await lq.close(); await l.close();
 }
 
-/* ── 7. EDIT: the tail and table bodies, then every op over the fake module — OK / BAD_ARGS / BAD_STATE, tableGen,
- *       the 14-byte table, tombstones, keys, FROM_ONSETS, the audition voice, TAP_MARK, and an older firmware ── */
+/* ── 7. EDIT: the state's bytes and the table body, then every op over the fake module — OK / BAD_ARGS / BAD_STATE,
+ *       tableGen, the table's flags, tombstones, keys, FROM_ONSETS, the audition voice, TAP_MARK ── */
 {
-  /* the synthetic bodies: old lengths still parse, the new bytes appear at 258 and 262 */
-  const e0 = HL.parseState(stateBody(255)); check('state 255: no edit tail', e0.setName === 'Amen_kit-2' && e0.tableGen === undefined && e0.srcPos === undefined);
-  check('state 257: the three bytes need 258', HL.parseState(stateBody(257)).tableGen === undefined);
-  const e1 = HL.parseState(stateBody(258)); check('state 258: tableGen, undoDepth, selSlice −1; no srcPos', e1.tableGen === 77 && e1.undoDepth === 3 && e1.selSlice === -1 && e1.srcPos === undefined);
-  const e2 = HL.parseState(stateBody(262)); check('state 262: srcPos', e2.srcPos === 123456 && e2.tableGen === 77);
-  { const b = stateBody(262); b[257] = 9; check('selSlice 9', HL.parseState(b).selSlice === 9); }
-  check('state 262: no redoDepth (EDIT-PROTO without the journal)', HL.parseState(stateBody(262)).redoDepth === undefined);
-  check('state 263: redoDepth (EDIT-UNDO)', HL.parseState(stateBody(263)).redoDepth === 2 && HL.parseState(stateBody(263)).undoDepth === 3);
-  check('state 300: a longer body still parses', HL.parseState(stateBody(300)).srcPos === 123456 && HL.parseState(stateBody(300)).redoDepth === 2);
+  const e1 = HL.parseState(stateBody()); check('state: tableGen, undoDepth, selSlice −1, srcPos, redoDepth', e1.tableGen === 77 && e1.undoDepth === 3 && e1.selSlice === -1 && e1.srcPos === 123456 && e1.redoDepth === 2);
+  { const b = stateBody(); b[257] = 9; check('selSlice 9', HL.parseState(b).selSlice === 9); }
   check('ACT: the journal ops 30 / 31', HL.ACT.undoEdit === 30 && HL.ACT.redoEdit === 31);
-  { const t = new Uint8Array(3 + 2 * HL.TABLE_ENTRY_EDIT); t[0] = 0; t[1] = 32; t[2] = 34; const dv = new DataView(t.buffer);
+  { const t = new Uint8Array(3 + 2 * HL.TABLE_ENTRY); t[0] = 0; t[1] = 32; t[2] = 34; const dv = new DataView(t.buffer);
     dv.setUint32(3, 100, true); dv.setUint32(7, 6000, true); t[11] = 0xff; t[12] = 0; t[13] = 240; t[14] = 1; t[15] = 60; t[16] = HL.EDIT.orange;
     dv.setUint32(17, 192000, true); dv.setUint32(21, 0, true); t[25] = 0xff; t[26] = 2; t[27] = 255; t[28] = 0; t[29] = 210; t[30] = HL.EDIT.tomb;
-    const tb = HL.parseTableChunk(t, HL.TABLE_ENTRY_EDIT);
-    check('table chunk, 14-byte form: flags read, the rest as before', tb.entries.length === 2 && tb.entries[0].flags === HL.EDIT.orange && tb.entries[0].len === 6000 && tb.entries[0].key === -1 && tb.entries[1].flags === HL.EDIT.tomb && tb.entries[1].len === 0 && tb.entries[1].cls === 2);
-    check('table chunk, 13-byte form: flags 0', HL.parseTableChunk(t.subarray(0, 3 + 2 * HL.TABLE_ENTRY)).entries[0].flags === 0);
-    check('39 × 14 fit max_body 1024', 3 + 39 * HL.TABLE_ENTRY_EDIT <= 1024 && HL.TABLE_CHUNK === 39); }
+    const tb = HL.parseTableChunk(t);
+    check('table chunk: start, len, key, class, salience, hit, density, flags', tb.nSlices === 32 && tb.nTable === 34 && tb.entries.length === 2 && tb.entries[0].flags === HL.EDIT.orange && tb.entries[0].start === 100 && tb.entries[0].len === 6000 && tb.entries[0].key === -1 && tb.entries[0].hit === true && tb.entries[0].sal === 240
+      && tb.entries[1].flags === HL.EDIT.tomb && tb.entries[1].len === 0 && tb.entries[1].cls === 2 && tb.entries[1].hit === false && tb.entries[1].dens === 210); }
   check('ACT: the edit ops 16..29', HL.ACT.setBoundary === 16 && HL.ACT.fromOnsets === 26 && HL.ACT.audition === 27 && HL.ACT.release === 28 && HL.ACT.tapMark === 29 && HL.EDIT.orange === 1 && HL.EDIT.tomb === 2);
 
   const SL = DEMO.SLICE_LEN;
@@ -500,14 +463,11 @@ await link.start();
   const l = new HL.Link(new DEMO.FakePort(d)); await l.start();
   const info = await HL.hello(l); const desc = await HL.getDescriptor(l, info);
   const state = async () => HL.parseState(await l.request(HL.CMD.state));
-  const table = () => HL.fetchTable(l, { edit: true });
-  check('demo advertises edit 2 and keys 1 (v0.13)', desc.audiothurgist.edit === 2 && desc.audiothurgist.keys === 1 && desc.audiothurgist.sets === 1 && HL.caps(desc).keys === 1);
+  const table = () => HL.fetchTable(l);
   const s0 = await state();
   check('tail: tableGen ≥ 1, undoDepth 0, redoDepth 0, selSlice −1, srcPos inside the material', s0.tableGen >= 1 && s0.undoDepth === 0 && s0.redoDepth === 0 && s0.selSlice === -1 && s0.srcPos >= 0 && s0.srcPos < s0.bufLen && s0.nTable === 35);
   const t0 = await table();
-  check('14-byte form: 32 grid + 3 recordings, every flag white', t0.entries.length === 35 && t0.entries.every(e => e.flags === 0) && t0.entries[32].key === 3);
-  const t13 = await HL.fetchTable(l);
-  check('the 13-byte form still answers, flags 0', t13.entries.length === 35 && t13.entries[1].start === t0.entries[1].start && t13.entries[32].flags === 0);
+  check('the table: 32 grid + 3 recordings, every flag white', t0.entries.length === 35 && t0.entries.every(e => e.flags === 0) && t0.entries[32].key === 3);
   const gen0 = s0.tableGen;
   /* SET_BOUNDARY: ok with the gen, refetch shows the linked move and the orange flag; the state's tableGen follows */
   let r = await HL.editBoundary(l, 5, 5 * SL - 1000, gen0);
@@ -649,19 +609,6 @@ await link.start();
   check('a full table: the refusal does not bump tableGen', (await HL.editAdd(l, null, 0, 4800)).status === 3 && (await state()).tableGen === gFull);
   check('TOMBSTONE frees a slot: the next ADD takes it', (await HL.editTombstone(l, 40)).ok && (await HL.editAdd(l, null, 0, 4800)).newIdx === 40 && (await state()).nTable === DEMO.MAX_TABLE);
   await l.close();
-  /* an older firmware (noedit): no capability, the 13-byte table whatever is asked, the 255-byte body, ops unknown */
-  const o = new DEMO.FakeDevice({ kit: true, nSlices: 32, latencyMs: 1, edit: false });
-  const ol = new HL.Link(new DEMO.FakePort(o)); await ol.start();
-  const oi = await HL.hello(ol); const od = await HL.getDescriptor(ol, oi);
-  check('noedit: no "edit" capability, sets still there', od.audiothurgist.edit === undefined && od.audiothurgist.sets === 1);
-  const os = await state.call(null).catch(() => null) || HL.parseState(await ol.request(HL.CMD.state));
-  const os2 = HL.parseState(await ol.request(HL.CMD.state));
-  check('noedit: the 255-byte body — no tableGen, no srcPos, the set name still parses', os2.tableGen === undefined && os2.srcPos === undefined && os2.setName === '' && os2.keySlice.length === 24);
-  const raw = await ol.request(HL.CMD.table, Uint8Array.of(0, 39, 1));
-  check('noedit: form 1 is ignored — 13-byte entries', (raw.length - 3) % 13 === 0 && (raw.length - 3) / 13 === 35);
-  check('noedit: the page\'s 13-byte fetch parses it', (await HL.fetchTable(ol)).entries.length === 35);
-  check('noedit: ACTION 16 / 27 / 29 / 30 / 31 → BAD_ARGS (unknown op)', (await HL.editBoundary(ol, 5, 100)).status === 2 && (await HL.audition(ol, 0, 100)).status === 2 && (await HL.tapMark(ol, 10, 20)).status === 2 && (await HL.editUndo(ol)).status === 2 && (await HL.editRedo(ol)).status === 2);
-  await ol.close();
 
   /* ── EDIT-UNDO (docs/packages/slice-edit-undo.md): ACTION 30 / 31 against the fake's journal — every op undone restores
    * the 14-byte table and the key map byte for byte, redo re-applies, a new op clears the redo half, the ring holds 64,
@@ -670,10 +617,10 @@ await link.start();
     const u = new DEMO.FakeDevice({ kit: true, nSlices: 32, latencyMs: 1 });
     const ul = new HL.Link(new DEMO.FakePort(u)); await ul.start(); await HL.hello(ul);
     const ustate = async () => HL.parseState(await ul.request(HL.CMD.state));
-    /* the raw form-1 table plus the key map, as one string */
-    const snap = async () => { const t = await HL.fetchTable(ul, { edit: true }); const st = await ustate(); return JSON.stringify([t.nSlices, t.nTable, t.entries, Array.from(st.keySlice)]); };
+    /* the table plus the key map, as one string */
+    const snap = async () => { const t = await HL.fetchTable(ul); const st = await ustate(); return JSON.stringify([t.nSlices, t.nTable, t.entries, Array.from(st.keySlice)]); };
     let st = await ustate();
-    check('undo tail: a 263-byte body, both depths 0; UNDO / REDO on an empty journal → BAD_ARGS, gen untouched', st.undoDepth === 0 && st.redoDepth === 0 && (await HL.editUndo(ul)).status === 2 && (await HL.editRedo(ul)).status === 2 && (await ustate()).tableGen === st.tableGen);
+    check('undo: both depths 0; UNDO / REDO on an empty journal → BAD_ARGS, gen untouched', st.undoDepth === 0 && st.redoDepth === 0 && (await HL.editUndo(ul)).status === 2 && (await HL.editRedo(ul)).status === 2 && (await ustate()).tableGen === st.tableGen);
     let steps = 0;
     const roundTrip = async (name, fn) => {
       const before = await snap(); const g0 = (await ustate()).tableGen;
@@ -734,21 +681,16 @@ await link.start();
       check('…the next op restarts it at 1', (await HL.editSetKey(ul, 0, 2)).ok && (await ustate()).undoDepth === 1); }
     await ul.close();
   }
-  void os;
-  await ol.close();
 }
 
-/* ── 7b. KEYS (v0.13): the tail from 263, ACTION 32..36 and the v0.13 TAP_MARK over the fake module — the transport
- *        (SET_MUTE), the pads (PLAY_KEY), markers → keys, clear markers, the autoslice count (nested draws, re-roll,
- *        undo), Pads' keys following the markers, Play's loop, the jack map following the grammar, and a 0.12 firmware ── */
+/* ── 7b. KEYS: the state's bytes from 263, ACTION 32..36 and TAP_MARK over the fake module — the transport (SET_MUTE),
+ *        the pads (PLAY_KEY), markers → keys, clear markers, the autoslice count (nested draws, re-roll, undo), Pads'
+ *        keys following the markers, Play's loop, the jack map following the grammar ── */
 {
-  const k0 = HL.parseState(stateBody(263)); check('state 263: no KEYS tail', k0.srcValid === undefined && k0.loadAvg === undefined && k0.keyFlash === undefined);
-  check('state 275: one short of the KEYS tail', HL.parseState(stateBody(275)).srcValid === undefined);
-  const k1 = HL.parseState(stateBody(276));
-  check('state 276: flags2 (srcValid, keys follow), load avg / max ‰, J4 −250 mV → key 0, J5 255 → −1 (Brain map), no key flash, keySeq, autoK, nMarkers',
+  const k1 = HL.parseState(stateBody());
+  check('state: flags2 (srcValid, keys follow), load avg / max ‰, J4 −250 mV → key 0, J5 255 → −1 (Brain map), no key flash, keySeq, autoK, nMarkers',
     k1.srcValid === true && k1.keysFollow === true && k1.loadAvg === 412 && k1.loadMax === 905 && k1.j4mV === -250 && k1.j4Key === 0 && k1.j5Style === -1 && k1.keyFlash === -1 && k1.keySeq === 17 && k1.autoK === 12 && k1.nMarkers === 5 && k1.redoDepth === 2);
-  { const b = stateBody(276); b[263] = 0; b[272] = 9; b[271] = 4; const s = HL.parseState(b); check('state 276: flags clear, key 9 flashed, style 4', s.srcValid === false && s.keysFollow === false && s.keyFlash === 9 && s.j5Style === 4); }
-  check('state 300: a longer body still parses the KEYS tail', HL.parseState(stateBody(300)).nMarkers === 5);
+  { const b = stateBody(); b[263] = 0; b[272] = 9; b[271] = 4; const s = HL.parseState(b); check('state: flags clear, key 9 flashed, style 4', s.srcValid === false && s.keysFollow === false && s.keyFlash === 9 && s.j5Style === 4); }
   check('ACT: the KEYS ops 32..36', HL.ACT.playKey === 32 && HL.ACT.keysFromMarkers === 33 && HL.ACT.clearMarkers === 34 && HL.ACT.setMute === 35 && HL.ACT.autoslice === 36 && HL.KEYS.styles.length === 9);
 
   const SL = DEMO.SLICE_LEN;
@@ -756,10 +698,10 @@ await link.start();
   const l = new HL.Link(new DEMO.FakePort(d)); await l.start();
   const info = await HL.hello(l); const desc = await HL.getDescriptor(l, info);
   const state = async () => HL.parseState(await l.request(HL.CMD.state));
-  const table = () => HL.fetchTable(l, { edit: true });
+  const table = () => HL.fetchTable(l);
   const nap = ms => new Promise(res => setTimeout(res, ms));
   let s = await state(), r, t;
-  check('hello: the beta version, a 276-byte body, caps edit 2 + keys 1', info.fw === DEMO.FW && info.fw === '0.13.0-beta-demo' && HL.caps(desc).keys === 1 && HL.caps(desc).edit === 2 && s.nMarkers === 0 && s.srcValid === true && s.loadAvg > 0 && s.loadMax >= s.loadAvg);
+  check('hello: the beta version; no markers, something sounds, the load meter', info.fw === DEMO.FW && info.fw === '0.13.0-beta-demo' && s.nMarkers === 0 && s.srcValid === true && s.loadAvg > 0 && s.loadMax >= s.loadAvg);
   /* the transport */
   r = await HL.setMute(l, true); s = await state();
   check('SET_MUTE 1: stopped (flags b0), nothing sounds → srcValid clear', r.ok && s.muted === true && s.srcValid === false);
@@ -844,18 +786,9 @@ await link.start();
   check('Play: ACTION 13 clears the loop', s.looperEvents === 0 && Array.from(s.src).slice(0, 32).every(x => x === -1));
   gram(DEMO.GRAM.classic); await l.close();
 
-  /* a 0.12 firmware: no "keys", edit 1, the 263-byte body, ACTION 32..36 unknown, TAP_MARK taken whatever sounds */
-  const o = new DEMO.FakeDevice({ kit: true, nSlices: 32, latencyMs: 1, keys: false });
-  const ol = new HL.Link(new DEMO.FakePort(o)); await ol.start();
-  const oi = await HL.hello(ol), od = await HL.getDescriptor(ol, oi), ob = await ol.request(HL.CMD.state); const os = HL.parseState(ob);
-  check('0.12 firmware: edit 1, no keys, its version, the 263-byte body (no KEYS tail)', HL.caps(od).keys === 0 && HL.caps(od).edit === 1 && oi.fw === '0.12.3-demo' && ob.length === 263 && os.srcValid === undefined && os.redoDepth === 0);
-  check('0.12 firmware: ACTION 32..36 → BAD_ARGS', (await HL.playKey(ol, 1, true)).status === 2 && (await HL.keysFromMarkers(ol)).status === 2 && (await HL.clearMarkers(ol)).status === 2 && (await HL.setMute(ol, true)).status === 2 && (await HL.autoslice(ol, 4)).status === 2);
-  o.muted = true; r = await HL.tapMark(ol, 10, 0); const r2 = await HL.tapMark(ol, 10, 0);
-  check('0.12 firmware: TAP_MARK taken while stopped, and two taps stack (the old behaviour), a three-byte reply', r.ok && r2.ok && r2.newIdx !== r.newIdx && r.flags === 0);
-  await ol.close();
 }
 
-/* ── 7c. CARD (0x67, capability "card": 1): the WAV encoder, the name rule, the plan, the 276.. tail, then the upload
+/* ── 7c. CARD (0x67): the WAV encoder, the name rule, the plan, the state's bytes from 276, then the upload
  *        sequencer, the refusals, the serialiser and the copy over the fake module ── */
 {
   /* the encoder, read back byte by byte */
@@ -885,12 +818,12 @@ await link.start();
   check('the chunk fits max_body with its 9-byte header (1024 and 512)', HL.CARD.chunkFor(1024) + 9 <= 1024 && HL.CARD.chunkFor(512) + 9 <= 512 && HL.CARD.chunkFor(1024) >= 900);
 
   /* the tail, synthetic */
-  const b = stateBody(293); const dvb = new DataView(b.buffer);
+  const b = stateBody(); const dvb = new DataView(b.buffer);
   b[276] = 2; b[277] = 128; b[278] = 8; b[279] = 4; b[280] = 1 | 2 | 4 | 32; dvb.setUint16(281, 12, true); dvb.setUint16(283, 15, true); dvb.setUint16(285, 0, true); b[287] = 255; dvb.setUint16(288, 3, true); dvb.setUint16(290, 9, true); b[292] = 41;
   const sc = HL.parseState(b).card;
-  check('state 293: the card tail (state, progress, result, seq, flags, counts, lastIdx −1, copied / skipped, nFiles)', sc && sc.state === 2 && HL.CARD.STATE[sc.state] === 'writing' && sc.progress === 128 && HL.CARD.RESULT[sc.result] === 'already on the card' && sc.seq === 4
+  check('state: the card (state, progress, result, seq, flags, counts, lastIdx −1, copied / skipped, nFiles)', sc && sc.state === 2 && HL.CARD.STATE[sc.state] === 'writing' && sc.progress === 128 && HL.CARD.RESULT[sc.result] === 'already on the card' && sc.seq === 4
     && sc.mounted && sc.oldRoot && sc.oldSets && !sc.oldPresets && !sc.hasBreaks && sc.rootWavs === 12 && sc.pending === 15 && sc.breaks === 0 && sc.lastIdx === -1 && sc.copied === 3 && sc.skipped === 9 && sc.nFiles === 41);
-  check('state 276: no card tail (null)', HL.parseState(stateBody(276)).card === null && HL.SET_STATE[3] === 'card');
+  check('a set op\'s state 3 is the card\'s', HL.SET_STATE[3] === 'card');
 
   /* over the fake: the upload */
   const d = new DEMO.FakeDevice({ latencyMs: 1 });
@@ -899,7 +832,7 @@ await link.start();
   const state = async () => HL.parseState(await l.request(HL.CMD.state));
   const settle = async seq0 => { for (let i = 0; i < 200; i++) { const s = await state(); if (s.card.seq !== seq0 && s.card.state === 0) return s; d.cardOp.t -= 200; await new Promise(r => setTimeout(r, 5)); } return null; };
   let s = await state();
-  check('card: "card": 1, a 293-byte body, a mounted card with the four breaks, nothing old', HL.caps(desc).card === 1 && s.card && s.card.mounted && s.card.breaks === 4 && s.card.pending === 0 && !s.card.oldRoot && s.card.state === 0 && s.card.lastIdx === -1);
+  check('card: a mounted card with the four breaks, nothing old', s.card.mounted && s.card.breaks === 4 && s.card.pending === 0 && !s.card.oldRoot && s.card.state === 0 && s.card.lastIdx === -1);
   check('card list: the module\'s list as it is now', JSON.stringify(await HL.cardList(l)) === JSON.stringify(DEMO.FILES));
   const bodies = []; { const h = d.handle.bind(d); d.handle = (t, x) => { if (t === HL.CMD.card) bodies.push(x.length); return h(t, x); }; }
   const planes = [new Float32Array(48000 * 2).map((_, i) => Math.sin(i / 20) * 0.5), new Float32Array(48000 * 2).map((_, i) => Math.cos(i / 20) * 0.5)];
@@ -969,24 +902,20 @@ await link.start();
   const sn = HL.parseState(await ln.request(HL.CMD.state));
   check('no card: flags 0, NO_CARD for an upload and a copy', sn.card.flags === 0 && !sn.card.mounted && await err(() => HL.uploadBreak(ln, 'x', wav2)) === 'NO_CARD' && await err(() => HL.copyOldCard(ln)) === 'NO_CARD');
   await ln.close();
-  const of = new DEMO.FakeDevice({ latencyMs: 1, tail: 276 }), lf = new HL.Link(new DEMO.FakePort(of)); await lf.start(); const iof = await HL.hello(lf);
-  const sf = HL.parseState(await lf.request(HL.CMD.state)), cf = HL.caps(await HL.getDescriptor(lf, iof));
-  check('a firmware before the card work: no "card", a 276-byte body (card null), 0x67 UNSUPPORTED', cf.card === 0 && cf.keys === 1 && sf.card === null && await err(() => HL.cardList(lf)) === 'UNSUPPORTED');
-  await lf.close();
 }
 
-/* ── 7d. PADS (0x68, capability "pads": 1): the tail from 293, the plan and the PCM16 encoder, then a drop over the fake
+/* ── 7d. PADS (0x68): the state's bytes from 293, the plan and the PCM16 encoder, then a drop over the fake
  *        module byte for byte, one undo step, a replaced pad held, every refusal both ways (a card job or a load while a
  *        drop is open), the abort and the 5 s timeout, New empty kit, and a pads-only kit end to end through a set save,
  *        a power-cycle and the load back ── */
 {
   /* the tail, synthetic */
-  const b = stateBody(315); const dvb = new DataView(b.buffer);
+  const b = stateBody(); const dvb = new DataView(b.buffer);
   b[293] = 1; b[294] = 64; b[295] = 1; b[296] = 7; b[297] = 5; b[298] = 1 | 2; dvb.setUint32(299, 1234567, true); dvb.setUint32(303, 2148000, true); dvb.setUint32(307, 9600, true); dvb.setUint32(311, 0x800021, true);
   const sp = HL.parseState(b).pads;
-  check('state 315: the pads tail (state, progress, result, seq, key, flags, free, total, held, the pads\' mask)', sp && HL.PADS.STATE[sp.state] === 'receiving' && sp.progress === 64 && HL.PADS.RESULT[sp.result] === 'no room' && sp.seq === 7 && sp.key === 5
+  check('state: the pads (state, progress, result, seq, key, flags, free, total, held, the pads\' mask)', sp && HL.PADS.STATE[sp.state] === 'receiving' && sp.progress === 64 && HL.PADS.RESULT[sp.result] === 'no room' && sp.seq === 7 && sp.key === 5
     && sp.unsaved && sp.noBreak && !sp.madeStereo && sp.free === 1234567 && sp.total === 2148000 && sp.held === 9600 && sp.mask === 0x800021, JSON.stringify(sp));
-  check('state 293: no pads tail (null); 255 → key −1', HL.parseState(stateBody(293)).pads === null && (b[297] = 255, HL.parseState(b).pads.key === -1));
+  check('state: pads key 255 → −1', (b[297] = 255, HL.parseState(b).pads.key === -1));
   /* the plan and the encoder */
   const q1 = HL.padPlan(2, 44100, 44100 * 3, null), q2 = HL.padPlan(6, 48000, 48000, 12000), q3 = HL.padPlan(1, 96000, 96000, 300);
   check('padPlan: 3 s at 44.1 → 144000 frames at 48 k, stereo, uncut; 6 channels → 2, cut to the room; under 480 frames: too short', q1.frames === 144000 && q1.channels === 2 && !q1.cut && q1.resample && q1.bytes === 144000 * 4
@@ -1004,7 +933,7 @@ await link.start();
   const settle = async seq0 => { for (let i = 0; i < 200; i++) { const s = await state(); if (s.pads.seq !== seq0 && s.pads.state === 0) return s; d.padOp.t -= 500; await new Promise(r => setTimeout(r, 5)); } return null; };
   const err = async f => { try { await f(); return 'ok'; } catch (e) { return e.message; } };
   let s = await state();
-  check('pads: "pads": 1, a 315-byte body, the 45 s planes, a 4 s break: 41 s for pads, nothing held, nothing unsaved', HL.caps(desc).pads === 1 && s.pads && s.bufCap === 45 * 48000 && s.pads.total === 45 * 48000 - s.bufLen && s.pads.free === s.pads.total && s.pads.held === 0 && !s.pads.unsaved && !s.pads.noBreak && s.pads.mask === 0);
+  check('pads: the 45 s planes, a 4 s break: 41 s for pads, nothing held, nothing unsaved', s.bufCap === 45 * 48000 && s.pads.total === 45 * 48000 - s.bufLen && s.pads.free === s.pads.total && s.pads.held === 0 && !s.pads.unsaved && !s.pads.noBreak && s.pads.mask === 0);
   const bodies = []; { const h = d.handle.bind(d); d.handle = (t, x) => { if (t === HL.CMD.pads) bodies.push(x.length); return h(t, x); }; }
   const L1 = new Float32Array(30000).map((_, i) => Math.sin(i / 9) * 0.6), pcm1 = HL.encodePcm16([L1]), prog = [];
   let polls = 0; const poller = setInterval(() => { l.request(HL.CMD.state, undefined, { key: 'state' }).then(() => polls++, () => {}); }, 20);
@@ -1099,17 +1028,12 @@ await link.start();
   const q9 = y.pads.seq; await HL.uploadPad(l2, 9, 1, HL.encodePcm16([new Float32Array(2400).fill(0.2)])); for (let i = 0; i < 100 && ((y = await st2()).pads.seq === q9 || y.pads.state); i++) { e2.padOp.t -= 500; }
   check('a drop after the load: unsaved again (the card holds the kit as it was)', y.pads.unsaved && y.pads.mask === 0b1000000101);
   await l2.close();
-  /* a firmware before the pads work */
-  const of = new DEMO.FakeDevice({ latencyMs: 1, tail: 293 }), lf = new HL.Link(new DEMO.FakePort(of)); await lf.start(); const iof = await HL.hello(lf);
-  const sf = HL.parseState(await lf.request(HL.CMD.state)), cf = HL.caps(await HL.getDescriptor(lf, iof));
-  check('a firmware before the pads work: no "pads", a 293-byte body (pads null), 0x68 UNSUPPORTED', cf.pads === 0 && cf.card === 1 && sf.pads === null && sf.card !== null && await err(() => HL.newKit(lf)) === 'UNSUPPORTED');
-  await lf.close();
 }
 
-/* ── 7e. KEYP (ACTION 37 + 0x69, capability "keyp": 1): every key neutral to begin with, KEY_PARAMS and its refusals,
+/* ── 7e. KEYP (ACTION 37 + 0x69): every key neutral to begin with, KEY_PARAMS and its refusals,
  *        GET_KEYS, one undo step per edit, a drag's joined sends one step (a join for another key a step of its own),
  *        a key's own Plays on PLAY_KEY (Held, Loop, Ratchet hold; One-shot does not), a set save / load carrying the
- *        settings, new material neutral, and a firmware before it ── */
+ *        settings, new material neutral ── */
 {
   const d = new DEMO.FakeDevice({ latencyMs: 1 });
   const l = new HL.Link(new DEMO.FakePort(d)); await l.start();
@@ -1118,7 +1042,7 @@ await link.start();
   const keys = () => HL.fetchKeyParams(l);
   const err = async f => { try { await f(); return 'ok'; } catch (e) { return e.message; } };
   let k = await keys();
-  check('keyp: "keyp": 2 (CHROMA: ≥ 1 is the settings); GET_KEYS: 24 keys, 5 bytes each, every one neutral', HL.caps(desc).keyp === 2 && k.length === 24 && k.every(HL.keypNeutral) && (await l.request(HL.CMD.keys, new Uint8Array(0))).length === 2 + 24 * 5);
+  check('keyp: GET_KEYS: 24 keys, 5 bytes each, every one neutral', k.length === 24 && k.every(HL.keypNeutral) && (await l.request(HL.CMD.keys, new Uint8Array(0))).length === 2 + 24 * 5);
   let s0 = await state();
   let r = await HL.keyParams(l, 3, { gain: -12, cents: 700, plays: 2 });
   k = await keys(); let s = await state();
@@ -1158,26 +1082,19 @@ await link.start();
   d.loadBreak(); d.bumpGen();
   check('new material (a loose break): every key neutral', (await keys()).every(HL.keypNeutral));
   await l.close();
-  /* a firmware before it */
-  const of = new DEMO.FakeDevice({ latencyMs: 1, keyp: false }), lf = new HL.Link(new DEMO.FakePort(of)); await lf.start(); const iof = await HL.hello(lf);
-  const cf = HL.caps(await HL.getDescriptor(lf, iof));
-  check('a firmware before the key settings: no "keyp", 0x69 UNSUPPORTED, ACTION 37 BAD_ARGS', cf.keyp === 0 && cf.pads === 1 && await err(() => HL.fetchKeyParams(lf)) === 'UNSUPPORTED' && (await HL.keyParams(lf, 3, { gain: -2 })).status === 2);
-  await lf.close();
 }
 
-/* ── 7f. CHROMA (ACTION 38 SPREAD_KEYS, capability "keyp": 2): one key's sample on all 24 keys, a semitone a key — the
+/* ── 7f. CHROMA (ACTION 38 SPREAD_KEYS): one key's sample on all 24 keys, a semitone a key — the
  *        tunes, gain and Plays read back, one undo step that puts every key's map and settings back, keep pads, a
- *        spread in place moving nothing, the refusals, a set carrying it, the plan the page asks first, and a firmware
- *        with the settings but before the spread ── */
+ *        spread in place moving nothing, the refusals, a set carrying it, the plan the page asks first ── */
 {
   const d = new DEMO.FakeDevice({ latencyMs: 1, kit: true });   /* the kit: recordings on D♯1 (3), G1 (7), D2 (14) */
   const l = new HL.Link(new DEMO.FakePort(d)); await l.start();
   const info = await HL.hello(l), desc = await HL.getDescriptor(l, info);
   const state = async () => HL.parseState(await l.request(HL.CMD.state));
   const keys = () => HL.fetchKeyParams(l);
-  const table = async () => HL.fetchTable(l, { edit: true });
+  const table = async () => HL.fetchTable(l);
   const snap = async () => JSON.stringify({ k: await keys(), m: Array.from((await state()).keySlice) });
-  check('chroma: "keyp": 2', HL.caps(desc).keyp === 2);
   await HL.keyParams(l, 3, { gain: -12, cents: 30, plays: 2 });   /* the root: −6 dB, +30 cents, Held */
   await HL.keyParams(l, 11, { gain: 6, cents: -500, plays: 1 });
   let s0 = await state(); const before = await snap(), tb = await table(), t = s0.keySlice[3];
@@ -1212,11 +1129,6 @@ await link.start();
   await HL.editUndo(l);
   check('Load set: the spread comes back (the map and every tune)', !!(await setOp(HL.loadSet, 'chroma_kit')) && await snap() === want);
   await l.close();
-  /* a firmware with the settings but before the spread */
-  const of = new DEMO.FakeDevice({ latencyMs: 1, spread: false }), lf = new HL.Link(new DEMO.FakePort(of)); await lf.start(); const iof = await HL.hello(lf);
-  const cf = HL.caps(await HL.getDescriptor(lf, iof));
-  check('a firmware before SPREAD_KEYS: "keyp": 1, ACTION 38 BAD_ARGS', cf.keyp === 1 && (await HL.spreadKeys(lf, 3)).status === 2);
-  await lf.close();
 }
 
 /* ── 8. EDIT-UI: the pure editor (edit.js) — magnets, clamps, handles, positions, labels, the drop rule, the onset
@@ -1309,20 +1221,19 @@ const ED = require('./edit.js');
   const l = new HL.Link(new DEMO.FakePort(d)); await l.start(); await HL.hello(l);
   const sent = []; const req0 = l.request.bind(l); l.request = (type, body, o) => { if (type === HL.CMD.action) sent.push(Array.from(body)); return req0(type, body, o); };
   const Hh = { table: null, st: null, hits: null, view: { a: 0, b: 1 }, status: [], redraws: 0, menus: [], answer: null, dropKey: -1, sel: -1, fit: null, plans: [] };
-  const refetch = async () => { Hh.st = HL.parseState(await l.request(HL.CMD.state)); Hh.table = await HL.fetchTable(l, { edit: true }); Hh.hits = await HL.fetchHits(l); };
+  const refetch = async () => { Hh.st = HL.parseState(await l.request(HL.CMD.state)); Hh.table = await HL.fetchTable(l); Hh.hits = await HL.fetchHits(l); };
   await refetch(); Hh.view.a = 0; Hh.view.b = Hh.st.bufLen;
   let clock = 0; const timers = []; const now = () => clock;
   const setTimer = (f, ms) => { const id = { f, at: clock + ms }; timers.push(id); return id; }, clearTimer = id => { const i = timers.indexOf(id); if (i >= 0) timers.splice(i, 1); };
   const fire = () => { for (const t of timers.splice(0)) if (t.at <= clock) t.f(); else timers.push(t); };
-  let editOk = true;
   const ed = new ED.Editor({ link: () => l, view: Hh.view, now, setTimer, clearTimer, gesture: { holdMs: 60, dblMs: 200 },
-    ctx: () => ({ table: Hh.table, st: Hh.st, hits: Hh.hits, sampleAt: null, editOk, tapAllowMs: 40 }),
+    ctx: () => ({ table: Hh.table, st: Hh.st, hits: Hh.hits, sampleAt: null, tapAllowMs: 40 }),
     cb: { redraw: () => Hh.redraws++, status: (m, k) => Hh.status.push(m), select: t => { Hh.sel = t; }, refetch,
       setView: (a, b) => { Hh.view.a = Math.round(a); Hh.view.b = Math.round(b); }, zoomView: (f, at) => { const s = (Hh.view.b - Hh.view.a) * f; Hh.view.a = Math.round(at - (at - Hh.view.a) * f); Hh.view.b = Hh.view.a + Math.round(s); },
       fitEntry: t => { Hh.fit = t; }, menu: (items, x, y, t) => Hh.menus.push({ items, t }), choose: async plan => { Hh.plans.push(plan); return Hh.answer || plan.def; }, dropTarget: () => Hh.dropKey } });
   const W = 600, HH = 290, px = p => p / Hh.st.bufLen * W;
   const L = ed.layout(W, HH);
-  check('layout: wave / a 44 px handle row / the strip', L.edit && L.wave[1] === 200 && L.handles[0] === 200 && L.handles[1] === 244 && L.strip[0] === 244 && ed.zoneAt(100, L) === 'wave' && ed.zoneAt(220, L) === 'handles' && ed.zoneAt(260, L) === 'strip');
+  check('layout: wave / a 44 px handle row / the strip', L.wave[1] === 200 && L.handles[0] === 200 && L.handles[1] === 244 && L.strip[0] === 244 && ed.zoneAt(100, L) === 'wave' && ed.zoneAt(220, L) === 'handles' && ed.zoneAt(260, L) === 'strip');
   const P = (kind, id, x, y, extra = {}) => ed.pointer(kind, Object.assign({ id, x, y, w: W, h: HH, t: clock, cx: x, cy: y }, extra));
   const settle = async () => { for (let i = 0; i < 50 && (ed.busy || ed.pending); i++) { await ed.pending; ed.pending = null; } };
   /* select by a tap on a handle: an audition of that slice */
@@ -1468,15 +1379,6 @@ const ED = require('./edit.js');
   ed.select(4); Hh.fit = null; P('down', 1, 100, 260); clock += 20; P('up', 1, 100, 260); clock += 50; P('down', 1, 100, 260); clock += 20; P('up', 1, 100, 260);
   check('strip double-tap = fit the selected slice', Hh.fit === 4);
   Hh.view.a = 0; Hh.view.b = span0; ed.wheel(300, W, -100); check('wheel up = zoom in', Hh.view.b - Hh.view.a < span0);
-  /* an older firmware: the wave alone, drag = pan, tap = select, no split, no handles */
-  editOk = false; const L0 = ed.layout(W, 180); ed.select(-1);
-  check('noedit layout: no handle row, the whole canvas pans', !L0.edit && L0.wave[1] === 180 && L0.handles[0] === L0.handles[1] && L0.strip[0] === L0.strip[1] && ed.zoneAt(170, L0) === 'wave' && ed.zoneAt(20, L0) === 'wave');
-  sent.length = 0; Hh.view.a = 0; Hh.view.b = span0; const mx = px(Hh.table.entries[m1].start + 1000);
-  P('down', 1, mx, 90, { h: 180 }); clock += 10; P('move', 1, mx + 30, 90, { h: 180 }); P('up', 1, mx + 30, 90, { h: 180 });
-  check('noedit: a drag on the wave pans, no drag-to-key', Hh.view.a < 0 && !ed.drag);
-  Hh.view.a = 0; Hh.view.b = span0; P('down', 1, mx, 90, { h: 180 }); clock += 20; P('up', 1, mx, 90, { h: 180 }); await settle();
-  check('noedit: a tap inside a marker selects, never splits', ed.selT === m1 && !sent.some(b => b[0] === 19));
-  check('noedit: no handles are offered from the wave', ed.tagAt(px(5 * SL), 170, W, 180).h === null);
   await l.close();
 }
 
@@ -1484,8 +1386,9 @@ const ED = require('./edit.js');
  *        says what the module says, and it had drifted far (five grammars of seven, an 18-byte Options block of 24,
  *        every default 0). This reads src/audiothurgist.cpp — the Options block's Describe (ids, names, offsets,
  *        zones, the enum labels from each k…Disp string), its size and schema hash, the live defaults (Serialize's
- *        byte → struct, the struct's initialiser), the jacks, the pager's knobs and the descriptor root's
- *        capabilities — and fails on any difference. String parsing, deliberately: no build step. ── */
+ *        byte → struct, the struct's initialiser), the jacks, the pager's knobs and the descriptor root (the "api" the
+ *        page checks: the firmware's, the fake's and HL.API agree) — and fails on any difference. String parsing,
+ *        deliberately: no build step. ── */
 function firmwareDescriptor(cpp) {
   const unC = lit => lit.replace(/\\(["\\])/g, '$1');
   const disp = {};
@@ -1509,8 +1412,8 @@ function firmwareDescriptor(cpp) {
   const knob = {}; for (const m of cpp.matchAll(/VirtualKnob\s+(\w+)\s*=\s*VirtualKnob\(\w+,\s*"([^"]+)"\)[\s\S]*?\.Ident\("([^"]+)"\)/g)) knob[m[1]] = { name: m[2], id: m[3] };
   const pages = [...cpp.matchAll(/Page\s+\w+\s*=\s*Page\((\d+)\)\.Name\("([^"]+)"\)[\s\S]*?\.Knobs\(([^)]*)\)/g)].map(m => ({ page: +m[1], name: m[2], knobs: m[3].split(',').map(x => knob[x.trim()] || null) }));
   const root = cpp.match(/return\s+"(\\"audiothurgist\\":\{(?:[^"\\]|\\.)*\})";/);
-  const caps = root ? JSON.parse('{' + unC(root[1]) + '}').audiothurgist : null;
-  return { fields, size, hash, defaults, jacks, pages, caps };
+  const rootObj = root ? JSON.parse('{' + unC(root[1]) + '}').audiothurgist : null;
+  return { fields, size, hash, defaults, jacks, pages, root: rootObj };
 }
 function parityDiffs(fw, demoDesc, demoDefaults) {
   const out = [], opt = demoDesc.components.find(c => c.id === 'options'), pager = demoDesc.components.find(c => c.kind === 'pager');
@@ -1533,36 +1436,36 @@ function parityDiffs(fw, demoDesc, demoDefaults) {
     if (pager.pageNames[pg.page] !== pg.name) out.push(`page ${pg.page}: demo ${pager.pageNames[pg.page]}, firmware ${pg.name}`);
     pg.knobs.forEach((k, pot) => { const d = pager.fields.find(f => f.page === pg.page && f.pot === pot); if (!k || !d || d.id !== k.id || d.name !== k.name) out.push(`knob ${pg.page}:${pot}: demo ${d && d.id + '/' + d.name}, firmware ${k && k.id + '/' + k.name}`); });
   }
-  /* capabilities: every one the firmware declares, at least as high in the demo (the demo may run ahead of a firmware
-   * still being built — v0.13's "keys" and "edit": 2 — and says so below; behind it, or different, is drift) */
-  for (const [k, v] of Object.entries(fw.caps || {})) { const dv = demoDesc.audiothurgist[k]; if (dv == null || (k === 'edit' || k === 'keys' || k === 'scope2' ? dv < v : dv !== v)) out.push(`capability ${k}: demo ${dv}, firmware ${v}`); }
-  if (!fw.caps) out.push('the descriptor root (DescriptorRootJson) did not parse');
+  /* the descriptor root: the one number the page checks on connect */
+  if (!fw.root) out.push('the descriptor root (DescriptorRootJson) did not parse');
+  else {
+    if (JSON.stringify(fw.root) !== JSON.stringify(demoDesc.audiothurgist)) out.push(`descriptor root: demo ${JSON.stringify(demoDesc.audiothurgist)}, firmware ${JSON.stringify(fw.root)}`);
+    if (fw.root.api !== HL.API) out.push(`api: firmware ${fw.root.api}, the page (HL.API) ${HL.API}`);
+  }
   return out;
 }
 {
   const fArg = process.argv.indexOf('--fw-src'), cppPath = fArg > 0 ? path.resolve(process.argv[fArg + 1]) : path.resolve(here, '..', 'src', 'audiothurgist.cpp');
   if (!existsSync(cppPath)) console.log('parity: skipped (no ' + cppPath + ')');
   else {
-    const cpp = readFileSync(cppPath, 'utf8'), fw = firmwareDescriptor(cpp), dd = DEMO.buildDescriptor(true, true), defs = DEMO.OPTION_FIELDS.map(f => f[3]);
-    check('parity: the firmware source parses — 24 Options fields with labels, size, hash, defaults, ten jacks, two pages of six knobs, the root caps',
-      fw.fields.length === 24 && fw.fields.every(f => Array.isArray(f.labels)) && fw.size === 24 && fw.hash === 0x4F505438 && fw.defaults.length === 24 && fw.defaults.every(v => Number.isInteger(v)) && fw.jacks.length === 10 && fw.pages.length === 2 && fw.pages.every(p => p.knobs.length === 6 && p.knobs.every(Boolean)) && !!fw.caps,
-      JSON.stringify({ n: fw.fields.length, size: fw.size, hash: fw.hash, d: fw.defaults, j: fw.jacks.length, p: fw.pages.length, caps: fw.caps }).slice(0, 300));
+    const cpp = readFileSync(cppPath, 'utf8'), fw = firmwareDescriptor(cpp), dd = DEMO.buildDescriptor(), defs = DEMO.OPTION_FIELDS.map(f => f[3]);
+    check('parity: the firmware source parses — 25 Options fields with labels, size, hash, defaults, ten jacks, two pages of six knobs, the root',
+      fw.fields.length === 25 && fw.fields.every(f => Array.isArray(f.labels)) && fw.size === 25 && fw.hash === 0x4F505439 && fw.defaults.length === 25 && fw.defaults.every(v => Number.isInteger(v)) && fw.jacks.length === 10 && fw.pages.length === 2 && fw.pages.every(p => p.knobs.length === 6 && p.knobs.every(Boolean)) && !!fw.root,
+      JSON.stringify({ n: fw.fields.length, size: fw.size, hash: fw.hash, d: fw.defaults, j: fw.jacks.length, p: fw.pages.length, root: fw.root }).slice(0, 300));
     const diffs = parityDiffs(fw, dd, defs);
-    check('parity: demo.js = the firmware (fields, labels, offsets, zones, defaults, jacks, knobs, caps)', diffs.length === 0, diffs.slice(0, 6).join(' · '));
-    const ahead = Object.keys(dd.audiothurgist).filter(k => fw.caps && JSON.stringify(dd.audiothurgist[k]) !== JSON.stringify(fw.caps[k]));
-    if (ahead.length) console.log('parity: the demo runs ahead of this firmware on ' + ahead.map(k => `${k} (${fw.caps[k] ?? 'absent'} → ${dd.audiothurgist[k]})`).join(', ') + ' — v0.13, being built beside it');
-    const live = new DEMO.FakeDevice({ latencyMs: 1 }).options;
-    check('parity: the fake\'s live blob starts at the firmware\'s defaults', Array.from(live).join() === fw.defaults.join());
-    /* the check must bite: one changed label, one moved byte, one default, one missing jack each fail it */
-    const bite = [['Zoom (read on, BreakFix)', 'Zoom (read on)'], ['"quantize", "Quantize", 21', '"quantize", "Quantize", 22'], ['static Sel gTail = {3};', 'static Sel gTail = {2};'], ['Jack jk10("out_r"', 'Jack jk10("out_x"']]
+    check('parity: demo.js = the firmware (fields, labels, offsets, zones, defaults, jacks, knobs, the root\'s api = the page\'s)', diffs.length === 0, diffs.slice(0, 6).join(' · '));
+    const live = new DEMO.FakeDevice({ latencyMs: 1 }).options, want = fw.defaults.slice(); want[DEMO.O['start.in']] = 1;
+    check('parity: the fake\'s live blob starts at the firmware\'s defaults (Start In As saved: the fake\'s default boot)', Array.from(live).join() === want.join());
+    /* the check must bite: one changed label, one moved byte, one default, one missing jack, another api each fail it */
+    const bite = [['Zoom (read on, BreakFix)', 'Zoom (read on)'], ['"quantize", "Quantize", 21', '"quantize", "Quantize", 22'], ['static Sel gTail = {3};', 'static Sel gTail = {2};'], ['Jack jk10("out_r"', 'Jack jk10("out_x"'], ['\\"api\\":' + HL.API + '}', '\\"api\\":' + (HL.API + 1) + '}']]
       .map(([x, y]) => cpp.includes(x) ? parityDiffs(firmwareDescriptor(cpp.replace(x, y)), dd, defs).length : -1);
-    check('parity: the check bites — a changed label, a moved byte, a changed default and a renamed jack each fail it', bite.every(n => n > 0), JSON.stringify(bite));
+    check('parity: the check bites — a changed label, a moved byte, a changed default, a renamed jack and another api each fail it', bite.every(n => n > 0), JSON.stringify(bite));
   }
 }
 
 /* ── 9. EDIT-UI, the page itself: index.html's inline script under a DOM stub, connected to the fake module through
  *       `?demo=kit`, then the DOM paths driven with synthetic pointer events — the handle drag from the canvas, the
- *       key cells' tap / drag / swap prompt, the Chop pad, the field, and `?demo=noedit`'s view-only fallback ── */
+ *       key cells' tap / drag / swap prompt, the Chop pad, the field ── */
 import vm from 'node:vm';
 const ED9 = require('./edit.js');
 /* The page's colour tokens, per theme, from its own <style> (the stub's getComputedStyle and the contrast check) */
@@ -1635,7 +1538,7 @@ async function loadPage(search) {
   check('page: the inline script runs to the end under the stub (no throw), the Kit tab is on', D.errors.length === 0 && G('kitShown') === true, D.errors.join(' | ').slice(0, 300));
   check('page: the table, the hits and the state arrive from the fake', await until(() => G('table && hits && st && st.srcPos != null')), D.errors.concat(D.warns).join(' | ').slice(0, 300));
   await sleep(150);
-  check('page: with "edit" the editor is on — the panel, the field row, the status pill, the 290 px canvas; the 14-byte form was asked for', G('editOk') === true && !G("$('editor').hidden") && !G("$('ed_field').hidden") && G("$('kitwave').style.height") === '290px' && G('table.entries[0].flags') === 0 && G('demoDevice.log').includes(HL.CMD.table));
+  check('page: connected, the editor is on — the panel, the field row, the status pill, the 290 px canvas; the table carries its flags', !G("$('editor').hidden") && !G("$('ed_field').hidden") && G("$('kitwave').style.height") === '290px' && G('table.entries[0].flags') === 0 && G('demoDevice.log').includes(HL.CMD.table));
   check('page: the Tap Allowance option is read from the live blob (40 ms)', G('tapAllowMs()') === 40 && G("$('chop_allow').textContent") === '40 ms');
   check('page: the kit waveform, the histogram and the cells drew without a runtime error', G("$('kitwave')._calls") > 100 && G("$('onsethist')._calls") > 10 && G('keyCells[3].el.className').includes('rec') && D.errors.length === 0, D.errors.join(' | ').slice(0, 300));
   /* a handle drag on the canvas: boundary 5, −15 px */
@@ -1690,18 +1593,7 @@ async function loadPage(search) {
   check('page: keys follow the grid (confirmed, queued behind the nudge\'s reply) → every key on its span', await until(() => { const ks = G('Array.from(demoDevice.keySlice)'); return ks.every((t, k) => t === ED9.spanSlice(k, 32)); }, 6000));
   check('page: no runtime errors or link warnings through all of it', D.errors.length === 0 && !D.warns.some(w => /table|state|hits/.test(w)), D.errors.concat(D.warns).join(' | ').slice(0, 400));
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
-  check('page: disconnect resets the editor and hides the panel', G('editOk') === false && G("$('editor').hidden") === true && G('ed.selT') === -1);
-}
-{
-  const { D, G } = await loadPage('?demo=noedit,kit');
-  check('noedit page: loads, connects', D.errors.length === 0 && await until(() => G('table && st')), D.errors.join(' | ').slice(0, 300));
-  await sleep(120);
-  check('noedit page: no editor — the panel hidden, no field, the 180 px canvas, the 13-byte table, no handles, no Chop', G('editOk') === false && G("$('editor').hidden") === true && G("$('ed_field').hidden") === true && G("$('kitwave').style.height") === '180px' && G('ed.layout(600, 180).edit') === false && G('demoDevice.table[0].flags') === 0 && G('table.entries[32].flags') === 0);
-  const kw = G("$('kitwave')"); kw._h = 180; G('view.a = 0; view.b = st.bufLen'); await sleep(30); const a0 = G('view.a');
-  fireEv(kw, 'pointerdown', { clientX: 300, clientY: 90 }); for (let i = 1; i <= 15; i++) fireEv(kw, 'pointermove', { clientX: 300 - 2 * i, clientY: 90 }); fireEv(kw, 'pointerup', { clientX: 270, clientY: 90 });
-  check('noedit page: a drag on the wave pans, exactly as before; nothing was sent', G('view.a') > a0 && !G('demoDevice.log').slice(-40).some(t => t === HL.CMD.action));
-  check('noedit page: no runtime errors', D.errors.length === 0, D.errors.join(' | ').slice(0, 300));
-  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+  check('page: disconnect resets the editor and hides the panel', !G('link') && G("$('editor').hidden") === true && G('ed.selT') === -1);
 }
 
 /* ── 9b. The revamp, the page itself over `?demo` — every check performs the real gesture through the captured
@@ -1713,7 +1605,7 @@ const spyActs = G => G('(() => { const d = demoDevice, h = d.handle.bind(d); d.a
 const sentAct = (G, ...pre) => G('demoDevice.acts').some(a => pre.every((v, i) => a[i] === v));
 {
   const { D, G } = await loadPage('?demo');
-  check('revamp page: loads and connects to a v0.13 fake — keys on, the pads card shown, seven mode chips', await until(() => G('!!(st && keysOk && table)')) && G("$('padsCard').hidden") === false && G('modeChips.length') === 7 && G('modeChips.filter(c => c.main).length') === 4, D.errors.join(' | ').slice(0, 300));
+  check('revamp page: loads and connects to the fake — the pads card shown, seven mode chips', await until(() => G('!!(st && table)')) && G("$('padsCard').hidden") === false && G('modeChips.length') === 7 && G('modeChips.filter(c => c.main).length') === 4, D.errors.join(' | ').slice(0, 300));
   spyActs(G); await sleep(150);
   /* the transport */
   check('transport: running shows ■ and "playing", BPM steady to one decimal', G("$('t_play').textContent") === '■' && /playing/.test(G("$('t_sub').innerHTML")) && /^\d+\.\d$/.test(G("$('t_bpm').textContent")));
@@ -1803,7 +1695,7 @@ const sentAct = (G, ...pre) => G('demoDevice.acts').some(a => pre.every((v, i) =
   check('Play: Clear, confirmed → ACTION 13', await until(() => sentAct(G, 13)));
   /* Options: regrouped, nothing in Other */
   const grp = G("$('optgroups').children.map(c => c._html)");
-  check('Options: Pattern · Sound · Looper · Jacks & CV · Recording · Editing · Analysis, nothing in "Other"', ['Pattern', 'Sound', 'Looper', 'Jacks &amp; CV', 'Recording', 'Editing', 'Analysis'].every(n => grp.some(h => h.includes(`<h3>${n}</h3>`))) && !grp.some(h => h.includes('Other')) && G('GROUPS.flatMap(g => g[1]).length') === 24);
+  check('Options: Pattern · Sound · Looper · Jacks & CV · Recording · Editing · Analysis · Power-up, nothing in "Other"', ['Pattern', 'Sound', 'Looper', 'Jacks &amp; CV', 'Recording', 'Editing', 'Analysis', 'Power-up'].every(n => grp.some(h => h.includes(`<h3>${n}</h3>`))) && !grp.some(h => h.includes('Other')) && G('GROUPS.flatMap(g => g[1]).length') === 25);
   /* the theme: auto → light, tokens re-read, remembered */
   const darkBg = G("TOK['cv-bg']"); fireEv(G("$('theme')"), 'click', {});
   check('theme toggle: light on the root, the canvas tokens re-read from the CSS, remembered', G("document.documentElement.getAttribute('data-theme')") === 'light' && G("TOK['cv-bg']") === D.themes.light['cv-bg'] && G("TOK['cv-bg']") !== darkBg && G("localStorage.getItem('audiothurgist.theme')") === 'light');
@@ -1820,24 +1712,23 @@ const sentAct = (G, ...pre) => G('demoDevice.acts').some(a => pre.every((v, i) =
   check('unplugged: onClose → disconnected, said as a fault, the readouts cleared (BPM, CPU, J4, pills)', await until(() => G('link') === null) && /went away/.test(G("$('msg').textContent")) && G("$('t_bpm').textContent") === '—' && G("$('cpuText').textContent") === '—' && G("$('jk_key').textContent") === '—' && G("$('modpill').textContent") === 'not connected' && G("$('t_play').disabled") === true && G("$('connect').textContent") === 'Connect');
   check('revamp page: no unknown element ids asked for, no runtime errors', D.unknownIds.size === 0 && D.errors.filter(e => !/draw/.test(e)).length === 0, [...D.unknownIds].join(',') + ' ' + D.errors.join(' | ').slice(0, 300));
 }
-{
-  const { D, G } = await loadPage('?demo=old12');
-  check('0.12 page: connects without "keys" — no pads, no markers box, start / stop still there', await until(() => G('!!(st && editOk)')) && G('keysOk') === false && G("$('padsCard').hidden") === true && (await until(() => G("$('mk_box').hidden") === true)), D.errors.join(' | ').slice(0, 300));
-  spyActs(G); fireEv(G("$('t_play')"), 'click', {});
-  check('0.12 page: ▶/■ sends the toggle (ACTION 2), never SET_MUTE', await until(() => sentAct(G, 2) && G('demoDevice.muted') === true) && !sentAct(G, 35));
-  check('0.12 page: the Chop pad is not guarded (no srcValid in a 263-byte body)', await until(() => G('st.srcValid') === undefined && G("$('chop').disabled") === false && G("$('chop_why').hidden") === true));
-  check('0.12 page: the CPU meter falls back to the diag\'s audio µs (a peak, no average)', await until(() => /^max \d+%$/.test(G("$('cpuText').textContent"))));
-  check('0.12 page: no unknown ids, no runtime errors', D.unknownIds.size === 0 && D.errors.length === 0, D.errors.join(' | ').slice(0, 300));
-  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+{ /* a module built for another page: one plain message, then nothing — no partial mode */
+  const { D, G } = await loadPage('');
+  await G(`(async () => { const d = new DEMO.FakeDevice({ latencyMs: 2, api: HL.API + 1 }); window.__wd = d; demoDevice = d; demoPort = new DEMO.FakePort(d); await connectPort(demoPort, true); })()`);
+  const n = G("$('notice').textContent");
+  check('the wrong firmware: one message (this page needs its own firmware, the module\'s version and API, flash the matching .bin), disconnected, the Connect button back',
+    new RegExp('needs the Audiothurgist firmware it came with \\(page API ' + HL.API + '\\).*0\\.13\\.0-beta-demo \\(API ' + (HL.API + 1) + '\\).*Flash the matching \\.bin').test(n) && G('link') === null && G("$('connect').textContent") === 'Connect' && /wrong firmware/.test(G("$('msg').textContent")), n);
+  check('…nothing past the handshake was asked (no state, no Options, no card list), nothing shown as connected', G('__wd.log').length > 0 && !G('__wd.log').some(t => t === HL.CMD.state || t === HL.CMD.getLive || t === HL.CMD.card) && G("$('padsCard').hidden") === true && G("$('editor').hidden") === true && G('st') === null);
+  check('wrong-firmware page: no runtime errors', D.errors.length === 0, D.errors.join(' | ').slice(0, 300));
 }
 /* ── 9d. CARD, the page itself: the Card panel over `?demo=card` — a file picked (the change event), two dropped at
  *        once (the drop event), each decoded by a stand-in for the browser's decoder, converted, sent, written; the
  *        row's progress, KB/s and result; "Load it now"; the same name again and "Replace it"; then `?demo=oldcard`'s
- *        banner and "Copy them in", and `?demo=nocardfw`'s hidden panel ── */
+ *        banner and "Copy them in" ── */
 {
   const { D, G } = await loadPage('?demo=card');
   check('card page: connects with "card" — the panel and Play\'s "Add breaks…" shown, the list from the module, no banner',
-    await until(() => G('!!(st && st.card && cardOk)')) && G("$('cardCard').hidden") === false && G("$('p_add').hidden") === false && G("$('cardnote').hidden") === true && G('kitShown') === true, D.errors.join(' | ').slice(0, 300));
+    await until(() => G('!!(st && st.card)')) && G("$('cardCard').hidden") === false && G("$('p_add').hidden") === false && G("$('cardnote').hidden") === true && G('kitShown') === true, D.errors.join(' | ').slice(0, 300));
   check('card page: the pill counts the breaks in the folder', await until(() => /4 breaks in Audiothurgist\/breaks/.test(G("$('cd_status').textContent"))), G("$('cd_status').textContent"));
   /* the browser's decoder, stood in: 2 s of stereo at 44.1 kHz (the page converts to 48 k); the name says how long */
   G(`cardDecode = async f => { const secs = /long/.test(f.name) ? 20 : 2, sr = 44100, n = sr * secs; return { numberOfChannels: 2, sampleRate: sr, length: n, getChannelData: c => new Float32Array(n).fill(c ? -0.25 : 0.25) }; }`);
@@ -1851,9 +1742,13 @@ const sentAct = (G, ...pre) => G('demoDevice.acts').some(a => pre.every((v, i) =
   check('…the Sample list re-read from the module (the new break at the end)', G('labels.sample[labels.sample.length - 1]') === 'Think Break (live).wav' && /Think Break \(live\)\.wav/.test(G("$('sample').innerHTML")));
   fireEv(G("cardJobs[0].btns['Load it now']"), 'click', {});
   check('"Load it now": ACTION 6 with the module\'s lastIdx, the fake loads it', await until(() => sentAct(G, HL.ACT.load, 5) && G('demoDevice.file') === 5));
-  /* two dropped at once: one card job at a time, both land; a long one is cut to 17 s */
+  /* two dropped at once: one card job at a time, both land; a long one is cut to 17 s. 17 s of stereo is 3.3 MB, one
+   * ~1000-byte chunk per round trip: at the demo's 6 ms a reply that alone is 20 s of waiting, so the fake answers at
+   * 1 ms for these two (the chunking and the order are what is tested, not the wait) */
+  G('demoDevice.opts.latencyMs = 1');
   fireEv(G("$('cd_drop')"), 'drop', { dataTransfer: { files: [{ name: 'one long.wav', size: 10 }, { name: 'two.aiff', size: 10 }], types: ['Files'] } });
   check('dropped two: both land, one after the other', await until(() => G("cardJobs.length === 3 && cardJobs[1].state === 'done' && cardJobs[2].state === 'done'"), 30000), G('cardJobs.map(j => j.state).join()'));
+  G('demoDevice.opts.latencyMs = 6');
   check('…the long one cut to the first 17 s, and says so', G("demoDevice.cardFs.get('Audiothurgist/breaks/one long.wav').length") === 44 + 17 * 48000 * 4 && /the first 17 of 20\.0 s/.test(G('cardJobs[1].inf.textContent')));
   /* the same name again: refused, then replaced on request */
   fireEv(G("$('cd_file')"), 'change', { target: { files: [{ name: 'two.wav', size: 10 }] } });
@@ -1893,7 +1788,7 @@ const sentAct = (G, ...pre) => G('demoDevice.acts').some(a => pre.every((v, i) =
 {
   const { D, G } = await loadPage('?demo=oldcard,card');
   check('old card page: the banner and the panel say it plainly — the root\'s WAVs, sets and presets, nothing moved for you',
-    await until(() => G('!!(st && st.card && cardOk)')) && await until(() => G("$('cardnote').hidden") === false) && /old way/.test(G("$('cn_text').textContent")) && /moves nothing/.test(G("$('cn_text').textContent")) && G("$('cd_old').hidden") === false
+    await until(() => G('!!(st && st.card)')) && await until(() => G("$('cardnote').hidden") === false) && /old way/.test(G("$('cn_text').textContent")) && /moves nothing/.test(G("$('cn_text').textContent")) && G("$('cd_old').hidden") === false
     && /4 WAVs in its root, a sets folder and a presets folder/.test(G("$('cd_old_text').textContent")) && /8 files copied into Audiothurgist\/, the originals left where they are/.test(G("$('cd_old_text').textContent")) && G('labels.sample.length') === 0, G("$('cd_old_text').textContent"));
   spyActs(G); { G('demoDevice.cardOps = []'); G(`(() => { const d = demoDevice, h = d.handle; d.handle = (t, b) => { if (t === 0x67) d.cardOps.push(b[0]); return h(t, b); }; })()`); }
   fireEv(G("$('cn_copy')"), 'click', {});
@@ -1903,21 +1798,14 @@ const sentAct = (G, ...pre) => G('demoDevice.acts').some(a => pre.every((v, i) =
   check('old card page: no unknown ids, no runtime errors', D.unknownIds.size === 0 && D.errors.length === 0, [...D.unknownIds].join(',') + ' ' + D.errors.join(' | ').slice(0, 300));
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
 }
-{
-  const { D, G } = await loadPage('?demo=nocardfw');
-  check('pre-card firmware: no panel, no "Add breaks…", no banner, no 0x67 asked', await until(() => G('!!(st && keysOk)')) && G('cardOk') === false && G("$('cardCard').hidden") === true && G("$('p_add').hidden") === true && G("$('cardnote').hidden") === true && !G('demoDevice.log').includes(0x67) && G('st.card') === null);
-  check('pre-card firmware page: no errors', D.unknownIds.size === 0 && D.errors.length === 0, D.errors.join(' | ').slice(0, 300));
-  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
-}
 /* ── 9e. PADS, the page itself: files dropped on a Play pad (the drop event), on a Kit key cell, chosen through the
  *        picker (the change event), several onto one pad; each decoded by a stand-in for the browser's decoder, cut to
  *        the room, sent, placed; the pad's progress and result, the room meter, the unsaved note and its Save set, New
- *        empty kit (a "no" sends nothing), a stereo drop that turns the kit stereo, a busy module, a hidden tab; then
- *        `?demo=nopads`'s hidden controls ── */
+ *        empty kit (a "no" sends nothing), a stereo drop that turns the kit stereo, a busy module, a hidden tab ── */
 {
   const { D, G } = await loadPage('?demo');
   check('pads page: connects with "pads" — the room meter, the picker and New empty kit shown, no unsaved note',
-    await until(() => G('!!(st && st.pads && padsOk && table)')) && await until(() => G("$('pd_bar').hidden") === false) && G("$('pd_unsaved').hidden") === true && G("$('pads_drop_help').hidden") === false
+    await until(() => G('!!(st && st.pads && table)')) && await until(() => G("$('pd_bar').hidden") === false) && G("$('pd_unsaved').hidden") === true && G("$('pads_drop_help').hidden") === false
     && /^pads: 41\.00 s of 41\.00 s free$/.test(G("$('pd_room').textContent")), D.errors.join(' | ').slice(0, 300) + ' ' + G("$('pd_room').textContent"));
   /* the browser's decoder, stood in: the name says how long and how many channels; 44.1 kHz unless it says 48 */
   G(`cardDecode = async f => { const secs = (/(\\d+(?:\\.\\d+)?)s/.exec(f.name) || [0, 1])[1] * 1, sr = /48k/.test(f.name) ? 48000 : 44100, n = Math.round(sr * secs), ch = /stereo/.test(f.name) ? 2 : 1;
@@ -1994,21 +1882,11 @@ const sentAct = (G, ...pre) => G('demoDevice.acts').some(a => pre.every((v, i) =
   check('…and the empty kit takes a drop like any other', await until(() => G("padJobs.length === 15 && padJobs[14].state === 'done'"), 15000) && await until(() => G('st.pads.mask') === 1));
   check('pads page: no unknown ids, no runtime errors', D.unknownIds.size === 0 && D.errors.length === 0, [...D.unknownIds].join(',') + ' ' + D.errors.join(' | ').slice(0, 300));
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
-  check('disconnect: the pads controls hidden', G("$('pd_bar').hidden") === true && G('padsOk') === false);
+  check('disconnect: the pads controls hidden', G("$('pd_bar').hidden") === true && G("$('padsCard').hidden") === true);
 }
-{
-  const { D, G } = await loadPage('?demo=nopads');
-  check('pre-pads firmware: the pads play, but no room meter, no picker, no New empty kit, no drop help, no 0x68 asked', await until(() => G('!!(st && keysOk && table)')) && G('padsOk') === false && G("$('padsCard').hidden") === false
-    && G("$('pd_bar').hidden") === true && G("$('pads_drop_help').hidden") === true && G("$('k_load').hidden") === true && !G('demoDevice.log').includes(0x68) && G('st.pads') === null);
-  fireEv(G('padEls[3].el'), 'drop', { dataTransfer: { files: [{ name: 'x.wav' }], types: ['Files'] } }); await sleep(100);
-  check('…a drop on a pad there is not taken (nothing sent)', !G('demoDevice.log').includes(0x68) && G('padJobs.length') === 0);
-  check('pre-pads page: no errors', D.unknownIds.size === 0 && D.errors.length === 0, D.errors.join(' | ').slice(0, 300));
-  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
-}
-/* ── 9f. beta-sampler: Start in, and "import and play individual samples" end to end. The protocol first (ACTION 40,
- *        the flags bit, the card file, a power-cycle, the refusals, HL.padNormalize), then the page over
- *        `?demo=sampler` — the module powering up as a sampler and the Play tab reading as one; Start in on the
- *        Options tab; a mono WAV and a stereo WAV (real RIFF bytes, decoded by a PCM16 stand-in for the browser's
+/* ── 9f. beta-sampler: Start In, and "import and play individual samples" end to end. The protocol first (Start In is
+ *        Options byte 24, a power-up with each value, ▶ in Pads, HL.padNormalize), then the page over `?demo=sampler` —
+ *        the module powering up as a sampler and the Play tab reading as one; Start In on the Options tab; a mono WAV and a stereo WAV (real RIFF bytes, decoded by a PCM16 stand-in for the browser's
  *        decoder) dropped on two pads and arriving sample for sample; both played from the page's pads; the kit turned
  *        stereo; normalise drops (remembered); the set saved; the module power-cycled on the same card and the page
  *        reconnected — a sampler again, the pads gone from memory; the set loaded back — the same pads, stereo, playing;
@@ -2016,40 +1894,30 @@ const sentAct = (G, ...pre) => G('demoDevice.acts').some(a => pre.every((v, i) =
 {
   /* the protocol, over HL and the fake */
   const d = new DEMO.FakeDevice({ latencyMs: 1 }), l = new HL.Link(new DEMO.FakePort(d)); await l.start(); const inf = await HL.hello(l);
-  const ds = await HL.getDescriptor(l, inf);
-  check('START: the descriptor says "startIn": 1 (with "pads")', HL.caps(ds).startIn === 1 && HL.caps(ds).pads === 1);
+  const ds = await HL.getDescriptor(l, inf), oi = HL.optionsInfo(ds), fs = oi.fields.find(f => f.id === 'start.in');
+  check('START: Start In is Options byte 24 — Sampler (the firmware\'s default) · As saved', fs && fs.off === 24 && fs.zones === 2 && /^Sampler/.test(fs.disp.labels[0]) && /^As saved/.test(fs.disp.labels[1]) && DEMO.OPTION_FIELDS[24][3] === 0);
   let s = HL.parseState(await l.request(HL.CMD.state));
-  check('START: the fake boots As saved unless asked — Classic, running, flags b5 set', s.grammar === 0 && s.muted === false && s.startSaved === true && (s.flags & 32) === 32);
-  let r = await HL.setStartIn(l, false);
-  s = HL.parseState(await l.request(HL.CMD.state));
-  check('START_IN(0): OK, b5 clear, startup.json on the card says "sampler" — the running module untouched (Classic, running)', r.ok && s.startSaved === false && /"startIn":"sampler"/.test(new TextDecoder().decode(d.cardFs.get('Audiothurgist/startup.json'))) && s.grammar === 0 && !s.muted);
-  const p1 = new DEMO.FakeDevice({ latencyMs: 1, bootCard: d.cardFs }), lp = new HL.Link(new DEMO.FakePort(p1)); await lp.start(); await HL.hello(lp);
+  check('START: this fake\'s boot preset says As saved — Classic, running', s.grammar === 0 && s.muted === false && d.options[24] === 1);
+  { const live = await HL.getLive(l, inf), bytes = Uint8Array.from(live.bytes); bytes[oi.comp.off + 24] = 0; await HL.setLive(l, inf, bytes);
+    s = HL.parseState(await l.request(HL.CMD.state));
+    check('Start In → Sampler through the live blob: the byte reads back 0, the running module untouched (Classic, running) — it is read at power-up', (await HL.getLive(l, inf)).bytes[oi.comp.off + 24] === 0 && s.grammar === 0 && !s.muted); }
+  const p1 = new DEMO.FakeDevice({ latencyMs: 1, startIn: 0 }), lp = new HL.Link(new DEMO.FakePort(p1)); await lp.start(); await HL.hello(lp);
   s = HL.parseState(await lp.request(HL.CMD.state));
-  check('…a power-cycle on that card: Pads (6), stopped, b5 clear, the Voice map (Jacks = Follow grammar)', s.grammar === 6 && s.muted === true && s.startSaved === false && s.jackMap === 1);
-  r = await HL.setStartIn(lp, true); s = HL.parseState(await lp.request(HL.CMD.state));
-  const p2 = new DEMO.FakeDevice({ latencyMs: 1, bootCard: p1.cardFs }), lq = new HL.Link(new DEMO.FakePort(p2)); await lq.start(); await HL.hello(lq);
-  const s2 = HL.parseState(await lq.request(HL.CMD.state));
-  check('START_IN(1) → As saved: b5 set, and the next power-up runs the saved grammar (Classic, running)', r.ok && s.startSaved === true && s2.grammar === 0 && s2.muted === false && s2.startSaved === true);
-  const p3 = new DEMO.FakeDevice({ latencyMs: 1, bootCard: new Map() }), lr = new HL.Link(new DEMO.FakePort(p3)); await lr.start(); await HL.hello(lr);
-  check('a card without startup.json powers up as a sampler (the firmware\'s default)', HL.parseState(await lr.request(HL.CMD.state)).grammar === 6 && p3.muted === true);
+  check('…a power-up with Start In = Sampler: Pads (6), stopped, the Voice map (Jacks = Follow grammar); the preset\'s Classic kept for ▶', s.grammar === 6 && s.muted === true && s.jackMap === 1 && p1.lastDrum === 0);
   {
     /* ▶ in Pads plays a beat: a start made in Pads brings back the last drum grammar (the boot preset's here, Classic) */
-    const rs = await HL.setMute(lr, false), ss = HL.parseState(await lr.request(HL.CMD.state));
-    const rt = await HL.setMute(lr, true), st2 = HL.parseState(await lr.request(HL.CMD.state));
+    const rs = await HL.setMute(lp, false), ss = HL.parseState(await lp.request(HL.CMD.state));
+    const rt = await HL.setMute(lp, true), st2 = HL.parseState(await lp.request(HL.CMD.state));
     check('START: ▶ (SET_MUTE 0) in Pads after a sampler power-up → the boot preset\'s Classic, running; ■ leaves Classic, stopped', rs.ok && ss.grammar === 0 && ss.muted === false && rt.ok && st2.grammar === 0 && st2.muted === true, JSON.stringify([ss.grammar, ss.muted, st2.grammar, st2.muted]));
-    p3.options[5] = 2; p3.setGrammar(2, 0); p3.options[5] = 6; p3.setGrammar(6, 2);   /* Options byte 5 = grammar.mode */
-    await HL.editOp(lr, HL.ACT.mute, []); const su = HL.parseState(await lr.request(HL.CMD.state));
-    check('…Grids → Pads, then the toggle (ACTION 2): Grids comes back, running', su.grammar === 2 && su.muted === false, JSON.stringify([su.grammar, su.muted]));
+    p1.options[5] = 2; p1.setGrammar(2, 0); p1.options[5] = 6; p1.setGrammar(6, 2);   /* Options byte 5 = grammar.mode */
+    await HL.setMute(lp, false); const su = HL.parseState(await lp.request(HL.CMD.state));
+    check('…Grids → Pads, then ▶: Grids comes back, running', su.grammar === 2 && su.muted === false, JSON.stringify([su.grammar, su.muted]));
   }
-  const fileNow = () => new TextDecoder().decode(d.cardFs.get('Audiothurgist/startup.json')), before = fileNow(), bad = await HL.editOp(l, HL.ACT.startIn, [2]);
-  check('START_IN(2): BAD_ARGS, nothing written', !bad.ok && bad.status === 2 && fileNow() === before, JSON.stringify(bad));
   const nc = new DEMO.FakeDevice({ latencyMs: 1, nocard: true }), ln = new HL.Link(new DEMO.FakePort(nc)); await ln.start(); await HL.hello(ln);
-  const rn = await HL.setStartIn(ln, true), sn = HL.parseState(await ln.request(HL.CMD.state));
-  check('no card: it powers up a sampler (Pads, stopped); START_IN answers NO_CARD (21) and nothing changes', !rn.ok && rn.status === 21 && sn.startSaved === false && sn.grammar === 6 && sn.muted === true && HL.statusName(21) === 'NO_CARD', JSON.stringify([rn, sn.startSaved, sn.grammar]));
-  const op = new DEMO.FakeDevice({ latencyMs: 1, tail: 293 }), lo = new HL.Link(new DEMO.FakePort(op)); await lo.start(); const io = await HL.hello(lo);
-  const ro = await HL.setStartIn(lo, true), so = HL.parseState(await lo.request(HL.CMD.state));
-  check('a firmware before it (no "pads", no "startIn"): ACTION 40 is BAD_ARGS, b5 never set, it boots as it always did', HL.caps(await HL.getDescriptor(lo, io)).startIn === 0 && !ro.ok && ro.status === 2 && so.startSaved === false && so.grammar === 0 && so.muted === false);
-  for (const x of [l, lp, lq, lr, ln, lo]) await x.close();
+  const sn = HL.parseState(await ln.request(HL.CMD.state));
+  check('no card changes nothing: Start In is the preset\'s (As saved here: Classic, running)', sn.grammar === 0 && sn.muted === false && !sn.card.mounted);
+  check('ACTION 40 (the card file\'s START_IN) is gone: BAD_ARGS', (await HL.editOp(l, 40, [1])).status === 2);
+  for (const x of [l, lp, ln]) await x.close();
   /* HL.padNormalize: one gain for both channels, −1 dBFS at the peak, only the first `frames`, silence left alone */
   const L = Float32Array.from({ length: 1000 }, (_, i) => 0.25 * Math.sin(i / 7)), R = Float32Array.from({ length: 1000 }, (_, i) => 0.125 * Math.cos(i / 5));
   const nz = HL.padNormalize([L, R], 1000, -1), pk = a => a.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
@@ -2073,7 +1941,7 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
     const len = data.n / 2 / fmt.ch, planes = Array.from({ length: fmt.ch }, () => new Float32Array(len));
     for (let i = 0; i < len; i++) for (let c = 0; c < fmt.ch; c++) planes[c][i] = dv.getInt16(data.at + (i * fmt.ch + c) * 2, true) / 32768;
     return { numberOfChannels: fmt.ch, sampleRate: fmt.sr, length: len, getChannelData: c => planes[c] }; }`);
-  check('sampler page: the fake powers up as the module does — Pads, stopped, the Voice map', await until(() => G('!!(st && padsOk && table)')) && G('st.grammar') === 6 && G('st.muted') === true && await until(() => G('st.jackMap') === 1), D.errors.join(' | ').slice(0, 300));
+  check('sampler page: the fake powers up as the module does — Pads, stopped, the Voice map', await until(() => G('!!(st && table)')) && G('st.grammar') === 6 && G('st.muted') === true && await until(() => G('st.jackMap') === 1), D.errors.join(' | ').slice(0, 300));
   await sleep(120);
   check('…the Play tab reads as a sampler: the pads card first (m-sampler), the sampler line with where a drop goes and how it powers up, the transport says "sampler", ▶ not cued (Pads has no pattern), the ring says SAMPLER',
     await until(() => G("$('play').className").includes('m-sampler') && G("$('pd_sampler').hidden") === false) && /Drop audio files on a pad/.test(G("$('pd_sampler_text').innerHTML")) && /powers up like this/.test(G("$('pd_sampler_text').innerHTML"))
@@ -2081,18 +1949,15 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
     G("$('play').className") + ' / ' + G("$('t_sub').innerHTML"));
   check('…the mode chips: Pads lit; the Jacks card says the Voice map; the sampler line\'s Classic / Grids buttons are there', G('modeChips.find(c => c.g === 6).el.className').includes('on') && G("$('jk_map').textContent") === 'Voice map' && G("$('pd_go_classic').hidden") === false && G("$('pd_go_grids').hidden") === false);
   spyActs(G);
-  /* Start in, on the Options tab */
-  const grp = G("$('optgroups').children.map(c => c._html)");
-  check('Options: a "Start-up (kept on the card)" group beside the 24 (still nothing in "Other"), Start in = Sampler from the state', grp.some(h => /Start-up \(kept on the card\)/.test(h)) && !grp.some(h => h.includes('Other')) && G('startSel.value') === '0' && G('startSel.disabled') === false);
-  G("startSel.value = '1'"); fireEv(G('startSel'), 'change', {});
-  check('Start in → As saved: ACTION 40 (1) on the wire, the card\'s startup.json says "saved", b5 comes back set, the sampler line stops saying it powers up like this',
-    await until(() => sentAct(G, 40, 1)) && await until(() => G('st.startSaved') === true) && /"saved"/.test(G("new TextDecoder().decode(demoDevice.cardFs.get('Audiothurgist/startup.json'))")) && await until(() => !/powers up like this/.test(G("$('pd_sampler_text').innerHTML"))) && /As saved/.test(G("$('msg').textContent")));
+  /* Start In, on the Options tab: an Options field like the others */
+  const grp = G("$('optgroups').children.map(c => c._html)"), sel = () => G("optSelects.get('start.in')[0]");
+  check('Options: Start In in its own "Power-up" group (still nothing in "Other"), Sampler from the live blob', grp.some(h => /Power-up/.test(h)) && !grp.some(h => h.includes('Other')) && G("optByte('start.in')") === 0 && sel().value === '0');
+  sel().value = '1'; fireEv(sel(), 'change', {});
+  check('Start In → As saved: written through the live blob (byte 24 on the module), the sampler line stops saying it powers up like this',
+    await until(() => G("demoDevice.options[DEMO.O['start.in']]") === 1) && await until(() => !/powers up like this/.test(G("$('pd_sampler_text').innerHTML"))));
   check('…the running module untouched by it (still Pads, stopped)', G('st.grammar') === 6 && G('st.muted') === true);
-  G("startSel.value = '0'"); fireEv(G('startSel'), 'change', {});
-  check('…and back to Sampler: ACTION 40 (0), the file says "sampler"', await until(() => sentAct(G, 40, 0)) && await until(() => G('st.startSaved') === false) && /"sampler"/.test(G("new TextDecoder().decode(demoDevice.cardFs.get('Audiothurgist/startup.json'))")));
-  G("demoDevice.cardMounted = false"); await until(() => G('st.card && st.card.mounted') === false);
-  check('no card: the select disabled and says why', await until(() => G('startSel.disabled') === true) && /no card/.test(G('startSel.title')));
-  G("demoDevice.cardMounted = true"); await until(() => G('startSel.disabled') === false);
+  await until(() => G('!optBusy')); sel().value = '0'; fireEv(sel(), 'change', {});
+  check('…and back to Sampler: byte 24 is 0 again, the line says so', await until(() => G("demoDevice.options[DEMO.O['start.in']]") === 0) && await until(() => /powers up like this/.test(G("$('pd_sampler_text').innerHTML"))));
   /* a pad plays while stopped */
   const pad = k => G(`padEls[${k}].el`);
   fireEv(pad(3), 'pointerdown', { pointerId: 31 }); fireEv(pad(3), 'pointerup', { pointerId: 31 });
@@ -2132,12 +1997,12 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
   /* save the set */
   G("$('s_name').value = 'smp_kit'"); fireEv(G("$('pd_save')"), 'click', {});
   check('Save set… (named): ACTION 14 "smp_kit", saved, the unsaved note gone', await until(() => sentAct(G, HL.ACT.saveSet)) && await until(() => G('st.setName') === 'smp_kit' && G('st.pads.unsaved') === false, 8000) && await until(() => G("$('pd_unsaved').hidden") === true));
-  /* the power-cycle: a fresh module on the same card; the page reconnects */
+  /* the power-cycle: a fresh module (Start In = Sampler) on the same card; the page reconnects */
   G('window.__card = demoDevice.cardFs; window.__sets = demoDevice.sets');
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
-  await G(`(async () => { const d = new DEMO.FakeDevice({ tail: 315, latencyMs: 6, bootCard: __card }); d.sets = __sets; demoDevice = d; demoPort = new DEMO.FakePort(d); await connectPort(demoPort, true); demoDevice = d; })()`);
+  await G(`(async () => { const d = new DEMO.FakeDevice({ latencyMs: 6, startIn: 0 }); d.cardFs = __card; d.sets = __sets; demoDevice = d; demoPort = new DEMO.FakePort(d); await connectPort(demoPort, true); demoDevice = d; })()`);
   check('power-cycled on the same card, the page reconnected: a sampler again (Pads, stopped), the sampler line back, the pads empty of drops (they were in memory), nothing unsaved',
-    await until(() => G('!!(st && padsOk && table && st.pads)')) && G('st.grammar') === 6 && G('st.muted') === true && G('st.pads.mask') === 0 && G('st.pads.unsaved') === false && await until(() => G("$('pd_sampler').hidden") === false), D.errors.join(' | ').slice(0, 300));
+    await until(() => G('!!(st && table)')) && G('st.grammar') === 6 && G('st.muted') === true && G('st.pads.mask') === 0 && G('st.pads.unsaved') === false && await until(() => G("$('pd_sampler').hidden") === false), D.errors.join(' | ').slice(0, 300));
   spyActs(G);
   G("$('s_name').value = 'smp_kit'"); fireEv(G("$('s_load')"), 'click', {});
   check('Load set "smp_kit": ACTION 15, the three pads back, the kit stereo, nothing unsaved, still Pads and stopped', await until(() => sentAct(G, HL.ACT.loadSet)) && await until(() => G('st.setName') === 'smp_kit' && G('st.pads.mask') === 7, 8000) && await until(() => G('st.stereo') === true) && G('st.pads.unsaved') === false && G('st.grammar') === 6 && G('st.muted') === true);
@@ -2164,11 +2029,10 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
 
 /* ── 9g. KEYP, the page itself: `?demo=keyp` (four keys set) — the cells and the pads say a key's settings in words,
  *        the row under the keys shows the selected key's (the ratchet's rate only in Ratchet), a gain slider dragged
- *        sends live and lands as one undo step and one history line, Plays and its ratchet rate, reset; then
- *        `?demo=nokeyp`: nothing of it shown, 0x69 never asked ── */
+ *        sends live and lands as one undo step and one history line, Plays and its ratchet rate, reset ── */
 {
   const { D, G } = await loadPage('?demo=keyp');
-  check('keyp page: connects with "keyp", reads 0x69, the row shown under the keys', await until(() => G('!!(st && keypOk && keyp && table)')) && G("$('kp_row').hidden") === false && G('demoDevice.log').includes(0x69), D.errors.join(' | ').slice(0, 300));
+  check('keyp page: connects, reads 0x69, the row shown under the keys', await until(() => G('!!(st && keyp && table)')) && G("$('kp_row').hidden") === false && G('demoDevice.log').includes(0x69), D.errors.join(' | ').slice(0, 300));
   await until(() => G('keyCells[7].kp.textContent') !== '');
   check('the cells say the set keys in words (C1 −3 dB, D♯1 +7 st · loop, G1 +2 dB · −12 st · ratchet ½, C2 +0.25 st · one-shot); the rest say nothing',
     G('keyCells[0].kp.textContent') === '−3 dB' && G('keyCells[3].kp.textContent') === '+7 st · loop' && G('keyCells[7].kp.textContent') === '+2 dB · −12 st · ratchet ½' && G('keyCells[12].kp.textContent') === '+0.25 st · one-shot'
@@ -2206,22 +2070,16 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
     && await until(() => G('keyCells[1].kp.hidden') === true) && G("$('kp_gain').value") === '0');
   check('keyp page: no errors, no unknown ids', D.unknownIds.size === 0 && D.errors.length === 0, D.errors.join(' | ').slice(0, 300) + [...D.unknownIds].join(','));
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
-  check('disconnect: the row hidden', G("$('kp_row').hidden") === true && G('keypOk') === false);
-}
-{
-  const { D, G } = await loadPage('?demo=nokeyp');
-  check('a firmware before the key settings: no row, no words on the cells, 0x69 never asked', await until(() => G('!!(st && table && keysOk)')) && await sleep(150).then(() => true) && G('keypOk') === false
-    && G("$('kp_row').hidden") === true && G('keyCells[0].kp.hidden') === true && !G('demoDevice.log').includes(0x69) && D.errors.length === 0, D.errors.join(' | ').slice(0, 300));
-  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+  check('disconnect: the row hidden', G("$('kp_row').hidden") === true && G('keyp') === null);
 }
 /* ── 9h. CHROMA, the page: the Kit's "Spread D♯1 chromatically (C1 … B2)" under the settings row — a key whose spread
  *        would replace pads asks first (the key-drop prompt's red popover: keep them, the default · over them · cancel),
  *        the cells and the pads then say each key's tune, one history line, Undo puts every key back; a key with no pads
- *        in the way spreads at once; an empty kit's key cannot be spread; a firmware before it shows no button ── */
+ *        in the way spreads at once; an empty kit's key cannot be spread ── */
 {
   const { D, G } = await loadPage('?demo=kit');
   G("showTab('tab_kit')");
-  check('chroma page: connected with "keyp": 2, the button shown in the settings row', await until(() => G('!!(st && keypOk && spreadOk && keyp && table)')) && G("$('kp_spread').hidden") === false, D.errors.join(' | ').slice(0, 300));
+  check('chroma page: connected, the button shown in the settings row', await until(() => G('!!(st && keyp && table)')) && G("$('kp_spread').hidden") === false, D.errors.join(' | ').slice(0, 300));
   G('selectKey(3)'); G('invalidate(D.kit)'); await sleep(80);
   check('D♯1 selected: "Spread D♯1 chromatically (C1 … B2)", enabled', G("$('kp_spread').textContent") === 'Spread D♯1 chromatically (C1 … B2)' && G("$('kp_spread').disabled") === false, G("$('kp_spread').textContent"));
   spyActs(G);
@@ -2257,13 +2115,7 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
   G('demoDevice.padNewKit()'); await until(() => G('!!(st && st.pads && st.pads.noBreak && table && table.nSlices === 16)')); await sleep(200); G('selectKey(0)'); G('invalidate(D.kit)'); await sleep(60);
   check('an empty kit\'s key: the button off, its title says to drop a sample first', G("$('kp_spread').disabled") === true && /empty — drop a sample on it first/.test(G("$('kp_spread').title")));
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
-  check('disconnect: the button hidden', G("$('kp_spread').hidden") === true && G('spreadOk') === false);
-}
-{
-  const { D, G } = await loadPage('?demo=kit,nospread');
-  await until(() => G('!!(st && keypOk && table)'));
-  check('a firmware with the settings but before SPREAD_KEYS: the row, no spread button', G('spreadOk') === false && G("$('kp_spread').hidden") === true && D.errors.length === 0, D.errors.join(' | ').slice(0, 300));
-  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+  check('disconnect: the button hidden', G("$('kp_spread').hidden") === true);
 }
 /* ── 9c. Contrast, measured: every text token against every surface it sits on, in both themes, ≥ 4.5:1; and no
  *        colour outside the token blocks — not in a CSS rule, not in an inline style, not in the script ── */
@@ -2314,7 +2166,8 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
   check('publish stamp: the footer marker and the three script tags publish-pages.sh rewrites are in the page as it expects them', html.includes('<!--page-build--><b>local</b>') && ['hostlink', 'edit', 'demo'].every(s => html.includes(`<script src="${s}.js"></script>`) && pub.includes(s)) && /\?v=\$stamp/.test(pub));
   check('service worker: the cache version bumped for the beta, the query ignored in the offline fallback', /audiothurgist-v2/.test(sw) && /ignoreSearch: true/.test(sw));
   check('page links manifest and loads the polyfill only without navigator.serial', /rel="manifest"/.test(html) && /!navigator\.serial && navigator\.usb/.test(html) && /serialApi\(\)/.test(html));
-  check('page has the Scope tab wired to scope2', /id="tab_scope"/.test(html) && /id="bigscope"/.test(html) && /cp\.scope2 >= 1/.test(html) && /caps\(desc\)/.test(html) && /fetchScopeFrame\(/.test(html) && /SCOPE_TAB_STATE_MS/.test(html) && /id="sc_cvchans"/.test(html) && /id="sc_p_gates"/.test(html) && /cp\.scope2 >= 2/.test(html));
+  check('page has the Scope tab wired to the ten-channel body', /id="tab_scope"/.test(html) && /id="bigscope"/.test(html) && /fetchScopeFrame\(/.test(html) && /SCOPE_TAB_STATE_MS/.test(html) && /id="sc_cvchans"/.test(html) && /id="sc_p_gates"/.test(html));
+  check('the page checks the firmware\'s api on connect, and nothing else of the descriptor (no capability gates left)', /HL\.apiOf\(desc\)/.test(html) && !/caps\(desc\)|cp\.\w+ >=|(edit|keys|pads|card|keyp|spread|start|sets|scope2|kit)Ok\b/.test(html));
 }
 
 check('no canvas call ever received NaN/Infinity', nanDraws.length === 0, nanDraws.slice(0, 5).join(' · '));

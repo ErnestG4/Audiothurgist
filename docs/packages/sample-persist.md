@@ -17,8 +17,10 @@
 > Voice key plays as an index into the file's `slices[]`, −1 = the
 > default). `key` on an entry is provenance — the key that recorded it, −1
 > for a grid slice or a marker nobody recorded — not the map. Options are
-> 24 bytes (`OPT8`: 22 Tap Allowance, 23 Autosave; `bb::kSetOptionsToday`,
-> static_asserted against `Options::kBytes` in the shell). A worst-case set
+> 25 bytes (`OPT9`: 22 Tap Allowance, 23 Autosave, 24 Start In;
+> `bb::kSetOptionsToday`, static_asserted against `Options::kBytes` in the
+> shell; a set load keeps the device's Autosave and Start In, a preset backup
+> carries all 25). A worst-case set
 > is 29.5 KB. The same document minus the material, options and looper is
 > the loose-file **sidecar** `sets/<wavname>.slices.json` (there).
 

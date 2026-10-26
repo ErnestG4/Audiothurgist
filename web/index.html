@@ -378,7 +378,7 @@
     <p id="kit_help_edit" class="note" hidden><b>Keys:</b> tap one to hear it and see it below · drag a key onto another to <b>swap</b> (a prompt when the target is taken; <span class="bad">magenta</span> when a recording would lose its only key) · long-press a key, then drop or tap another, to <b>copy</b> it there · drag a slice up from the waveform onto a key to assign it.</p>
   </section>
   <section class="wide">
-    <h2><span id="wv_title">Waveform</span><span class="wvbtns"><span id="ed_status" class="pill" hidden>ready</span><button id="wv_fit" class="mini" title="fit the selected key's material">fit</button><button id="wv_all" class="mini" title="the whole buffer up to freePos">all</button><button id="wv_out" class="mini" title="zoom out (wheel on the waveform also zooms; drag pans)">−</button><button id="wv_in" class="mini" title="zoom in">+</button><select id="wv_plane" class="inline" title="which plane to read (GET_WAVE)" hidden><option value="0">L</option><option value="1">R</option><option value="2">L+R</option></select></span></h2>
+    <h2><span id="wv_title">Waveform</span><span class="wvbtns"><span id="ed_status" class="pill" hidden>ready</span><button id="wv_fit" class="mini" title="fit the selected slice or marker">fit</button><button id="wv_all" class="mini" title="the whole buffer up to freePos">all</button><button id="wv_out" class="mini" title="zoom out (wheel on the waveform also zooms; drag pans)">−</button><button id="wv_in" class="mini" title="zoom in">+</button><select id="wv_plane" class="inline" title="which plane to read (GET_WAVE)" hidden><option value="0">L</option><option value="1">R</option><option value="2">L+R</option></select></span></h2>
     <div id="wv_wrap" style="position:relative">
       <canvas id="kitwave" style="height:180px"></canvas>
       <div id="ed_menu" class="edmenu" hidden></div>
@@ -487,7 +487,7 @@
       <button id="sc_glow" class="mini" title="draw the previous frames dimmer behind the current one">Afterglow</button>
       <button id="sc_freeze" class="mini" title="stop polling and keep the last frame (the other tabs keep their own polls)">Freeze</button>
     </div>
-    <p id="sc_help" class="note">Ten channels on one sample clock from the firmware's rings: out L/R and in L/R (J1/J2, AC-coupled) at 48 kHz, and the six jacks J3–J8 DC-coupled at ±5 V, 2 kHz — in or out (an output jack reads back what it drives). One snapshot per frame, so every trace starts at the same instant. Click a channel to show or hide it — J1/J2 show themselves while a signal is present. A jack's label is its role under the current jack map, with its present voltage. Needs firmware with <code>scope2</code> (2 for the jacks); older firmware shows its mono output trace here.</p>
+    <p id="sc_help" class="note">Ten channels on one sample clock from the firmware's rings: out L/R and in L/R (J1/J2, AC-coupled) at 48 kHz, and the six jacks J3–J8 DC-coupled at ±5 V, 2 kHz — in or out (an output jack reads back what it drives). One snapshot per frame, so every trace starts at the same instant. Click a channel to show or hide it — J1/J2 show themselves while a signal is present. A jack's label is its role under the current jack map, with its present voltage.</p>
   </section>
 </main>
 
@@ -520,7 +520,7 @@
 <script src="demo.js"></script>
 <script>
 'use strict';
-const { CMD, ACT, REC, KEYS, ZONE_MULT, keyName, Link, hello, getDescriptor, getLive, setLive, parseState, fetchEnv, parseScope, SCOPE, SCOPE_CH, SCOPE_JACK_ROLE, SCOPE_JACK_IN, scopeVolts, scopePlan, fetchScopeFrame, fetchWave, fetchTable, fetchHits, fieldLabels, pagerInfo, optionsInfo, manualInfo, SET_STATE, SET_RESULT, setNameOk, setLabelName, saveSet, loadSet, caps, playKey, setMute, CARD } = HL;
+const { CMD, ACT, REC, KEYS, ZONE_MULT, keyName, Link, hello, getDescriptor, getLive, setLive, parseState, fetchEnv, parseScope, SCOPE, SCOPE_CH, SCOPE_JACK_ROLE, SCOPE_JACK_IN, scopeVolts, scopePlan, fetchScopeFrame, fetchWave, fetchTable, fetchHits, fieldLabels, pagerInfo, optionsInfo, manualInfo, SET_STATE, SET_RESULT, setNameOk, setLabelName, saveSet, loadSet, playKey, setMute, CARD } = HL;
 const $ = id => document.getElementById(id);
 const CLS_NAME = ['kick', 'snare', 'hat', 'other'];
 const SR = 48000;   /* the engine's rate: lengths and positions are shown in seconds */
@@ -560,21 +560,18 @@ let pager = null, opts = null, manual = null;
 let demoDevice = null, demoPort = null;
 /* Kit: the slice table (grid + recorded entries, real boundaries), the onset
  * table, the selected key, the waveform view and its window cache. */
-let table = null, tableSig = '', bufSig = '', hits = null, hitsGen = -1, selKey = 0, kitOk = false, kitShown = false;
-/* EDIT-UI: the editor is on when the descriptor says "edit" — otherwise the Kit tab is the view-only one. The onset
- * threshold for the histogram, the key armed for a copy (long-press), the cell lit as a drop target. */
-let editOk = false, edThresh = 128, copyArm = -1;
-/* KEYS (v0.13, "keys": 1): the pads, SET_MUTE, the marker ops, the autoslice count, the tail from 263 */
-let keysOk = false;
-/* Sets: advertised by the descriptor ("sets":1); the last op's sequence the page has shown, and the op it asked for. */
-let setsOk = false, setSeqShown = -1, setAsked = null;
+let table = null, tableSig = '', bufSig = '', hits = null, hitsGen = -1, selKey = 0, kitShown = false;
+/* EDIT-UI: the onset threshold for the histogram, the key armed for a copy (long-press). */
+let edThresh = 128, copyArm = -1;
+/* Sets: the last op's sequence the page has shown, and the op it asked for. */
+let setSeqShown = -1, setAsked = null;
 const view = { a: 0, b: 1 };
 const wave = { cache: new Map(), queue: [], planSig: '', plane: 0, step: 1 };
 const WAVE_N = 480, WAVE_MS = 334;   /* ≤ 3 waveform windows per second */
 /* Scope tab (declared here: the hash may open the tab before the tab's code below runs). */
 const sc = { on: [true, true, null, null, false, false, false, false, false, false], decim: 4, cvDecim: 4, gain: 1, trig: true, trigSrc: -1, peak: false, glow: false, freeze: false,
              frames: [], busy: false, timer: null, seen: [0, 0, 0, 0], fps: 0, rps: 0, bps: 0, fpsN: 0, bytes: 0, reqs: 0, fpsT: 0, lastMs: 0, err: '' };
-let scopeShown = false, scope2Ok = false, scopeCvOk = false;
+let scopeShown = false;
 
 /* ───────────── Messages ─────────────
  * notice: the standing explanation (no USB API here, a descriptor error). say: one line for what just happened —
@@ -613,7 +610,7 @@ canvases.forEach(sizeCanvas);
 function ctx(c) { if (!c._cw) sizeCanvas(c); const g = c.getContext('2d'); g.setTransform(c._d, 0, 0, c._d, 0, 0); return [g, c._cw, c._ch]; }
 /* the play grammars: Play (the loop is what you play in) and Pads (nothing is written) — the bar there is the kit's */
 const playish = s => !!s && (s.grammar === GR.play || s.grammar === GR.pads);
-/* beta-sampler: Pads with the transport stopped — how the module powers up (Start in = Sampler): a plain sampler */
+/* beta-sampler: Pads with the transport stopped — how the module powers up (Start In = Sampler): a plain sampler */
 const samplerish = s => !!s && s.grammar === GR.pads && !!s.muted;
 /* a step's class (0 kick · 1 snare · 2 hat · 3 other, -1 at rest) and its colour; the strip also letters it, so the class is not told by colour alone */
 function stepCls(s) { if (!st || s >= st.nSlices) return -1; const src = st.src[s]; return src < 0 ? -1 : (src < st.stepClass.length ? st.stepClass[src] : srcClass(src)) & 3; }
@@ -627,8 +624,8 @@ const calledStep = s => st.callFlash !== 255 && st.src[s] === st.callFlash;
 const gridTable = () => table && st && table.nSlices === st.nSlices && st.bufLen > 0 ? table : null;
 function sliceX(s, w) { const ns = st.nSlices, t = gridTable(); if (s >= ns) return w; return t ? t.entries[s].start / st.bufLen * w : s / ns * w; }
 function sliceAt(x, w) { const ns = st.nSlices, t = gridTable(); if (!t) return Math.max(0, Math.min(ns - 1, Math.floor(x / w * ns))); const p = x / w * st.bufLen; let s = 0; while (s + 1 < ns && t.entries[s + 1].start <= p) s++; return s; }
-/* The Play tab's output trace polls only while its canvas is on screen. (It was id="scope" beside main#scope until
- * v0.13: getElementById found the canvas first, so the Scope tab never showed.) */
+/* The Play tab's output trace polls only while its canvas is on screen. (Its id is outscope: an id="scope" beside
+ * main#scope would be the one getElementById finds, and the Scope tab would never show.) */
 let scopeVisible = true;
 if ('IntersectionObserver' in window) new IntersectionObserver(es => { scopeVisible = es[0].isIntersecting; }).observe($('outscope'));
 
@@ -718,52 +715,48 @@ function drawText() {
   setText('k_cls', labels.classifier[st.cls] ?? String(st.cls));
   setText('k_chop', Math.round(st.chop / 2.55) + '%'); setText('k_hist', st.histN ? `${st.histN - st.histDepth}/${st.histN}` : '—');
   setText('k_file', st.file === 255 ? 'synth break / a take' : (labels.sample[st.file] ?? String(st.file)));
-  setText('k_native', st.nativeBpm != null ? st.nativeBpm.toFixed(1) + ' BPM' : '— (needs v0.8.0)');
-  setText('k_grid', st.gridBars != null ? `${st.gridBars} bar${st.gridBars === 1 ? '' : 's'} · ${st.nSlices} steps` : st.nSlices + ' steps');
+  setText('k_native', st.nativeBpm.toFixed(1) + ' BPM');
+  setText('k_grid', `${st.gridBars} bar${st.gridBars === 1 ? '' : 's'} · ${st.nSlices} steps`);
   const barsSel = $('k_bars').firstElementChild;
-  if (!barsSel) setText('k_bars', st.barsOpt != null ? (optLabel('bars', st.barsOpt) ?? String(st.barsOpt)) : '—');
+  if (!barsSel) setText('k_bars', optLabel('bars', st.barsOpt) ?? String(st.barsOpt));
   /* Clock line: state · applied multiplier (→ requested one while a beat-aligned
    * switch is pending) · aligned · jitter peak / rms · external-clock transitions. */
   let clk = st.ext ? (st.locked ? 'locked' : 'following') : 'internal';
   if (st.ext) {
     clk += ' · ' + multLabel(st.mult);
-    if (st.multPending && st.multZone != null && ZONE_MULT[st.multZone] !== st.mult) clk += ` → ${multLabel(ZONE_MULT[st.multZone])} pending`;
-    else if (st.multZone != null && st.clkFlags == null) clk += ` (zone ${st.multZone})`;
-    if (st.p2Engaged === false) clk += ' · P2 not engaged';
+    if (st.multPending && ZONE_MULT[st.multZone] !== st.mult) clk += ` → ${multLabel(ZONE_MULT[st.multZone])} pending`;
+    if (!st.p2Engaged) clk += ' · P2 not engaged';
     if (st.aligned) clk += ' · aligned';
     const j = steady(sJit, st.jitterUs, 20, 400), jr = steady(sJitR, st.jitterRmsUs, 10, 200);
     if (j != null) clk += ` · jitter ${Math.round(j)}` + (jr != null ? ` / ${Math.round(jr)} rms` : '') + ' µs';
   }
-  if (st.extTrans != null) clk += ` · ext ${st.extTrans}`;
+  clk += ` · ext ${st.extTrans}`;
   setText('k_clock', clk);
   setPill('pagepill', 'page ' + (st.brain ? 'Brain' : 'Perform'), st.brain ? 'brain' : '');
-  if (st.jackMap != null) setPill('jackpill', 'jacks ' + (st.jackMap ? 'Voice' : 'Brain'), st.jackMap ? 'brain' : '');
-  if (st.diag) { const d = st.diag; const ph = ['—', 'poll', 'sdk/host', 'frame', 'sdk/frame', 'render', 'sdk/leds', 'handlers', 'load', 'analysis'];
-    const extra = st.stallPhase != null ? ` · stall in ${ph[st.stallPhase] || st.stallPhase} · gate late ${(st.gateLateUs / 1000).toFixed(1)} ms · overruns ${st.overruns}` : '';
-    setPill('diagpill', `poll gap ${(d.gap / 1000).toFixed(1)} ms · audio ${d.audio} µs · jumps ${d.jumps} · regens ${d.regens}${extra}`, d.gap > 4000 || d.audio > 400 || (st.overruns > 0) ? 'warn' : 'ok'); }
+  setPill('jackpill', 'jacks ' + (st.jackMap ? 'Voice' : 'Brain'), st.jackMap ? 'brain' : '');
+  { const d = st.diag; const ph = ['—', 'poll', 'sdk/host', 'frame', 'sdk/frame', 'render', 'sdk/leds', 'handlers', 'load', 'analysis'];
+    const extra = ` · stall in ${ph[st.stallPhase] || st.stallPhase} · gate late ${(st.gateLateUs / 1000).toFixed(1)} ms · overruns ${st.overruns}`;
+    setPill('diagpill', `poll gap ${(d.gap / 1000).toFixed(1)} ms · audio ${d.audio} µs · jumps ${d.jumps} · regens ${d.regens}${extra}`, d.gap > 4000 || d.audio > 400 || st.overruns > 0 ? 'warn' : 'ok'); }
   setPill('syncpill', st.ext ? (st.locked ? 'clock locked' : 'clock following') : 'clock internal', st.ext ? (st.locked ? 'ok' : 'warn') : '');
   const hs = $('hist'); if (document.activeElement !== hs) { const mx = Math.max(0, st.histN - 1), v = Math.max(0, st.histN - 1 - st.histDepth); if (+hs.max !== mx) hs.max = mx; if (+hs.value !== v) hs.value = v; }
   const sel = $('sample'); if (document.activeElement !== sel && st.file !== 255 && sel.value !== String(st.file)) sel.value = String(st.file);
   drawCpu();
 }
 /* The CPU meter: the audio callback's mean (the bar) and peak (the tick) over the last second against the block's
- * budget — from the v0.13 tail (‰), else the old diag's worst callback in µs (a tick, no average). Orange on an
- * overrun or a peak past 70 %. */
+ * budget (the state's ‰). Orange on an overrun or a peak past 70 %. */
 function drawCpu() {
-  let avg = null, max = null;
-  if (st && st.loadAvg != null) { avg = steady(sLoad, st.loadAvg / 10, 1, 15); max = steady(sLoadMax, st.loadMax / 10, 2, 15); }
-  else if (st && st.diag) max = steady(sLoadMax, st.diag.audio / BUDGET_US * 100, 2, 15);
-  if (max == null) { clearCpu(); return; }
-  $('cpuAvg').style.width = (avg == null ? 0 : Math.min(100, avg)).toFixed(0) + '%'; $('cpuMax').style.left = Math.min(98, max).toFixed(0) + '%';
-  setText('cpuText', avg != null ? `${avg.toFixed(0)}% · max ${max.toFixed(0)}%` : `max ${max.toFixed(0)}%`);
-  const hot = (st.overruns > 0) || max > 70, c = 'cpu' + (hot ? ' warn' : ''); if ($('cpu').className !== c) $('cpu').className = c;
+  if (!st) { clearCpu(); return; }
+  const avg = steady(sLoad, st.loadAvg / 10, 1, 15), max = steady(sLoadMax, st.loadMax / 10, 2, 15);
+  $('cpuAvg').style.width = Math.min(100, avg).toFixed(0) + '%'; $('cpuMax').style.left = Math.min(98, max).toFixed(0) + '%';
+  setText('cpuText', `${avg.toFixed(0)}% · max ${max.toFixed(0)}%`);
+  const hot = st.overruns > 0 || max > 70, c = 'cpu' + (hot ? ' warn' : ''); if ($('cpu').className !== c) $('cpu').className = c;
 }
 function clearCpu() { $('cpuAvg').style.width = '0%'; $('cpuMax').style.left = '0%'; setText('cpuText', '—'); $('cpu').className = 'cpu'; }
 applyTheme();
 
 /* ───────────── The transport: on every tab ─────────────
  * ▶ / ■ is the mute — Combust's call, 2026-10-14: the pattern stops, the clock runs on (a restart lands on the beat),
- * keys still play; on the panel, B1 held 600 ms alone. SET_MUTE (35) on a v0.13 module, the toggle (2) before it.
+ * keys still play; on the panel, B1 held 600 ms alone (SET_MUTE, ACTION 35).
  * The three buttons follow the grammar: in Play, B2's tap is the looper's undo and B3's clears the loop (asked
  * first — it cannot be undone); Pads has no pattern, so no dice and no flow; Camp's B2 rings the next change. Flow is
  * held: on while the button is down, off when it comes up, as B2's hold. */
@@ -794,8 +787,7 @@ function drawTransport() {
 async function transportPlay() {
   if (!link || !st) return;
   const stop = !st.muted;
-  if (keysOk) { const r = await setMute(link, stop); if (!r.ok) say('start / stop refused: ' + HL.statusName(r.status), true); poll.tState = 0; }
-  else await action(ACT.mute);   /* 0.12: the toggle */
+  const r = await setMute(link, stop); if (!r.ok) say('start / stop refused: ' + HL.statusName(r.status), true); poll.tState = 0;
 }
 $('t_play').onclick = transportPlay;
 $('t_dice').onclick = () => { if (!st) return; if (st.grammar === GR.play) action(ACT.looperUndo); else action(ACT.dice); };
@@ -883,9 +875,9 @@ const padEls = [], padDown = new Map();
   for (let k = 0; k < 24; k++) {
     const el = document.createElement('button'); el.className = 'padk' + ([1, 3, 6, 8, 10].includes(k % 12) ? ' sh' : ''); el.dataset.k = k;
     el.innerHTML = `<span>${keyName(k)}</span><em hidden></em><small>—</small>`; el.title = `key ${k} (${keyName(k)}) — PLAY_KEY`;
-    const up = e => { if (padDown.get(e.pointerId) !== k) return; padDown.delete(e.pointerId); el.classList.remove('down'); if (link && keysOk) playKey(link, k, false).catch(() => {}); };
+    const up = e => { if (padDown.get(e.pointerId) !== k) return; padDown.delete(e.pointerId); el.classList.remove('down'); if (link) playKey(link, k, false).catch(() => {}); };
     el.addEventListener('pointerdown', e => {
-      e.preventDefault(); if (!link || !keysOk) return; try { el.setPointerCapture(e.pointerId); } catch {}
+      e.preventDefault(); if (!link) return; try { el.setPointerCapture(e.pointerId); } catch {}
       padDown.set(e.pointerId, k); el.classList.add('down'); flashKey(k);
       playKey(link, k, true).then(r => { if (r && !r.ok) say(`${keyName(k)}: ${r.status === 3 ? 'nothing loaded to play' : HL.statusName(r.status)}`, true); }, () => {});
     });
@@ -893,28 +885,27 @@ const padEls = [], padDown = new Map();
     host.appendChild(el); padEls.push({ el, sub: el.querySelector('small'), kp: el.querySelector('em'), sig: '' });
   }
 })();
-/* ───────────── PADS (0x68, capability "pads": 1): a sample dropped onto a pad ─────────────
+/* ───────────── PADS (0x68): a sample dropped onto a pad ─────────────
  * Drop audio files on a pad (Play) or a key cell (Kit), or choose them (phones): the browser decodes each (48 kHz, as
  * the card upload does), keeps it mono or stereo, cuts it to the room the module has left (the tail's pads.free, read
  * fresh before each one) and sends raw PCM16 (HL.uploadPad); the module converts it in place and publishes it as that
  * key's recording — one undo step. Several files fill the pad and the ones after it. Every card and pad job shares
  * one queue (cardRun): a drop never interleaves with a card upload on the wire. The waits ask for the state themselves
  * (never the background poll, which stops while the tab is hidden) and give up only when the module stands still. */
-let padsOk = false, startOk = false;   /* startOk — beta-sampler: "startIn" (ACTION 40, flags b5) */
 let padStallMs = 30000;                     /* how long the module's pads state may stand still before a wait gives up (the selftest shortens it) */
 const padJobs = [];                         /* every drop this session, in order */
 const padJob = new Array(24).fill(null);    /* the drop shown on each pad (its progress, then its result for a while) */
 const dtHasFiles = e => !!(e && e.dataTransfer && e.dataTransfer.types && Array.from(e.dataTransfer.types).includes('Files'));
 function padDropTarget(el, k) {
-  el.addEventListener('dragover', e => { if (!padsOk || !link || !dtHasFiles(e)) return; e.preventDefault(); e.stopPropagation(); el.classList.add('dropover'); });
+  el.addEventListener('dragover', e => { if (!link || !dtHasFiles(e)) return; e.preventDefault(); e.stopPropagation(); el.classList.add('dropover'); });
   el.addEventListener('dragleave', () => el.classList.remove('dropover'));
-  el.addEventListener('drop', e => { if (!padsOk || !link || !dtHasFiles(e)) return; e.preventDefault(); e.stopPropagation(); el.classList.remove('dropover'); padAddFiles(e.dataTransfer.files, k); });
+  el.addEventListener('drop', e => { if (!link || !dtHasFiles(e)) return; e.preventDefault(); e.stopPropagation(); el.classList.remove('dropover'); padAddFiles(e.dataTransfer.files, k); });
 }
 padEls.forEach((p, k) => { padDropTarget(p.el, k); const f = document.createElement('i'); f.className = 'pf'; p.el.appendChild(f); p.fill = f; });
 const padSecs = n => (n / 48000).toFixed(2) + ' s';
 function padShow(job, text, kind, frac) { job.text = text; job.kind = kind || ''; if (frac != null) job.frac = frac; padJob[job.key] = job; setText('pd_msg', `${keyName(job.key)}: ${text}`); $('pd_msg').hidden = false; $('pd_msg').className = 'note' + (kind === 'bad' ? ' bad' : ''); invalidate(D.pads); }
 function padAddFiles(files, k0) {
-  if (!padsOk || !link) { say('connect to a module that takes samples onto pads first', true); return; }
+  if (!link) { say('connect to the module first', true); return; }
   const list = Array.from(files || []); let k = Math.max(0, Math.min(23, k0 | 0));
   for (const file of list) {
     if (k > 23) { say(`${list.length - list.indexOf(file)} file${list.length - list.indexOf(file) === 1 ? '' : 's'} left over — there is no pad after B2`, true); break; }
@@ -948,7 +939,7 @@ async function padUpload(job) {
   catch (e) { job.state = 'failed'; padShow(job, `${job.file.name}: this browser cannot decode it (${e && e.message || e})`, 'bad', 0); return; }
   let p0;
   try { p0 = await padState(); } catch (e) { job.state = 'failed'; padShow(job, 'the module did not answer: ' + e.message, 'bad', 0); return; }
-  if (!p0) { job.state = 'failed'; padShow(job, 'this firmware has no pads state', 'bad', 0); return; }
+  if (!p0) { job.state = 'failed'; padShow(job, 'the module\'s state did not read', 'bad', 0); return; }
   const plan = HL.padPlan(ab.numberOfChannels, ab.sampleRate, ab.length, p0.free); job.plan = plan;
   if (p0.free < HL.PADS.minFrames) { job.state = 'failed'; padShow(job, `no room left for pads (${padSecs(p0.free)} free${p0.held ? `, ${padSecs(p0.held)} held by replaced pads` : ''}) — save the kit, or start a New empty kit`, 'bad', 0); return; }
   if (plan.tooShort) { job.state = 'failed'; padShow(job, `${job.file.name}: too short (${(plan.seconds * 1000).toFixed(0)} ms; a pad needs 10 ms)`, 'bad', 0); return; }
@@ -977,7 +968,7 @@ async function padUpload(job) {
   }
 }
 async function padNewKit() {
-  if (!link || !padsOk) return;
+  if (!link) return;
   const p = st && st.pads, lose = p && p.unsaved ? ' The kit holds sounds the card does not have — they are lost.' : '';
   if (!confirm(`New empty kit: the break, every pad and every marker go, the whole memory is for pads, and the module switches to Pads.${lose} This cannot be undone.`)) return;
   await cardRun(async () => {
@@ -994,7 +985,7 @@ async function padNewKit() {
 const grammarIndex = name => labels.grammar.findIndex(l => baseLabel(l) === name);
 function drawSampler() {
   const on = samplerish(st); $('pd_sampler').hidden = !on; if (!on) return;
-  const html = `<b>Sampler</b> — the pads play samples (so do J4 and the Kit); no pattern runs.${padsOk ? ' Drop audio files on a pad to load it.' : ''}${startOk && !st.startSaved ? ' The module powers up like this (Options → Start-up).' : ''}`;
+  const html = `<b>Sampler</b> — the pads play samples (so do J4 and the Kit); no pattern runs. Drop audio files on a pad to load it.${optByte('start.in') === 0 ? ' The module powers up like this (Options → Start In).' : ''}`;
   if (lastText.get('pd_sampler_text') !== html) { lastText.set('pd_sampler_text', html); $('pd_sampler_text').innerHTML = html; }
   const c = grammarIndex('Classic'), g = grammarIndex('Grids');
   $('pd_go_classic').hidden = c < 0; $('pd_go_grids').hidden = g < 0; $('pd_go_classic').disabled = $('pd_go_grids').disabled = !link || !opts;
@@ -1009,10 +1000,9 @@ $('pd_norm').checked = padNorm;
 $('pd_norm').addEventListener('change', e => { padNorm = !!e.target.checked; try { localStorage.setItem('audiothurgist.padNorm', padNorm ? '1' : '0'); } catch {} });
 /* the room, the unsaved note, the controls (drawn with the pads) */
 function drawPadsBar() {
-  const p = st && st.pads, on = padsOk && !!p;
-  $('pd_bar').hidden = !on; $('pads_drop_help').hidden = !on; $('k_load').hidden = !on;
-  $('pd_unsaved').hidden = !(on && p.unsaved);
-  if (!on) return;
+  const p = st && st.pads;
+  $('pd_unsaved').hidden = !(p && p.unsaved);
+  if (!p) return;
   const total = Math.max(1, p.total), used = Math.max(0, p.total - p.free - p.held);
   $('pd_used').style.width = (used / total * 100).toFixed(2) + '%'; $('pd_held').style.left = (used / total * 100).toFixed(2) + '%'; $('pd_held').style.width = (p.held / total * 100).toFixed(2) + '%';
   setText('pd_room', `pads: ${padSecs(p.free)} of ${padSecs(p.total)} free${p.held ? ` · ${padSecs(p.held)} held by replaced pads` : ''}${p.noBreak ? ' · no break' : ''}`);
@@ -1027,29 +1017,28 @@ let padPickKey = 0;
 $('pd_file').addEventListener('change', e => { const t = e.target; padAddFiles(t && t.files, padPickKey); try { t.value = ''; } catch {} });
 $('pd_save').onclick = () => {
   const name = $('s_name').value.trim();
-  if (setsOk && setNameOk(name)) { setOp(ACT.saveSet); say(`saving the kit as set “${name}”…`); return; }
+  if (setNameOk(name)) { setOp(ACT.saveSet); say(`saving the kit as set “${name}”…`); return; }
   showTab('tab_kit'); const el = $('s_name'); if (el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.focus(); say('name the set (letters, digits, _ -), then Save set');
 };
 const padFlash = new Array(24).fill(0);
 function flashKey(k) { if (k < 0 || k > 23) return; flashAt[k] = performance.now(); const p = padEls[k]; p.el.classList.add('flash'); clearTimeout(padFlash[k]); padFlash[k] = setTimeout(() => p.el.classList.remove('flash'), 220); invalidate(D.wave | D.jacks); }
 function drawPads() {
-  $('padsCard').hidden = !keysOk;
-  if (!keysOk || !st) return;
+  if (!st) return;
   for (let k = 0; k < 24; k++) {
-    const p = padEls[k], t = st.keySlice ? st.keySlice[k] : -1, e = table && t >= 0 && t < table.entries.length ? table.entries[t] : null;
-    const j = padJob[k], noBreak = !!(st.pads && st.pads.noBreak);
+    const p = padEls[k], t = st.keySlice[k], e = table && t >= 0 && t < table.entries.length ? table.entries[t] : null;
+    const j = padJob[k], noBreak = st.pads.noBreak;
     const what = j ? (j.kind === 'busy' ? (j.state === 'sending' ? `↑ ${Math.round(j.frac * 100)} %` : j.state === 'committing' ? 'placing…' : '…') : j.kind === 'ok' ? '✓ ' + padSecs(j.plan ? j.plan.frames : 0) : '✕ not loaded')
       : !e ? (t >= 0 ? `slice ${t}` : '—') : t < table.nSlices ? (noBreak ? 'empty' : `slice ${t}`) : e.key >= 0 ? padSecs(e.len) : `marker ${t}`, cls = e && !(noBreak && t < table.nSlices) ? e.cls & 3 : -1;
     const kpt = keypOf(k);   /* KEYP */
     const sig = what + '|' + cls + '|' + (j ? j.kind + j.frac : '') + '|' + kpt; if (sig === p.sig) continue; p.sig = sig;
-    const empty = !j && padsOk && noBreak && e && t < table.nSlices;   /* beta-sampler: an empty kit's pad says it takes a drop */
+    const empty = !j && noBreak && e && t < table.nSlices;   /* beta-sampler: an empty kit's pad says it takes a drop */
     p.sub.textContent = what; p.kp.textContent = kpt; p.kp.hidden = !kpt; p.el.className = p.el.className.replace(/\s*(c\d|busy|bad|empty)\b/g, '') + (cls >= 0 ? ' c' + cls : '') + (j && j.kind === 'busy' ? ' busy' : j && j.kind === 'bad' ? ' bad' : '') + (empty ? ' empty' : '');
     if (p.fill) { p.fill.style.width = j ? Math.round((j.kind === 'bad' ? 1 : j.frac) * 100) + '%' : '0'; p.fill.className = 'pf' + (j && j.kind === 'ok' ? ' ok' : j && j.kind === 'bad' ? ' bad' : ''); }
-    p.el.title = j && j.text ? `${keyName(k)} — ${j.text}` : `key ${k} (${keyName(k)}) — PLAY_KEY${kpt ? ' · ' + kpt + ' (its own settings: Kit tab)' : ''}${padsOk ? ' · drop an audio file here to load it' : ''}`;
+    p.el.title = j && j.text ? `${keyName(k)} — ${j.text}` : `key ${k} (${keyName(k)}) — PLAY_KEY${kpt ? ' · ' + kpt + ' (its own settings: Kit tab)' : ''} · drop an audio file here to load it`;
   }
   drawPadsBar(); drawSampler();
   $('pads_follow').hidden = !st.keysFollow;
-  setPill('pads_plays', (st.keyPlays != null ? st.keyPlays : optByte('key.plays')) === 1 ? 'held until you let go' : 'one-shot', '');
+  setPill('pads_plays', st.keyPlays === 1 ? 'held until you let go' : 'one-shot', '');
 }
 
 /* ───────────── Jacks: what the map is, why, and what J4 is saying ───────────── */
@@ -1057,19 +1046,17 @@ const jkStrip = [];
 (function buildJackStrip() { const host = $('jk_strip'); for (let k = 0; k < 24; k++) { const i = document.createElement('i'); if (k % 12 === 0) i.className = 'oct'; i.title = `${keyName(k)} · key ${k} · ${(k / 12).toFixed(2)} V`; host.appendChild(i); jkStrip.push(i); } })();
 let jkLit = -1;
 function drawJacks() {
-  if (!st || st.jackMap == null) return;
+  if (!st) return;
   const voice = st.jackMap === 1, jacks = optByte('jacks'), g = st.grammar;
   setPill('jk_map', voice ? 'Voice map' : 'Brain map', voice ? 'brain' : '');
   setText('jk_why', jacks == null ? (voice ? 'The Voice map is applied.' : 'The Brain map is applied.')
     : jacks === 0 ? `Options → Jacks = Follow grammar, and ${modeName(g)} ${g >= GR.play ? 'is a play grammar — the Voice map' : 'is a pattern grammar — the Brain map'}.`
     : `Options → Jacks pins the ${voice ? 'Voice' : 'Brain'} map, whatever the grammar.`);
-  if (st.j4mV != null) {
-    const k = st.j4Key; setText('jk_key', `${keyName(k)} · key ${k}`);
+  { const k = st.j4Key; setText('jk_key', `${keyName(k)} · key ${k}`);
     setText('jk_mv', `${st.j4mV >= 0 ? '+' : '−'}${(Math.abs(st.j4mV) / 1000).toFixed(3)} V${st.j4mV < 0 ? ' (below 0 V → key 0)' : ''}`);
-    if (k !== jkLit) { if (jkLit >= 0) jkStrip[jkLit].classList.remove('on'); jkStrip[k].classList.add('on'); jkLit = k; }
-  } else { setText('jk_key', '—'); setText('jk_mv', 'the live J4 reading needs v0.13 firmware'); if (jkLit >= 0) { jkStrip[jkLit].classList.remove('on'); jkLit = -1; } }
+    if (k !== jkLit) { if (jkLit >= 0) jkStrip[jkLit].classList.remove('on'); jkStrip[k].classList.add('on'); jkLit = k; } }
   const sty = st.j5Style;
-  setText('jk_j5', voice ? `style v/oct — now ${sty != null && sty >= 0 ? `${sty} ${KEYS.styles[sty] || ''}` : '—'} (0 plain · 1 reverse · 2 half · 3 double · 4 ratchet · 5 staccato · 6 punch/choke · 7 record · 8 clear)` : 'gate in — each rising edge plays the J4 key');
+  setText('jk_j5', voice ? `style v/oct — now ${sty >= 0 ? `${sty} ${KEYS.styles[sty] || ''}` : '—'} (0 plain · 1 reverse · 2 half · 3 double · 4 ratchet · 5 staccato · 6 punch/choke · 7 record · 8 clear)` : 'gate in — each rising edge plays the J4 key');
   setText('jk_j6', voice ? 'gate in — plays the J4 key (and starts a loop take while Record is armed)' : 'kick gate out');
   setText('jk_j78', voice ? 'J7 hit trigger out (10 ms per call) · J8 velocity out (1.5–5 V)' : 'J7 snare gate out · J8 hat gate out (Gate Fires / Lanes / Length / Level in Options)');
 }
@@ -1186,15 +1173,14 @@ function onState(b) {
     if (p.grammar !== s.grammar) { ctlSig = ''; selSlice = -1; }
   }
   /* KEYS: a key call from anywhere (CV, the panel, a pad) — keySeq bumps, keyFlash names the key */
-  if (s.keySeq != null && p && p.keySeq != null && s.keySeq !== p.keySeq && s.keyFlash >= 0) flashKey(s.keyFlash);
+  if (p && s.keySeq !== p.keySeq && s.keyFlash >= 0) flashKey(s.keyFlash);
   if (s.matGen !== envGen && !poll.pEnv) { const gen = s.matGen; poll.pEnv = fetchEnv(link, s.nSlices).then(e => { env = e; envGen = gen; selSlice = -1; invalidate(D.wave); }, e => warn('env', e)).finally(() => { poll.pEnv = null; }); }
   syncKit(s);
-  if (startOk) syncStartIn();   /* beta-sampler */
-  if (cardOk) drawCard();
-  /* EDIT-PANEL: the module's Edit page publishes its selection (tail byte 257); the editor follows the knobs */
-  if (editOk && s.selSlice != null && s.selSlice >= 0 && s.selSlice !== (p ? p.selSlice : -1) && s.selSlice !== ed.selT) ed.select(s.selSlice);
-  /* Options edited elsewhere (a preset load on the panel): the state carries three of them. */
-  if (live && opts && !poll.pLive && (optByte('grammar.mode') !== s.grammar || optByte('class.mode') !== s.cls || (s.barsOpt != null && optByte('bars') !== s.barsOpt) || (s.keyPlays != null && optByte('key.plays') != null && optByte('key.plays') !== s.keyPlays))) refreshLive();
+  drawCard();
+  /* EDIT-PANEL: the module's Edit page publishes its selection (state byte 257); the editor follows the knobs */
+  if (s.selSlice >= 0 && s.selSlice !== (p ? p.selSlice : -1) && s.selSlice !== ed.selT) ed.select(s.selSlice);
+  /* Options edited elsewhere (a preset load on the panel): the state carries four of them. */
+  if (live && opts && !poll.pLive && (optByte('grammar.mode') !== s.grammar || optByte('class.mode') !== s.cls || optByte('bars') !== s.barsOpt || optByte('key.plays') !== s.keyPlays)) refreshLive();
   invalidate(m);
 }
 function drawLink() {
@@ -1217,7 +1203,7 @@ $('sample').addEventListener('change', e => { const v = +e.target.value; if (Num
 /* the slice view: in the pattern grammars a click selects a slice to punch; in Play / Pads it is the kit, and a click plays that key */
 $('wave').addEventListener('click', e => {
   if (!st) return; const r = e.currentTarget.getBoundingClientRect();
-  if (playish(st)) { const k = Math.max(0, Math.min(23, Math.floor((e.clientX - r.left) / r.width * 24))); if (link && keysOk) { flashKey(k); playKey(link, k, true).catch(() => {}); } return; }
+  if (playish(st)) { const k = Math.max(0, Math.min(23, Math.floor((e.clientX - r.left) / r.width * 24))); if (link) { flashKey(k); playKey(link, k, true).catch(() => {}); } return; }
   const s = sliceAt(e.clientX - r.left, r.width); selSlice = (selSlice === s) ? -1 : s; invalidate(D.wave);
 });
 /* a click on the strip punches the selected slice into that step (ACTION 3) — never in Pads, which writes nothing */
@@ -1263,20 +1249,20 @@ function cellPointer(el, k) {
   el.addEventListener('pointercancel', e => { clearTimeout(cellHold); run(e, cellG.cancel(e.pointerId)); });
 }
 function cellGesture(ev, e, k) {
-  const t = st && st.keySlice ? st.keySlice[k] : -1, src = copyArm === k ? { t } : { key: k };
+  const t = st ? st.keySlice[k] : -1, src = copyArm === k ? { t } : { key: k };
   switch (ev.type) {
-    case 'hold': if (!editOk) break; copyArm = k; setEdStatus(`copy ${keyName(k)}: drop it on a key, or tap one`, ''); invalidate(D.kit); break;
-    case 'dragstart': case 'drag': if (!editOk) break; ghost(`${keyName(k)}${copyArm === k ? ' · copy' : ' · swap'}`, e.clientX, e.clientY); dragOverKeys(src, e.clientX, e.clientY); break;
+    case 'hold': if (!st) break; copyArm = k; setEdStatus(`copy ${keyName(k)}: drop it on a key, or tap one`, ''); invalidate(D.kit); break;
+    case 'dragstart': case 'drag': if (!st) break; ghost(`${keyName(k)}${copyArm === k ? ' · copy' : ' · swap'}`, e.clientX, e.clientY); dragOverKeys(src, e.clientX, e.clientY); break;
     case 'dragend': {
-      ghost(null); dropHi(-1); if (!editOk || ev.cancelled) { if (copyArm === k) { copyArm = -1; invalidate(D.kit); } break; }
+      ghost(null); dropHi(-1); if (!st || ev.cancelled) { if (copyArm === k) { copyArm = -1; invalidate(D.kit); } break; }
       const dst = cellAt(e.clientX, e.clientY);
       if (dst >= 0 && dst !== k) { if (copyArm === k) ed.setKey(dst, t); else ed.dropOnKey({ key: k }, dst, e.clientX, e.clientY); }
       if (copyArm === k) { copyArm = -1; invalidate(D.kit); }
       break; }
     case 'tap':
-      if (editOk && copyArm >= 0 && copyArm !== k) { ed.setKey(k, st.keySlice[copyArm]); copyArm = -1; invalidate(D.kit); break; }
+      if (st && copyArm >= 0 && copyArm !== k) { ed.setKey(k, st.keySlice[copyArm]); copyArm = -1; invalidate(D.kit); break; }
       if (copyArm >= 0) { copyArm = -1; setEdStatus('', ''); invalidate(D.kit); }
-      selectKey(k); if (editOk && t >= 0) ed.auditionEntry(t);
+      selectKey(k); if (t >= 0) ed.auditionEntry(t);
       break;
   }
 }
@@ -1284,8 +1270,8 @@ function cellGesture(ev, e, k) {
  * empty key's span of the break runs up to it. */
 function nextGridKey(k) { for (let j = k + 1; j < 24; j++) if (st.keySlice[j] < table.nSlices) return st.keySlice[j]; return table.nSlices; }
 /* Selecting a key selects its entry in the editor (and the other way round through the editor's select callback). */
-function selectKey(k, fromEditor) { if (k !== selKey) { selKey = k; if (!editOk) fitView(); invalidate(D.kit | D.kitwave); } if (!fromEditor && editOk && st && st.keySlice) { ed.select(st.keySlice[k]); fitEntry(st.keySlice[k]); } }
-function fitView() { const e = editOk && ed.selT >= 0 && table ? table.entries[ed.selT] : entryOfKey(selKey); if (!e || !st) return; const pad = Math.max(200, e.len * 0.02); setView(e.start - pad, e.start + e.len + pad); }
+function selectKey(k, fromEditor) { if (k !== selKey) { selKey = k; invalidate(D.kit | D.kitwave); } if (!fromEditor && st) { ed.select(st.keySlice[k]); fitEntry(st.keySlice[k]); } }
+function fitView() { const e = ed.selT >= 0 && table ? table.entries[ed.selT] : entryOfKey(selKey); if (!e || !st) return; const pad = Math.max(200, e.len * 0.02); setView(e.start - pad, e.start + e.len + pad); }
 function fitEntry(t) { const e = table && t >= 0 && t < table.entries.length ? table.entries[t] : null; if (!e || !st || !ED.isLive(e)) return; const pad = Math.max(200, e.len * 0.02); setView(e.start - pad, e.start + e.len + pad); }
 function setView(a, b) {
   const lim = st && st.freePos ? st.freePos : 1; if (b - a < 96) { const c = (a + b) / 2; a = c - 48; b = c + 48; }
@@ -1298,7 +1284,7 @@ function zoomView(f, at) { const c = at == null ? (view.a + view.b) / 2 : at, sp
  * centre first, only those not cached. Re-planned when the view, the width,
  * the plane or the buffer changes. */
 function wavePlan(W) {
-  if (!kitOk || !st || !st.freePos) { wave.queue.length = 0; return; }
+  if (!st || !st.freePos) { wave.queue.length = 0; return; }
   const span = Math.max(1, view.b - view.a), step = Math.max(1, Math.min(128, Math.ceil(span / Math.max(50, W)))), win = WAVE_N * step;
   const sig = [view.a, view.b, W, step, wave.plane, st.freePos].join('|'); if (sig === wave.planSig) return; wave.planSig = sig; wave.step = step;
   wave.queue.length = 0; const mid = (view.a + view.b) / 2;
@@ -1307,16 +1293,16 @@ function wavePlan(W) {
 }
 function drawKit() {
   if (!st) return;
-  const rs = st.recState || 0, rk = st.recKey == null ? -1 : st.recKey;
+  const rs = st.recState, rk = st.recKey;
   for (let k = 0; k < 24; k++) {
     const c = keyCells[k], e = entryOfKey(k), rec = keyRecorded(e);
     let info = '—', meta = '', cls = -1;
     if (e && rec) { info = `${secs(e.len)} · ${CLS_NAME[e.cls & 3]}${e.hit ? ' · hit' : ''}`; meta = `sal ${Math.round(e.sal / 2.55)}% · dens ${Math.round(e.dens / 2.55)}%`; cls = e.cls & 3; }
     else if (e && keyMarker(e)) { info = `marker ${e.t}`; meta = `${secs(e.len)} · ${CLS_NAME[e.cls & 3]}`; cls = e.cls & 3; }
     else if (e) { const nxt = nextGridKey(k) - 1; info = nxt > e.t ? `slices ${e.t}–${nxt}` : `slice ${e.t}`; meta = `${secs(e.len)} · ${CLS_NAME[e.cls & 3]}`; }
-    else if (st.keySlice) info = `slice ${st.keySlice[k]}`;
+    else info = `slice ${st.keySlice[k]}`;
     const rstate = rk === k && rs ? REC[rs] : '';
-    const pulse = editOk && e && ed.selT >= 0 && e.t === ed.selT, arm = copyArm === k, mark = !!(e && keyMarker(e)), orange = !!(e && ED.isOrange(e));
+    const pulse = e && ed.selT >= 0 && e.t === ed.selT, arm = copyArm === k, mark = !!(e && keyMarker(e)), orange = !!(e && ED.isOrange(e));
     const kpt = keypOf(k);   /* KEYP: the key's own settings, in words — only when set */
     const sig = [info, meta, cls, rec, k === selKey, rstate, rs, pulse, arm, mark, orange, kpt].join('|');
     if (sig === c.sig) continue; c.sig = sig;
@@ -1325,50 +1311,49 @@ function drawKit() {
     c.el.className = 'key' + (rec ? ' rec' : '') + (k === selKey ? ' sel' : '') + (rstate ? ' ' + rstate : '') + (pulse ? ' pulse' : '') + (arm ? ' arm' : '');
     c.el.style.borderLeftStyle = mark ? (orange ? 'solid' : 'dotted') : 'solid';
     c.el.style.borderLeftColor = cls >= 0 ? COL[cls] : (e ? COL[e.cls & 3] + '66' : '');
-    c.rec.disabled = !kitOk || rs !== 0; c.clr.disabled = !kitOk || !rec;
+    c.rec.disabled = !link || rs !== 0; c.clr.disabled = !link || !rec;
   }
   const e = entryOfKey(selKey), rec = keyRecorded(e), kn = keyName(selKey);
-  $('k_rec').textContent = `● Record into ${kn}`; $('k_rec').disabled = !kitOk || rs !== 0;
-  $('k_clr').textContent = `✕ Clear ${kn}`; $('k_clr').disabled = !kitOk || !rec;
-  $('k_load').textContent = `⤓ Load into ${kn}…`; $('k_load').disabled = !padsOk || !link;
+  $('k_rec').textContent = `● Record into ${kn}`; $('k_rec').disabled = !link || rs !== 0;
+  $('k_clr').textContent = `✕ Clear ${kn}`; $('k_clr').disabled = !link || !rec;
+  $('k_load').textContent = `⤓ Load into ${kn}…`; $('k_load').disabled = !link;
   setPill('k_recstate', rs ? `record ${REC[rs]} · ${rk >= 0 ? keyName(rk) : '—'}` : 'record idle', rs === 2 ? 'warn' : rs ? 'ok' : '');
-  const lvl = st.inLevel || 0; $('k_meter').style.width = Math.round(lvl / 2.55) + '%'; $('k_meterbox').classList.toggle('hot', lvl > 230); $('k_meterbox').classList.toggle('idle', !rs);
-  const kp = st.keyPlays != null ? st.keyPlays : optByte('key.plays'); const ks = $('k_plays'); if (kp != null && document.activeElement !== ks && ks.value !== String(kp)) ks.value = String(kp); ks.disabled = !kitOk;
+  const lvl = st.inLevel; $('k_meter').style.width = Math.round(lvl / 2.55) + '%'; $('k_meterbox').classList.toggle('hot', lvl > 230); $('k_meterbox').classList.toggle('idle', !rs);
+  const ks = $('k_plays'); if (document.activeElement !== ks && ks.value !== String(st.keyPlays)) ks.value = String(st.keyPlays); ks.disabled = !link;
   if (st.bufCap) {
     const recs = Math.max(0, st.freePos - st.bufLen);
     $('u_mat').style.width = (st.bufLen / st.bufCap * 100).toFixed(2) + '%'; $('u_rec').style.left = (st.bufLen / st.bufCap * 100).toFixed(2) + '%'; $('u_rec').style.width = (recs / st.bufCap * 100).toFixed(2) + '%';
     setText('u_break', secs(st.bufLen)); setText('u_recs', recs ? `${secs(recs)} (${table ? table.nTable - table.nSlices : '?'} key${table && table.nTable - table.nSlices === 1 ? '' : 's'})` : 'none');
     const pp = st.pads;   /* PADS: the free room is the pads' (and the takes'): what the break leaves */
-    setText('u_free', pp ? `${secs(pp.free)} of ${secs(pp.total)} for pads (the buffer: ${secs(st.bufCap)})` : secs(st.bufCap - st.freePos) + ' of ' + secs(st.bufCap)); setText('u_planes', st.stereo ? 'stereo (L · R)' : 'mono');
-    const held = pp ? pp.held : 0; $('u_held_l').hidden = $('u_held').hidden = $('u_held_help').hidden = !held; if (held) setText('u_held', secs(held));
-    if (pp && pp.noBreak) setText('u_break', 'none — an empty kit (¼ s of silence holds the grid)');
-    setText('u_table', table ? tableLine() : (st.nTable != null ? `${st.nTable} entries` : '—'));
+    setText('u_free', `${secs(pp.free)} of ${secs(pp.total)} for pads (the buffer: ${secs(st.bufCap)})`); setText('u_planes', st.stereo ? 'stereo (L · R)' : 'mono');
+    const held = pp.held; $('u_held_l').hidden = $('u_held').hidden = $('u_held_help').hidden = !held; if (held) setText('u_held', secs(held));
+    if (pp.noBreak) setText('u_break', 'none — an empty kit (¼ s of silence holds the grid)');
+    setText('u_table', table ? tableLine() : `${st.nTable} entries`);
   }
   drawKeyp();   /* KEYP */
-  if (editOk) drawEditor();
-  const le = st.looperEvents; setText('l_count', le == null ? '—' : String(le)); setText('l_label', le == null ? 'needs LOOPER firmware (state byte 176)' : (le === 1 ? 'event on the bar' : 'events on the bar'));
+  drawEditor();
+  const le = st.looperEvents; setText('l_count', String(le)); setText('l_label', le === 1 ? 'event on the bar' : 'events on the bar');
   $('l_undo').disabled = !le; $('l_clear').disabled = !le;
   drawSet();
-  setPill('kit_status', !st.keySlice ? 'needs sample-mode firmware' : table ? kitLine() : 'reading the table…', st.keySlice ? 'ok' : 'warn');
+  setPill('kit_status', table ? kitLine() : 'reading the table…', 'ok');
   $('wv_plane').hidden = !st.stereo;
 }
 /* EDIT: the table has grid slices, recordings, markers inside the break, and tombstones (free slots). */
 function tableCounts() { let recs = 0, marks = 0, tombs = 0; if (table) for (let t = table.nSlices; t < table.entries.length; t++) { const e = table.entries[t]; if (ED.isTomb(e)) tombs++; else if (e.key >= 0) recs++; else marks++; } return { recs, marks, tombs }; }
 function tableLine() { const { recs, marks, tombs } = tableCounts(); return `${table.nSlices} grid + ${recs} recorded${marks ? ` + ${marks} marker${marks === 1 ? '' : 's'}` : ''}${tombs ? ` + ${tombs} free` : ''} = ${table.nTable}`; }
-function kitLine() { const { recs, marks } = tableCounts(); const onMarks = st.keySlice ? Array.from(st.keySlice).filter(t => t >= table.nSlices && t < table.entries.length && table.entries[t].key < 0).length : 0; return `${recs} recorded${marks ? ` · ${marks} marker${marks === 1 ? '' : 's'} (${onMarks} on keys)` : ''} · ${24 - recs - onMarks} on the break`; }
+function kitLine() { const { recs, marks } = tableCounts(); const onMarks = Array.from(st.keySlice).filter(t => t >= table.nSlices && t < table.entries.length && table.entries[t].key < 0).length; return `${recs} recorded${marks ? ` · ${marks} marker${marks === 1 ? '' : 's'} (${onMarks} on keys)` : ''} · ${24 - recs - onMarks} on the break`; }
 /* The set section: the op in flight (with the save's progress), the result of the last one
  * (once per sequence number), the name the material came from. */
 function drawSet() {
   const busy = !!(st.setState), name = $('s_name').value.trim();
-  $('s_save').disabled = !setsOk || busy || !setNameOk(name) || (st.recState || 0) !== 0; $('s_load').disabled = !setsOk || busy || !setNameOk(name);
-  $('s_name').disabled = !setsOk;
+  $('s_save').disabled = !link || busy || !setNameOk(name) || st.recState !== 0; $('s_load').disabled = !link || busy || !setNameOk(name);
+  $('s_name').disabled = !link;
   $('s_bar').style.width = busy && st.setState === 1 ? Math.round((st.setProgress || 0) / 2.55) + '%' : (busy ? '100%' : '0'); $('s_barbox').classList.toggle('idle', !busy);
   setText('s_cur', st.setName ? `material: set “${st.setName}”` : (st.file === 255 ? 'material: a take / the synth break' : 'material: a loose file'));
-  if (!setsOk) { setPill('s_status', st.setState == null ? 'needs sets firmware (state byte 219)' : '—', 'warn'); return; }
   if (busy) { setPill('s_status', `${SET_STATE[st.setState] || 'busy'}${setAsked ? ' ' + setAsked.name : ''}${st.setState === 1 ? ' ' + Math.round(st.setProgress / 2.55) + '%' : '…'}`, 'warn'); return; }
-  if (st.setSeq != null && setSeqShown < 0 && !setAsked) setSeqShown = st.setSeq;   /* the last result before this page came is not news */
-  if (st.setSeq != null && st.setSeq !== setSeqShown) {
-    setSeqShown = st.setSeq; const r = st.setResult || 0, what = setAsked ? `${setAsked.op === ACT.saveSet ? 'saved' : 'loaded'} ${setAsked.name}` : 'set';
+  if (setSeqShown < 0 && !setAsked) setSeqShown = st.setSeq;   /* the last result before this page came is not news */
+  if (st.setSeq !== setSeqShown) {
+    setSeqShown = st.setSeq; const r = st.setResult, what = setAsked ? `${setAsked.op === ACT.saveSet ? 'saved' : 'loaded'} ${setAsked.name}` : 'set';
     setPill('s_status', r ? `${what}: ${SET_RESULT[r] || ('error ' + r)}` : what, r ? 'warn' : 'ok');
     if (!r && setAsked && setAsked.op === ACT.saveSet) { const lab = setAsked.name + ' [set]'; if (!labels.sample.includes(lab)) { labels.sample.push(lab); fillSetList(); ctlSig = ''; invalidate(D.text | D.controls); } }
     setAsked = null;
@@ -1385,12 +1370,12 @@ $('s_save').onclick = () => setOp(ACT.saveSet); $('s_load').onclick = () => setO
 $('s_name').addEventListener('input', () => { if (st) drawSet(); });
 function drawKitWave() {
   const c = $('kitwave'), [g, w, h] = ctx(c); g.clearRect(0, 0, w, h);
-  if (!kitOk || !st || !st.freePos) { g.fillStyle = TOK['cv-ink2']; g.font = '12px system-ui'; g.textAlign = 'center'; g.fillText(st && !st.keySlice ? 'this firmware sends no sample-mode state tail' : 'connect to read the material', w / 2, h / 2); setText('wv_title', 'Waveform'); return; }
+  if (!st || !st.freePos) { g.fillStyle = TOK['cv-ink2']; g.font = '12px system-ui'; g.textAlign = 'center'; g.fillText(st ? 'no material yet' : 'connect to read the material', w / 2, h / 2); setText('wv_title', 'Waveform'); return; }
   wavePlan(w);
   const L = ed.layout(w, h), hw = L.wave[1];
   const a = view.a, span = Math.max(1, view.b - a), mid = hw / 2, step = wave.step, win = WAVE_N * step, xOf = p => (p - a) / span * w;
   const ke = entryOfKey(selKey), rec = keyRecorded(ke);
-  const selT = L.edit ? ed.selT : (ke ? ke.t : -1), selE = selT >= 0 && table ? table.entries[selT] : null;
+  const selT = ed.selT, selE = selT >= 0 && table ? table.entries[selT] : null;
   const col = selE ? COL[selE.cls & 3] : TOK['cv-ok'];
   if (selE) { const s0 = drawPos(selT, 'start', selE.start), s1 = drawPos(selT, 'end', selE.start + selE.len); g.fillStyle = col; g.globalAlpha = 0.12; g.fillRect(xOf(s0), 0, xOf(s1) - xOf(s0), hw); g.globalAlpha = 1; }
   if (st.bufLen > a && st.bufLen < view.b) { g.fillStyle = TOK['cv-end']; g.fillRect(xOf(st.bufLen), 0, 2, hw); }
@@ -1419,9 +1404,9 @@ function drawKitWave() {
     g.fillStyle = TOK['cv-ink2']; g.textAlign = 'right'; g.fillText('grid', w - 4, LANE - 3); g.fillText('markers', w - 4, hw - 3); g.textAlign = 'left';
   }
   if (hits) { g.fillStyle = TOK['cv-call']; for (const p of hits) { if (p < a || p > view.b) continue; const x = xOf(p); g.fillRect(x - 1, 13, 3, 6); g.fillRect(x, 19, 1, hw * 0.18); } }
-  if (L.edit && st.srcPos != null && st.srcPos >= a && st.srcPos <= view.b) { g.fillStyle = TOK['cv-ok']; g.globalAlpha = 0.6; g.fillRect(xOf(st.srcPos), 0, 1, hw); g.globalAlpha = 1; }
+  if (st.srcPos >= a && st.srcPos <= view.b) { g.fillStyle = TOK['cv-ok']; g.globalAlpha = 0.6; g.fillRect(xOf(st.srcPos), 0, 1, hw); g.globalAlpha = 1; }
   if (ed.drag && ed.drag.kind === 'handle') { const x = xOf(ed.drag.pos); g.fillStyle = ed.drag.by ? TOK['cv-call'] : TOK['cv-play']; g.fillRect(x - 1, 0, 2, hw); }
-  if (L.edit) {
+  {
     /* the handle row: a lollipop per movable start (a square for the selected marker's end), the selection ringed */
     const hy = L.handles[0] + ED.K.handlePx / 2, pulse = 0.5 + 0.5 * Math.sin(performance.now() / 180);
     g.fillStyle = TOK['cv-handles']; g.fillRect(0, L.handles[0], w, ED.K.handlePx); g.fillStyle = TOK['cv-handle-line']; g.fillRect(0, L.handles[0], w, 1);
@@ -1444,10 +1429,10 @@ function drawKitWave() {
   }
   if (have < want) { g.fillStyle = TOK['cv-ink2']; g.font = '11px system-ui'; g.textAlign = 'right'; g.fillText(`loading… ${wave.queue.length} window${wave.queue.length === 1 ? '' : 's'} to go`, w - 6, 14); }
   let what;
-  if (L.edit && selE) { const ks = ED.keysOn(st.keySlice, selT).map(keyName).join(' '); what = `${entryLabel(selT)}${ks ? ' · ' + ks : ''} · ${secs(selE.len)} · ${CLS_NAME[selE.cls & 3]}${selE.hit ? ' · hit' : ''}${ED.isOrange(selE) ? ' · yours' : ''}`; }
+  if (selE) { const ks = ED.keysOn(st.keySlice, selT).map(keyName).join(' '); what = `${entryLabel(selT)}${ks ? ' · ' + ks : ''} · ${secs(selE.len)} · ${CLS_NAME[selE.cls & 3]}${selE.hit ? ' · hit' : ''}${ED.isOrange(selE) ? ' · yours' : ''}`; }
   else what = ke ? (rec ? `${keyName(selKey)} · recording · ${secs(ke.len)} · ${CLS_NAME[ke.cls & 3]}${ke.hit ? ' · hit' : ''}` : `${keyName(selKey)} · slice ${ke.t} of the break · ${secs(ke.len)}`) : keyName(selKey);
   setText('wv_title', what); setText('wv_range', `view ${secs(a)} – ${secs(view.b)} · ${step === 1 ? 'raw samples' : step + ' samples per pixel'}`);
-  if (L.edit) updateField();
+  updateField();
 }
 /* Colour is state: grid white, a recording gold, a marker grey until touched, orange once placed or moved by the user.
  * Not by colour alone: an untouched marker is also drawn dotted in its lane and hollow on its handle (as its key is dotted). */
@@ -1493,7 +1478,7 @@ $('wv_plane').onchange = e => { wave.plane = +e.target.value; invalidate(D.kitwa
  * the long-press menu, the swap / replace / cancel prompt, the drop target under a finger, the table refetch. */
 const ed = new ED.Editor({
   link: () => link, view,
-  ctx: () => ({ table, st, hits, sampleAt, editOk, tapAllowMs: tapAllowMs() }),
+  ctx: () => ({ table, st, hits, sampleAt, tapAllowMs: tapAllowMs() }),
   cb: { redraw: () => invalidate(D.kitwave | D.kit), status: setEdStatus, refetch: refetchKit,
     select: t => { if (st && st.keySlice) { const ks = ED.keysOn(st.keySlice, t); if (ks.length && !ks.includes(selKey)) selectKey(ks[0], true); } fieldSig = ''; invalidate(D.kit | D.kitwave); },
     setView, zoomView, fitEntry, menu: showMenu, choose: showChoice, dropTarget: cellAt },
@@ -1510,7 +1495,7 @@ function sampleAt(i) {
 }
 /* A fresh state, then the table (the 14-byte form) — what a landed edit or a refusal asks for. */
 async function refetchKit() {
-  if (!link || !kitOk) return;
+  if (!link) return;
   try { if (poll.pState) await poll.pState; else { const b = await link.request(CMD.state, undefined, { key: 'state', urgent: true }); onState(b); } } catch (e) { warn('state', e); }
   if (poll.pTable) { try { await poll.pTable; } catch {} }
   tableSig = ''; if (st) syncKit(st); if (poll.pTable) { try { await poll.pTable; } catch {} }
@@ -1544,17 +1529,17 @@ document.addEventListener('pointerdown', e => { if (!$('ed_menu').hidden && !$('
   c.addEventListener('wheel', e => { if (!st || !st.freePos) return; e.preventDefault(); const r = c.getBoundingClientRect(); ed.wheel(e.clientX - r.left, r.width, e.deltaY); }, { passive: false });
   document.addEventListener('keydown', e => { if (e.key === 'Shift') ed.keyModifier(true); }); document.addEventListener('keyup', e => { if (e.key === 'Shift') ed.keyModifier(false); });
   /* the selection pulses: the canvas is redrawn a few times a second while something is selected */
-  setInterval(() => { if (kitShown && editOk && ed.selT >= 0 && !ed.drag && document.visibilityState !== 'hidden') invalidate(D.kitwave); }, 160);
+  setInterval(() => { if (kitShown && st && ed.selT >= 0 && !ed.drag && document.visibilityState !== 'hidden') invalidate(D.kitwave); }, 160);
 }
 /* the field under the handles, the snap toggles, the panel */
 $('ed_start').addEventListener('change', e => { ed.typed('start', e.target.value); fieldSig = ''; }); $('ed_end').addEventListener('change', e => { ed.typed('end', e.target.value); fieldSig = ''; });
 $('ed_unit').onchange = e => { ed.unit = e.target.value; fieldSig = ''; invalidate(D.kitwave); };
 $('ed_zgrid').onchange = e => { ed.zero.grid = e.target.checked; }; $('ed_zmark').onchange = e => { ed.zero.markers = e.target.checked; };
-$('chop').addEventListener('pointerdown', e => { e.preventDefault(); if (!link || !editOk) return; $('chop').classList.add('hit'); setTimeout(() => $('chop').classList.remove('hit'), 120); ed.tapMark(); });
+$('chop').addEventListener('pointerdown', e => { e.preventDefault(); if (!link) return; $('chop').classList.add('hit'); setTimeout(() => $('chop').classList.remove('hit'), 120); ed.tapMark(); });
 $('ed_nudge_m').onclick = () => ed.nudge(-nudgeMs(), +$('ed_nudge_which').value); $('ed_nudge_p').onclick = () => ed.nudge(nudgeMs(), +$('ed_nudge_which').value);
 const nudgeMs = () => Math.max(1, Math.min(500, Math.round(+$('ed_nudge').value) || 5));
 $('ed_follow').onclick = () => {
-  if (!table || !st || !st.keySlice) return; let n = 0, recs = 0;
+  if (!table || !st) return; let n = 0, recs = 0;
   for (let k = 0; k < 24; k++) if (st.keySlice[k] !== ED.spanSlice(k, table.nSlices)) { n++; if (keyRecorded(entryOfKey(k))) recs++; }
   if (!n) { setEdStatus('every key already follows the grid', ''); return; }
   if (confirm(`${n} key${n === 1 ? '' : 's'} go back to the grid${recs ? ` — ${recs} recorded key${recs === 1 ? '' : 's'} lose${recs === 1 ? 's' : ''} the take (it stays in the table, keyless)` : ''}. Go on?`)) ed.keysFollowGrid();
@@ -1565,31 +1550,31 @@ $('ed_follow').onclick = () => {
   c.addEventListener('pointermove', e => { if (down) at(e); }); c.addEventListener('pointerup', () => { down = false; }); c.addEventListener('pointercancel', () => { down = false; }); }
 $('ed_onsets').onclick = () => ed.fromOnsets(edThresh);
 $('ed_undo').onclick = () => ed.undo(); $('ed_redo').onclick = () => ed.redo();
-/* the history list (the page's labels keyed by tableGen, the undone ones struck through), the two depths from the tail
- * (EDIT-UNDO: byte 262 is the redo depth and the sign the journal exists), the playhead for the Chop pad */
+/* the history list (the page's labels keyed by tableGen, the undone ones struck through), the journal's two depths,
+ * the playhead for the Chop pad */
 let histSig = '';
 function drawEditor() {
-  const ud = st.undoDepth || 0, rd = st.redoDepth || 0, journal = st.redoDepth != null;
+  const ud = st.undoDepth, rd = st.redoDepth;
   $('ed_undo').disabled = !ud || !link; $('ed_redo').disabled = !rd || !link;
-  setText('ed_depth', st.undoDepth == null ? '' : !journal ? 'no journal on this firmware (EDIT-UNDO) — the list is what this page did' : ud || rd ? `undo ${ud} · redo ${rd}` : 'nothing to undo');
-  setPill('ed_gen', st.tableGen != null ? `table gen ${st.tableGen}` : '—', '');
-  setText('chop_pos', st.srcPos != null && st.bufLen ? `playhead ${ED.fmtBbs(st.srcPos, ed.posCtx())} · ${ED.fmtMs(st.srcPos)}` : 'playhead —'); setText('chop_allow', tapAllowMs() + ' ms');
-  /* v0.13: the module refuses a tap while nothing sounds (tail 263 b0) — say so on the pad instead of after the tap */
-  const silent = keysOk && st.srcValid === false; $('chop').disabled = !link || !st.bufLen || silent; $('chop_why').hidden = !silent;
+  setText('ed_depth', ud || rd ? `undo ${ud} · redo ${rd}` : 'nothing to undo');
+  setPill('ed_gen', `table gen ${st.tableGen}`, '');
+  setText('chop_pos', st.bufLen ? `playhead ${ED.fmtBbs(st.srcPos, ed.posCtx())} · ${ED.fmtMs(st.srcPos)}` : 'playhead —'); setText('chop_allow', tapAllowMs() + ' ms');
+  /* the module refuses a tap while nothing sounds (state byte 263 b0) — say so on the pad instead of after the tap */
+  const silent = !st.srcValid; $('chop').disabled = !link || !st.bufLen || silent; $('chop_why').hidden = !silent;
   drawMarkers();
   const list = ed.history.list(), sig = list.map(x => x.gen + x.label + (x.undone ? '~' : '')).join('|'); if (sig !== histSig) { histSig = sig; $('ed_hist').innerHTML = list.map(x => `<li${x.undone ? ' class="undone"' : ''}><i>gen ${x.gen}</i>${esc(x.label)}</li>`).join('') || '<li>nothing yet</li>'; }
 }
 $('k_rec').onclick = () => action(ACT.recArm, selKey); $('k_clr').onclick = () => action(ACT.recClear, selKey);
 $('k_plays').onchange = async e => { await action(ACT.keyPlays, +e.target.value); refreshLive(); };
 $('l_undo').onclick = () => action(ACT.looperUndo); $('l_clear').onclick = () => action(ACT.looperClear);
-/* ───────────── KEYP (ACTION 37 + 0x69, capability "keyp": 1): each key's own gain / tune / plays ─────────────
+/* ───────────── KEYP (ACTION 37 + 0x69): each key's own gain / tune / plays ─────────────
  * The selected key's settings in the row under the keys; the cells (and the Play pads) show a key's settings in words
  * when it has any. The sliders play live: each value goes out while you drag (one at a time — the newest waits for the
  * last reply), every send after the drag's first with JOIN, so a whole drag is one undo step (the autoslice slider's
  * way). The module's answer is the truth: the row follows the settings read back, except while you hold a control. */
-let keypOk = false, keyp = null, keypGen = -1, spreadOk = false;   /* CHROMA: spreadOk = "keyp": 2 (ACTION 38) */
+let keyp = null, keypGen = -1;
 let kpBusy = false, kpWant = null, kpDrag = false, kpSent = 0, kpKey = -1, kpTouch = 0;
-const keypOf = k => keypOk && keyp && keyp[k] ? HL.keypText(keyp[k]) : '';
+const keypOf = k => keyp && keyp[k] ? HL.keypText(keyp[k]) : '';
 const kpGainText = g => g ? HL.keypGainText(g) : '0 dB';
 const kpSemiText = c => { const s = Math.trunc(c / 100); return (s > 0 ? '+' : s < 0 ? '−' : '') + Math.abs(s) + ' st'; };
 /* what the row's controls say now, as a key's settings */
@@ -1598,8 +1583,7 @@ function kpFromRow() {
   return { gain: +$('kp_gain').value, cents: Math.max(-HL.KEYP.centsMax, Math.min(HL.KEYP.centsMax, semi * 100 + fine)), plays: +$('kp_plays').value, rat: +$('kp_rat').value };
 }
 function drawKeyp() {
-  const row = $('kp_row'); row.hidden = !keypOk; if (!keypOk) return;
-  const k = selKey, p = keyp && keyp[k] ? keyp[k] : { gain: 0, cents: 0, plays: 0, rat: 0 }, held = kpDrag || performance.now() - kpTouch < 1500 || kpBusy || kpWant;
+  const row = $('kp_row'), k = selKey, p = keyp && keyp[k] ? keyp[k] : { gain: 0, cents: 0, plays: 0, rat: 0 }, held = kpDrag || performance.now() - kpTouch < 1500 || kpBusy || kpWant;
   setText('kp_key', keyName(k)); row.classList.toggle('set', !HL.keypNeutral(p));
   const busy = !link || !st || !st.bufLen; for (const id of ['kp_gain', 'kp_semi', 'kp_cents', 'kp_plays', 'kp_rat', 'kp_hear', 'kp_reset']) $(id).disabled = busy;
   $('kp_rat_l').hidden = +$('kp_plays').value !== HL.KEYP.ratchet;
@@ -1615,22 +1599,21 @@ function drawKeyp() {
   $('kp_rat_l').hidden = +$('kp_plays').value !== HL.KEYP.ratchet;
   setText('kp_gain_v', kpGainText(p.gain)); setText('kp_semi_v', kpSemiText(p.cents));
 }
-/* ───────────── CHROMA (ACTION 38, capability "keyp": 2): one sample, played chromatically ─────────────
+/* ───────────── CHROMA (ACTION 38): one sample, played chromatically ─────────────
  * "Spread G1 chromatically (C1 … B2)": the selected key's sample on all 24 keys, key j tuned (j − G1) semitones plus
  * G1's own cents, with G1's gain and Plays; G1 stays as it is. J4's V/oct then plays a melody from one sample. Keys that
  * play their own pads would lose them (the samples stay in the kit, unplayed) — the prompt asks first, the way the
  * key-drop prompt does when a recording would lose its only key: keep those pads (the default), spread over them too,
  * or cancel. One undo step puts every key's map and settings back. */
-const emptyKey = k => { const e = entryOfKey(k); return !!(e && st && st.pads && st.pads.noBreak && e.t < table.nSlices); };   /* an empty kit's key: nothing to spread */
+const emptyKey = k => { const e = entryOfKey(k); return !!(e && st && st.pads.noBreak && e.t < table.nSlices); };   /* an empty kit's key: nothing to spread */
 function drawSpread(k, busy) {
-  const b = $('kp_spread'); b.hidden = !spreadOk; if (!spreadOk) return;
-  const kn = keyName(k), empty = !!table && emptyKey(k);
+  const b = $('kp_spread'), kn = keyName(k), empty = !!table && emptyKey(k);
   setText('kp_spread', `Spread ${kn} chromatically (${keyName(0)} … ${keyName(23)})`);
-  b.disabled = busy || !table || !st || !st.keySlice || empty || !!st.recState;
+  b.disabled = busy || !table || !st || empty || !!st.recState;
   b.title = empty ? `${kn} is empty — drop a sample on it first, then spread it` : `SPREAD_KEYS (ACTION 38): ${kn}'s sample on every key, a semitone a key — J4's V/oct plays it as a melody. Every other key takes its tune (its distance from ${kn} in semitones, plus ${kn}'s cents), ${kn}'s gain and Plays; ${kn} stays as it is. Asks first when it would replace pads with their own samples. One undo step puts every key back.`;
 }
 async function spreadKey(cx, cy) {
-  if (!link || !spreadOk || !st || !st.keySlice || !table) return;
+  if (!link || !st || !table) return;
   const k = selKey, kn = keyName(k), plan = HL.spreadPlan(st.keySlice, table.entries, table.nSlices, k);
   let keep = false;
   if (plan.pads.length) {
@@ -1649,7 +1632,7 @@ $('kp_spread').addEventListener('click', e => { spreadKey(e.clientX, e.clientY);
 function kpLabels() { const p = kpFromRow(); setText('kp_gain_v', kpGainText(p.gain)); setText('kp_semi_v', kpSemiText(p.cents)); }
 /* one send at a time; `join` for every send of a drag after its first */
 function kpQueue(p, join) {
-  if (!link || !keypOk) return;
+  if (!link) return;
   const key = selKey;
   if (kpBusy) { kpWant = { p, join: true, key }; return; }
   kpBusy = true; kpKey = key; kpTouch = performance.now();
@@ -1670,35 +1653,33 @@ $('kp_plays').addEventListener('change', () => { kpTouch = performance.now(); kp
 $('kp_rat').addEventListener('change', () => { kpTouch = performance.now(); kpSent = 0; kpQueue(kpFromRow(), false); });
 $('kp_reset').onclick = () => { kpSent = 0; $('kp_gain').value = '0'; $('kp_semi').value = '0'; $('kp_cents').value = '0'; $('kp_plays').value = '0'; $('kp_rat').value = '0'; $('kp_rat_l').hidden = true; kpLabels(); kpTouch = 0; kpQueue({ gain: 0, cents: 0, plays: 0, rat: 0 }, false); };
 { const b = $('kp_hear'); let down = -1;
-  const up = () => { if (down < 0) return; const k = down; down = -1; if (link && keysOk) playKey(link, k, false).catch(() => {}); };
-  b.addEventListener('pointerdown', e => { e.preventDefault(); if (!link || !keysOk) return; try { b.setPointerCapture(e.pointerId); } catch {} down = selKey; flashKey(down); playKey(link, down, true).catch(() => {}); });
+  const up = () => { if (down < 0) return; const k = down; down = -1; if (link) playKey(link, k, false).catch(() => {}); };
+  b.addEventListener('pointerdown', e => { e.preventDefault(); if (!link) return; try { b.setPointerCapture(e.pointerId); } catch {} down = selKey; flashKey(down); playKey(link, down, true).catch(() => {}); });
   b.addEventListener('pointerup', up); b.addEventListener('pointercancel', up); b.addEventListener('lostpointercapture', up); }
 /* The table follows the state: refetched when the material, the table size,
  * the free position or the key map changes (a take, a clear, a re-slice). */
 function syncKit(s) {
-  if (!kitOk || s.keySlice == null) return;
-  if (editOk) ed.noteState(s);
+  ed.noteState(s);
   const sig = [s.matGen, s.nTable, s.freePos, s.bufLen, Array.from(s.keySlice).join(','), s.tableGen].join('|');   /* EDIT: tableGen joins the signature */
   if (sig !== tableSig && !poll.pTable) {
-    poll.pTable = fetchTable(link, { edit: editOk }).then(t => {   /* EDIT: the 14-byte form (flags) when the capability is there */
+    poll.pTable = fetchTable(link).then(t => {
       const before = table ? entryOfKey(selKey) : null; table = t; tableSig = sig;
       const bs = [s.matGen, s.freePos, s.bufLen].join('|'), bufChanged = bs !== bufSig; bufSig = bs;
       if (bufChanged) { wave.cache.clear(); wave.planSig = ''; }   /* an edit moves the table, not the audio: the windows stay */
-      if (editOk && ed.selT >= 0 && (ed.selT >= t.entries.length || (ed.selT >= t.nSlices && ED.isTomb(t.entries[ed.selT])))) ed.select(-1);
-      const after = entryOfKey(selKey); if (bufChanged || !before || !after || (!editOk && (before.start !== after.start || before.len !== after.len))) fitView();   /* new material (or, view-only, the key's take moved) */
+      if (ed.selT >= 0 && (ed.selT >= t.entries.length || (ed.selT >= t.nSlices && ED.isTomb(t.entries[ed.selT])))) ed.select(-1);
+      const after = entryOfKey(selKey); if (bufChanged || !before || !after) fitView();   /* new material */
       fieldSig = ''; invalidate(D.kit | D.kitwave | D.bar | D.wave);
     }, e => warn('table', e)).finally(() => { poll.pTable = null; });
   }
   /* KEYP: the 24 keys' settings (0x69), read again whenever tableGen moves — every KEY_PARAMS, undo and load bumps it */
-  if (keypOk && s.tableGen !== keypGen && !poll.pKeyp) { const g = s.tableGen; poll.pKeyp = HL.fetchKeyParams(link, { key: 'keyp' }).then(a => { keyp = a; keypGen = g; invalidate(D.kit | D.pads); }, e => warn('keys', e)).finally(() => { poll.pKeyp = null; }); }
+  if (s.tableGen !== keypGen && !poll.pKeyp) { const g = s.tableGen; poll.pKeyp = HL.fetchKeyParams(link, { key: 'keyp' }).then(a => { keyp = a; keypGen = g; invalidate(D.kit | D.pads); }, e => warn('keys', e)).finally(() => { poll.pKeyp = null; }); }
   if (s.matGen !== hitsGen && !poll.pHits) { const gen = s.matGen; poll.pHits = fetchHits(link).then(hh => { hits = hh; hitsGen = gen; invalidate(D.kitwave | D.wave); }, e => warn('hits', e)).finally(() => { poll.pHits = null; }); }
 }
 
-/* ── KEYS (v0.13): the markers box — the autoslice count with its re-roll, markers → keys, clear markers ── */
+/* ── KEYS: the markers box — the autoslice count with its re-roll, markers → keys, clear markers ── */
 function drawMarkers() {
-  $('mk_box').hidden = !keysOk; if (!keysOk) return;
   const n = st.nMarkers, busy = !link || !st.bufLen;
-  setPill('mk_n', n == null ? '—' : `${n} marker${n === 1 ? '' : 's'}`, '');
+  setPill('mk_n', `${n} marker${n === 1 ? '' : 's'}`, '');
   $('mk_keys').disabled = busy || !n; $('mk_clear').disabled = busy || !n; $('as_go').disabled = busy; $('as_reroll').disabled = busy;
   $('mk_follow').hidden = !st.keysFollow;
   setText('mk_note', st.grammar === GR.pads ? (st.keysFollow ? 'Pads: every change to the markers puts them on the keys.' : 'Pads: the keys follow the markers once there are some.') : 'In Pads the keys follow the markers by themselves.');
@@ -1710,7 +1691,7 @@ function drawMarkers() {
  * waits for the last reply), every send after the drag's first with JOIN, so the whole drag is one undo step */
 let asTouched = false, asDrag = false, asSent = 0, asBusy = false, asWant = null, asLast = -1, asSeen = null;
 function asQueue(k) {
-  if (!link || !editOk || !keysOk) return;
+  if (!link) return;
   if (asBusy) { asWant = k; return; }
   if (k === asLast && asSent) return;
   asBusy = true; asLast = k; const join = asSent++ > 0;
@@ -1718,16 +1699,15 @@ function asQueue(k) {
 }
 $('as_k').addEventListener('input', e => { if (!asDrag) { asDrag = true; asSent = 0; asLast = -1; } asTouched = true; setText('as_n', e.target.value); asQueue(+e.target.value); });
 $('as_k').addEventListener('change', e => { asTouched = false; if (!asDrag) { asSent = 0; asLast = -1; } asDrag = false; asQueue(+e.target.value); if (!asBusy) asSent = 0; });
-$('as_go').onclick = () => { if (link && editOk && keysOk) ed.autoslice(+$('as_k').value, false); };
-$('as_reroll').onclick = () => { if (link && editOk && keysOk) ed.autoslice(+$('as_k').value, true); };
-$('mk_keys').onclick = () => { if (link && editOk && keysOk) ed.keysFromMarkers(); };
+$('as_go').onclick = () => { if (link) ed.autoslice(+$('as_k').value, false); };
+$('as_reroll').onclick = () => { if (link) ed.autoslice(+$('as_k').value, true); };
+$('mk_keys').onclick = () => { if (link) ed.keysFromMarkers(); };
 $('mk_clear').onclick = () => {
-  if (!link || !editOk || !keysOk || !st) return; const n = st.nMarkers || 0;
+  if (!link || !st) return; const n = st.nMarkers;
   if (confirm(`Delete all ${n} marker${n === 1 ? '' : 's'} (grey and orange)? Their keys go back to the grid. One undo step brings them back.`)) ed.clearMarkers();
 };
 /* ───────────── Scope tab ─────────────
- * The ten-channel scope: 0x62 with a body (descriptor "scope2": 1 audio,
- * 2 with the jacks). Two tiers on one sample clock in the firmware — out L ·
+ * The ten-channel scope: 0x62 with a body. Two tiers on one sample clock in the firmware — out L ·
  * out R · in L · in R at 48 kHz, and J3..J8 DC-coupled at 2 kHz (one sample
  * per audio block), ±5 V = ±127 — one snapshot per frame, so every trace
  * starts at the same instant; each tier keeps its own window (audio n·decim
@@ -1739,8 +1719,7 @@ $('mk_clear').onclick = () => {
  * firmware's 1024 gives 253 samples × 4 audio channels, or 202 × 5 mixed; a
  * 512-byte module, or all ten channels, gets the channels split over
  * requests pinned to the first one's pos (scopePlan / fetchScopeFrame in
- * hostlink.js). Old firmware without "scope2" answers the empty body only:
- * one mono trace here, at the Play tab's 256 × ×4. */
+ * hostlink.js). */
 /* the channel colours are tokens --sc0..--sc9 (out L · out R · in L · in R · J3..J8; J6/J7/J8 = the class colours), read into SC_COL;
  * the kind is in the line as well as the colour: the outputs solid, the inputs in long dashes, the jacks in short ones (SC_DASH) */
 const SC_DASH = c => c < 2 ? [] : c < 4 ? [10, 4] : [4, 3];
@@ -1762,7 +1741,7 @@ const jackIsIn = j => (SCOPE_JACK_IN[st && st.jackMap ? 1 : 0] || SCOPE_JACK_IN[
 /* on: true / false, or null = auto (an input shows itself while it carries a signal). Auto channels are still requested. */
 const scShown = c => sc.on[c] === true || (sc.on[c] === null && performance.now() - sc.seen[c] < SCOPE_SEEN_MS);
 function scMask() { let m = 0; for (let c = 0; c < 4; c++) if (sc.on[c] !== false) m |= 1 << c; return m; }
-function scMaskHi() { if (!scopeCvOk) return 0; let m = 0; for (let c = 4; c < 10; c++) if (sc.on[c]) m |= 1 << (c - 4); return m; }
+function scMaskHi() { let m = 0; for (let c = 4; c < 10; c++) if (sc.on[c]) m |= 1 << (c - 4); return m; }
 /* the trigger: auto = the first shown channel (audio before cv); level 0 for audio, 1 V for a jack */
 function scTrig() {
   const mask = scMask(), maskHi = scMaskHi();
@@ -1775,13 +1754,9 @@ async function scopeLoop() {
   if (!scopeShown || !link || link.closed || !info || sc.freeze || sc.busy || document.visibilityState === 'hidden') return;
   sc.busy = true; const t0 = performance.now();
   try {
-    let f;
-    if (scope2Ok) {
-      const mask = scMask(), maskHi = scMaskHi(); if (!mask && !maskHi) throw new Error('no channel shown');
-      const t = scTrig(), ext = maskHi || (scopeCvOk && sc.trigSrc >= 0) ? { cvDecim: sc.cvDecim, level: t.level, trig: t.trig } : null;
-      f = await fetchScopeFrame(link, scopePlan(info.maxBody, mask, sc.decim, SCOPE.maxN, 200, maskHi, sc.cvDecim), sc.decim, (sc.trig ? SCOPE.trig : 0) | (sc.peak ? SCOPE.peak : 0), {}, ext);
-    }
-    else { const b = await link.request(CMD.scope, undefined, { key: 'scope' }); const d = parseScope(b); f = { n: d.length, decim: 4, cvDecim: 1, cvDiv: SCOPE.cvDiv, pos: 0, triggered: false, detached: false, trigSrc: SCOPE.trigNone, ch: { 0: d }, reqs: 1, bytes: b.length, mono: true }; }
+    const mask = scMask(), maskHi = scMaskHi(); if (!mask && !maskHi) throw new Error('no channel shown');
+    const t = scTrig(), ext = maskHi || sc.trigSrc >= 0 ? { cvDecim: sc.cvDecim, level: t.level, trig: t.trig } : null;
+    const f = await fetchScopeFrame(link, scopePlan(info.maxBody, mask, sc.decim, SCOPE.maxN, 200, maskHi, sc.cvDecim), sc.decim, (sc.trig ? SCOPE.trig : 0) | (sc.peak ? SCOPE.peak : 0), {}, ext);
     onScopeFrame(f, performance.now() - t0);
   } catch (e) { sc.err = e.message; warn('scope', e); invalidate(D.bigscope); }
   finally { sc.busy = false; if (scopeShown && !sc.freeze && link && !link.closed) sc.timer = setTimeout(scopeLoop, Math.max(0, SCOPE_MIN_MS - (performance.now() - t0))); }
@@ -1830,24 +1805,23 @@ function drawBigScope() {
   };
   const frames = sc.glow ? sc.frames : [cur];
   frames.forEach((f, k) => { const last = f === cur; const fA = f.n * f.decim / SR * 1000, fC = f.n * f.cvDecim * (f.cvDiv || SCOPE.cvDiv) / SR * 1000;
-    for (let ch = 0; ch < 10; ch++) { if (!f.ch[ch] || !scShown(ch)) continue; trace(f.ch[ch], f.mono ? SC_COL[0] : SC_COL[ch], last ? 1 : 0.15 + 0.15 * k, last ? 1.5 : 1, ch < 4 ? sc.gain : 1, ch < 4 ? fA : fC, f.mono ? [] : SC_DASH(ch)); } });
+    for (let ch = 0; ch < 10; ch++) { if (!f.ch[ch] || !scShown(ch)) continue; trace(f.ch[ch], SC_COL[ch], last ? 1 : 0.15 + 0.15 * k, last ? 1.5 : 1, ch < 4 ? sc.gain : 1, ch < 4 ? fA : fC, SC_DASH(ch)); } });
   if (cur.triggered) { g.fillStyle = cur.trigSrc < 10 ? SC_COL[cur.trigSrc] : TOK['cv-ink']; g.beginPath(); g.moveTo(padL, mid - 6); g.lineTo(padL + 7, mid); g.lineTo(padL, mid + 6); g.fill(); }
   if (cur.detached) { g.fillStyle = TOK['cv-warn']; g.font = '11px system-ui'; g.textAlign = 'right'; g.fillText('audio tier detached: its window starts after the cv one (the audio ring holds 1.4 s)', w - 6, 26); }
   $('sc_clip').hidden = !clipped;
   drawScopeChans(cur);
   const t = scTrig();
   setPill('sc_fps', sc.freeze ? 'frozen' : `${sc.fps.toFixed(0)} fps · ${cur.reqs} req/frame · ${(sc.bps / 1024).toFixed(1)} KB/s · ${sc.lastMs.toFixed(0)} ms`, sc.freeze ? 'warn' : (sc.fps >= 15 ? 'ok' : ''));
-  setPill('sc_win', `n = ${cur.n}${hasAudio ? `, audio ×${cur.decim} → ${fmtMs(winA)}` : ''}${hasCv ? `, cv ×${cur.cvDecim} → ${fmtMs(winC)}` : ''} · ${cur.mono ? 'mono output (old firmware)' : cur.triggered ? `triggered on ${SCOPE_CH[cur.trigSrc] || (t.src >= 0 ? SCOPE_CH[t.src] : '?')}` : sc.trig ? `no trigger on ${t.src >= 0 ? SCOPE_CH[t.src] : '—'} (free-running)` : 'free-running'}${sc.peak && !cur.mono ? ' · peak' : ''}${cur.detached ? ' · audio detached' : ''}`, cur.mono ? 'warn' : cur.detached ? 'warn' : '');
+  setPill('sc_win', `n = ${cur.n}${hasAudio ? `, audio ×${cur.decim} → ${fmtMs(winA)}` : ''}${hasCv ? `, cv ×${cur.cvDecim} → ${fmtMs(winC)}` : ''} · ${cur.triggered ? `triggered on ${SCOPE_CH[cur.trigSrc] || (t.src >= 0 ? SCOPE_CH[t.src] : '?')}` : sc.trig ? `no trigger on ${t.src >= 0 ? SCOPE_CH[t.src] : '—'} (free-running)` : 'free-running'}${sc.peak ? ' · peak' : ''}${cur.detached ? ' · audio detached' : ''}`, cur.detached ? 'warn' : '');
 }
 /* the channel buttons: state, the jacks' roles under the current map, their present voltage */
 function drawScopeChans(cur) {
   for (let ch = 0; ch < 10; ch++) {
     const b = scChanBtns[ch], has = !!(cur && cur.ch[ch]), on = scShown(ch) && (has || !cur);
     b.el.classList.toggle('on', on); b.el.classList.toggle('auto', sc.on[ch] === null);
-    b.el.disabled = (!!(cur && cur.mono) && ch > 0) || (ch >= 4 && !scopeCvOk);
     if (ch >= 4) { const role = jackRole(ch - 4); if (b.role.textContent !== role) b.role.textContent = role; const dc = has ? fmtV(scopeVolts(cur.last[ch])) : '—'; if (b.dc.textContent !== dc) b.dc.textContent = dc; }
   }
-  const sel = $('sc_trigsrc'); for (let c = 4; c < 10; c++) { const o = sel.options && sel.options[c + 1]; if (o) { const txt = SCOPE_CH[c] + ' · ' + jackRole(c - 4); if (o.textContent !== txt) o.textContent = txt; o.disabled = !scopeCvOk; } }
+  const sel = $('sc_trigsrc'); for (let c = 4; c < 10; c++) { const o = sel.options && sel.options[c + 1]; if (o) { const txt = SCOPE_CH[c] + ' · ' + jackRole(c - 4); if (o.textContent !== txt) o.textContent = txt; } }
 }
 $('sc_decim').onchange = e => { sc.decim = +e.target.value; };
 $('sc_cvdecim').onchange = e => { sc.cvDecim = +e.target.value; };
@@ -1872,7 +1846,7 @@ $('sc_p_gates').onclick = () => scopePreset([true, false, false, false, false, f
  * Values live in the running blob: read it fresh, change one byte, write it
  * back as a live audition. The read happens right before the write so the
  * pager's stored knob positions are current, not a stale snapshot. */
-/* every field of the firmware's 24-byte block has a home (the selftest checks nothing lands in "Other") */
+/* every field of the firmware's Options block has a home (the selftest checks nothing lands in "Other") */
 const GROUPS = [
   ['Pattern', ['grammar.mode', 'swaps', 'flow.dejavu', 'rests']],
   ['Sound', ['voice.mode', 'key.plays', 'fades', 'tail', 'swing']],
@@ -1881,16 +1855,17 @@ const GROUPS = [
   ['Recording', ['sampling', 'rec.src', 'record']],
   ['Editing', ['tap.allow', 'autosave']],
   ['Analysis', ['class.mode', 'onsets', 'bars']],
+  ['Power-up', ['start.in']],
 ];
 const optSelects = new Map();   /* field id → [select…] (the Bars option also sits next to the grid readout) */
 const optByte = id => { const f = opts && opts.fields.find(f => f.id === id); return f && live ? live.bytes[opts.comp.off + f.off] : null; };
 const optLabel = (id, v) => { const f = opts && opts.fields.find(f => f.id === id); return f && f.disp && f.disp.labels ? f.disp.labels[v] : null; };
 function buildOptions() {
   const host = $('optgroups'); host.innerHTML = ''; optSelects.clear(); $('k_bars').textContent = '';
-  if (!opts) { host.innerHTML = '<p class="note">This firmware\'s descriptor carries no Options block.</p>'; return; }
+  if (!opts) return;
   const placed = new Set();
   const groups = GROUPS.map(([name, ids]) => [name, ids.map(id => opts.fields.find(f => f.id === id)).filter(Boolean)]);
-  groups.push(['Other', opts.fields.filter(f => !GROUPS.some(g => g[1].includes(f.id)))]);   /* a field a newer firmware adds */
+  groups.push(['Other', opts.fields.filter(f => !GROUPS.some(g => g[1].includes(f.id)))]);   /* a field added without a home here */
   for (const [name, fields] of groups) {
     if (!fields.length) continue;
     const g = document.createElement('div'); g.className = 'grp'; g.innerHTML = `<h3>${esc(name)}</h3>`;
@@ -1898,38 +1873,7 @@ function buildOptions() {
     host.appendChild(g);
   }
   const bars = opts.fields.find(f => f.id === 'bars'); if (bars) { const s = makeOptionSelect(bars); s.className = 'inline'; $('k_bars').appendChild(s); }
-  if (startOk) host.appendChild(buildStartIn());
   syncOptions();
-}
-/* beta-sampler: Start in — not an Options byte (a 25th would move the preset schema and drop every saved slot): the
- * module keeps it on its card (Audiothurgist/startup.json) and reads it at power-up. ACTION 40 writes it; the state's
- * flags b5 reads it back, so the select follows the module, not what was last picked here. */
-let startSel = null, startNote = null, startBusy = false;
-function buildStartIn() {
-  const g = document.createElement('div'); g.className = 'grp'; g.innerHTML = '<h3>Start-up (kept on the card)</h3>';
-  const row = document.createElement('div'); row.className = 'opt'; row.innerHTML = '<span title="startIn — Audiothurgist/startup.json, read at power-up">Start in</span>';
-  const sel = document.createElement('select');
-  for (const [v, t] of [[0, 'Sampler — Pads, stopped (the keys play; ▶ starts a beat)'], [1, 'As saved — the boot preset\'s grammar, running']]) { const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o); }
-  sel.onchange = () => writeStartIn(+sel.value);
-  row.appendChild(sel); g.appendChild(row);
-  const n = document.createElement('p'); n.className = 'note'; n.textContent = 'How the module powers up. It lives on the card, not in a preset, so saving or loading a preset never changes it; without a card it starts as a sampler.';
-  g.appendChild(n); startSel = sel; startNote = n; syncStartIn(); return g;
-}
-function syncStartIn() {
-  if (!startSel || !st) return;
-  const v = String(st.startSaved ? 1 : 0), noCard = !!(st.card && !st.card.mounted);
-  if (document.activeElement !== startSel && !startBusy && startSel.value !== v) startSel.value = v;
-  startSel.disabled = noCard || startBusy;
-  startSel.title = noCard ? 'no card in the module — Start in is kept on the card (without one it starts as a sampler)' : 'what the module does at power-up';
-}
-async function writeStartIn(v) {
-  if (!link || !startOk || startBusy) return; startBusy = true; syncStartIn();
-  try {
-    const r = await HL.setStartIn(link, v === 1);
-    if (!r.ok) say(`Start in: ${r.status === 21 ? 'no card in the module — there is nowhere to keep it' : 'refused (' + HL.statusName(r.status) + ')'}`, true);
-    else say(`Start in: ${v === 1 ? 'As saved — the next power-up plays the boot preset\'s grammar' : 'Sampler — the next power-up comes up in Pads, stopped'}`);
-  } catch (e) { say('Start in failed: ' + e.message, true); }
-  finally { startBusy = false; poll.tState = 0; setTimeout(syncStartIn, 400); }
 }
 function makeOptionSelect(f) {
   const sel = document.createElement('select'); const lab = (f.disp && f.disp.labels) || [];
@@ -1959,7 +1903,7 @@ const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(
 function md(s) { return String(s).split(/\n\s*\n/).map(p => '<p>' + esc(p).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/\*(.+?)\*/g, '<i>$1</i>').replace(/`(.+?)`/g, '<code>$1</code>') + '</p>').join(''); }
 function buildManual() {
   const host = $('manual');
-  if (!manual) { host.innerHTML = '<p class="note">This firmware\'s descriptor carries no manual block (no <code>manual</code> / <code>jacks</code> / pager help). Hermetic\'s /program shows the manual when the firmware attaches one.</p>'; return; }
+  if (!manual) return;
   let h = '';
   if (manual.tagline) h += `<p class="tag">${esc(manual.tagline)}</p>`;
   if (manual.preamble) h += md(manual.preamble);
@@ -1971,7 +1915,7 @@ function buildManual() {
       h += '<dl>'; for (let p = 0; p < pager.pots; p++) { const f = pager.knobs[pg + ':' + p]; if (f) h += `<dt>P${p + 1} · ${esc(f.name)}</dt><dd>${f.help ? md(f.help) : ''}</dd>`; } h += '</dl>';
     }
   }
-  h += '<h3>Buttons</h3><dl><dt>B1</dt><dd>tap: page Perform ↔ Brain · hold + turn a pot: record a motion lock (hold + nudge again clears it) · hold 600 ms alone and release: start / stop (v0.13) · LED: clock pulse / lock</dd>'
+  h += '<h3>Buttons</h3><dl><dt>B1</dt><dd>tap: page Perform ↔ Brain · hold + turn a pot: record a motion lock (hold + nudge again clears it) · hold 600 ms alone and release: start / stop · LED: clock pulse / lock</dd>'
      + '<dt>B2</dt><dd>tap: dice (a new fill; in Camp, ring the next change; in Play, undo the last overdub) · hold &gt; 300 ms: flow (a new fill every bar while held)</dd>'
      + '<dt>B3</dt><dd>tap: reslice (in Play: clear the loop) · hold &gt; 400 ms: load the file highlighted by P5</dd>'
      + '<dt>B2 + B3</dt><dd>held 2 s: Settings (brightness, preset save/load); B2 or B3 leaves</dd></dl>'
@@ -1981,14 +1925,14 @@ function buildManual() {
   host.innerHTML = h;
 }
 
-/* ───────────── Card (0x67, capability "card": 1) ─────────────
+/* ───────────── Card (0x67) ─────────────
  * Files dropped or picked here are decoded by the browser (decodeAudioData on a 48 kHz OfflineAudioContext decodes
  * and resamples in one step), cut to 17 s, kept stereo when stereo, encoded PCM16 (HL.encodeWav) and sent one chunk
  * per round trip (HL.uploadBreak). One card job on the wire at a time (HL.serial: Kyklophoria's putQueued), so two
  * drops never interleave. The module writes the file once it holds every byte; the state tail's card seq says when,
  * and lastIdx is what "Load it now" loads. An old card (WAVs in the root, no Audiothurgist folder) is said so plainly
  * and offered a copy — never a move. */
-let cardOk = false, cardJobs = [], cardCopying = false;
+let cardJobs = [], cardCopying = false;
 let cardStallMs = 30000;   /* how long the module's card state may stand still before a wait gives up (the selftest shortens it) */
 const cardRun = HL.serial();
 /* the decoder, a variable so the selftest can stand in for the browser's */
@@ -2002,7 +1946,7 @@ const fmtKB = n => n >= 1048576 ? (n / 1048576).toFixed(2) + ' MB' : Math.max(1,
 const cardNow = () => (st && st.card) || null;
 /* the module's list as it is now (the descriptor's dropdown is the list at boot) → the Sample select, the set names */
 async function cardRefreshList() {
-  if (!link || !cardOk) return;
+  if (!link) return;
   try {
     const l = await HL.cardList(link); labels.sample = l;
     const sel = $('sample'), cur = sel.value;
@@ -2042,7 +1986,7 @@ function jobBar(job, f) { job.fill.style.width = Math.round(Math.max(0, Math.min
 function jobButton(job, label, fn, primary) { const b = document.createElement('button'); b.className = 'mini' + (primary ? ' primary' : ''); b.textContent = label; b.onclick = fn; job.acts.appendChild(b); (job.btns = job.btns || {})[label] = b; return b; }
 function jobClear(job) { job.acts.innerHTML = ''; job.btns = {}; }
 function cardAddFiles(files) {
-  if (!cardOk || !link) { say('connect to a module with card uploads first', true); return; }
+  if (!link) { say('connect to the module first', true); return; }
   for (const file of Array.from(files || [])) {
     const job = { file, name: HL.breakName(file.name), overwrite: $('cd_over').checked, state: 'queued' };
     cardRow(job); jobSay(job, 'waiting…'); jobBar(job, 0); cardJobs.push(job);
@@ -2097,7 +2041,7 @@ async function cardUpload(job) {
 }
 function cardRetry(job) { job.cancelled = false; jobClear(job); jobSay(job, 'waiting…'); jobButton(job, 'Cancel', () => { job.cancelled = true; }); cardRun(() => cardUpload(job)).catch(e => warn('card', e)); }
 async function cardCopy() {
-  if (!link || !cardOk || cardCopying) return;
+  if (!link || cardCopying) return;
   cardCopying = true; drawCard();
   try {
     await cardRun(async () => {
@@ -2114,9 +2058,9 @@ async function cardCopy() {
 }
 /* the card readouts: the pill, the old-card notice (here and as the banner), the drop zone */
 function drawCard() {
-  const c = cardNow(), show = cardOk && !!c;
+  const c = cardNow();
   $('cardnote').hidden = true;
-  if (!show) { setPill('cd_status', cardOk ? '—' : 'needs card firmware', cardOk ? '' : 'warn'); $('cd_old').hidden = true; return; }
+  if (!c) { setPill('cd_status', '—', ''); $('cd_old').hidden = true; return; }
   const busy = c.state === 2 || c.state === 3, pct = Math.round(c.progress / 2.55);
   setPill('cd_status', !c.mounted ? 'no card' : c.state === 1 ? `receiving ${pct} %` : c.state === 2 ? `writing ${pct} %` : c.state === 3 ? `copying ${pct} %` : `${c.breaks} break${c.breaks === 1 ? '' : 's'} in Audiothurgist/breaks`, !c.mounted || busy || !c.breaks ? 'warn' : 'ok');
   $('cd_drop').classList.toggle('off', !c.mounted); $('cd_pick').disabled = !c.mounted;
@@ -2143,7 +2087,7 @@ $('cd_file').addEventListener('change', e => { const t = e.target; cardAddFiles(
   z.addEventListener('drop', e => { e.preventDefault(); e.stopPropagation(); z.classList.remove('over'); cardAddFiles(e.dataTransfer && e.dataTransfer.files); });
   /* a drop that misses the zone must not navigate the page away from the module; with card uploads it uploads */
   window.addEventListener('dragover', e => { if (has(e)) e.preventDefault(); });
-  window.addEventListener('drop', e => { if (!has(e)) return; e.preventDefault(); if (cardOk && link) { cardShowPanel(); cardAddFiles(e.dataTransfer.files); } });
+  window.addEventListener('drop', e => { if (!has(e)) return; e.preventDefault(); if (link) { cardShowPanel(); cardAddFiles(e.dataTransfer.files); } });
 }
 
 /* ───────────── Connect ───────────── */
@@ -2164,15 +2108,14 @@ function clearReadouts() {
 }
 function setDisconnected() {
   stopPolling(); link = null; info = null; desc = null; live = null; st = null; env = null; envGen = -1; scope = null; demoDevice = null; demoPort = null; ctlSig = '';
-  table = null; tableSig = ''; bufSig = ''; hits = null; hitsGen = -1; kitOk = false; wave.cache.clear(); wave.queue.length = 0; wave.planSig = ''; keyCells.forEach(c => { c.sig = ''; });
-  editOk = false; keysOk = false; copyArm = -1; ed.selT = -1; ed.drag = null; ed.local = null; ed.history = new ED.History(); histSig = fieldSig = ''; closeMenu(); ghost(null); dropHi(-1); setEditorShown(false);
-  setsOk = false; setSeqShown = -1; setAsked = null; setPill('s_status', '—', ''); $('s_save').disabled = $('s_load').disabled = true;
-  keypOk = false; keyp = null; keypGen = -1; kpWant = null; kpBusy = false; kpDrag = false; $('kp_row').hidden = true;   /* KEYP */
-  spreadOk = false; $('kp_spread').hidden = true;   /* CHROMA */
-  padsOk = false; startOk = false; startSel = startNote = null; $('pd_sampler').hidden = true; $('mode_cue').hidden = true; lastText.delete('mode_cue'); for (const j of padJobs) j.cancelled = true; padJob.fill(null); $('pd_bar').hidden = true; $('pd_unsaved').hidden = true; $('pd_msg').hidden = true; $('k_load').hidden = true;
-  cardOk = false; for (const j of cardJobs) j.cancelled = true; $('cardCard').hidden = true; $('cardnote').hidden = true; $('p_add').hidden = true;
-  scope2Ok = scopeCvOk = false; clearTimeout(sc.timer); sc.timer = null; sc.frames.length = 0; sc.fps = sc.rps = sc.bps = 0; sc.err = ''; invalidate(D.bigscope);
-  $('connect').textContent = 'Connect'; $('connect').disabled = !serialApi(); $('demo').disabled = false; $('demo').hidden = false; $('padsCard').hidden = true;
+  table = null; tableSig = ''; bufSig = ''; hits = null; hitsGen = -1; wave.cache.clear(); wave.queue.length = 0; wave.planSig = ''; keyCells.forEach(c => { c.sig = ''; });
+  copyArm = -1; ed.selT = -1; ed.drag = null; ed.local = null; ed.history = new ED.History(); histSig = fieldSig = ''; closeMenu(); ghost(null); dropHi(-1); setConnectedUi(false);
+  setSeqShown = -1; setAsked = null; setPill('s_status', '—', ''); $('s_save').disabled = $('s_load').disabled = true;
+  keyp = null; keypGen = -1; kpWant = null; kpBusy = false; kpDrag = false;   /* KEYP */
+  $('pd_sampler').hidden = true; $('mode_cue').hidden = true; lastText.delete('mode_cue'); for (const j of padJobs) j.cancelled = true; padJob.fill(null); $('pd_unsaved').hidden = true; $('pd_msg').hidden = true;
+  for (const j of cardJobs) j.cancelled = true; $('cardnote').hidden = true;
+  clearTimeout(sc.timer); sc.timer = null; sc.frames.length = 0; sc.fps = sc.rps = sc.bps = 0; sc.err = ''; invalidate(D.bigscope);
+  $('connect').textContent = 'Connect'; $('connect').disabled = !serialApi(); $('demo').disabled = false; $('demo').hidden = false;
   clearReadouts();
   invalidate(D.kit | D.kitwave | D.transport);
 }
@@ -2197,43 +2140,35 @@ async function connectPort(port, isDemo) {
     await l.start();
     info = await hello(l);
     setPill('modpill', `${info.name} ${info.fw}${isDemo ? ' (demo)' : transportName() === 'WebUSB' ? ' · WebUSB' : ''}`, 'ok');
-    desc = await getDescriptor(l, info).catch(e => { notice('Descriptor unreadable: ' + e.message); return null; });
+    desc = await getDescriptor(l, info).catch(() => null);
+    /* the page and the firmware ship together: anything but this page's api is the wrong build — one message, no partial mode */
+    const api = HL.apiOf(desc);
+    if (api !== HL.API) {
+      notice(`This page needs the Audiothurgist firmware it came with (page API ${HL.API}); the module runs ${info.name} ${info.fw}${api == null ? '' : ` (API ${api})`}. Flash the matching .bin, then connect again.`);
+      say('wrong firmware — disconnected', true); setDisconnected(); await l.close(); return;
+    }
     labels = { grammar: fieldLabels(desc, 'grammar.mode'), classifier: fieldLabels(desc, 'class.mode'), sample: fieldLabels(desc, 'sample.idx') };
     pager = pagerInfo(desc); opts = optionsInfo(desc); manual = manualInfo(desc);
     const sel = $('sample'); sel.innerHTML = labels.sample.length ? labels.sample.map((n, i) => `<option value="${i}">${esc(n)}</option>`).join('') : '<option value="-1">—</option>';
     $('b_load').disabled = !labels.sample.length;
-    if (desc && desc.error) notice('The module reports a descriptor build error: ' + desc.error);
-    else if (!desc || !desc.audiothurgist) notice('Connected, but this firmware does not advertise the Audiothurgist state extension (0x60). Flash v0.7.0+ for the live view.');
-    const cp = caps(desc);
-    kitOk = cp.table;                         /* GET_TABLE / GET_WAVE / GET_HITS advertised */
-    editOk = kitOk && cp.edit >= 1;           /* EDIT-UI: ACTION 16.., the flags form, the tail */
-    keysOk = editOk && cp.keys >= 1;          /* v0.13: the pads, SET_MUTE, the marker ops, the autoslice count, the 263.. tail */
-    setEditorShown(editOk);
-    setsOk = !!cp.sets;                       /* ACTION 14 / 15 + the 219.. tail */
-    cardOk = cp.card >= 1;                    /* CARD: 0x67 (upload, copy an old card in, the list) + the 276.. tail */
-    padsOk = keysOk && cp.pads >= 1;          /* PADS: 0x68 (a sample dropped onto a pad, New empty kit) + the 293.. tail */
-    startOk = padsOk && cp.startIn >= 1;      /* beta-sampler: Start in — ACTION 40, GET_STATE flags b5 */
-    keypOk = editOk && cp.keyp >= 1;          /* KEYP: ACTION 37 KEY_PARAMS + 0x69 GET_KEYS (no tail bytes) */
-    spreadOk = keypOk && cp.keyp >= 2;        /* CHROMA: ACTION 38 SPREAD_KEYS */
-    $('cardCard').hidden = !cardOk; $('p_add').hidden = !cardOk; $('cardnote').hidden = true;
-    scope2Ok = cp.scope2 >= 1;                /* SCOPE: the 0x62 body (audio channels) */
-    scopeCvOk = cp.scope2 >= 2;               /* SCOPE: … with the J3..J8 ext */
-    if (cardOk) await cardRefreshList();      /* CARD: the list as it is now, not as it was at boot */
+    if (desc.error) notice('The module reports a descriptor build error: ' + desc.error);
+    setConnectedUi(true); $('cardnote').hidden = true;
+    await cardRefreshList();                  /* CARD: the list as it is now, not as it was at boot */
     fillSetList();
-    setPill('kit_status', kitOk ? 'reading…' : 'this firmware has no sample-mode commands (0x64–0x66)', kitOk ? '' : 'warn');
-    buildManual(); buildModes(); $('padsCard').hidden = !keysOk;
+    setPill('kit_status', 'reading…', '');
+    buildManual(); buildModes();
     if (opts) { try { live = await getLive(l, info); } catch (e) { notice('Options unreadable: ' + e.message); } }
     buildOptions(); setPill('opt_status', live ? 'live' : '—', live ? 'ok' : '');
     $('connect').textContent = 'Disconnect'; $('connect').disabled = false; $('demo').hidden = true;
-    say(`connected — ${info.name} ${info.fw}${isDemo ? ' (the demo module)' : ''}${keysOk ? '' : ' · older firmware: no pads, start / stop is the toggle'}`);
+    say(`connected — ${info.name} ${info.fw}${isDemo ? ' (the demo module)' : ''}`);
     startPolling(); if (scopeShown) scopeKick(); invalidate(D.all);
   } catch (e) { if (gen !== connectGen) return; say('connect failed: ' + e.message, true); const l = link; setDisconnected(); if (l) await l.close(); }
 }
-/* EDIT-UI: with "edit" the Kit waveform grows its handle row and strip and the Edit panel shows; without it the tab is
- * the view-only one (no handles, no pad, no field — `?demo=noedit`). */
-function setEditorShown(on) {
-  $('editor').hidden = !on; $('ed_field').hidden = !on; $('ed_status').hidden = !on; $('wv_help').hidden = !on; $('kit_help_edit').hidden = !on; $('lg_mark').hidden = !on; $('lg_orange').hidden = !on; $('lg_play').hidden = !on;
-  $('kitwave').style.height = on ? '290px' : '180px'; $('wv_fit').title = on ? 'fit the selected slice or marker' : 'fit the selected key\'s material';
+/* What only means something with a module there: the pads, the Kit's editor and its key settings, the card. Shown on
+ * connect, hidden again when the module goes. */
+function setConnectedUi(on) {
+  for (const id of ['padsCard', 'pd_bar', 'pads_drop_help', 'k_load', 'kp_row', 'kp_spread', 'cardCard', 'p_add', 'editor', 'ed_field', 'ed_status', 'wv_help', 'kit_help_edit', 'lg_mark', 'lg_orange', 'lg_play']) $(id).hidden = !on;
+  $('kitwave').style.height = on ? '290px' : '180px';
   if (on) setEdStatus('ready', '');
 }
 /* The transport: native Web Serial where the browser has it (desktop
@@ -2285,30 +2220,19 @@ async function connect() {
     notice(m);
   }
 }
-/* ?demo[=brain,ext,pending,grids,euclid,camp,play,pads,locks,kit,swing,old,short,v099,nosets,noedit,noundo,old12,scope,cv,gates,noin,body512]
- * — the fake module, optionally started on the Brain page, following a
- * clock (with a multiplier switch left pending), in a grammar (play / pads
- * are v0.13's play grammars; pads also lays six autoslice markers on the
- * keys), with locks, with three keys recorded and a swung grid (kit: opens
- * the Kit tab), with a pre-v0.8.0 state body (no tails), the 167-byte CLOCK
- * body (no flags), the 176-byte v0.9.9 body (no sample-mode tail) or the
- * 219-byte sample body (no sets tail), `noedit` a firmware without slice
- * editing, `noundo` one without the journal, `old12` a 0.12 firmware (no
- * "keys": no pads, the mute toggle, TAP_MARK taken whatever sounds);
- * `scope` opens the Scope tab (`cv` / `gates` press that preset), `noin`
- * leaves J1/J2 silent, `body512` announces the protocol's default max_body; CARD: `oldcard` the old layout (WAVs in
- * the root, sets/ and presets/ beside them, no Audiothurgist folder), `nocard` no card in, `nocardfw` a 0.13 firmware
- * before the card work (no "card", the 276-byte body), `card` opens the Kit tab's Card panel; PADS: `nopads` a firmware
- * before the pads work (no "pads", the 293-byte body), `emptykit` starts from New empty kit (no break, Pads); START
- * (beta-sampler): `sampler` powers the fake up as the firmware does by default — Start in = Sampler: Pads, the transport
- * stopped (the Demo button does this; a bare `?demo` keeps the old boot, Classic running, that the selftest drives). KEYP: `keyp`
- * opens the Kit with four keys' settings set (gain, tune, loop, a ½ ratchet), `nokeyp` a firmware before them; CHROMA:
- * `nospread` a firmware with the settings but before SPREAD_KEYS ("keyp": 1). */
+/* ?demo[=brain,ext,pending,grids,euclid,camp,play,pads,locks,kit,swing,scope,cv,gates,noin,card,oldcard,nocard,emptykit,sampler,keyp]
+ * — the fake module: started on the Brain page, following a clock (with a multiplier switch left pending), in a
+ * grammar (pads also lays six autoslice markers on the keys), with locks, with three keys recorded and a swung grid
+ * (kit: opens the Kit tab); `scope` opens the Scope tab (`cv` / `gates` press that preset), `noin` leaves J1/J2
+ * silent. CARD: `card` opens the Kit tab's Card panel, `oldcard` lays the card out the old way (WAVs in the root,
+ * sets/ and presets/ beside them, no Audiothurgist folder), `nocard` no card in. PADS: `emptykit` starts from New
+ * empty kit (no break, Pads). START: `sampler` powers up with Start In = Sampler (Pads, the transport stopped — the
+ * firmware's default; the Demo button does this); without it the boot preset says As saved (Classic, running), which
+ * the selftest drives. KEYP: `keyp` opens the Kit with four keys' settings set (gain, tune, loop, a ½ ratchet). */
 async function connectDemo(flags = '') {
   if (link) return; notice('');
   const f = new Set(flags.split(',').filter(Boolean));
-  const tail = f.has('old') ? 148 : f.has('short') ? 167 : f.has('v099') ? 176 : f.has('nosets') ? 219 : f.has('noedit') ? 255 : f.has('noundo') ? 262 : f.has('old12') ? 263 : f.has('nocardfw') ? 276 : f.has('nopads') ? 293 : 315;
-  demoDevice = new DEMO.FakeDevice({ tail, latencyMs: 6, startIn: f.has('sampler') ? 0 : undefined, oldcard: f.has('oldcard'), nocard: f.has('nocard'), kit: f.has('kit') || f.has('pads'), swing: f.has('kit') || f.has('swing'), inputs: !f.has('noin'), maxBody: f.has('body512') ? 512 : DEMO.MAX_BODY, keyp: f.has('nokeyp') ? false : undefined, spread: f.has('nospread') ? false : undefined, edit: !(f.has('noedit') || f.has('nosets') || f.has('v099') || f.has('short') || f.has('old')) });
+  demoDevice = new DEMO.FakeDevice({ latencyMs: 6, startIn: f.has('sampler') ? 0 : 1, oldcard: f.has('oldcard'), nocard: f.has('nocard'), kit: f.has('kit') || f.has('pads'), swing: f.has('kit') || f.has('swing'), inputs: !f.has('noin') });
   const d = demoDevice;
   if (f.has('scope')) showTab('tab_scope');
   if (f.has('cv')) $('sc_p_cv').onclick(); if (f.has('gates')) $('sc_p_gates').onclick();

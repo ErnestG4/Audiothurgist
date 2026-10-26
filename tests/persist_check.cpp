@@ -442,18 +442,18 @@ static void TestSet()
         const char* few = "{\"audiothurgist\":1,\"sr\":48000,\"len\":1000,\"keys\":[5,6]}";
         CHECK(bb::SetReader::Json(few, strlen(few), t) && t.hasKeys && t.keys[0] == 5 && t.keys[1] == 6 && t.keys[2] == -1, "a short key list: the rest default");
     }
-    /* EDIT-PERSIST: the Options schema pin — 24 bytes (OPT8: 22 Tap Allowance, 23 Autosave); the shell static_asserts Options::kBytes against it */
+    /* the Options schema pin — 25 bytes (OPT9: 22 Tap Allowance, 23 Autosave, 24 Start In); the shell static_asserts Options::kBytes against it */
     {
-        CHECK(bb::kSetOptionsToday == 24, "kSetOptionsToday = %d (OPT8)", bb::kSetOptionsToday);
+        CHECK(bb::kSetOptionsToday == 25, "kSetOptionsToday = %d (OPT9)", bb::kSetOptionsToday);
         bb::SetInfo o; o.sr = 48000; o.len = 10; o.nOptions = bb::kSetOptionsToday;
         for(int i = 0; i < bb::kSetOptionsToday; i++) o.options[i] = (uint8_t)(i * 9);
         char ob[4096]; size_t on = 0;
-        CHECK(bb::SetWriter::Json(o, ob, sizeof ob, &on) && strstr(ob, "\"options\":[0,9,18,") && strstr(ob, ",198,207]"), "24 option bytes emitted");
+        CHECK(bb::SetWriter::Json(o, ob, sizeof ob, &on) && strstr(ob, "\"options\":[0,9,18,") && strstr(ob, ",198,207,216]"), "25 option bytes emitted");
         bb::SetInfo t;
-        CHECK(bb::SetReader::Json(ob, on, t) && t.nOptions == 24 && t.options[22] == 198 && t.options[23] == 207, "…and read back: byte 23 (Autosave) = 207");
-        bb::PresetInfo p; p.nOptions = bb::kSetOptionsToday; for(int i = 0; i < 24; i++) p.options[i] = (uint8_t)(23 - i);
+        CHECK(bb::SetReader::Json(ob, on, t) && t.nOptions == 25 && t.options[23] == 207 && t.options[24] == 216, "…and read back: byte 24 (Start In) = 216");
+        bb::PresetInfo p; p.nOptions = bb::kSetOptionsToday; for(int i = 0; i < 25; i++) p.options[i] = (uint8_t)(24 - i);
         char pb[1024]; size_t pn = 0; bb::PresetInfo q;
-        CHECK(bb::PresetBackup::Write(p, pb, sizeof pb, &pn) && bb::PresetBackup::Read(pb, pn, q) && q.nOptions == 24 && q.options[23] == 0 && q.options[22] == 1, "a preset backup carries all 24");
+        CHECK(bb::PresetBackup::Write(p, pb, sizeof pb, &pn) && bb::PresetBackup::Read(pb, pn, q) && q.nOptions == 25 && q.options[24] == 0 && q.options[23] == 1, "a preset backup carries all 25 (Start In with the preset)");
     }
     // capacity: 100 slices in the file → 64 kept, rest consumed, still valid
     {

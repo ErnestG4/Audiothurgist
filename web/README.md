@@ -6,7 +6,7 @@ grammars as big mode chips on the Play tab, 24 on-screen pads, a Jacks card
 with the live J4 → key, the Kit's markers → keys / clear markers / autoslice
 count, a light theme beside the dark one, and a layout that works on a
 phone. Details under *What is on the page*; the protocol it needs under
-*The v0.13 keys ops*.
+*The keys ops*.
 
 `index.html` is the instrument's face in a browser: the live bar, per-slice
 waveforms you can select and punch into steps, an output scope, a **Controls
@@ -15,13 +15,18 @@ panel that always says what B1/B2/B3 and the six knobs do right now**, a
 DC-coupled CV traces, zoom, trigger, ≤ 30 frames/s), the module's Options,
 and its manual. It speaks **HostLink over Web Serial** to
 the module's front USB-C — the same protocol Hermetic's `/program` uses —
-plus the firmware's `StateExt` (commands 0x60–0x66, v0.7.0+; the v0.8.0
-state tail for locks, native BPM and bars; the CLOCK package's jitter,
-multiplier-zone and clock-flags tail; the sample-mode tail — record state,
-buffer bookkeeping, key table — and the `GET_WAVE` / `GET_TABLE` /
-`GET_HITS` reads behind the **Kit** tab when the firmware sends them; the
-SCOPE package's ten-channel `0x62` body behind the **Scope** tab). No
-dependencies, four static files (plus the vendored Android polyfill), phone-friendly.
+plus the firmware's `StateExt` (commands 0x60–0x69: the state, the envelope,
+the scope, the actions, the Kit's wave / table / hits reads, the card, the
+pads, the keys' settings). No dependencies, four static files (plus the
+vendored Android polyfill), phone-friendly.
+
+**The page and the firmware ship together**, from this repo. On connect the
+page reads one number from the descriptor — `"audiothurgist": {"api": n}` —
+and if it is not the page's own (`HL.API`) it says so in one line ("This page
+needs the Audiothurgist firmware it came with (page API 1); the module runs
+…. Flash the matching .bin, then connect again.") and lets go. There are no
+partial modes for an older or newer build: flash the `.bin` from the same
+commit as the page.
 
 | file | what |
 |---|---|
@@ -83,33 +88,23 @@ a clock at ×2, in Grids, with two motion locks; `?demo=ext,pending` leaves a
 opens the Kit tab — the slice editor — on a swung 32-slice break with three keys already
 recorded (arm a key and the fake take runs armed → taking → pending →
 committed by itself; the looper count drifts up; every edit op, the audition
-voice and the tap mark answer as the firmware would); `?demo=old` sends a
-pre-v0.8.0 state body, `?demo=short` the 167-byte CLOCK body (no flags)
-and `?demo=v099` the 176-byte body (no sample-mode tail), `?demo=nosets`
-the 219-byte body (no sets tail), `?demo=noedit` a firmware without
-slice editing (no `"edit"` capability, the 255-byte body, the 13-byte
-table) and `?demo=noundo` one without the undo journal (the 262-byte body)
-so you can see the fallbacks; **`?demo=play`** starts in Play (an empty
-loop: what the pads play is written into it), **`?demo=pads`** in Pads with
-six autoslice markers already on the keys, **`?demo=old12`** plays a 0.12
-firmware (no `"keys"`: no pads, ▶ / ■ is the mute toggle, the Chop pad
-unguarded); **`?demo=scope`** opens the Scope tab (`cv` / `gates`
-press that preset, `noin` leaves J1/J2 silent, `body512` announces the
-protocol's default `max_body` so a frame takes two requests); **`?demo=card`**
-opens the Kit tab's Card panel on a fake card (in-memory files: upload, list,
-Load it now), **`?demo=oldcard`** lays the card out the old way (WAVs in the
-root, `sets/` and `presets/` beside them — the banner and *Copy them in*),
-`nocard` has no card in, `nocardfw` plays a 0.13 firmware before the card work
-(no `"card"`, the 276-byte body); **`?demo=emptykit`** starts from New empty kit
-(no break, Pads — drop files on the pads), `nopads` plays a firmware before the
-pads work (no `"pads"`, the 293-byte body); **`?demo=sampler`** powers the fake
-up as the module does by default — Start in = Sampler: Pads, the transport
-stopped (the **Demo** button does this; a bare `?demo` keeps the old boot,
-Classic running, which the selftest drives).; **`?demo=keyp`** opens the Kit with
-four keys' own settings set (a gain, a tune with Loop, a ½-sample Ratchet, a
-One-shot), `nokeyp` plays a firmware before them (no `"keyp"`), `nospread` one with
-them but before Spread across keys (`"keyp": 1`). `#kit` / `#scope` / `#opts` / `#man`
-open a tab directly.
+voice and the tap mark answer as the firmware would); **`?demo=play`**
+starts in Play (an empty loop: what the pads play is written into it),
+**`?demo=pads`** in Pads with six autoslice markers already on the keys;
+**`?demo=scope`** opens the Scope tab (`cv` / `gates` press that preset,
+`noin` leaves J1/J2 silent); **`?demo=card`** opens the Kit tab's Card panel
+on a fake card (in-memory files: upload, list, Load it now),
+**`?demo=oldcard`** lays the card out the old way (WAVs in the root, `sets/`
+and `presets/` beside them — the banner and *Copy them in*), `nocard` has no
+card in; **`?demo=emptykit`** starts from New empty kit (no break, Pads — drop
+files on the pads); **`?demo=sampler`** powers the fake up as the module does
+by default — Start In = Sampler: Pads, the transport stopped (the **Demo**
+button does this; without it the fake's boot preset says As saved — Classic,
+running — which the selftest drives); **`?demo=keyp`** opens the Kit with four
+keys' own settings set (a gain, a tune with Loop, a ½-sample Ratchet, a
+One-shot). `#kit` / `#scope` / `#opts` / `#man` open a tab directly. The flags
+are the module's situations (a card or none, an old card, a kit, an empty kit,
+how it powers up), never an older firmware: there is none to model.
 
 ## What is on the page
 
@@ -125,13 +120,11 @@ open a tab directly.
   the canvases.
 - **The transport** (every tab; sticky under the tabs, at the bottom of a
   phone): **▶ / ■** is the mute — the pattern stops, the clock runs on, the
-  keys still play (B1 held 600 ms on the panel); `SET_MUTE` (35) on a v0.13
-  module, the toggle (2) before. BPM (steadied: a short average, shown when
+  keys still play (B1 held 600 ms on the panel); `SET_MUTE` (35). BPM (steadied: a short average, shown when
   it moves 0.1, a 2 BPM step taken at once), playing / stopped, the mode and
   the clock. The **CPU** meter: the audio callback's mean (bar) and peak
   (tick) over the last second against the 24-sample block, orange past
-  70 % or on an overrun (the v0.13 tail; older firmware: the diag's worst
-  callback as a tick). **Dice / Flow / Reslice** follow the grammar: in
+  70 % or on an overrun. **Dice / Flow / Reslice** follow the grammar: in
   Play they are the looper's **Undo** (12) and **Clear** (13, asked first);
   Pads has no dice and no flow; Camp's Dice rings the next change. Flow is
   held — on while the button is down.
@@ -140,14 +133,14 @@ open a tab directly.
   · Camp under *more* — written through the Options blob path; the line
   under them says what the mode means: the jack map it brings (with Jacks
   = Follow grammar, Play and Pads take the Voice map) and what B2 / B3 do.
-- **Pads** (`"keys"`): the 24 keys, two octaves from C1, each saying what it
+- **Pads**: the 24 keys, two octaves from C1, each saying what it
   plays (slice / marker / recording); `PLAY_KEY` (32) down on press, up on
   release, one pointer per pad, so several fingers play at once. A pad
-  lights whenever its key is called from anywhere (tail `keyFlash` /
+  lights whenever its key is called from anywhere (state `keyFlash` /
   `keySeq`). First on the tab in Play and Pads; *keys follow markers* shows
   when Pads has put the markers on the keys.
 - **The sampler** (beta-sampler): in Pads with the transport stopped — how
-  the module powers up (Start in = Sampler) — the Play tab reads as a
+  the module powers up (Start In = Sampler) — the Play tab reads as a
   sampler: the pads card first, a line over the pads saying what plays and
   where a drop goes, with **Classic** / **Grids** buttons ("for a beat: …
   then ▶") that only write the grammar; the transport says *sampler*, the
@@ -172,8 +165,7 @@ open a tab directly.
   a beat-aligned switch is waiting — the one P2 has *requested* (`×2 → ×4
   pending`), `P2 not engaged` until the knob has moved, `aligned` for ~2 s
   after a lock snaps the loop onto the pulse grid, pulse jitter as peak /
-  RMS µs, and `ext n`, the external-clock transition counter (mod 16), when
-  the firmware reports them.
+  RMS µs, and `ext n`, the external-clock transition counter (mod 16).
 - **Controls:** every button gesture as the firmware implements it (B1 tap
   = page, B1 held + pot = motion lock, hold + nudge again clears, B1 held
   alone = start / stop; B2 tap dice — in Play the looper's undo — / hold
@@ -207,14 +199,13 @@ open a tab directly.
   **Undo** (12) and **Clear** (13). The **set** card saves the playing
   material — the break with its recordings, the table, keys, options and
   the loop — as `sets/<name>.wav` + `.json` (ACTION 14, the name as the
-  body) and loads one back (15); the buttons follow the state tail's
+  body) and loads one back (15); the buttons follow the state's
   `setState`, the progress bar the save's `setProgress`, and each result
   shows once per `setSeq`. The **Play** tab's strip and slice view
   use the same table boundaries instead of assuming `i · step`, and carry
   the onset ticks.
-- **The editor** (EDIT-UI, firmware with `"edit": 1` — without it the Kit
-  tab is the view-only one above, `?demo=noedit`): the waveform below the
-  keys is the **Sample Drum surface**. Its top band is the material from
+- **The editor** (EDIT-UI): the waveform below the keys is the **Sample Drum
+  surface**. Its top band is the material from
   `GET_WAVE` windows with every edge of the table drawn over it — grid
   boundaries white, recordings gold, markers grey (dotted, a hollow handle)
   until touched and **orange** once you placed or moved them (the table's
@@ -250,11 +241,11 @@ open a tab directly.
   **keys follow the grid**, and the **history** — the page's labels for
   what it did, keyed by the table's generation, with Undo / Redo driving
   the module's journal (ACTION 30 / 31, 64 steps; the undone entries are
-  struck through, the depths come from the tail). Every op
+  struck through, the depths come from the state). Every op
   carries the page's `tableGen`; a stale one is refetched and retried once,
   a take or a set op in flight is named, and a refusal reverts the handle.
   Details and the gesture table: `docs/packages/slice-edit-ui.md`.
-- **Scope tab** (SCOPE package, firmware with `scope2`): ten channels on
+- **Scope tab** (SCOPE package): ten channels on
   one sample clock from the firmware's rings — out L, out R, in L (J1), in R
   (J2) at 48 kHz, and the six jacks J3–J8 DC-coupled at ±5 V, one sample per
   audio block (2 kHz): LFOs, envelopes, sequences and gates, in or out (an
@@ -276,22 +267,21 @@ open a tab directly.
   frames/s · requests per frame · KB/s · last round trip, and `n = 252,
   audio ×16 → 84 ms, cv ×2 → 252 ms · triggered on J6`. A cv window longer
   than the audio ring (1.4 s) detaches the audio tier to its newest window
-  and says so. Old firmware without `scope2` gets its mono trace here.
+  and says so.
 - **Options tab:** every enum field of the module's Options block, labels
   and names straight from the descriptor, grouped Pattern / Sound / Looper
   (Quantize) / Jacks & CV / Recording (Sampling, Record Source, Record) /
-  Editing (Tap Allowance, Autosave) / Analysis — all 24 bytes have a home;
-  a field a newer firmware adds lands in "Other". A change reads the live
+  Editing (Tap Allowance, Autosave) / Analysis / Power-up (Start In) — all 25
+  bytes have a home (a field added without one would land in "Other"). A
+  change reads the live
   blob fresh, flips one byte and writes it back as a live audition
   (`BLOB_BEGIN 0xFF → DATA → COMMIT`), exactly what `/program` does — it is
   not saved until a preset is saved. If the panel changes an option (a
   preset load), the page notices through the state and re-reads the blob.
-  Under them, **Start-up (kept on the card)**: *Start in* — Sampler (Pads,
-  stopped; the default) or As saved (the boot preset's grammar, running).
-  Not an Options byte: ACTION 40 writes it to the module's card
-  (`Audiothurgist/startup.json`), GET_STATE byte 3 b5 reads it back, so a
-  preset save or load never changes it (`"startIn": 1`; disabled with no
-  card in).
+  **Start In** (byte 24) is how the module powers up: Sampler (Pads,
+  stopped; the default) or As saved (the boot preset's grammar, running). It
+  is the boot preset's like every other option — save a preset to keep it —
+  and a set load leaves it alone.
 - **Manual tab:** the descriptor's manual block (tagline, preamble,
   sections), the pager's page and knob help, the jack help and the presets
   help — all firmware-authored (`src/audiothurgist_manual.cpp`). The button
@@ -310,7 +300,7 @@ open a tab directly.
   the state poll to 4 Hz meanwhile — one 1022-byte request per frame for
   the four audio channels on the firmware's `max_body` of 1024, two
   requests pinned to one ring position when the channels do not fit (all
-  ten, the six jacks, or a 512-byte module); envelope only when `matGen`
+  ten, or the six jacks); envelope only when `matGen`
   changes; the slice table when the
   state's (matGen, nTable, freePos, bufLen, key table) signature changes —
   a take, a clear, a re-slice; the onset table when `matGen` changes;
@@ -327,13 +317,13 @@ open a tab directly.
   locks make it ~12 KB) — expect the display to hold for well under a
   second while it goes through.
 
-- **The Kit's marker ops** (`"keys"`, in the Edit panel): the **autoslice
+- **The Kit's marker ops** (in the Edit panel): the **autoslice
   count** (0–64; dragging sends each value as it goes, every send after
   the drag's first with JOIN, so a drag is one undo step) and **Re-roll**
   (a new draw at the same count), **Markers → keys** (33: time order onto
   keys 0, 1, 2…, keys holding a recording skipped) and **Clear markers**
   (34, asked first) — one undo step each. The **Chop pad** is disabled with
-  the reason while nothing sounds (tail 263 b0 — the module would refuse
+  the reason while nothing sounds (state byte 263 b0 — the module would refuse
   the tap); a tap on a marker that is already there selects it. The
   waveform keeps the grid's boundaries on a lane at the top and the markers
   on a lane at the bottom.
@@ -357,10 +347,10 @@ node web/selftest.mjs
 pins `hostlink.js` to the SDK's golden vectors
 (`../alchemy-sdk/tests/host/golden/hostlink_golden.json`: 11/11 — CRC32,
 COBS, the HELLO frame both ways — plus every recorded exchange frame and
-the golden descriptor), parses synthetic `GET_STATE` bodies of every length
-the firmware has shipped (148 / 156 / 164 / 167 / 170 / 176 / 177 / 194 /
-218 / 219 bytes) plus `GET_WAVE`, `GET_TABLE` and `GET_HITS` bodies, and
-parses the SCOPE request / reply and plans frames at 512 / 1024 / 2048,
+the golden descriptor), parses a synthetic 315-byte `GET_STATE` body field by
+field (a shorter one is refused) plus `GET_WAVE`, `GET_TABLE` and `GET_HITS`
+bodies, and parses the SCOPE request / reply and plans frames at 512 / 1024 /
+2048,
 runs the real `Link` over the fake module: priority ordering, coalescing,
 status errors, envelope fetch, the clock flags on a fake clock, a `GET_LIVE
 → BLOB` option round-trip, the seven-label Grammar (Camp 4, Play 5, Pads 6),
@@ -368,13 +358,13 @@ and — on a 64-slice kit with three recordings — the chunked table (39 +
 28), the onset table, raw and decimated waveform windows with the clamp at
 `freePos`, and ACTION 9–13: arm → taking → pending → committed, a second
 arm refused, clear re-pointing the keys, Key Plays landing in the Options
-byte, looper undo / clear — and the scope: the empty body unchanged, a
-four-channel frame, trigger, peak, at-pos re-reads, the two-request plan,
+byte, looper undo / clear — and the scope: the Play tab's empty-body trace, a
+four-channel frame, trigger, peak, at-pos re-reads, a stale pos refused,
 every BAD_ARGS and clamp of both body forms, the jacks (a cv-only frame,
 a mixed frame aligned, the gates preset triggered on J6, an 8 s LFO
 detaching the audio, all ten channels pinned) — and every slice-editing op
 over the fake module with its gen, tombstones, keys, FROM_ONSETS, the
-audition window, TAP_MARK and an older firmware. Then **the editor**: its
+audition window and TAP_MARK. Then **the editor**: its
 pure helpers (magnets, clamps, handles, positions, labels, the drop rule,
 the histogram preview, the audition window, the gesture recogniser) and the
 `Editor` driven against the fake with synthetic pointer events (a drag
@@ -383,65 +373,64 @@ merge, delete, promote, copy, keys, nudge, onsets, the Chop pad; a stale gen
 refetched and retried; a take in flight refused and named); and **the page
 itself, headless** — `index.html`'s inline script under a DOM stub in `vm`,
 connected to the fake through `?demo=kit`, driven through its canvases,
-cells, menu and panel, then `?demo=noedit`'s view-only fallback. Then
-**v0.13**: the transports (Link over a SerialTransport, bytesIn / kbps, the
-unplug as onClose, a WebSocket transport); the KEYS tail and ACTION 32–36
+cells, menu and panel. Then the transports (Link over a SerialTransport, bytesIn / kbps, the
+unplug as onClose, a WebSocket transport); the KEYS bytes and ACTION 32–36
 over the fake (the transport, pads, nested autoslice draws, re-roll, JOIN,
 in-place re-spans, markers → keys, clear markers, Pads' keys following,
-Play's loop, a 0.12 firmware's BAD_ARGS); the **descriptor parity** — it
-parses `src/audiothurgist.cpp` (the Options block's ids, names, offsets,
-zones and enum labels, its size, hash and live defaults, the jacks, the
-pager's knobs, the root capabilities) and fails when `demo.js` drifts (and
-proves the check bites); **the revamped page** under the stub, every
+Play's loop); the **descriptor parity** — it parses `src/audiothurgist.cpp`
+(the Options block's ids, names, offsets, zones and enum labels, its size,
+hash and live defaults, the jacks, the pager's knobs, the descriptor root's
+`api` against `HL.API`) and fails when `demo.js` drifts (and proves the check
+bites); **the wrong firmware**: a fake built for another page gets the one
+message and a disconnect, nothing past the handshake asked; **the revamped page** under the stub, every
 gesture performed through its listeners (▶ / ■, Flow held, the mode chips,
 three pads at once, the slider drag, re-roll, markers → keys, clear, the
-Chop pad twice, Play's Undo / Clear, the theme, a draw error, the unplug,
-then `?demo=old12`), with the stub's unknown-id trap and draw logs (what
+Chop pad twice, Play's Undo / Clear, the theme, a draw error, the unplug),
+with the stub's unknown-id trap and draw logs (what
 the last frame drew); CARD: the WAV encoder, the name rule (fuzzed), the
 upload sequencer and every refusal against the fake, two uploads at once
 (refused mid-stream without the queue, both landing through it), the old
 card's copy, and the Card panel through real `change` / `drop` / `click`
-gestures; PADS: the 315-byte tail, the plan and the PCM16 encoder, a drop
+gestures; PADS: the state's pads bytes, the plan and the PCM16 encoder, a drop
 over the fake byte for byte with every refusal both ways, ABORT, the timeout,
 a pads-only kit through a set save, a power-cycle and the load back, and the
-pads through real `dragover` / `drop` / `change` / `click` gestures (then
-`?demo=nopads`); KEYP: GET_KEYS / KEY_PARAMS over the fake (the refusals, a
+pads through real `dragover` / `drop` / `change` / `click` gestures; KEYP: GET_KEYS / KEY_PARAMS over the fake (the refusals, a
 drag as one undo step, PLAY_KEY holding as the key says, a set carrying the
 settings) and the Kit's settings row through real `input` / `change` / `click`
-events (then `?demo=nokeyp`); CHROMA (§7f, §9h): SPREAD_KEYS over the fake (the
+events; CHROMA (§7f, §9h): SPREAD_KEYS over the fake (the
 tunes, gain and Plays read back, one undo step putting every key's map and
 settings back, keep pads, a spread in place moving nothing, the refusals, a set
-carrying it, a firmware before it) and the Kit's Spread button through real
+carrying it) and the Kit's Spread button through real
 `click`s — the pads prompt (keep / over / cancel), the cells' and pads' words,
 the history line, Undo, no prompt with no pads in the way, an empty kit's key
-refused (then `?demo=kit,nospread`); the **contrast** of every text token on every surface in both
-themes, no colour outside the tokens, no duplicate ids; START (§9f): ACTION 40
-and the flags bit over the fake (the card file, two power-cycles, a card
-without the file, BAD_ARGS, NO_CARD, an older firmware), `padNormalize`, then
-the page over `?demo=sampler` — it reads as a sampler, Start in on the Options
-tab, a mono and a stereo WAV (real RIFF bytes) dropped on two pads and arriving
+refused; the **contrast** of every text token on every surface in both
+themes, no colour outside the tokens, no duplicate ids; START (§9f): Start In
+as Options byte 24 over the fake (written through the live blob, a power-up
+with each value, ▶ in Pads bringing the preset's beat back, ACTION 40 gone),
+`padNormalize`, then the page over `?demo=sampler` — it reads as a sampler,
+Start In on the Options tab, a mono and a stereo WAV (real RIFF bytes) dropped on two pads and arriving
 sample for sample, both played from the page's pads, the kit turned stereo,
 normalise drops (remembered), Save set, a power-cycle on the same card with the
 page reconnected, Load set — the same pads, stereo, playing — and the flip to
-Classic, stopped until ▶. 792 checks. Pass `--golden <path>` if the SDK lives elsewhere (it is found
+Classic, stopped until ▶. 733 checks. Pass `--golden <path>` if the SDK lives elsewhere (it is found
 above a worktree too) and `--fw-src <file>` to check the parity against
 another firmware source (`git show beta-fw:src/audiothurgist.cpp > /tmp/f.cpp`).
 
 ## The GET_STATE body
 
-Fixed 148 bytes, then append-only tails that the page parses by length —
-an older firmware simply sends a shorter body and the page falls back.
+315 bytes, every field always there; the page refuses a shorter body (not
+this firmware's).
 
 ```
 u8 status u8 nSlices u8 curStep u8 flags u8 matGen u8 grammar u8 cls u8 file
 u8 chop u8 histN u8 histDepth u8 callFlash f32 bpm f32 mult
 i8 stepSrc[64] u8 stepClass[64]                                  (ends at 148)
-u16 pollGapUs u16 audioUs u16 jumps u16 regens                    (148..155, v0.7.3)
-u16 lockMask f32 nativeBpm u8 gridBars u8 barsOpt                 (156..163, v0.8.0)
+u16 pollGapUs u16 audioUs u16 jumps u16 regens                    (148..155, diag)
+u16 lockMask f32 nativeBpm u8 gridBars u8 barsOpt                 (156..163)
 u16 jitterUs u8 multZone                                          (164..166, CLOCK)
 u8 clkFlags u16 jitterRmsUs                                       (167..169, CLOCK)
-u8 stallPhase u16 gateLateUs u16 overruns                         (170..174, v0.9.5)
-u8 jackMap                                                        (175, v0.9.9)
+u8 stallPhase u16 gateLateUs u16 overruns                         (170..174, forensics)
+u8 jackMap                                                        (175)
 u8 looperEvents                                                   (176, LOOPER)
 u8 recState u8 recKey u32 freePos u32 bufCap u8 stereo u8 inLevel (177..188, SAMPLE)
 u8 nTable u32 bufLen                                              (189..193, SAMPLE)
@@ -453,10 +442,12 @@ u8 tableGen u8 undoDepth u8 selSlice                              (255..257, EDI
 u32 srcPos                                                        (258..261, EDIT)
 u8 redoDepth                                                      (262, EDIT-UNDO)
 u8 flags2 u16 loadAvg u16 loadMax i16 j4mV u8 j4Key u8 j5Style
-u8 keyFlash u8 keySeq u8 autoK u8 nMarkers                        (263..275, KEYS v0.13)
+u8 keyFlash u8 keySeq u8 autoK u8 nMarkers                        (263..275, KEYS)
 u8 cardState u8 cardProgress u8 cardResult u8 cardSeq u8 cardFlags
 u16 rootWavs u16 pending u16 breaks u8 lastIdx u16 copied u16 skipped
 u8 nFiles                                                         (276..292, CARD)
+u8 padState u8 padProgress u8 padResult u8 padSeq u8 padKey u8 padFlags
+u32 free u32 total u32 held u32 mask                              (293..314, PADS)
 ```
 
 `recState`: 0 idle · 1 armed (waiting for the gate) · 2 taking · 3 pending
@@ -472,13 +463,12 @@ is the last op's outcome (0 ok · 1 no card · 2 card full · 3 write failed
 · 4 bad name · 5 not found · 6 busy · 7 bad file) and `setSeq` bumps when
 one finishes, so the page reports each result once; `setName` names the
 set the playing material came from (empty for a loose file or a take).
-`tableGen` (EDIT, capability `"edit": 1`) is the slice table's generation
+`tableGen` (EDIT) is the slice table's generation
 — never 0, bumped by every edit, take, clear, re-slice and set load; the
 page carries it back as an op's trailing `gen` and joins it to the Kit
 tab's refetch signature. `undoDepth` / `redoDepth` (EDIT-UNDO) are the
-module's journal depths in steps — Undo / Redo enable from them, and a
-262-byte body (no `redoDepth`) is a firmware without the journal;
-`selSlice` is 255 (none) until EDIT-PANEL. `srcPos` is the material position of the youngest
+module's journal depths in steps — Undo / Redo enable from them;
+`selSlice` is the panel's selection (255 none). `srcPos` is the material position of the youngest
 sounding voice (else the current step's source), snapshotted by the audio
 thread once per block — the Chop pad's display, and what a TAP_MARK is
 timestamped from.
@@ -488,14 +478,14 @@ timestamped from.
 ```
 0x64 GET_WAVE   ← u32 start, u16 n (≤480), u8 plane (0 L · 1 R · 2 L+R), [u8 step 1..128]
                 → u8 status, u32 start, u16 n, u8 step, i8 x[n]
-0x65 GET_TABLE  ← [u8 first, u8 count (≤39) [, u8 form]]
-                → u8 status, u8 nSlices, u8 nTable, then per entry (13 bytes)
-                  u32 start, u32 len, i8 key (-1 grid / keyless), u8 cls, u8 sal, u8 hit, u8 dens
-                  [, u8 flags (b0 orange · b1 tombstone) — 14 bytes, when form = 1 and "edit" is present]
+0x65 GET_TABLE  ← [u8 first, u8 count (≤39)]
+                → u8 status, u8 nSlices, u8 nTable, then per entry (14 bytes)
+                  u32 start, u32 len, i8 key (-1 grid / keyless), u8 cls, u8 sal, u8 hit, u8 dens,
+                  u8 flags (b0 orange · b1 tombstone)
 0x66 GET_HITS   ← [u8 first]  → u8 status, u8 nTotal, u8 first, u32 pos[…] (≤127)
 ```
 
-## The card (0x67, capability `"card": 1`)
+## The card (0x67)
 
 The card is one folder, `Audiothurgist/` (`breaks/`, `sets/`, `presets/`); the
 module no longer reads the root. The **Card** panel on the Kit tab (and *Add
@@ -516,8 +506,8 @@ Chunks are `max_body − 24` bytes at normal priority (clicks still go first,
 the state poll interleaves); every card job goes through one queue
 (`HL.serial`, Kyklophoria's `putQueued` fix) so two drops never interleave.
 Once the module holds every byte it writes `breaks/<name>.wav` itself; the
-tail's `cardSeq` bumps when it is done, `cardResult` says how, `lastIdx` is the
-new list entry (**Load it now** = ACTION 6 with it). The tail's `cardState` is
+state's `cardSeq` bumps when it is done, `cardResult` says how, `lastIdx` is the
+new list entry (**Load it now** = ACTION 6 with it). The state's `cardState` is
 0 idle · 1 receiving · 2 writing · 3 copying, `cardFlags` b0 mounted · b1 root
 WAVs · b2 old `sets/` · b3 old `presets/` · b4 breaks in the folder · b5
 something not copied in; `pending` counts old files whose copy is missing — the
@@ -526,7 +516,7 @@ reads 3 while the module writes or copies. LIST is the module's list as it is
 now (the descriptor's dropdown is the boot one). Protocol and reasons:
 `docs/packages/card.md`.
 
-## Each key's own settings (ACTION 37 + 0x69, capability `"keyp": 1`)
+## Each key's own settings (ACTION 37 + 0x69)
 
 The Kit's row under the keys edits the **selected** key: Gain (−24 … +6 dB, ½ dB
 steps), Tune (semitones + cents, ±24 st), Plays (Follow Key Plays · One-shot ·
@@ -534,8 +524,8 @@ Held · Loop · Ratchet, and the ratchet's rate), ▶ hear (held while down) and
 reset. A key cell and a Play pad with settings say them in words in the
 accent's ink. The sliders send live, one request at a time, every send of a
 drag after its first with JOIN — one undo step, one history line. The 24 keys'
-settings are read through `0x69 GET_KEYS` whenever the tail's `tableGen` moves
-(nothing was added to the state tail). Wire format, the join rule, where the
+settings are read through `0x69 GET_KEYS` whenever the state's `tableGen` moves
+(the state carries no copy of them). Wire format, the join rule, where the
 settings apply and why: `docs/packages/keyp.md`.
 
 ```
@@ -544,7 +534,7 @@ ACTION 37 KEY_PARAMS ← u8 key, i8 gain ½ dB, i16 cents, u8 plays 0..4, u8 rat
 0x69 GET_KEYS        → u8 status, u8 24, 24 × { i8 gain, u8 plays, i16 cents, u8 rate }
 ```
 
-**Spread across keys** (ACTION 38, `"keyp": 2`): the row's last button,
+**Spread across keys** (ACTION 38): the row's last button,
 "Spread G1 chromatically (C1 … B2)", puts the selected key's sample on all 24
 keys — key j tuned (j − G1) semitones plus G1's cents, with G1's gain and
 Plays; G1 itself stays as it is. When keys that play pads of their own would be
@@ -559,7 +549,7 @@ spread chromatically (23 keys)"). Decisions and the bench check:
 ACTION 38 SPREAD_KEYS ← u8 root 0..23, u8 flags b0 keep pads [, u8 gen] → u8 status, u8 tableGen, u8 count
 ```
 
-## Samples onto pads (0x68, capability `"pads": 1`)
+## Samples onto pads (0x68)
 
 Drop an audio file on a pad (Play) or a key cell (Kit) — or, on a phone,
 *Choose samples…* (Play, with *into [key]*) / *⤓ Load into …* (Kit, the selected
@@ -578,7 +568,7 @@ statuses: 0 OK · 2 BAD_ARGS · 3 BAD_STATE · 6 TOO_LARGE (more than the room)
 ```
 
 The module holds the bytes past freePos, converts them in place and publishes
-the pad (one undo step; the tail's `pads.seq` moves); the page waits by asking
+the pad (one undo step; the state's `pads.seq` moves); the page waits by asking
 for the state itself and gives up only when the module stands still. Several
 files fill the pad and the ones after it, through the card's queue
 (`cardRun`), so a drop and a card upload never interleave. Each pad shows the
@@ -590,13 +580,13 @@ per browser; the module itself never normalises a drop). The row above the pads 
 meter ("pads: 12.30 s of 28.00 s free · 2.10 s held by replaced pads" — held
 memory comes back only with new material), the picker and **New empty kit**
 (asks first: the break, every pad and marker go, Pads, the whole memory for
-pads); the **Unsaved kit** note (tail `pads.flags` b0) offers **Save set…**,
-which saves at once when the Kit's Set name is filled. Tail 293..314:
+pads); the **Unsaved kit** note (state `pads.flags` b0) offers **Save set…**,
+which saves at once when the Kit's Set name is filled. State bytes 293..314:
 `pads = { state, progress, result, seq, key, unsaved, noBreak, madeStereo,
-free, total, held, mask }` (null on an older body). Protocol and reasons:
+free, total, held, mask }`. Protocol and reasons:
 `docs/packages/pads.md`.
 
-## The slice-editing ops (ACTION 16–29, capability `"edit": 1`)
+## The slice-editing ops (ACTION 16–31)
 
 Every body is the op byte, its fields little-endian, then an optional
 trailing `u8 gen` — the `tableGen` the page last saw, 0 = unchecked; a
@@ -624,21 +614,21 @@ per op (`editBoundary(link, i, pos, gen)` …) resolving
 26 FROM_ONSETS   u8 thresh, u16 minGapMs       grey markers inside the break replaced; one per onset ≥ thresh   → count
 27 AUDITION      u32 start, u16 lenMs, u8 flags (b0 from-end · b1 loop)   the scratch voice, ≤ 10/s
 28 RELEASE       —                             ends the audition (5 ms fade)
-29 TAP_MARK      u8 snapMs, u8 allowMs         an orange marker at srcPos − allow, onset-snapped   → newIdx
+29 TAP_MARK      u8 snapMs, u8 allowMs         an orange marker at srcPos − allow, onset-snapped   → newIdx, u8 flags
+                                               BAD_STATE while nothing sounds (state byte 263 b0 clear); within 10 ms of a
+                                               live marker it selects that marker instead (flags b0 reused, nothing added)
 30 UNDO_EDIT     —                             one journal step back (64 deep; a take / load / new material ends the history)
 31 REDO_EDIT     —                             one step forward (a new edit clears the redo half)
 ```
 
-## The v0.13 keys ops (ACTION 29, 32–36, capability `"keys": 1`, `"edit": 2`)
+## The keys ops (ACTION 32–36)
 
 ```
-29 TAP_MARK      as above, but BAD_STATE while nothing sounds (tail 263 b0 clear); within 10 ms of a live marker
-                 it selects that marker instead: reply u8 status, u8 tableGen, u8 idx, u8 flags (b0 reused)
 32 PLAY_KEY      u8 key (0..23), u8 down (1) / up (0)            the key as a CV note would play it (plain); up releases a held key
 33 KEYS_FROM_MARKERS [u8 gen]  → count                           markers in time order onto keys 0..; recording keys kept; the
                                                                  keys past the last marker back to their span; one undo step
 34 CLEAR_MARKERS [u8 gen]      → count                           every live marker (grey and orange) deleted, never a take; one step
-35 SET_MUTE      u8 1 stopped / 0 running                        the transport (2 is still the toggle)
+35 SET_MUTE      u8 1 stopped / 0 running                        the transport (a start in Pads brings the last beat back)
 36 AUTOSLICE     u8 k (0..64), u8 flags (b0 re-roll · b1 JOIN) [, u8 gen]  → count
                  grey markers re-spanned / added / removed to the first k of a seeded draw weighted by salience
                  (nested in k); orange markers stay, onsets within 10 ms of one are skipped; JOIN folds the apply
@@ -654,13 +644,13 @@ millivolts, `j4Key` the key it would play; `j5Style` the style J5 reads in
 the Voice map (255 in the Brain map); `keyFlash` the last key called by any
 source (255 none), `keySeq` bumps per call; `autoK` the autoslice count last
 applied; `nMarkers` the live markers. `hostlink.js` has `playKey`,
-`keysFromMarkers`, `clearMarkers`, `setMute`, `autoslice` and `caps(desc)`.
+`keysFromMarkers`, `clearMarkers`, `setMute` and `autoslice`.
 
 ## The scope (0x62)
 
 ```
 0x62 SCOPE      ← (empty)  → u8 status, u16 256, i8 x[256]: (out L + out R) / 2, one in four,
-                             the newest 21 ms — the pre-SCOPE reply, unchanged
+                             the newest 21 ms — the Play tab's trace
                 ← u8 chanMask (b0 out L · b1 out R · b2 in L · b3 in R), u8 decim (1..16),
                   u16 n, u8 flags (b0 trigger · b1 peak · b2 at · b3 ext), [u32 pos (with at or
                   ext)], [ext: u8 maskHi (b0..b5 = J3..J8), u8 cvDecim (1..64), i8 trigLevel,
@@ -685,9 +675,8 @@ previous reply's `pos` (a second request of the same frame, for when
 `max_body` cannot hold every channel); a tier that cannot hold the start
 (a cv window older than the audio ring) shows its newest window and the
 reply says `detached`. BAD_ARGS for no channel, mask bits past the
-channels, decim 0 / > 16, cvDecim 0 / > 64, n 0, a bad trigSrc. The
-descriptor's `audiothurgist` object says `"scope2":2` (1 = the audio body
-alone). Details: `docs/packages/scope.md`.
+channels, decim 0 / > 16, cvDecim 0 / > 64, n 0, a bad trigSrc. Details:
+`docs/packages/scope.md`.
 
 `GET_WAVE` reads the material buffer directly on the control thread,
 bounded by `freePos` (a take in flight is not exposed until it is
@@ -703,7 +692,7 @@ onset table for the current material (`gPendOnsets`, up to 128 positions,
 in material samples), chunked the same way.
 
 `flags`: b0 muted · b1 following an external clock · b2 locked · b3 flow
-held · b4 Brain page · b5 Start in = As saved (`"startIn"`; clear = Sampler). `mult` is the multiplier being *applied*; `multZone`
+held · b4 Brain page. `mult` is the multiplier being *applied*; `multZone`
 is the zone P2 is *requesting* (0..4 = ÷4 ÷2 ×1 ×2 ×4), which differs only
 while a switch waits for its beat. `jitterUs` / `jitterRmsUs` are the peak
 and RMS per-pulse period deviation over the last second. `clkFlags`: b0 P2
@@ -718,22 +707,23 @@ number of bells, B2 rings the next change, Brain knobs unused).
 | Page needs               | HostLink command                  | Notes                                        |
 |--------------------------|-----------------------------------|----------------------------------------------|
 | identity, max body       | `0x01 HELLO`                      | standard                                     |
-| labels, help, manual     | `0x02 GET_DESCRIPTOR`             | the module's own descriptor JSON             |
+| labels, help, manual     | `0x02 GET_DESCRIPTOR`             | the module's own descriptor JSON; its `"api"` must be the page's |
 | option values            | `0x20 GET_LIVE`                   | at connect, before each write, on mismatch   |
 | option edits             | `0x12/0x13/0x14 BLOB_*` to `live` | audition; save a preset to keep it           |
-| bar / playhead / tails   | `0x60 GET_STATE`                  | 10 Hz; tails parsed by length                |
+| bar / playhead / state   | `0x60 GET_STATE`                  | 10 Hz; the one 315-byte body                 |
 | waveform                 | `0x61 GET_ENV`                    | refetched when the material changes          |
 | scope (Play tab)         | `0x62 SCOPE` (empty body)         | 5 Hz while visible; 256 samples ×4 decimated |
-| scope (Scope tab)        | `0x62 SCOPE` (body, `scope2`)     | ≤ 30 frames/s; audio 4 × 253 or out L + 3 jacks × 252 per request at max_body 1024; trigger, peak, at-pos, the jacks' own decimation |
-| buttons, punch, scrub    | `0x63 ACTION`                     | 0 dice · 1 reslice · 2 mute · 3 punch · 4 flow · 5 scrub · 6 load · 7 clear locks · 8 page · 9 rec arm(key) · 10 rec clear(key) · 11 key plays(0/1) · 12 looper undo · 13 looper clear · 14 save set · 15 load set |
-| slice editing            | `0x63 ACTION` 16–29 (`"edit"`)    | the table ops with a gen, the audition voice, the tap mark — the table above; the Kit tab's editor drives them (`edit.js`) |
-| undo / redo              | `0x63 ACTION` 30 / 31             | the module's journal (EDIT-UNDO); Undo enables from the tail's `undoDepth`, Redo from `redoDepth` |
-| transport, pads, markers | `0x63 ACTION` 32–36 (`"keys"`)    | SET_MUTE · PLAY_KEY per pointer · markers → keys · clear markers · autoslice (JOIN while dragging) |
-| Start in                 | `0x63 ACTION` 40 (`"startIn"`)    | START_IN(u8 0 Sampler / 1 As saved) → the card's `Audiothurgist/startup.json`, read at power-up; NO_CARD (21) without one; flags b5 reads it back |
+| scope (Scope tab)        | `0x62 SCOPE` (body)               | ≤ 30 frames/s; audio 4 × 253 or out L + 3 jacks × 252 per request at max_body 1024; trigger, peak, at-pos, the jacks' own decimation |
+| buttons, punch, scrub    | `0x63 ACTION`                     | 0 dice · 1 reslice · 3 punch · 4 flow · 5 scrub · 6 load · 7 clear locks · 8 page · 9 rec arm(key) · 10 rec clear(key) · 11 key plays(0/1) · 12 looper undo · 13 looper clear · 14 save set · 15 load set |
+| slice editing            | `0x63 ACTION` 16–29               | the table ops with a gen, the audition voice, the tap mark — the table above; the Kit tab's editor drives them (`edit.js`) |
+| undo / redo              | `0x63 ACTION` 30 / 31             | the module's journal (EDIT-UNDO); Undo enables from the state's `undoDepth`, Redo from `redoDepth` |
+| transport, pads, markers | `0x63 ACTION` 32–36               | SET_MUTE · PLAY_KEY per pointer · markers → keys · clear markers · autoslice (JOIN while dragging) |
+| key settings, spread     | `0x63 ACTION` 37 / 38, `0x69`     | KEY_PARAMS (JOIN while dragging) · SPREAD_KEYS · GET_KEYS when `tableGen` moves |
 | kit waveform             | `0x64 GET_WAVE`                   | on demand, ≤ 3/s, cached windows            |
 | slice table              | `0x65 GET_TABLE`                  | when the state's table signature changes    |
 | onset ticks              | `0x66 GET_HITS`                   | when `matGen` changes                        |
-| card: upload, copy, list | `0x67 CARD` (`"card"`)            | one job at a time; chunks of max_body − 24; the 276.. tail reports |
+| card: upload, copy, list | `0x67 CARD`                       | one job at a time; chunks of max_body − 24; state bytes 276.. report |
+| samples onto pads        | `0x68 PADS`                       | through the card's queue; raw PCM16; state bytes 293.. report |
 
 Flashing, presets and settings stay in `/program`; this page is deliberately
 the *instrument* view.

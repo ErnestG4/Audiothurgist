@@ -72,7 +72,7 @@ constexpr int   kSubdiv[]  = {1, 2, 3, 4, 6, 8, 12, 16, 32};
 inline float RelWeight(int k) { return k <= 4 ? (float)(6 - k) : (k <= 8 ? 1.f : 0.f); }
 
 // All of EstimateBar's scratch (≈15 KB) in one object the shell places in
-// SDRAM (review M7: it sat in DTCM as function statics). Written before read
+// SDRAM (not DTCM: function statics would land there). Written before read
 // on every path; the shell zeroes it once at boot anyway (NOLOAD section).
 struct BarScratch
 {

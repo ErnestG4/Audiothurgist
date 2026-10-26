@@ -34,7 +34,7 @@ struct ConditionInfo
 };
 
 // allowBarCut = false (Options → Bars set by hand): skip 3a so the user's bar
-// count applies to the file as it is, not to an estimator-cut buffer (review M5).
+// count applies to the file as it is, not to an estimator-cut buffer.
 inline int ConditionBuffer(float* x, int len, float sr, OnsetDetector& det, ConditionInfo* info = nullptr,
                            bool allowBarCut = true)
 {
@@ -60,7 +60,7 @@ inline int ConditionBuffer(float* x, int len, float sr, OnsetDetector& det, Cond
     int n2 = b - a + 1;
     if(n2 < (int)(0.25f * sr)) return len;
     /* shift EVERYTHING past the head trim, not just the body: 3a may take the
-     * trimmed tail back (lenValid), and it must be shifted data (review H1) */
+     * trimmed tail back (lenValid), and it must be shifted data */
     if(a > 0) memmove(x, x + a, sizeof(float) * (size_t)(len - a));
     const int lenValid = len - a;   // samples still in memory past the tail trim
     len = n2;
@@ -92,7 +92,7 @@ inline int ConditionBuffer(float* x, int len, float sr, OnsetDetector& det, Cond
         if(est.bar > 0.f)
         {
             /* `len` is NOT truncated to lenA here: a vetoed attempt must leave
-             * the full file for the prior path (review H2) */
+             * the full file for the prior path */
             const float B = est.bar;
             float db = est.downbeat;
             if(db > 0.5f * B) db -= B;                   // just before the start

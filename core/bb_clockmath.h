@@ -115,7 +115,7 @@ struct ClockMap
         if(!(A > 0.)) return 0.;
         double r = std::fmod(L, A);
         if(r < 0.) r += A;
-        if(r == 0.) return 0.;   /* already on the grid (review L7) */
+        if(r == 0.) return 0.;   /* already on the grid */
         return (r <= 0.5 * A && r < maxBack) ? -r : A - r;
     }
 };

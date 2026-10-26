@@ -81,7 +81,9 @@ struct Voice
     bool   epShape  = false;
     /* PLAY: tail policy (Options → Slice Tail). tail 1 loops [loopA, loopB)
      * forward, 2 ping-pongs between them; 0 plays to the natural end. Set by
-     * Engine::SetTail only when the grid slot outlasts the slice. */
+     * Engine::SetTail only when the grid slot outlasts the slice. KEYP:
+     * kTailBack loops it backward (a reversed Loop key, Engine::LoopHeld). */
+    static constexpr int8_t kTailBack = 3;
     int8_t tail    = 0;
     bool   looping = false;        // has wrapped at least once
     double loopA = 0., loopB = 0.; // sub-sample zero-crossing positions
@@ -228,7 +230,8 @@ struct Voice
             }
             else if(rate < 0.f && pos <= loopA)
             {
-                rate = -rate; pos = 2. * loopA - pos;
+                if(tail == kTailBack) { pos += loopB - loopA; looping = true; }   /* KEYP: backward, loopA → loopB */
+                else { rate = -rate; pos = 2. * loopA - pos; }
                 wrapped = true;
             }
         }
@@ -254,7 +257,7 @@ struct Voice
         if(epShape) { g = g * (2.f - g); h = h * (2.f - h); } // PLAY: ≈ equal power
         pos += (double)rate;
         age++;
-        const float o = s * g * h * relScale * gain;   /* KEYP: gain 1 = the old bits */
+        const float o = s * g * h * relScale * gain;   /* KEYP: the key's gain (1 for steps, auditions, keyless calls) */
         if(wrapped) clickComp += lastOut - o; // PLAY: bridge the seam
         lastOut = o;
         oL      = lastOut + clickComp;
@@ -312,7 +315,7 @@ enum class EditOp : uint8_t
     SpreadKeys     // CHROMA: key `key`'s entry on every key, tuned a semitone a key from it — a = flags (kSpreadKeepPads)
 };
 /* KEYP (docs/packages/keyp.md): one key's settings — how loud, how far tuned, how it plays. All zero is
- * neutral: the key plays exactly as before this package. A POD (it lives in the journal's union). */
+ * neutral: unity, untuned, Plays as Options → Key Plays says. A POD (it lives in the journal's union). */
 struct KeyParam
 {
     static constexpr int kGainMin = -48, kGainMax = 12;   // ½ dB steps: −24 … +6 dB
@@ -626,7 +629,7 @@ struct Engine
      * slice with the kick's tail and shears the hat off the kick slice) and
      * odd STEPS fire at the same offset, so rearrangement keeps the groove
      * (straight timing of swung slices would straighten it). 0.5 leaves
-     * every path below byte-identical to v0.8.0. */
+     * every path below unswung. */
     float  swing = 0.5f;
     bool   swung = false;             // swing applied to the current slices
     bool   gateOnsetsOnly = false;    // gates fire once per HIT, not on every
@@ -659,9 +662,9 @@ struct Engine
      * memory when Options → Quantize is Off or 8ths. A call in Play records
      * itself (its phase, key, style, held) instead of punching a step, and
      * Process fires the events back through the same call path, sample-exact
-     * within the block, every pass. Quantize = 16ths keeps Play exactly as
-     * it was (punch into steps, byte-identical): the looper never records
-     * or fires then. The list survives a grammar change (silent until Play
+     * within the block, every pass. Quantize = 16ths is Play as a step
+     * sequencer (calls punch into steps): the looper never records or fires
+     * then. The list survives a grammar change (silent until Play
      * again); B3 (Reslice) clears it with the punch bar; B2 undoes the last
      * pass's overdub. */
     Looper looper;
@@ -1097,19 +1100,17 @@ struct Engine
     int ReadEnd(int idx) const
     {
         if(idx < nSlices) return bufLen;
-        const int e = slices[idx].start + slices[idx].len;   /* clamped: a torn Slice read must stay in the plane (review L4) */
+        const int e = slices[idx].start + slices[idx].len;   /* clamped: a torn Slice read must stay in the plane */
         return e > bufCap ? bufCap : (e < 0 ? 0 : e);
     }
     /* PADS (docs/packages/pads.md): a key call on a RECORDING — an entry past the grid that starts at or past the
      * material's end (a take into a key, a sample dropped onto a pad) — plays at its own rate × pitch × the style's
      * multiplier, never the tempo's varispeed: a kit is a sampler's, its pads keep their pitch whatever the clock
-     * does. The break's slices and the markers inside it still follow the tempo. recOwnRate = false restores the
-     * v0.13 rule (every call varispeeds). The sequencer's steps (a recording punched into the bar) keep the
-     * varispeed: there the slot's length is the tempo's. */
-    bool recOwnRate = true;
+     * does. The break's slices and the markers inside it still follow the tempo. The sequencer's steps (a
+     * recording punched into the bar) keep the varispeed: there the slot's length is the tempo's. */
     bool OwnRate(int idx) const
     {
-        return recOwnRate && idx >= nSlices && idx < nTable && slices[idx].start >= bufLen;
+        return idx >= nSlices && idx < nTable && slices[idx].start >= bufLen;
     }
     // AUDIO, at block start. PADS: mono material grows an R plane in place — the shell has copied the L plane
     // into `bR` over [0, freePos) first, so everything already in the kit sounds the same on both sides; every
@@ -1148,7 +1149,7 @@ struct Engine
             v->held = true;
             v->key  = (int8_t)key;
             if(keyed && keyp[key].plays == KeyParam::kRatchet) {}   /* KEYP: a ratchet's hit plays its entry, as a one-shot (the next hit or the release fades it) */
-            else if(!rev && keyed && keyp[key].plays == KeyParam::kLoop && LoopHeld(*v, cell, bound)) {}   /* KEYP: Loop — the entry, until the release */
+            else if(keyed && keyp[key].plays == KeyParam::kLoop && LoopHeld(*v, cell, bound, rev)) {}   /* KEYP: Loop — the entry, until the release */
             else if(!rev) { v->natEnd = bound; v->end = bound; }
             else v->start = idx >= nSlices ? cell.start : 0;   /* backwards to the material's start */
         }
@@ -1377,7 +1378,7 @@ struct Engine
         recStart = freePos;
         recPos   = freePos;
         recFull  = false;
-        __asm__ volatile("" ::: "memory"); recArmed = true;   // last: publishes the take to the audio thread (compiler fence, review L3)
+        __asm__ volatile("" ::: "memory"); recArmed = true;   // last: publishes the take to the audio thread (compiler fence)
         return true;
     }
     // AUDIO. Append n input samples at the write head while armed. `inR`
@@ -1435,7 +1436,7 @@ struct Engine
     // count, key — each step leaves a consistent table.
     int CommitSlice(int key, int start, int len, uint8_t cls, float sal, float dens, bool hit)
     {
-        if(!buf || key < 0 || key >= kKeys || len < kRecMin || start < 0 || start > bufCap || len > bufCap - start) return -1;   /* overflow-safe (review M1) */
+        if(!buf || key < 0 || key >= kKeys || len < kRecMin || start < 0 || start > bufCap || len > bufCap - start) return -1;   /* overflow-safe */
         int t = RecordedEntry(key);
         if(t < 0)
         {
@@ -1515,7 +1516,7 @@ struct Engine
     static constexpr int kLooperFiresPerBlock = 48;
     /* Style 8 / browser Clear: the key goes back to its span slice AND its
      * recorded entry forgets the key, so a re-apply (DefaultKeyTable) does
-     * not re-claim it (review L2). The region stays until the next load. */
+     * not re-claim it. The region stays until the next load. */
     void ClearKey(int key)
     {
         if(key < 0 || key >= kKeys) return;
@@ -1665,20 +1666,23 @@ struct Engine
             if(--r.left <= 0) keyRatOn &= ~(1u << k);
         }
     }
-    /* KEYP: a held call on a Loop key loops its entry [start, end) — the tail mechanism (loop forward, the wrap's
-     * click bridge), the loop point a rate's step plus two short of the end so the reader never reaches the end
-     * between two wraps; the release fades forward from wherever it is, never past the entry's end. An entry too
-     * short for the rate (under 64 samples of loop) plays as plain Held. */
-    BB_COLD bool LoopHeld(Voice& v, const Slice& cell, int bound) const
+    /* KEYP: a held call on a Loop key loops its entry [start, end) — the tail mechanism (the wrap's click bridge),
+     * forward from the start or, reversed, backward from the top; the far loop point sits a rate's step plus two
+     * inside the entry so the reader never leaves it between two wraps. The release fades forward from wherever it
+     * is, never past the entry's end. An entry too short for the rate (under 64 samples of loop) plays as plain
+     * Held. */
+    BB_COLD bool LoopHeld(Voice& v, const Slice& cell, int bound, bool rev) const
     {
         int e = cell.start + cell.len; if(e > bound) e = bound;
         const float r = v.rate < 0.f ? -v.rate : v.rate;
         const int margin = (int)r + 2;
-        const int b = e - 2 - margin;
-        if(b - cell.start < 64 + margin) return false;
+        const int a = rev ? cell.start + margin : cell.start;
+        const int b = rev ? e - 2 : e - 2 - margin;
+        if(b - a < 64 + margin) return false;
         v.natEnd = e; v.end = e;
-        v.tail = 1; v.looping = false;
-        v.loopA = (double)cell.start; v.loopB = (double)b;
+        v.tail = rev ? Voice::kTailBack : 1; v.looping = false;
+        v.loopA = (double)a; v.loopB = (double)b;
+        if(rev) v.pos = (double)b;
         return true;
     }
     int8_t  tableKey[kMaxTable] = {};   // owner key of a recorded entry (grid entries: unused)
@@ -1906,7 +1910,7 @@ struct Engine
         bool on[kVoices];
         for(int v = 0; v < kVoices; v++) on[v] = voices[v].active;
         int seg = 0;
-        int fires = 0;   /* per-block cap: with 8ths quantise 256 events can share one block (review M4) */
+        int fires = 0;   /* per-block cap: with 8ths quantise 256 events can share one block */
         if(looper.n > 0 && LooperActive())
             for(int pass = 0; pass < 3; pass++)
             {
@@ -2008,7 +2012,7 @@ struct Engine
          * voice would gate before the next hit. The tail policy then loops
          * it; such a voice is not extendable, so no lookahead grace. */
         /* consumption of the slot in SOURCE samples: pitch × the slot's own
-         * slice length (under swing the odd slots are shorter — review M2) */
+         * slice length (under swing the odd slots are shorter) */
         const float slotSrc = swung ? (float)slices[k].len : nativeStep;
         const bool outlast = (tailMode == 1 || tailMode == 2) && !stepRev[k] && !reverse
                              && pitch * slotSrc - (float)cell.len > 160.f;
