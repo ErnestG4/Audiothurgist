@@ -1106,6 +1106,65 @@ await link.start();
   await lf.close();
 }
 
+/* ── 7e. KEYP (ACTION 37 + 0x69, capability "keyp": 1): every key neutral to begin with, KEY_PARAMS and its refusals,
+ *        GET_KEYS, one undo step per edit, a drag's joined sends one step (a join for another key a step of its own),
+ *        a key's own Plays on PLAY_KEY (Held, Loop, Ratchet hold; One-shot does not), a set save / load carrying the
+ *        settings, new material neutral, and a firmware before it ── */
+{
+  const d = new DEMO.FakeDevice({ latencyMs: 1 });
+  const l = new HL.Link(new DEMO.FakePort(d)); await l.start();
+  const info = await HL.hello(l), desc = await HL.getDescriptor(l, info);
+  const state = async () => HL.parseState(await l.request(HL.CMD.state));
+  const keys = () => HL.fetchKeyParams(l);
+  const err = async f => { try { await f(); return 'ok'; } catch (e) { return e.message; } };
+  let k = await keys();
+  check('keyp: "keyp": 1; GET_KEYS: 24 keys, 5 bytes each, every one neutral', HL.caps(desc).keyp === 1 && k.length === 24 && k.every(HL.keypNeutral) && (await l.request(HL.CMD.keys, new Uint8Array(0))).length === 2 + 24 * 5);
+  let s0 = await state();
+  let r = await HL.keyParams(l, 3, { gain: -12, cents: 700, plays: 2 });
+  k = await keys(); let s = await state();
+  check('KEY_PARAMS: OK with the new tableGen, read back exactly, one undo step', r.ok && r.tableGen === s.tableGen && r.tableGen !== s0.tableGen && k[3].gain === -12 && k[3].cents === 700 && k[3].plays === 2 && s.undoDepth === s0.undoDepth + 1);
+  check('the words: "−6 dB · +7 st · held"; a ratchet says its rate', HL.keypText(k[3]) === '−6 dB · +7 st · held' && HL.keypText({ gain: 0, cents: 0, plays: 4, rat: 5 }) === 'ratchet 1/16' && HL.keypText(k[4]) === '');
+  const raw = async b => (await HL.editOp(l, HL.ACT.keyParams, b)).status;
+  const bad = [[24, 0, 0, 0, 0, 0, 0], [3, 13, 0, 0, 0, 0, 0], [3, 0xCF, 0, 0, 0, 0, 0], [3, 0, 0x61, 0x09, 0, 0, 0], [3, 0, 0, 0, 5, 0, 0], [3, 0, 0, 0, 4, 7, 0], [3, 0, 0, 0, 0, 0, 2]];
+  const st2 = []; for (const b of bad) st2.push(await raw(b));
+  check('KEY_PARAMS: key 24, gain +6.5 / −24.5 dB, 24.01 st, plays 5, ratchet rate 7, unknown flags → BAD_ARGS, nothing written', st2.every(x => x === 2) && (await keys())[3].gain === -12, JSON.stringify(st2));
+  check('KEY_PARAMS short (no flags byte) → BAD_ARGS', await raw([3, 0, 0, 0, 0, 0]) === 2);
+  check('a stale gen → BAD_STATE', (await HL.keyParams(l, 3, { gain: -2 }, false, ((await state()).tableGen % 255) + 1)).status === 3);
+  r = await HL.editUndo(l); k = await keys();
+  check('Undo: key 3 neutral again', r.ok && HL.keypNeutral(k[3]));
+  r = await HL.editRedo(l); k = await keys();
+  check('Redo: back', r.ok && k[3].gain === -12 && k[3].plays === 2);
+  /* a drag: one step */
+  s0 = await state();
+  for (let i = 0; i < 12; i++) await HL.keyParams(l, 5, { gain: -i * 2, cents: 0, plays: 0 }, i > 0);
+  s = await state(); k = await keys();
+  check('a slider drag (12 sends, every one after the first with JOIN): one undo step, the last value', s.undoDepth === s0.undoDepth + 1 && k[5].gain === -22);
+  await HL.keyParams(l, 6, { gain: -4 }, true);
+  check('a JOIN for another key: a step of its own', (await state()).undoDepth === s0.undoDepth + 2);
+  await HL.editUndo(l); await HL.editUndo(l); k = await keys();
+  check('two undos: both keys neutral, key 3 kept', HL.keypNeutral(k[5]) && HL.keypNeutral(k[6]) && k[3].gain === -12);
+  /* the key's own Plays on PLAY_KEY (the option is One-shot) */
+  const plays = async (key, p) => { await HL.keyParams(l, key, { gain: 0, cents: 0, plays: p, rat: 1 }); await HL.playKey(l, key, true); return d.voice && d.voice.key === key && d.voice.until === Infinity; };
+  const holds = [await plays(8, 0), await plays(8, 1), await plays(8, 2), await plays(8, 3), await plays(8, 4)];
+  await HL.playKey(l, 8, false);
+  check('PLAY_KEY holds as the key says: Follow (the option: one-shot) no, One-shot no, Held / Loop / Ratchet yes; the up releases', JSON.stringify(holds) === '[false,false,true,true,true]' && d.voice.until !== Infinity, JSON.stringify(holds));
+  /* a set carries them */
+  const setOp = async (fn, name) => { const q = (await state()).setSeq; await fn(l, name); for (let i = 0; i < 100; i++) { d.set.t -= 1000; const x = await state(); if (x.setSeq !== q && !x.setState) return x; } return null; };
+  await HL.keyParams(l, 7, { gain: 4, cents: -1200, plays: 4, rat: 6 });
+  const want = JSON.stringify(await keys());
+  check('Save set: done', !!(await setOp(HL.saveSet, 'keyp_kit')));
+  await HL.keyParams(l, 7, { gain: 0, cents: 0, plays: 0 }); await HL.keyParams(l, 3, { gain: 0, cents: 0, plays: 0 });
+  check('Load set: the settings come back with it (a 1/32 ratchet among them)', !!(await setOp(HL.loadSet, 'keyp_kit')) && JSON.stringify(await keys()) === want && (await keys())[7].rat === 6);
+  d.loadBreak(); d.bumpGen();
+  check('new material (a loose break): every key neutral', (await keys()).every(HL.keypNeutral));
+  await l.close();
+  /* a firmware before it */
+  const of = new DEMO.FakeDevice({ latencyMs: 1, keyp: false }), lf = new HL.Link(new DEMO.FakePort(of)); await lf.start(); const iof = await HL.hello(lf);
+  const cf = HL.caps(await HL.getDescriptor(lf, iof));
+  check('a firmware before the key settings: no "keyp", 0x69 UNSUPPORTED, ACTION 37 BAD_ARGS', cf.keyp === 0 && cf.pads === 1 && await err(() => HL.fetchKeyParams(lf)) === 'UNSUPPORTED' && (await HL.keyParams(lf, 3, { gain: -2 })).status === 2);
+  await lf.close();
+}
+
 /* ── 8. EDIT-UI: the pure editor (edit.js) — magnets, clamps, handles, positions, labels, the drop rule, the onset
  *       preview, the audition window, the gesture recogniser — then the Editor driven against the fake module ── */
 const ED = require('./edit.js');
@@ -1887,6 +1946,59 @@ const sentAct = (G, ...pre) => G('demoDevice.acts').some(a => pre.every((v, i) =
   fireEv(G('padEls[3].el'), 'drop', { dataTransfer: { files: [{ name: 'x.wav' }], types: ['Files'] } }); await sleep(100);
   check('…a drop on a pad there is not taken (nothing sent)', !G('demoDevice.log').includes(0x68) && G('padJobs.length') === 0);
   check('pre-pads page: no errors', D.unknownIds.size === 0 && D.errors.length === 0, D.errors.join(' | ').slice(0, 300));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+}
+
+/* ── 9f. KEYP, the page itself: `?demo=keyp` (four keys set) — the cells and the pads say a key's settings in words,
+ *        the row under the keys shows the selected key's (the ratchet's rate only in Ratchet), a gain slider dragged
+ *        sends live and lands as one undo step and one history line, Plays and its ratchet rate, reset; then
+ *        `?demo=nokeyp`: nothing of it shown, 0x69 never asked ── */
+{
+  const { D, G } = await loadPage('?demo=keyp');
+  check('keyp page: connects with "keyp", reads 0x69, the row shown under the keys', await until(() => G('!!(st && keypOk && keyp && table)')) && G("$('kp_row').hidden") === false && G('demoDevice.log').includes(0x69), D.errors.join(' | ').slice(0, 300));
+  await until(() => G('keyCells[7].kp.textContent') !== '');
+  check('the cells say the set keys in words (C1 −3 dB, D♯1 +7 st · loop, G1 +2 dB · −12 st · ratchet ½, C2 +0.25 st · one-shot); the rest say nothing',
+    G('keyCells[0].kp.textContent') === '−3 dB' && G('keyCells[3].kp.textContent') === '+7 st · loop' && G('keyCells[7].kp.textContent') === '+2 dB · −12 st · ratchet ½' && G('keyCells[12].kp.textContent') === '+0.25 st · one-shot'
+    && G('keyCells[1].kp.hidden') === true && G('keyCells[7].kp.hidden') === false, [0, 3, 7, 12].map(k => G(`keyCells[${k}].kp.textContent`)).join(' | '));
+  check('…and so do the Play pads', await until(() => G('padEls[7].kp.textContent') === '+2 dB · −12 st · ratchet ½') && G('padEls[2].kp.hidden') === true);
+  G('selectKey(7)'); G('invalidate(D.kit)'); await sleep(80);
+  check('G1 selected: the row says +2 dB, −12 st, Ratchet, every ½ sample (the rate shown in Ratchet only)', G("$('kp_key').textContent") === 'G1' && G("$('kp_gain').value") === '4' && G("$('kp_semi').value") === '-12' && G("$('kp_plays').value") === '4' && G("$('kp_rat').value") === '1' && G("$('kp_rat_l').hidden") === false && G("$('kp_gain_v').textContent") === '+2 dB');
+  G('selectKey(1)'); G('invalidate(D.kit)'); await sleep(80);
+  check('C♯1: neutral — 0 dB, 0 st, Follow, no rate, reset off', G("$('kp_gain').value") === '0' && G("$('kp_plays').value") === '0' && G("$('kp_rat_l').hidden") === true && G("$('kp_reset').disabled") === true);
+  /* a drag of the gain slider: live sends, one undo step, one history line */
+  spyActs(G);
+  const d0 = G('st.undoDepth'), gain = G("$('kp_gain')");
+  for (const v of [-2, -4, -6, -8, -10, -12]) { G(`$('kp_gain').value = '${v}'`); fireEv(gain, 'input', {}); await sleep(5); }
+  fireEv(gain, 'change', {});
+  check('the gain dragged to −6 dB: the module has it, sent live (KEY_PARAMS more than once, the later ones with JOIN)',
+    await until(() => G('demoDevice.keyp[1].gain') === -12 && !G('kpBusy')) && G('demoDevice.acts.filter(a => a[0] === 37).length') >= 2 && G('demoDevice.acts.filter(a => a[0] === 37).slice(1).every(a => (a[7] & 1) === 1)'), JSON.stringify(G('demoDevice.acts.filter(a => a[0] === 37)')));
+  check('…one undo step on the module, one history line ("C♯1 settings: −6 dB"), the cell says it', await until(() => G('st.undoDepth') === d0 + 1) && G("ed.history.list().filter(x => /^C♯1 settings/.test(x.label)).length") === 1
+    && G("ed.history.list()[0].label") === 'C♯1 settings: −6 dB' && await until(() => G('keyCells[1].kp.textContent') === '−6 dB'), G("ed.history.list().map(x => x.label).join(' | ')"));
+  /* Plays → Ratchet, then its rate */
+  G("$('kp_plays').value = '4'"); fireEv(G("$('kp_plays')"), 'change', {});
+  check('Plays → Ratchet: sent, the rate select appears', await until(() => G('demoDevice.keyp[1].plays') === 4) && G("$('kp_rat_l').hidden") === false);
+  await until(() => !G('kpBusy'));
+  G("$('kp_rat').value = '5'"); fireEv(G("$('kp_rat')"), 'change', {});
+  check('…every 16th: sent; the cell says "−6 dB · ratchet 1/16"', await until(() => G('demoDevice.keyp[1].rat') === 5) && await until(() => G('keyCells[1].kp.textContent') === '−6 dB · ratchet 1/16'), G('keyCells[1].kp.textContent'));
+  await until(() => !G('kpBusy'));
+  /* tune: semitones and cents */
+  G("$('kp_semi').value = '3'"); fireEv(G("$('kp_semi')"), 'input', {}); fireEv(G("$('kp_semi')"), 'change', {});
+  await until(() => !G('kpBusy'));
+  G("$('kp_cents').value = '-50'"); fireEv(G("$('kp_cents')"), 'change', {});
+  check('tune +3 st, then −50 cents: +250 cents on the module ("+2.5 st")', await until(() => G('demoDevice.keyp[1].cents') === 250) && await until(() => /\+2\.5 st/.test(G('keyCells[1].kp.textContent'))), G('keyCells[1].kp.textContent'));
+  await until(() => !G('kpBusy'));
+  /* reset */
+  fireEv(G("$('kp_reset')"), 'click', {});
+  check('reset: the key neutral on the module, its words gone, the row back at 0', await until(() => G('demoDevice.keyp[1].gain === 0 && demoDevice.keyp[1].plays === 0 && demoDevice.keyp[1].cents === 0 && demoDevice.keyp[1].rat === 0'))
+    && await until(() => G('keyCells[1].kp.hidden') === true) && G("$('kp_gain').value") === '0');
+  check('keyp page: no errors, no unknown ids', D.unknownIds.size === 0 && D.errors.length === 0, D.errors.join(' | ').slice(0, 300) + [...D.unknownIds].join(','));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+  check('disconnect: the row hidden', G("$('kp_row').hidden") === true && G('keypOk') === false);
+}
+{
+  const { D, G } = await loadPage('?demo=nokeyp');
+  check('a firmware before the key settings: no row, no words on the cells, 0x69 never asked', await until(() => G('!!(st && table && keysOk)')) && await sleep(150).then(() => true) && G('keypOk') === false
+    && G("$('kp_row').hidden") === true && G('keyCells[0].kp.hidden') === true && !G('demoDevice.log').includes(0x69) && D.errors.length === 0, D.errors.join(' | ').slice(0, 300));
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
 }
 /* ── 9c. Contrast, measured: every text token against every surface it sits on, in both themes, ≥ 4.5:1; and no

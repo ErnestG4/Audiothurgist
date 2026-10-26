@@ -354,7 +354,8 @@
       <label class="ctl inl" title="this key's gain, −24 … +6 dB in ½ dB steps (KEY_PARAMS, ACTION 37) — a drag is one undo step">Gain <input id="kp_gain" type="range" min="-48" max="12" step="1" value="0"><span id="kp_gain_v" class="num kpv">0 dB</span></label>
       <label class="ctl inl" title="this key's tune in semitones, ±24 — on top of whatever it plays at (P4, a recording's own rate, the tempo's varispeed, the style)">Tune <input id="kp_semi" type="range" min="-24" max="24" step="1" value="0"><span id="kp_semi_v" class="num kpv">0 st</span></label>
       <label class="ctl inl" title="fine tune, cents (−99 … +99) on top of the semitones">cents <input id="kp_cents" type="number" class="inline num kpc" min="-99" max="99" step="1" value="0" inputmode="numeric"></label>
-      <label class="ctl inl" title="how this key plays: as Options → Key Plays says, or its own — one-shot, held while down, or held with its sample looping">Plays <select id="kp_plays" class="inline"><option value="0">Follow Key Plays</option><option value="1">One-shot</option><option value="2">Held (while down)</option><option value="3">Loop (while held)</option></select></label>
+      <label class="ctl inl" title="how this key plays: as Options → Key Plays says, or its own — one-shot, held while down, or held with its sample looping">Plays <select id="kp_plays" class="inline"><option value="0">Follow Key Plays</option><option value="1">One-shot</option><option value="2">Held (while down)</option><option value="3">Loop (while held)</option><option value="4">Ratchet (while held)</option></select></label>
+      <label id="kp_rat_l" class="ctl inl" hidden title="the ratchet's rate: the sample again from its start every whole, ½, ¼ or ⅛ of its own length (as it plays), or every 8th / 16th / 32nd at the tempo">every <select id="kp_rat" class="inline"><option value="0">whole sample</option><option value="1">½ sample</option><option value="2">¼ sample</option><option value="3">⅛ sample</option><option value="4">8th (tempo)</option><option value="5">16th (tempo)</option><option value="6">32nd (tempo)</option></select></label>
       <button id="kp_hear" class="mini" title="play the key as a pad does (hold for a held or looping key)">▶ hear</button>
       <button id="kp_reset" class="mini" title="this key back to neutral: 0 dB, no tune, Follow Key Plays (one undo step)">reset</button>
     </div>
@@ -1549,13 +1550,14 @@ const kpSemiText = c => { const s = Math.trunc(c / 100); return (s > 0 ? '+' : s
 /* what the row's controls say now, as a key's settings */
 function kpFromRow() {
   const semi = +$('kp_semi').value, fine = Math.max(-99, Math.min(99, Math.round(+$('kp_cents').value || 0)));
-  return { gain: +$('kp_gain').value, cents: Math.max(-HL.KEYP.centsMax, Math.min(HL.KEYP.centsMax, semi * 100 + fine)), plays: +$('kp_plays').value };
+  return { gain: +$('kp_gain').value, cents: Math.max(-HL.KEYP.centsMax, Math.min(HL.KEYP.centsMax, semi * 100 + fine)), plays: +$('kp_plays').value, rat: +$('kp_rat').value };
 }
 function drawKeyp() {
   const row = $('kp_row'); row.hidden = !keypOk; if (!keypOk) return;
-  const k = selKey, p = keyp && keyp[k] ? keyp[k] : { gain: 0, cents: 0, plays: 0 }, held = kpDrag || performance.now() - kpTouch < 1500 || kpBusy || kpWant;
+  const k = selKey, p = keyp && keyp[k] ? keyp[k] : { gain: 0, cents: 0, plays: 0, rat: 0 }, held = kpDrag || performance.now() - kpTouch < 1500 || kpBusy || kpWant;
   setText('kp_key', keyName(k)); row.classList.toggle('set', !HL.keypNeutral(p));
-  const busy = !link || !st || !st.bufLen; for (const id of ['kp_gain', 'kp_semi', 'kp_cents', 'kp_plays', 'kp_hear', 'kp_reset']) $(id).disabled = busy;
+  const busy = !link || !st || !st.bufLen; for (const id of ['kp_gain', 'kp_semi', 'kp_cents', 'kp_plays', 'kp_rat', 'kp_hear', 'kp_reset']) $(id).disabled = busy;
+  $('kp_rat_l').hidden = +$('kp_plays').value !== HL.KEYP.ratchet;
   $('kp_reset').disabled = busy || HL.keypNeutral(p);
   if (held && kpKey === k) return;   /* your hand is on it: the reply will come round */
   const semi = Math.trunc(p.cents / 100), fine = p.cents - semi * 100;
@@ -1563,6 +1565,8 @@ function drawKeyp() {
   if (document.activeElement !== $('kp_semi') && +$('kp_semi').value !== semi) $('kp_semi').value = String(semi);
   if (document.activeElement !== $('kp_cents') && +$('kp_cents').value !== fine) $('kp_cents').value = String(fine);
   if (document.activeElement !== $('kp_plays') && +$('kp_plays').value !== p.plays) $('kp_plays').value = String(p.plays);
+  if (document.activeElement !== $('kp_rat') && +$('kp_rat').value !== (p.rat | 0)) $('kp_rat').value = String(p.rat | 0);
+  $('kp_rat_l').hidden = +$('kp_plays').value !== HL.KEYP.ratchet;
   setText('kp_gain_v', kpGainText(p.gain)); setText('kp_semi_v', kpSemiText(p.cents));
 }
 function kpLabels() { const p = kpFromRow(); setText('kp_gain_v', kpGainText(p.gain)); setText('kp_semi_v', kpSemiText(p.cents)); }
@@ -1585,8 +1589,9 @@ for (const id of ['kp_gain', 'kp_semi']) {
   $(id).addEventListener('change', () => { const was = kpDrag; kpDrag = false; kpTouch = performance.now(); kpLabels(); kpQueue(kpFromRow(), was); });
 }
 $('kp_cents').addEventListener('change', () => { kpTouch = performance.now(); kpSent = 0; kpLabels(); kpQueue(kpFromRow(), false); });
-$('kp_plays').addEventListener('change', () => { kpTouch = performance.now(); kpSent = 0; kpQueue(kpFromRow(), false); });
-$('kp_reset').onclick = () => { kpSent = 0; $('kp_gain').value = '0'; $('kp_semi').value = '0'; $('kp_cents').value = '0'; $('kp_plays').value = '0'; kpLabels(); kpTouch = 0; kpQueue({ gain: 0, cents: 0, plays: 0 }, false); };
+$('kp_plays').addEventListener('change', () => { kpTouch = performance.now(); kpSent = 0; $('kp_rat_l').hidden = +$('kp_plays').value !== HL.KEYP.ratchet; kpQueue(kpFromRow(), false); });
+$('kp_rat').addEventListener('change', () => { kpTouch = performance.now(); kpSent = 0; kpQueue(kpFromRow(), false); });
+$('kp_reset').onclick = () => { kpSent = 0; $('kp_gain').value = '0'; $('kp_semi').value = '0'; $('kp_cents').value = '0'; $('kp_plays').value = '0'; $('kp_rat').value = '0'; $('kp_rat_l').hidden = true; kpLabels(); kpTouch = 0; kpQueue({ gain: 0, cents: 0, plays: 0, rat: 0 }, false); };
 { const b = $('kp_hear'); let down = -1;
   const up = () => { if (down < 0) return; const k = down; down = -1; if (link && keysOk) playKey(link, k, false).catch(() => {}); };
   b.addEventListener('pointerdown', e => { e.preventDefault(); if (!link || !keysOk) return; try { b.setPointerCapture(e.pointerId); } catch {} down = selKey; flashKey(down); playKey(link, down, true).catch(() => {}); });
@@ -2183,12 +2188,13 @@ async function connect() {
  * leaves J1/J2 silent, `body512` announces the protocol's default max_body; CARD: `oldcard` the old layout (WAVs in
  * the root, sets/ and presets/ beside them, no Audiothurgist folder), `nocard` no card in, `nocardfw` a 0.13 firmware
  * before the card work (no "card", the 276-byte body), `card` opens the Kit tab's Card panel; PADS: `nopads` a firmware
- * before the pads work (no "pads", the 293-byte body), `emptykit` starts from New empty kit (no break, Pads). */
+ * before the pads work (no "pads", the 293-byte body), `emptykit` starts from New empty kit (no break, Pads); KEYP: `keyp`
+ * opens the Kit with four keys' settings set (gain, tune, loop, a ½ ratchet), `nokeyp` a firmware before them. */
 async function connectDemo(flags = '') {
   if (link) return; notice('');
   const f = new Set(flags.split(',').filter(Boolean));
   const tail = f.has('old') ? 148 : f.has('short') ? 167 : f.has('v099') ? 176 : f.has('nosets') ? 219 : f.has('noedit') ? 255 : f.has('noundo') ? 262 : f.has('old12') ? 263 : f.has('nocardfw') ? 276 : f.has('nopads') ? 293 : 315;
-  demoDevice = new DEMO.FakeDevice({ tail, latencyMs: 6, oldcard: f.has('oldcard'), nocard: f.has('nocard'), kit: f.has('kit') || f.has('pads'), swing: f.has('kit') || f.has('swing'), inputs: !f.has('noin'), maxBody: f.has('body512') ? 512 : DEMO.MAX_BODY, edit: !(f.has('noedit') || f.has('nosets') || f.has('v099') || f.has('short') || f.has('old')) });
+  demoDevice = new DEMO.FakeDevice({ tail, latencyMs: 6, oldcard: f.has('oldcard'), nocard: f.has('nocard'), kit: f.has('kit') || f.has('pads'), swing: f.has('kit') || f.has('swing'), inputs: !f.has('noin'), maxBody: f.has('body512') ? 512 : DEMO.MAX_BODY, keyp: f.has('nokeyp') ? false : undefined, edit: !(f.has('noedit') || f.has('nosets') || f.has('v099') || f.has('short') || f.has('old')) });
   const d = demoDevice;
   if (f.has('scope')) showTab('tab_scope');
   if (f.has('cv')) $('sc_p_cv').onclick(); if (f.has('gates')) $('sc_p_gates').onclick();
@@ -2202,6 +2208,7 @@ async function connectDemo(flags = '') {
   if (f.has('play')) { d.setGrammar(DEMO.GRAM.play, d.grammar); d.options[G] = DEMO.GRAM.play; }
   if (f.has('pads')) { d.options[G] = DEMO.GRAM.pads; d.applyEdit(36, Uint8Array.of(36, 6, 0)); }
   if (f.has('emptykit')) d.padNewKit();
+  if (f.has('keyp')) { d.keyp[0] = { gain: -6, plays: 0, cents: 0, rat: 0 }; d.keyp[3] = { gain: 0, plays: 3, cents: 700, rat: 0 }; d.keyp[7] = { gain: 4, plays: 4, cents: -1200, rat: 1 }; d.keyp[12] = { gain: 0, plays: 1, cents: 25, rat: 0 }; showTab('tab_kit'); }   /* KEYP: four keys with settings */
   if (f.has('locks')) d.lockMask = 0x0049;
   demoPort = new DEMO.FakePort(d);
   await connectPort(demoPort, true);

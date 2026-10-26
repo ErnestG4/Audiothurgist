@@ -526,33 +526,38 @@ function caps(desc) {
 
 /* ───────────── KEYP (ACTION 37 + 0x69 GET_KEYS, capability "keyp": 1) ─────────────
  * Each of the 24 keys has a gain (½ dB steps, −24 … +6 dB), a tune (cents, ±24 semitones) and how it plays: 0 follow
- * Options → Key Plays · 1 one-shot · 2 held (until the gate falls / the pad comes up) · 3 loop (held, the entry looping).
+ * Options → Key Plays · 1 one-shot · 2 held (until the gate falls / the pad comes up) · 3 loop (held, the entry looping)
+ * · 4 ratchet (held, the entry again from its start every `rat`: 0 its whole length · 1 ½ · 2 ¼ · 3 ⅛ of it · 4 an 8th
+ * · 5 a 16th · 6 a 32nd at the tempo).
  * All zero = neutral: the key plays exactly as it always did. They ride every call made through the key — the CV keys,
  * the pads, Play's loop replaying a key (with the settings as they are now) — never the pattern's steps. KEY_PARAMS is
  * an edit (the journal: one undo step; `join` = every send of one slider drag after the first, folded into this key's
  * step) and answers like one: { ok, status, tableGen }. GET_KEYS reads all 24; the tableGen in the state tail moves with
  * every change (an edit, an undo, a load), which is when the page reads them again. */
-const KEYP = { gainMin: -48, gainMax: 12, centsMax: 2400, join: 1,
-  PLAYS: ['follow', 'one-shot', 'held', 'loop'],
-  PLAYS_LONG: ['Follow Key Plays', 'One-shot', 'Held (while down)', 'Loop (while held)'] };
-const keypNeutral = p => !p || (!p.gain && !p.cents && !p.plays);
+const KEYP = { gainMin: -48, gainMax: 12, centsMax: 2400, join: 1, ratchet: 4, ratMax: 6,
+  PLAYS: ['follow', 'one-shot', 'held', 'loop', 'ratchet'],
+  PLAYS_LONG: ['Follow Key Plays', 'One-shot', 'Held (while down)', 'Loop (while held)', 'Ratchet (while held)'],
+  RATS: ['×1', '½', '¼', '⅛', '1/8', '1/16', '1/32'],
+  RATS_LONG: ['every whole sample', 'every ½ sample', 'every ¼ sample', 'every ⅛ sample', 'every 8th (tempo)', 'every 16th (tempo)', 'every 32nd (tempo)'] };
+const keypNeutral = p => !p || (!p.gain && !p.cents && !p.plays && !p.rat);
 function keyParams(link, key, p, join = false, gen = 0) {
   const g = Math.max(KEYP.gainMin, Math.min(KEYP.gainMax, Math.round(p.gain || 0)));
   const c = Math.max(-KEYP.centsMax, Math.min(KEYP.centsMax, Math.round(p.cents || 0)));
-  const pl = Math.max(0, Math.min(3, p.plays | 0));
-  return editOp(link, ACT.keyParams, [key & 0xff, g & 0xff, ...i16b(c), pl, join ? KEYP.join : 0], gen);
+  const pl = Math.max(0, Math.min(KEYP.ratchet, p.plays | 0)), rt = Math.max(0, Math.min(KEYP.ratMax, p.rat | 0));
+  return editOp(link, ACT.keyParams, [key & 0xff, g & 0xff, ...i16b(c), pl, rt, join ? KEYP.join : 0], gen);
 }
-/* → [{ gain (½ dB), plays, cents } × 24] */
+/* → [{ gain (½ dB), plays, cents, rat } × 24] — 5 bytes a key */
 function parseKeyParams(b) {
-  const n = Math.min(b[1] || 0, Math.floor((b.length - 2) / 4)), out = [];
-  for (let k = 0; k < n; k++) { const o = 2 + k * 4, g = b[o], c = u16(b, o + 2); out.push({ gain: g > 127 ? g - 256 : g, plays: b[o + 1], cents: c > 0x7fff ? c - 0x10000 : c }); }
+  const n = Math.min(b[1] || 0, Math.floor((b.length - 2) / 5)), out = [];
+  for (let k = 0; k < n; k++) { const o = 2 + k * 5, g = b[o], c = u16(b, o + 2); out.push({ gain: g > 127 ? g - 256 : g, plays: b[o + 1], cents: c > 0x7fff ? c - 0x10000 : c, rat: b[o + 4] }); }
   return out;
 }
 const fetchKeyParams = async (link, opts = {}) => parseKeyParams(await link.request(CMD.keys, new Uint8Array(0), opts));
 /* the cell's words: "−6 dB", "+7 st", "−0.25 st" … — empty when neutral */
 const keypGainText = g => g ? `${g > 0 ? '+' : '−'}${Math.abs(g / 2)} dB` : '';
 const keypTuneText = c => { if (!c) return ''; const a = Math.abs(c); return `${c > 0 ? '+' : '−'}${a % 100 ? (a / 100).toFixed(2).replace(/0$/, '') : a / 100} st`; };
-const keypText = p => keypNeutral(p) ? '' : [keypGainText(p.gain), keypTuneText(p.cents), p.plays ? KEYP.PLAYS[p.plays] : ''].filter(Boolean).join(' · ');
+const keypPlaysText = p => !p.plays ? '' : p.plays === KEYP.ratchet ? `ratchet ${KEYP.RATS[p.rat | 0] || ''}` : (KEYP.PLAYS[p.plays] || '');
+const keypText = p => keypNeutral(p) ? '' : [keypGainText(p.gain), keypTuneText(p.cents), keypPlaysText(p)].filter(Boolean).join(' · ');
 
 /* ───────────── CARD (0x67, capability "card": 1) ─────────────
  * The card is one folder, Audiothurgist/: breaks/*.wav (the list), sets/, presets/. The page turns any file the
