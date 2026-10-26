@@ -291,6 +291,53 @@ on hardware. Bring a mono one-shot, a **stereo** sample and a quiet file
 overnight, e35b0e7). Keep it, or should ▶ / B1 in Pads stay a silent
 no-op and the beat come only from choosing a grammar? ____
 
+## 10e. Each key's own gain, tune and Plays (10 min)
+
+Firmware with `"keyp": 1` (`docs/packages/keyp.md`). Nothing of this has run
+on hardware. A break loaded and two pads dropped (a kick on C1, a long pad or
+vocal on D1), the page on the Kit tab, the clock on J3.
+
+1. [ ] Untouched: everything sounds exactly as before this firmware — the
+       break in Classic, a key from J4, Play's loop. No key cell or pad shows
+       any orange words.
+2. [ ] C1 selected, Gain to −12 dB: C1 is clearly quieter from the page, from
+       J4 and from the panel's Pads; the break's own kick (the pattern's
+       steps) is **not** quieter. Gain to +6 dB: louder, no distortion on a
+       normalised take beyond the output's own clip (report if it clips).
+3. [ ] Drag the Gain slider through its range and back: it follows live, and
+       **one** Undo (Kit → Edit) puts it back where the drag started; the
+       history shows one line.
+4. [ ] D1 Tune +7 st, then cents −50: up a fifth less a quarter tone, at the
+       same pitch at 90 and 170 BPM; P4 still transposes on top. A grid key
+       (any key not holding a pad) tuned −12 st plays an octave down **at
+       the tempo's varispeed** (move P2: it follows the tempo as before).
+5. [ ] D1 Plays → **Held** with Options → Key Plays on One-shot: it sounds as
+       long as J6's gate (or the page pad) is held, then fades. Another key
+       on One-shot still plays one-shot.
+6. [ ] D1 Plays → **Loop**: hold it for several seconds — it loops D1's own
+       sample (not into the next pad), the seam is smooth enough to use
+       (*listen for*: a click at the wrap; report how bad), and it fades on
+       the release. While it loops, play other keys and run the pattern:
+       the loop keeps going.
+7. [ ] C1 Plays → **Ratchet**, every ½ sample: hold C1 — the kick retriggers
+       from its start twice per kick length, *no click at the seams*, until
+       you let go; J7 sends a trigger per hit. Try ¼ and ⅛ (faster), and the
+       tempo rates 8th / 16th / 32nd with the clock on J3: they lock to the
+       clock (a hit ≤ 0.5 ms late at most).
+8. [ ] Ratchet + a pitched key (Tune +12): the ½-sample ratchet runs twice as
+       fast (the sample is half as long as it plays).
+9. [ ] Play mode (Quantize Off): play the ratcheting C1 into the loop for a
+       beat and let go — the loop replays the burst for as long as you held
+       it. Now set a key to Ratchet that was played into the loop *before*
+       (as a one-shot): on replay it fills its 16th (two hits at the 32nd
+       rate), then stops by itself. *Call*: right rule? ____
+10. [ ] Save the set, change every setting, load the set back: the settings
+        return (cells show the same words). Power-cycle and load it: same.
+        Load a loose break: every key back to neutral.
+11. [ ] CPU meter (transport): with eight voices sounding (Held keys) and
+        four keys ratcheting at ⅛, note loadAvg / loadMax ____ (expected:
+        within a few ‰ of the same scene with neutral keys).
+
 ## 11. Scope (3 min)
 
 - [ ] Scope tab: Out L/R trace the beat (this tab was hidden by a duplicate

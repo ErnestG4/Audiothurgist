@@ -226,6 +226,13 @@ inline void SetFromEngine(const Engine& e, const Looper& lp, SetInfo& s, bool st
         const int ks = e.KeySlice(k);
         s.keys[k] = ks >= 0 && ks < Engine::kMaxTable ? map[ks] : (int8_t)-1;
     }
+    for(int k = 0; k < kSetKeys && k < Engine::kKeys; k++)   /* KEYP */
+    {
+        s.keyp[k].gain  = e.keyp[k].gain;
+        s.keyp[k].plays = e.keyp[k].plays;
+        s.keyp[k].cents = e.keyp[k].cents;
+        s.keyp[k].rat   = e.keyp[k].rat;
+    }
     s.nLooper = 0;
     for(int i = 0; i < lp.n && s.nLooper < kSetMaxLooper; i++)
     {
@@ -374,6 +381,19 @@ inline int CommitSetRecordings(Engine& e, const SetInfo& s, const SetPlan& p, De
     }
     return done;
 }
+
+// KEYP: the set's key settings → the engine's form (an old file's: every key neutral), for Engine::SetKeyParams
+// after the load (with the key table).
+inline void KeyParamsFromSet(const SetInfo& s, KeyParam* out)
+{
+    for(int k = 0; k < Engine::kKeys; k++)
+    {
+        const SetKeyParam p = k < kSetKeys ? s.keyp[k] : SetKeyParam{0, 0, 0, 0};
+        out[k] = {p.gain, p.plays, p.cents, p.rat, 0};
+    }
+}
+static_assert(kSetGainMin == KeyParam::kGainMin && kSetGainMax == KeyParam::kGainMax && kSetCentsMax == KeyParam::kCentsMax
+              && kSetPlaysMax == KeyParam::kRatchet && kSetRatMax == KeyParam::kRatMax && kSetKeys == Engine::kKeys, "the set's key settings are the engine's");
 
 // The set's events into a (cleared) looper: Add, then Seal, so the first
 // live overdub after the load is its own undo unit. Returns the count added

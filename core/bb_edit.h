@@ -237,6 +237,19 @@ inline EditStatus Engine::EdRecord(const EditReq& r, int& idx)
     return EditStatus::Ok;
 }
 
+/* KEYP (docs/packages/keyp.md): key `key`'s settings — a = gain in ½ dB (−48 … +12), b = cents (±2400), i = plays
+ * (KeyParam::kFollow … kRatchet), len = the ratchet's rate (kRatFull … kRat32nd). Nothing in the table moves; a voice already sounding keeps what it was called with
+ * (the next call takes the new settings). */
+inline EditStatus Engine::EdSetKeyParams(const EditReq& r)
+{
+    if(r.key < 0 || r.key >= kKeys) return EditStatus::BadArgs;
+    if(r.a < KeyParam::kGainMin || r.a > KeyParam::kGainMax || r.b < -KeyParam::kCentsMax || r.b > KeyParam::kCentsMax
+       || r.i < 0 || r.i > KeyParam::kRatchet || r.len < 0 || r.len > KeyParam::kRatMax) return EditStatus::BadArgs;
+    const KeyParam p = {(int8_t)r.a, (uint8_t)r.i, (int16_t)r.b, (uint8_t)r.len, 0};
+    if(p.plays != KeyParam::kRatchet) keyRatOn &= ~(1u << r.key);   /* a running ratchet stops when its key leaves the mode */
+    return PutKeyParam(r.key, p) ? EditStatus::Ok : EditStatus::BadArgs;
+}
+
 inline int Engine::FreeSlot() const
 {
     for(int t = nSlices; t < nTable; t++)
@@ -584,6 +597,9 @@ inline EditStatus Engine::EdNudge(int delta, int which)
  *   SetKeyMap     keys[kKeys] (−1 = default)   —                BETA: every key at once; each a live entry
  *   Record        key, start, len              → the entry      PADS: key owns the span (its recording's slot reused,
  *                                                               else a free one); start ≤ freePos, end ≤ bufCap; freePos follows
+ *   SetKeyParams  key, a = gain ½ dB, b = cents, —              KEYP: −48…+12, ±2400, 0..4, 0..6; the table untouched. kQuiet
+ *                 i = plays, len = ratchet rate                 joins the previous record only when it is this key's
+ *                                                               settings (a drag) — otherwise a step of its own
  *
  * `meta` is copied verbatim when flags has kMeta (the control thread ran
  * bb::AnalyseEntry on the span first); ops marked — ignore it. The entry a
@@ -601,7 +617,7 @@ inline EditStatus Engine::ApplyEdit(const EditReq& r, int* newIdx)
     if(r.gen != 0 && r.gen != tableGen) return EditStatus::Stale;
     if(r.op == EditOp::Undo || r.op == EditOp::Redo) return UndoStep(r.op == EditOp::Redo);
     const bool quiet   = UndoQuiet(r);               /* BETA: the newest record already covers this op */
-    const bool tail    = (r.flags & EditReq::kQuiet) && UndoAtEnd();   /* BETA: …else, right behind its step, it joins it */
+    const bool tail    = (r.flags & EditReq::kQuiet) && UndoAtEnd() && r.op != EditOp::SetKeyParams;   /* BETA: …else, right behind its step, it joins it (KEYP: a key's drag joins only its own step) */
     const bool journal = !quiet && UndoBegin(r);
     EditStatus st  = EditStatus::BadOp;
     int        who = -1;   // the entry that takes the meta and the orange
@@ -612,6 +628,7 @@ inline EditStatus Engine::ApplyEdit(const EditReq& r, int* newIdx)
         case EditOp::SetEntry:    st = EdSetEntry(r.t, r.start, r.len); who = r.t; break;
         case EditOp::SetKeyMap:   st = EdSetKeyMap(r.keys); break;               /* BETA */
         case EditOp::Record:      st = EdRecord(r, idx); break;                   /* PADS: meta applied inside */
+        case EditOp::SetKeyParams: st = EdSetKeyParams(r); break;                /* KEYP */
         case EditOp::AddEntry:    st = EdAdd(r, idx); break;                      // meta and flags applied inside
         case EditOp::Split:       st = EdSplit(r, idx); break;                    // meta → the new half, inside
         case EditOp::Merge:       st = EdMerge(r.t); who = r.t; break;

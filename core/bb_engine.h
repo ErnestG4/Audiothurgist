@@ -5,6 +5,11 @@
 #include "bb_pattern.h"
 #include "bb_looper.h"   /* LOOPER */
 
+/* KEYP: once-per-load helpers stay out of line — the module's code runs from SRAM, its tightest budget */
+#ifndef BB_COLD
+#define BB_COLD __attribute__((noinline, cold))
+#endif
+
 namespace bb {
 
 // Pure engine: no libDaisy, no allocation, no printf. Fixed buffers; the
@@ -59,6 +64,10 @@ struct Voice
      * looper never sees it (CallRegion records nothing); only CallRegion
      * (which steals it with the 5 ms choke) and ReleaseRegion end it early. */
     bool   scratch = false;
+    /* KEYP (docs/packages/keyp.md): the key's gain, linear — set by FireSlice for a call through a key, 1 for
+     * everything else (Trigger resets it). One multiply per sample in the reader; exactly 1 leaves the bits as
+     * they were. */
+    float  gain = 1.f;
 
     /* PLAY: per-voice fade geometry (Options → Fades). Trigger resets these
      * to the fixed 1 ms attack / 5 ms release; Adaptive mode then rewrites
@@ -87,6 +96,7 @@ struct Voice
         held   = false;
         key    = -1;
         scratch = false;   /* EDIT-AUDITION: a stolen scratch voice is an ordinary one again */
+        gain   = 1.f;      /* KEYP: a step, an audition, a keyless call: unity */
         start  = s.start;
         natEnd = s.start + s.len;
         int e  = s.start + (int)((float)s.len * ext);
@@ -116,6 +126,7 @@ struct Voice
     bool WouldChoke() const
     {
         if(scratch) return false;   /* EDIT-AUDITION: an audition sits beside the hits, never under them */
+        if(held && tail) return false;   /* KEYP: a Loop key's held loop belongs to its key until the release */
         return active && (tail != 0 || (rate >= 0.f && pos > (double)(natEnd - 480)));
     }
 
@@ -243,13 +254,13 @@ struct Voice
         if(epShape) { g = g * (2.f - g); h = h * (2.f - h); } // PLAY: ≈ equal power
         pos += (double)rate;
         age++;
-        const float o = s * g * h * relScale;
+        const float o = s * g * h * relScale * gain;   /* KEYP: gain 1 = the old bits */
         if(wrapped) clickComp += lastOut - o; // PLAY: bridge the seam
         lastOut = o;
         oL      = lastOut + clickComp;
         if constexpr(ST)
         {
-            const float o2 = sR * g * h * relScale;
+            const float o2 = sR * g * h * relScale * gain;
             if(wrapped) clickCompR += lastOutR - o2;
             lastOutR = o2;
             oR       = lastOutR + clickCompR;
@@ -296,8 +307,31 @@ enum class EditOp : uint8_t
     Undo,          // EDIT-UNDO: one step back through the journal (no fields)
     Redo,          // EDIT-UNDO: one step forward
     SetKeyMap,     // BETA: the whole key map from `keys` (−1 = the key's default) — KEYS_FROM_MARKERS, Pads
-    Record         // PADS: key `key` owns [start, start + len) — a recording (a drop onto a pad), CommitSlice through the journal
+    Record,        // PADS: key `key` owns [start, start + len) — a recording (a drop onto a pad), CommitSlice through the journal
+    SetKeyParams   // KEYP: key `key`'s settings — a = gain (½ dB), b = cents, i = plays, len = the ratchet's rate (KeyParam)
 };
+/* KEYP (docs/packages/keyp.md): one key's settings — how loud, how far tuned, how it plays. All zero is
+ * neutral: the key plays exactly as before this package. A POD (it lives in the journal's union). */
+struct KeyParam
+{
+    static constexpr int kGainMin = -48, kGainMax = 12;   // ½ dB steps: −24 … +6 dB
+    static constexpr int kCentsMax = 2400;                // ±24 semitones
+    static constexpr uint8_t kFollow = 0, kOneShot = 1, kHeld = 2, kLoop = 3, kRatchet = 4;   // plays
+    /* the ratchet's rate: a fraction of the entry's own length (as it plays, after the tune) or a note value at the
+     * tempo (the grid's 16th = 1/16) */
+    static constexpr uint8_t kRatFull = 0, kRatHalf = 1, kRatQuarter = 2, kRatEighth = 3, kRat8th = 4, kRat16th = 5, kRat32nd = 6, kRatMax = 6;
+    int8_t  gain;    // ½ dB
+    uint8_t plays;   // kFollow (Options → Key Plays) · kOneShot · kHeld · kLoop (held, looping the entry) · kRatchet (held, retriggering)
+    int16_t cents;   // tune
+    uint8_t rat;     // kRatchet's rate (kRatFull … kRat32nd); kept, and ignored, in the other modes
+    uint8_t spare;   // 0
+    bool Neutral() const { return gain == 0 && plays == 0 && cents == 0 && rat == 0; }
+    bool Valid() const { return gain >= kGainMin && gain <= kGainMax && plays <= kRatchet && cents >= -kCentsMax && cents <= kCentsMax && rat <= kRatMax; }
+    // linear gain and rate; exactly 1 when neutral (no transcendental, no rounding)
+    float GainLin() const { return gain == 0 ? 1.f : exp2f((float)gain * 0.0830482024f); }   // 10^(gain/40) = 2^(gain·log2(10)/40)
+    float RateMul() const { return cents == 0 ? 1.f : exp2f((float)cents * (1.f / 1200.f)); }
+};
+static_assert(sizeof(KeyParam) == 6, "KeyParam packs to 6 bytes");
 enum class EditStatus : uint8_t
 {
     Ok = 0,
@@ -984,7 +1018,8 @@ struct Engine
          * follows its entry (a kept marker → its new index; a grid slice →
          * itself when the count is unchanged, else the span default). */
         if(samePlanes) RestoreKeyTable(oldKeys, map, oldN, oldTable);
-        else           DefaultKeyTable();
+        else         { DefaultKeyTable(); ResetKeyParams(); }   /* KEYP: new material, a new kit: every key neutral (a set's own follow its load) */
+        keyRatOn = 0;                                            /* KEYP: the voices go below; their ratchets with them */
         SetBpm(0.f); // every load opens at ITS OWN tempo — inheriting the
                      // previous break's BPM chipmunks the new one (field bug)
         RegenPattern();
@@ -1105,11 +1140,15 @@ struct Engine
         const int bound = ReadEnd(idx);
         v->Trigger(cell, rate, rev, bound, sliceExt);
         ApplyFades(*v, idx, ep); /* PLAY: calls play honestly — no tail loop */
+        const bool keyed = key >= 0 && key < kKeys;
+        if(keyed) v->gain = keyGain[key];   /* KEYP: the key's gain (1 when neutral) */
         if(held)   /* SAMPLE: the sampler rule — read on to the end, until the key comes up */
         {
             v->held = true;
             v->key  = (int8_t)key;
-            if(!rev) { v->natEnd = bound; v->end = bound; }
+            if(keyed && keyp[key].plays == KeyParam::kRatchet) {}   /* KEYP: a ratchet's hit plays its entry, as a one-shot (the next hit or the release fades it) */
+            else if(!rev && keyed && keyp[key].plays == KeyParam::kLoop && LoopHeld(*v, cell, bound)) {}   /* KEYP: Loop — the entry, until the release */
+            else if(!rev) { v->natEnd = bound; v->end = bound; }
             else v->start = idx >= nSlices ? cell.start : 0;   /* backwards to the material's start */
         }
         else if(lenMul < 0.999f && !rev)   /* staccato style: play a fraction, then the edge guard */
@@ -1126,6 +1165,7 @@ struct Engine
     void CallSlice(int idx, float rateMul, bool rev, bool punch, bool ratchet, float lenMul = 1.f,
                    bool held = false, int key = -1)
     {
+        held = KeyHeld(key, held);   /* KEYP: the key's Plays — Follow keeps `held` (the option), the others override it */
         /* LOOPER: in Play with the looper on, `punch` means "write" — into the
          * loop, at this phase, instead of into a step. The looper IS the
          * memory: no step is punched. A full list refuses; the call still
@@ -1154,7 +1194,9 @@ struct Engine
         /* PADS: a recording (past the material) plays at its own rate × P4 — the sampler rule; the break's
          * slices and its markers varispeed with the tempo as ever (OwnRate) */
         float rate         = OwnRate(idx) ? pitch * rateMul : pitch * (nativeStep / gridStepSamp) * rateMul;
+        if(key >= 0 && key < kKeys) rate *= keyRate[key];   /* KEYP: the key's tune multiplies whatever rate it gets (×1 neutral) */
         FireSlice(idx, rate, rev, lenMul, held, key);
+        if(key >= 0 && key < kKeys && keyp[key].plays == KeyParam::kRatchet) RatchetStart(key, idx, rate, rev, held, gridStepSamp);   /* KEYP */
         if(punch) PunchStep(curStep, idx, rev);
         if(ratchet)
         {
@@ -1201,6 +1243,7 @@ struct Engine
     }
     void ReleaseKeyRaw(int key)
     {
+        if(key >= 0 && key < kKeys) keyRatOn &= ~(1u << key);   /* KEYP: the key came up — its ratchet stops */
         for(int i = 0; i < kVoices; i++)
             if(voices[i].active && voices[i].held && voices[i].key == key) voices[i].Release();
     }
@@ -1514,6 +1557,129 @@ struct Engine
     }
 
     int8_t  keySlice[kKeys]     = {};   // table entry each Voice key plays
+    /* ── KEYP (docs/packages/keyp.md): per-key settings ────────────────────
+     * keyp[k] is key k's gain / tune / plays (all zero = neutral = the key as
+     * it always played); keyGain / keyRate are its linear gain and rate
+     * multiplier, worked out once per change (never per call or per sample).
+     * They belong to the KEY, not to what it plays: a re-pointed, swapped,
+     * re-recorded or cleared key keeps them; new material (SetMaterial on new
+     * planes: a load, a loop take, New empty kit) resets them, and a set's
+     * own come back with its load (SetKeyParams). Applied at the CALL — every
+     * call made through a key: the CV keys, PLAY_KEY, a looper replay of a
+     * keyed event (with the key's settings as they are now), a ratchet's
+     * double — and never to a grammar's steps, a keyless call or an
+     * audition. Writers: ApplyEdit(SetKeyParams) and UndoSwap on the audio
+     * thread; ResetKeyParams / SetKeyParams from SetMaterial or the control
+     * thread at a load (the audio thread reads keyGain / keyRate whole). */
+    KeyParam keyp[kKeys] = {};
+    float    keyGain[kKeys] = {1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f,
+                               1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f};
+    float    keyRate[kKeys] = {1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f,
+                               1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f};
+    // Does a call through `key` hold? `option` = Options → Key Plays = Held (what Follow means); a keyless call
+    // (key < 0) keeps it. CONTROL or AUDIO (one byte).
+    bool KeyHeld(int key, bool option) const
+    {
+        if(key < 0 || key >= kKeys) return option;
+        const uint8_t p = keyp[key].plays;
+        return p == KeyParam::kFollow ? option : p != KeyParam::kOneShot;
+    }
+    // One key's settings in, its gain and rate worked out. false = out of range (nothing written).
+    BB_COLD bool PutKeyParam(int key, const KeyParam& p)   /* per edit, never per call: built for size */
+    {
+        if(key < 0 || key >= kKeys || !p.Valid()) return false;
+        keyp[key]    = p;
+        keyGain[key] = p.GainLin();
+        keyRate[key] = p.RateMul();
+        return true;
+    }
+    BB_COLD void ResetKeyParams()
+    {
+        const KeyParam z = {0, 0, 0, 0, 0};
+        for(int k = 0; k < kKeys; k++) PutKeyParam(k, z);
+    }
+    // A set's (or the sidecar's) settings wholesale, after its load — out-of-range values clamped. CONTROL (the
+    // main loop, no edit in flight) or before audio runs. Bumps the generation: the page refetches.
+    BB_COLD void SetKeyParams(const KeyParam* p)
+    {
+        if(!p) return;
+        for(int k = 0; k < kKeys; k++)
+        {
+            KeyParam q = p[k];
+            if(q.gain < KeyParam::kGainMin) q.gain = KeyParam::kGainMin;
+            if(q.gain > KeyParam::kGainMax) q.gain = KeyParam::kGainMax;
+            if(q.cents < -KeyParam::kCentsMax) q.cents = -KeyParam::kCentsMax;
+            if(q.cents > KeyParam::kCentsMax) q.cents = KeyParam::kCentsMax;
+            if(q.plays > KeyParam::kRatchet) q.plays = KeyParam::kFollow;
+            if(q.rat > KeyParam::kRatMax) q.rat = 0;
+            q.spare = 0;
+            PutKeyParam(k, q);
+        }
+        BumpGen();
+    }
+    bool KeysNeutral() const { for(int k = 0; k < kKeys; k++) if(!keyp[k].Neutral()) return false; return true; }
+    /* KEYP: Ratchet — while the key is held its entry retriggers from its start every `period` output samples: the
+     * entry's own length as it plays (its length ÷ the rate: full, ½, ¼, ⅛) or a note value at the tempo (1/8, 1/16,
+     * 1/32 of the grid's bar, the 16th = one grid step), never under kRatMin (5 ms). Each retrigger is a FireSlice:
+     * the previous hit is released with the choke geometry (the fade every steal uses) while the new one attacks
+     * beside it — a crossfade, no step. Worked out at the call and at each retrigger, never per sample; block-
+     * accurate (the countdown carries the remainder, so the period is exact on average, each hit ≤ one 24-sample
+     * block late). The release (the gate's fall, the pad's up, the looper's release event) stops it. With no gate
+     * to go by — a looper replay of an event recorded without a hold — it FILLS THE STEP: as many hits as fit one
+     * grid step at the tempo, at least two. A held one gives up after eight bars without a release (a release the
+     * looper could not record must not leave it running forever). */
+    static constexpr int kRatMin = 240;
+    struct KeyRatchet { int idx = 0, period = kRatMin, countdown = 0, left = 0; float rate = 1.f; bool rev = false; };
+    KeyRatchet keyRat[kKeys];
+    uint32_t   keyRatOn = 0;   // bit k: key k's ratchet runs (AUDIO only)
+    BB_COLD void RatchetStart(int key, int idx, float rate, bool rev, bool held, float gridStepSamp)
+    {
+        const float r = rate < 0.f ? -rate : rate;
+        const uint8_t div = keyp[key].rat;
+        float per = div <= KeyParam::kRatEighth ? (float)(slices[idx].len >> div) / (r > 1e-3f ? r : 1e-3f)
+                                                : gridStepSamp * (div == KeyParam::kRat8th ? 2.f : div == KeyParam::kRat16th ? 1.f : 0.5f);
+        if(!(per < 4.0e6f)) per = 4.0e6f;
+        int p = (int)(per + 0.5f);
+        if(p < kRatMin) p = kRatMin;
+        int left;
+        if(held) { const float cap = 8.f * barSeconds * sr / (float)p; left = cap > 100000.f ? 100000 : (int)cap + 1; }
+        else     { const int hits = (int)(gridStepSamp / (float)p); left = (hits < 2 ? 2 : hits) - 1; }
+        KeyRatchet& k = keyRat[key];
+        k.idx = idx; k.period = p; k.countdown = p; k.left = left; k.rate = rate; k.rev = rev;
+        keyRatOn |= 1u << key;
+    }
+    void RatchetTick(int n)
+    {
+        for(uint32_t m = keyRatOn; m; m &= m - 1u)
+        {
+            const int k = __builtin_ctz(m);
+            KeyRatchet& r = keyRat[k];
+            r.countdown -= n;
+            if(r.countdown >= 0) continue;
+            for(int i = 0; i < kVoices; i++)   /* the previous hit fades as the next attacks */
+                if(voices[i].active && voices[i].held && voices[i].key == k) voices[i].Release();
+            if(r.idx < nTable) FireSlice(r.idx, r.rate, r.rev, 1.f, true, k);
+            r.countdown += r.period;
+            if(r.countdown < 0) r.countdown = 0;
+            if(--r.left <= 0) keyRatOn &= ~(1u << k);
+        }
+    }
+    /* KEYP: a held call on a Loop key loops its entry [start, end) — the tail mechanism (loop forward, the wrap's
+     * click bridge), the loop point a rate's step plus two short of the end so the reader never reaches the end
+     * between two wraps; the release fades forward from wherever it is, never past the entry's end. An entry too
+     * short for the rate (under 64 samples of loop) plays as plain Held. */
+    BB_COLD bool LoopHeld(Voice& v, const Slice& cell, int bound) const
+    {
+        int e = cell.start + cell.len; if(e > bound) e = bound;
+        const float r = v.rate < 0.f ? -v.rate : v.rate;
+        const int margin = (int)r + 2;
+        const int b = e - 2 - margin;
+        if(b - cell.start < 64 + margin) return false;
+        v.natEnd = e; v.end = e;
+        v.tail = 1; v.looping = false;
+        v.loopA = (double)cell.start; v.loopB = (double)b;
+        return true;
+    }
     int8_t  tableKey[kMaxTable] = {};   // owner key of a recorded entry (grid entries: unused)
     using RecMeta = EntryMeta;
     RecMeta recMeta[kMaxTable]  = {};   // shadow metadata of the recorded entries
@@ -1571,6 +1737,7 @@ struct Engine
      * break, owned by no key (a recording is not one, however it was re-keyed). */
     EditStatus EdSetKeyMap(const int8_t* keys);
     EditStatus EdRecord(const EditReq& r, int& idx);                   // PADS: a keyed recording through the journal
+    EditStatus EdSetKeyParams(const EditReq& r);                       // KEYP: one key's gain / tune / plays
     bool       IsMarker(int t) const;
     bool       IsGrey(int t) const;                                    // a marker that is not orange (FROM_ONSETS / AUTOSLICE own these)
     int        MarkerCount() const;
@@ -1595,6 +1762,7 @@ struct Engine
     void       UndoCaptureEntries(UndoRec& r, const int* idx, int n) const;
     void       UndoCaptureStarts(UndoRec& r, int first, int n) const;
     void       UndoCaptureSnap(UndoRec& r) const;                      // BETA: the marker range, whole
+    void       UndoCaptureKeyP(UndoRec& r, int key) const;             // KEYP: every key's settings (the edited key in `first`)
     bool       UndoQuiet(const EditReq& r) const;                      // BETA: kQuiet honoured (the newest record covers r)
     void       UndoKeepLive();                                         // BETA: after a quiet op, the journal follows tableGen
     bool       UndoAtEnd() const;                                      // BETA: live, records held, nothing undone since the newest
@@ -1629,6 +1797,7 @@ struct Engine
             callCountdown -= n;
             if(callCountdown < 0 && callIdx >= 0) FireSlice(callIdx, callRate, callRev, callLenMul, callHeld, callKey);
         }
+        if(keyRatOn) RatchetTick(n);   /* KEYP: the Ratchet keys' retriggers (nothing at all while none runs) */
 
         // Quantized cell sequencing: the grid clock runs at OUR tempo; the
         // pattern (a Brocot tiling of cells) says which source cell each grid
@@ -1882,6 +2051,7 @@ struct Engine
                 if(vv.active && vv.relScale > 0.99f && vv.tail == 0 /* PLAY */
                    && !vv.held /* SAMPLE: a held voice belongs to its key */
                    && !vv.scratch /* EDIT-AUDITION: an audition is not a run */
+                   && vv.gain == 1.f /* KEYP: a key's gain stays with its call, never with a step */
                    && fabsf(vv.rate - rate) < 0.02f * rate
                    && fabs(vv.pos - (double)cell.start) < 160.)
                 {

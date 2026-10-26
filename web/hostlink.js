@@ -20,6 +20,7 @@ const CMD = {
   hello: 0x01, getDescriptor: 0x02, blobBegin: 0x12, blobData: 0x13, blobCommit: 0x14,
   getLive: 0x20, reboot: 0x40,
   state: 0x60, env: 0x61, scope: 0x62, action: 0x63, wave: 0x64, table: 0x65, hits: 0x66, card: 0x67, pads: 0x68,
+  keys: 0x69,   /* KEYP: GET_KEYS — every key's gain / tune / plays */
 };
 const ACT = { dice: 0, reslice: 1, mute: 2, punch: 3, flow: 4, scrub: 5, load: 6, clearLocks: 7, page: 8,
   recArm: 9, recClear: 10, keyPlays: 11, looperUndo: 12, looperClear: 13, saveSet: 14, loadSet: 15,
@@ -30,6 +31,8 @@ const ACT = { dice: 0, reslice: 1, mute: 2, punch: 3, flow: 4, scrub: 5, load: 6
   undoEdit: 30, redoEdit: 31,
   /* KEYS (v0.13, capability "keys": 1): the on-screen pads, the two marker ops, the transport and the autoslice count */
   playKey: 32, keysFromMarkers: 33, clearMarkers: 34, setMute: 35, autoslice: 36,
+  /* KEYP (capability "keyp": 1): one key's gain / tune / plays */
+  keyParams: 37,
   /* START (beta-sampler, capability "startIn": 1): the power-up setting, kept on the card */
   startIn: 40 };
 /* v0.13 "keys": the J5 style the Voice map reads (state byte 271; 255 = the Brain map, where J5 is the gate) and the
@@ -526,8 +529,43 @@ const setStartIn     = (link, saved)                       => editOp(link, ACT.s
 /* What the descriptor's "audiothurgist" object says the firmware can do (each 0 when absent). */
 function caps(desc) {
   const a = (desc && desc.audiothurgist) || {};
-  return { ext: a.ext | 0, table: !!a.table, sets: a.sets | 0, scope2: a.scope2 | 0, edit: a.edit | 0, keys: a.keys | 0, card: a.card | 0, pads: a.pads | 0, startIn: a.startIn | 0 };
+  return { ext: a.ext | 0, table: !!a.table, sets: a.sets | 0, scope2: a.scope2 | 0, edit: a.edit | 0, keys: a.keys | 0, card: a.card | 0, pads: a.pads | 0, startIn: a.startIn | 0, keyp: a.keyp | 0 };
 }
+
+/* ───────────── KEYP (ACTION 37 + 0x69 GET_KEYS, capability "keyp": 1) ─────────────
+ * Each of the 24 keys has a gain (½ dB steps, −24 … +6 dB), a tune (cents, ±24 semitones) and how it plays: 0 follow
+ * Options → Key Plays · 1 one-shot · 2 held (until the gate falls / the pad comes up) · 3 loop (held, the entry looping)
+ * · 4 ratchet (held, the entry again from its start every `rat`: 0 its whole length · 1 ½ · 2 ¼ · 3 ⅛ of it · 4 an 8th
+ * · 5 a 16th · 6 a 32nd at the tempo).
+ * All zero = neutral: the key plays exactly as it always did. They ride every call made through the key — the CV keys,
+ * the pads, Play's loop replaying a key (with the settings as they are now) — never the pattern's steps. KEY_PARAMS is
+ * an edit (the journal: one undo step; `join` = every send of one slider drag after the first, folded into this key's
+ * step) and answers like one: { ok, status, tableGen }. GET_KEYS reads all 24; the tableGen in the state tail moves with
+ * every change (an edit, an undo, a load), which is when the page reads them again. */
+const KEYP = { gainMin: -48, gainMax: 12, centsMax: 2400, join: 1, ratchet: 4, ratMax: 6,
+  PLAYS: ['follow', 'one-shot', 'held', 'loop', 'ratchet'],
+  PLAYS_LONG: ['Follow Key Plays', 'One-shot', 'Held (while down)', 'Loop (while held)', 'Ratchet (while held)'],
+  RATS: ['×1', '½', '¼', '⅛', '1/8', '1/16', '1/32'],
+  RATS_LONG: ['every whole sample', 'every ½ sample', 'every ¼ sample', 'every ⅛ sample', 'every 8th (tempo)', 'every 16th (tempo)', 'every 32nd (tempo)'] };
+const keypNeutral = p => !p || (!p.gain && !p.cents && !p.plays && !p.rat);
+function keyParams(link, key, p, join = false, gen = 0) {
+  const g = Math.max(KEYP.gainMin, Math.min(KEYP.gainMax, Math.round(p.gain || 0)));
+  const c = Math.max(-KEYP.centsMax, Math.min(KEYP.centsMax, Math.round(p.cents || 0)));
+  const pl = Math.max(0, Math.min(KEYP.ratchet, p.plays | 0)), rt = Math.max(0, Math.min(KEYP.ratMax, p.rat | 0));
+  return editOp(link, ACT.keyParams, [key & 0xff, g & 0xff, ...i16b(c), pl, rt, join ? KEYP.join : 0], gen);
+}
+/* → [{ gain (½ dB), plays, cents, rat } × 24] — 5 bytes a key */
+function parseKeyParams(b) {
+  const n = Math.min(b[1] || 0, Math.floor((b.length - 2) / 5)), out = [];
+  for (let k = 0; k < n; k++) { const o = 2 + k * 5, g = b[o], c = u16(b, o + 2); out.push({ gain: g > 127 ? g - 256 : g, plays: b[o + 1], cents: c > 0x7fff ? c - 0x10000 : c, rat: b[o + 4] }); }
+  return out;
+}
+const fetchKeyParams = async (link, opts = {}) => parseKeyParams(await link.request(CMD.keys, new Uint8Array(0), opts));
+/* the cell's words: "−6 dB", "+7 st", "−0.25 st" … — empty when neutral */
+const keypGainText = g => g ? `${g > 0 ? '+' : '−'}${Math.abs(g / 2)} dB` : '';
+const keypTuneText = c => { if (!c) return ''; const a = Math.abs(c); return `${c > 0 ? '+' : '−'}${a % 100 ? (a / 100).toFixed(2).replace(/0$/, '') : a / 100} st`; };
+const keypPlaysText = p => !p.plays ? '' : p.plays === KEYP.ratchet ? `ratchet ${KEYP.RATS[p.rat | 0] || ''}` : (KEYP.PLAYS[p.plays] || '');
+const keypText = p => keypNeutral(p) ? '' : [keypGainText(p.gain), keypTuneText(p.cents), keypPlaysText(p)].filter(Boolean).join(' · ');
 
 /* ───────────── CARD (0x67, capability "card": 1) ─────────────
  * The card is one folder, Audiothurgist/: breaks/*.wav (the list), sets/, presets/. The page turns any file the
@@ -832,6 +870,7 @@ const api = { PROTO, CMD, ACT, REC, NOTE_NAMES, keyName, STATUS, statusName, crc
   EDIT, editOp, editBoundary, editEntry, editAdd, editSplit, editMerge, editTombstone, editSetKey, editSwapKeys, editNudgeAll, editPromote, editFromOnsets, audition, release, tapMark, editUndo, editRedo,
   KEYS, playKey, keysFromMarkers, clearMarkers, setMute, autoslice, caps, START, setStartIn,
   CARD, breakNameOk, breakName, uploadPlan, encodeWav, serial, uploadBreak, copyOldCard, cardRescan, cardList,
-  PADS, padPlan, encodePcm16, padNormalize, uploadPad, newKit };
+  PADS, padPlan, encodePcm16, padNormalize, uploadPad, newKit,
+  KEYP, keyParams, parseKeyParams, fetchKeyParams, keypNeutral, keypText, keypGainText, keypTuneText };
 if (typeof module === 'object' && module.exports) module.exports = api; else root.HL = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

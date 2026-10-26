@@ -63,6 +63,15 @@ sound on a pad:
    default, remembered by the browser). Several files fill that pad and the
    next ones.
 
+**Each key has its own settings** (Kit tab → select a key): **gain** (−24 …
++6 dB), **tune** (±24 semitones, with cents) and **Plays** — *Follow* Options →
+Key Plays, *One-shot*, *Held* (while the gate or the pad is down), *Loop* (held,
+the key's own sample looping) or *Ratchet* (held, the sample again from its
+start every whole, ½, ¼ or ⅛ of itself, or every 8th / 16th / 32nd at the
+tempo). They ride every call through the key — CV, the pads, Play's loop —
+never the pattern's steps; they are saved with the set, and an untouched key
+plays exactly as before. Details: `docs/packages/keyp.md`.
+
 Recordings and dropped samples play at their own pitch (P4 transposes them);
 the break's slices follow the tempo. The sample memory is 45 s per channel: a
 break takes at most 17 s and the pads get the rest — or press **New empty
@@ -174,7 +183,7 @@ In **Pads** the keys follow the markers (time order on keys 0, 1, 2…).
 | Swing | Straight · **Auto (the material's swing)** |
 | Onsets | Spectral flux · **Log-filtered flux** |
 | Jacks | **Follow grammar** · Brain · Voice |
-| Key Plays | **One-shot** · Held (until the gate falls) |
+| Key Plays | **One-shot** · Held (until the gate falls) — a key's own Plays (Kit) overrides it |
 | Sampling | **Mono (J1+J2)** · Stereo |
 | Record Source | **Inputs** · Output (resample the module) |
 | Record | **Off** · Arm (B3 tap or J6 starts a loop take) |
