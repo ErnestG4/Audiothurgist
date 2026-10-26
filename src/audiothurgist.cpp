@@ -1386,7 +1386,8 @@ static void ServicePanel();   /* the main loop: after the EDIT helpers */
  * The key plays what the Kit's key table says (Engine::KeySlice) in `style`
  * (bb::keys::CallFor: Pads never writes, Play writes unless style 6 flips it,
  * elsewhere Options → Voice), held until its release when Options → Key
- * Plays = Held. One slot (gCallReq) carries it to the audio thread, as ever;
+ * Plays = Held (KEYP: or the key's own Plays — One-shot / Held / Loop —
+ * overrides it; its gain and tune ride the call, Engine::keyp). One slot (gCallReq) carries it to the audio thread, as ever;
  * the jacks write it straight away, PLAY_KEY waits for it to drain first. In
  * Edit the key's entry is selected. Every call sets keyFlash and bumps keySeq
  * (tail 272 / 273), whoever made it. ─────────────────────────────────── */
@@ -1404,7 +1405,7 @@ static void CallKey(int key, int style)
     gCallRat   = c.rat;
     gCallLen   = c.len;
     gCallPunch = c.punch;
-    gCallHeld  = gKeyPlays.sel == 1;   /* SAMPLE: Options → Key Plays = Held */
+    gCallHeld  = engine.KeyHeld(key, gKeyPlays.sel == 1);   /* SAMPLE: Options → Key Plays = Held; KEYP: unless the key's own Plays says otherwise */
     gCallKey   = key;
     gCallFlash = idx; gCallFlashT = 6;
     gKeyFlash  = (uint8_t)key; gKeySeq = (uint8_t)(gKeySeq + 1u);
@@ -1745,11 +1746,11 @@ static void OnPoll(uint32_t /*t_ms*/)
     else
     {
         gJ5Style = 255u;
-        if(gClkEdge.JustFell(kVoiceGateChan) && gCvKey >= 0 && gKeyPlays.sel == 1 && !s_settle.Waiting() && !fire) gRelKey = gCvKey;   /* held only: no release events for one-shots in Play's loop */
+        if(gClkEdge.JustFell(kVoiceGateChan) && gCvKey >= 0 && engine.KeyHeld(gCvKey, gKeyPlays.sel == 1) && !s_settle.Waiting() && !fire) gRelKey = gCvKey;   /* held only: no release events for one-shots in Play's loop (KEYP: the key's own Plays) */
         if(fire && engine.nSlices > 0)   /* BETA: the settled edge */
         {
             gCvKey = j4key; CallKey(j4key, 0);
-            if(s_settle.FellPending() && gKeyPlays.sel == 1) gRelKey = gCvKey;
+            if(s_settle.FellPending() && engine.KeyHeld(gCvKey, gKeyPlays.sel == 1)) gRelKey = gCvKey;
         }
     }
     /* Gate CV writes — control thread (I²C-safe), on CHANGE only so J6's
@@ -2783,6 +2784,10 @@ static void ServiceSets()
             return dens; }, live);
         /* EDIT-PERSIST: the file's key map (24 one-byte writes the audio thread reads whole; an old file has none) */
         if(gSetPlan.hasKeys) engine.SetKeyTable(live);
+        /* KEYP: the file's key settings (an old file: every key neutral — what SetMaterial already left) */
+        bb::KeyParam kp[bb::Engine::kKeys];
+        bb::KeyParamsFromSet(*gSet, kp);
+        engine.SetKeyParams(kp);
     }
     if(gSetReq && !gLoadReq && !gApply && !gReapply && !gTakeActive && !gSetState && !PadBusy() /* PADS */)
     {
@@ -3151,6 +3156,11 @@ static void ServiceLoad()
  *   PADS (docs/packages/pads.md; capability "pads": 1): 0x68 PADS — a PCM16 sample dropped onto a pad (BEGIN / DATA /
  *                   ABORT, committed as EditOp::Record: one undo step), NEW_KIT (no break, Pads); state tail 293..314
  *                   (state, progress, result, seq, key, flags, free, total, held, the pads' key mask) — ends at 315
+ *   KEYP (docs/packages/keyp.md; capability "keyp": 1): per-key gain / tune / plays —
+ *   0x63 ACTION     37 KEY_PARAMS(u8 key 0..23, i8 gain ½ dB −48..+12, i16 cents ±2400, u8 plays 0 follow Key
+ *                   Plays · 1 one-shot · 2 held · 3 loop, u8 flags b0 join [, u8 gen]) → u8 status, u8 tableGen;
+ *                   one undo step (b0: folded into this key's previous step — a slider's drag)
+ *   0x69 GET_KEYS   → u8 status, u8 n = 24, n × {i8 gain, u8 plays, i16 cents}
  *   0x65 GET_TABLE  ← [u8 first, u8 count, u8 form] — form 1 = entries carry a trailing u8 flags
  *                   (b0 orange · b1 tombstone), 14 bytes each; absent / 0 = the 13-byte form. */
 /* WEB → RECORD: ACTION 9 / 10. -1 = nothing requested; the consumer clears
@@ -3172,8 +3182,9 @@ struct EditBody
     uint32_t U32() { uint32_t v = (uint32_t)p[at] | ((uint32_t)p[at + 1] << 8) | ((uint32_t)p[at + 2] << 16) | ((uint32_t)p[at + 3] << 24); at += 4; return v; }
     uint8_t  Gen() const { return at < n ? p[at] : 0u; }
 };
-static const uint8_t kEditNeed[21] = {5u, 9u, 10u, 5u, 1u, 1u, 2u, 2u, 3u, 2u, 3u, 7u, 0u, 2u, 0u, 0u,   /* field bytes of ops 16..31 */
-                                      2u, 0u, 0u, 1u, 2u};                                                /* BETA: 32..36 */
+static const uint8_t kEditNeed[22] = {5u, 9u, 10u, 5u, 1u, 1u, 2u, 2u, 3u, 2u, 3u, 7u, 0u, 2u, 0u, 0u,   /* field bytes of ops 16..31 */
+                                      2u, 0u, 0u, 1u, 2u,                                                 /* BETA: 32..36 */
+                                      6u};                                                                /* KEYP: 37 */
 /* HostLink status for an EditStatus: Ok → 0; a refusal of the arguments → BAD_ARGS; a refusal of the
  * moment (stale gen, no room, no material) → BAD_STATE. */
 static uint8_t EditToStatus(bb::EditStatus s)
@@ -3479,6 +3490,17 @@ static void HandleEdit(uint8_t op, const hostlink::ParsedFrame& f, hostlink::Fra
             if(st != EditStatus::Ok) { w.U8(EditToStatus(st)); return; }
             w.U8(0u); w.U8(engine.tableGen); w.U8((uint8_t)count);
             return;
+        }
+        case 37:
+        {
+            /* KEYP (docs/packages/keyp.md): KEY_PARAMS(u8 key, i8 gain ½ dB −48..12, i16 cents ±2400, u8 plays 0..3,
+             * u8 flags b0 join [, u8 gen]) → status, gen. One undo step; b0 (every send of one slider drag after the
+             * first) folds into the previous step when it is this key's settings and nothing else moved since. */
+            const int key = b.U8(); const int gain = (int8_t)b.U8(); const int cents = (int16_t)b.U16(); const int plays = b.U8(); const uint8_t fl = b.U8();
+            if(fl & ~1u) { w.U8(2u); return; }
+            r.op = EditOp::SetKeyParams; r.key = key; r.a = gain; r.b = cents; r.i = plays;
+            if(fl & 1u) r.flags = EditReq::kQuiet;
+            break;
         }
         case 29:
         {
@@ -3850,7 +3872,8 @@ struct StateExt : hostlink::IHostlinkExtension
          * list) and the state tail from 276. */
         /* PADS: "pads":1 = 0x68 (a sample dropped onto a pad, New empty kit), the 45 s planes, recordings at their
          * own rate, and the state tail from 293. */
-        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102,\"sets\":1,\"scope2\":2,\"edit\":2,\"keys\":1,\"card\":1,\"pads\":1}";
+        /* KEYP: "keyp":1 = per-key gain / tune / plays — ACTION 37 KEY_PARAMS and 0x69 GET_KEYS (no tail bytes). */
+        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102,\"sets\":1,\"scope2\":2,\"edit\":2,\"keys\":1,\"card\":1,\"pads\":1,\"keyp\":1}";
     }
     /* WEB: one float → i8 (±127), saturating. */
     static int8_t ToI8(float v)
@@ -4086,6 +4109,7 @@ struct StateExt : hostlink::IHostlinkExtension
                     case 16: case 17: case 18: case 19: case 20: case 21: case 22: case 23: case 24: case 25: case 26: case 27: case 28: case 29:
                     case 30: case 31:
                     case 33: case 34: case 36:   /* BETA: KEYS_FROM_MARKERS, CLEAR_MARKERS, AUTOSLICE — table ops, the same rules */
+                    case 37:                     /* KEYP: KEY_PARAMS — through the edit mailbox and the journal, the same rules */
                         HandleEdit(op, f, w); return;
                     case 32:
                     {
@@ -4101,7 +4125,7 @@ struct StateExt : hostlink::IHostlinkExtension
                             while(gCallReq && (TickNow() - t0) < 2000u * gTicksPerUs) bb::Yield();
                             CallKey(f.body[1], 0);
                         }
-                        else if(gKeyPlays.sel == 1)
+                        else if(engine.KeyHeld(f.body[1], gKeyPlays.sel == 1))   /* KEYP: the key's own Plays */
                         {
                             while(gRelKey >= 0 && (TickNow() - t0) < 2000u * gTicksPerUs) bb::Yield();
                             gRelKey = f.body[1];
@@ -4192,6 +4216,18 @@ struct StateExt : hostlink::IHostlinkExtension
             }
             case 0x67u: HandleCard(f, w); return;   /* CARD: uploads, the old card copied in, the list */
             case 0x68u: HandlePads(f, w); return;   /* PADS: a sample dropped onto a pad, New empty kit */
+            /* KEYP: 0x69 GET_KEYS → u8 status, u8 n (24), then per key i8 gain (½ dB), u8 plays, i16 cents (4 bytes).
+             * The page reads it again whenever tableGen moves (every KEY_PARAMS, undo, load bumps it). */
+            case 0x69u:
+            {
+                w.U8(0u); w.U8((uint8_t)bb::Engine::kKeys);
+                for(int k = 0; k < bb::Engine::kKeys; k++)
+                {
+                    const bb::KeyParam p = engine.keyp[k];
+                    w.U8((uint8_t)p.gain); w.U8(p.plays); w.U16((uint16_t)p.cents);
+                }
+                return;
+            }
             default: w.U8(1u); return;   /* UNSUPPORTED */
         }
     }

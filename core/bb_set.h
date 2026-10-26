@@ -30,6 +30,11 @@
 #include "bb_json.h"
 #include "bb_wavwrite.h"
 
+/* KEYP: once-per-save / per-load helpers out of line and built for size (`cold`) — the module runs its code from SRAM */
+#ifndef BB_COLD
+#define BB_COLD __attribute__((noinline, cold))
+#endif
+
 namespace bb {
 
 constexpr int kSetSchema      = 1;     // "audiothurgist": 1
@@ -66,11 +71,11 @@ struct SetSlice
  * gain in dB (½ dB steps, −24 … +6), cents ±2400, plays 0 follow the option · 1 one-shot · 2 held · 3 loop. A key
  * absent from the list is neutral. */
 constexpr int kSetGainMin = -48, kSetGainMax = 12, kSetCentsMax = 2400, kSetPlaysMax = 3;   // = bb::KeyParam's
-struct SetKeyParam
+struct SetKeyParam          // all zero = neutral (SetInfo value-initialises the array: one clear, no per-field code)
 {
-    int8_t  gain  = 0;      // ½ dB
-    uint8_t plays = 0;
-    int16_t cents = 0;
+    int8_t  gain;           // ½ dB
+    uint8_t plays;
+    int16_t cents;
     bool Neutral() const { return gain == 0 && plays == 0 && cents == 0; }
 };
 
@@ -106,7 +111,7 @@ struct SetInfo
     uint8_t options[kSetMaxOptions] = {};
     int     nLooper  = 0;
     SetLoopEvent looper[kSetMaxLooper];
-    SetKeyParam  keyp[kSetKeys];            /* KEYP: every key's settings (neutral unless the file says otherwise) */
+    SetKeyParam  keyp[kSetKeys] = {};       /* KEYP: every key's settings (neutral unless the file says otherwise) */
 };
 
 struct PresetInfo
@@ -217,25 +222,7 @@ struct SetWriter
         o.Key("keys"); o.BeginArray();
         for(int k = 0; k < kSetKeys; k++) o.Int(s.keys[k]);
         o.EndArray();
-        /* KEYP: the keys that are not neutral, only when there is one (an untouched kit writes what it always wrote) */
-        bool anyKeyp = false;
-        for(int k = 0; k < kSetKeys; k++) anyKeyp = anyKeyp || !s.keyp[k].Neutral();
-        if(anyKeyp)
-        {
-            o.Key("keyp"); o.BeginArray();
-            for(int k = 0; k < kSetKeys; k++)
-            {
-                const SetKeyParam& p = s.keyp[k];
-                if(p.Neutral()) continue;
-                o.BeginObject();
-                o.KeyInt("key", k);
-                o.KeyFloat("gain", 0.5f * (float)p.gain);
-                o.KeyInt("cents", p.cents);
-                o.KeyInt("plays", p.plays);
-                o.EndObject();
-            }
-            o.EndArray();
-        }
+        KeyParamsOut(o, s);   /* KEYP */
         detail::OptionsOut(o, s.options, s.nOptions);
         o.Key("looper"); o.BeginArray();
         for(int i = 0; i < s.nLooper && i < kSetMaxLooper; i++)
@@ -254,6 +241,27 @@ struct SetWriter
         o.Put('\n');
         if(outLen) *outLen = o.ok ? o.len : 0;
         return o.ok;
+    }
+
+    /* KEYP: the keys that are not neutral, only when there is one (an untouched kit writes what it always wrote) */
+    static BB_COLD void KeyParamsOut(JsonOut& o, const SetInfo& s)
+    {
+        bool any = false;
+        for(int k = 0; k < kSetKeys; k++) any = any || !s.keyp[k].Neutral();
+        if(!any) return;
+        o.Key("keyp"); o.BeginArray();
+        for(int k = 0; k < kSetKeys; k++)
+        {
+            const SetKeyParam& p = s.keyp[k];
+            if(p.Neutral()) continue;
+            o.BeginObject();
+            o.KeyInt("key", k);
+            o.KeyFloat("gain", 0.5f * (float)p.gain);
+            o.KeyInt("cents", p.cents);
+            o.KeyInt("plays", p.plays);
+            o.EndObject();
+        }
+        o.EndArray();
     }
 
     // Emit into `scratch` (kSetJsonMax bytes, DMA-placed on the firmware)
@@ -310,7 +318,7 @@ struct SetReader
   private:
     /* KEYP: "keyp":[{"key","gain","cents","plays"}, …] — a key outside 0..23 (or none) is skipped, values outside the
      * ranges clamped (an unknown plays → follow), unknown fields skipped, a later entry for the same key wins. */
-    static bool KeyParams(JsonIn& in, SetInfo& out)
+    static BB_COLD bool KeyParams(JsonIn& in, SetInfo& out)
     {
         if(!in.BeginArray()) return false;
         while(in.ArrayMore())

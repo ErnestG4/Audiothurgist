@@ -387,7 +387,7 @@ inline void KeyParamsFromSet(const SetInfo& s, KeyParam* out)
 {
     for(int k = 0; k < Engine::kKeys; k++)
     {
-        const SetKeyParam p = k < kSetKeys ? s.keyp[k] : SetKeyParam();
+        const SetKeyParam p = k < kSetKeys ? s.keyp[k] : SetKeyParam{0, 0, 0};
         out[k] = {p.gain, p.plays, p.cents};
     }
 }

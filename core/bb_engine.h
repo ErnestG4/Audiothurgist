@@ -5,6 +5,11 @@
 #include "bb_pattern.h"
 #include "bb_looper.h"   /* LOOPER */
 
+/* KEYP: once-per-load helpers stay out of line — the module's code runs from SRAM, its tightest budget */
+#ifndef BB_COLD
+#define BB_COLD __attribute__((noinline, cold))
+#endif
+
 namespace bb {
 
 // Pure engine: no libDaisy, no allocation, no printf. Fixed buffers; the
@@ -1571,7 +1576,7 @@ struct Engine
         return p == KeyParam::kFollow ? option : p != KeyParam::kOneShot;
     }
     // One key's settings in, its gain and rate worked out. false = out of range (nothing written).
-    bool PutKeyParam(int key, const KeyParam& p)
+    BB_COLD bool PutKeyParam(int key, const KeyParam& p)   /* per edit, never per call: built for size */
     {
         if(key < 0 || key >= kKeys || !p.Valid()) return false;
         keyp[key]    = p;
@@ -1579,14 +1584,14 @@ struct Engine
         keyRate[key] = p.RateMul();
         return true;
     }
-    void ResetKeyParams()
+    BB_COLD void ResetKeyParams()
     {
         const KeyParam z = {0, 0, 0};
         for(int k = 0; k < kKeys; k++) PutKeyParam(k, z);
     }
     // A set's (or the sidecar's) settings wholesale, after its load — out-of-range values clamped. CONTROL (the
     // main loop, no edit in flight) or before audio runs. Bumps the generation: the page refetches.
-    void SetKeyParams(const KeyParam* p)
+    BB_COLD void SetKeyParams(const KeyParam* p)
     {
         if(!p) return;
         for(int k = 0; k < kKeys; k++)
@@ -1606,7 +1611,7 @@ struct Engine
      * click bridge), the loop point a rate's step plus two short of the end so the reader never reaches the end
      * between two wraps; the release fades forward from wherever it is, never past the entry's end. An entry too
      * short for the rate (under 64 samples of loop) plays as plain Held. */
-    bool LoopHeld(Voice& v, const Slice& cell, int bound) const
+    BB_COLD bool LoopHeld(Voice& v, const Slice& cell, int bound) const
     {
         int e = cell.start + cell.len; if(e > bound) e = bound;
         const float r = v.rate < 0.f ? -v.rate : v.rate;
