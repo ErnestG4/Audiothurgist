@@ -19,8 +19,8 @@ in Chrome or Edge — then Connect. **It powers up as a sampler**: Pads, the
 pattern stopped — play the 24 pads or the J4 keys, drop your own samples on
 the pads. For a beat, pick a mode (Classic · Grids · Loop) and press **▶**
 (or hold **B1** on the panel); ▶/■ starts and stops it from then on.
-Options → Start-up → *As saved* powers up in the saved preset's mode,
-running, instead. No module? Press **Demo** (or add `?demo=sampler` to the
+Options → Power-up → *Start In: As saved* (then save the preset) powers up
+in the preset's mode, running, instead. No module? Press **Demo** (or add `?demo=sampler` to the
 page's address).
 
 ## Three roles, one engine
@@ -47,7 +47,7 @@ break and a kit are the same thing, played by different rules (slice or held).
 ## Use it as a sampler
 
 The 24 keys (J4, the page's pads, the Kit) are a sampler's pads as much as a
-break's slices — and the module powers up as one (**Start in = Sampler**:
+break's slices — and the module powers up as one (**Start In = Sampler**:
 Pads, the pattern stopped; the page opens on the pads). Three ways to put a
 sound on a pad:
 
@@ -105,6 +105,12 @@ and press ▶ — it comes in on the beat. Details: `docs/packages/pads.md`.
 If a build ever leaves the module USB-silent, tap **BOOT** during the
 power-up breathing pulse to reach the Daisy bootloader, then flash.
 
+A build that changes the Options block (this one added Start In) moves the
+preset schema: the flash slots are dropped once at the first power-up, and
+each slot with a backup on the card (`Audiothurgist/presets/<slot>.json`)
+comes back from it — options, knobs, sample and name; its motion locks and
+the brightness do not.
+
 ## The card
 
 Everything the module reads or writes lives in one folder, `Audiothurgist/`:
@@ -114,7 +120,6 @@ Everything the module reads or writes lives in one folder, `Audiothurgist/`:
 | `Audiothurgist/breaks/*.wav` | the breaks P5 and the page's Sample list show, sorted |
 | `Audiothurgist/sets/` | sets (`<name>.wav` + `<name>.json`) and the loose files' edits (`<wav>.slices.json`) |
 | `Audiothurgist/presets/` | preset backups (`<slot>.json`) |
-| `Audiothurgist/startup.json` | *Start in* (Sampler / As saved), the one setting kept on the card rather than in a preset |
 
 The folders are made the first time something is written. **What loads:** WAV,
 PCM 16- or 24-bit, mono or stereo, 8 kHz or more, at least ¼ s; the first 17 s
@@ -201,7 +206,7 @@ In **Pads** the keys follow the markers (time order on keys 0, 1, 2…).
 | Quantize | **Off (as played)** · 16ths · 8ths — Play's looper |
 | Tap Allowance | 0 · 20 · **40** · 60 · 80 ms — a tap-while-playing mark lands this far back (slice editing) |
 | Autosave | Off · **On (2 s after an edit)** — the slice table and key map to the set's JSON, or a `sets/<file>.slices.json` sidecar beside a loose WAV |
-| Start in | **Sampler (Pads, stopped)** · As saved (the boot preset's mode, running) — the web app's Options → Start-up; kept on the card (`startup.json`), not in a preset, so presets are untouched by it; no card = Sampler |
+| Start In | **Sampler (Pads, stopped)** · As saved (the preset's mode, running) — read from the boot preset at power-up; a set load leaves it alone |
 
 ## The web app
 
@@ -231,7 +236,9 @@ served from the PC, in `web/README.md`.
 
 Close `/program` first (one page holds the port). Press **Demo** to try it
 without the module. `node web/selftest.mjs` checks the protocol against
-the SDK's golden vectors.
+the SDK's golden vectors. **The page and the firmware go together**: flash
+the `.bin` built from the same commit as the page; a page that finds another
+build on the port says so in one line and does not connect.
 
 Platform gotchas live in `docs/sdk-quirks.md`; `make sdramcheck` reads the
 ELF for static initialisers touching SDRAM; the module's HELLO carries the

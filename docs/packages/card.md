@@ -17,7 +17,6 @@ Nothing here has run on hardware; the checklist at the end is Combust's.*
 | **Breaks** | `0:/*.wav` — every WAV in the card root | `0:/Audiothurgist/breaks/*.wav` (sorted, then the sets) |
 | **Sets** | `0:/sets/<name>.wav` + `.json`, sidecars `0:/sets/<wav>.slices.json` | `0:/Audiothurgist/sets/…` |
 | **Preset backups** | `0:/presets/<slot>.json` | `0:/Audiothurgist/presets/<slot>.json` |
-| **Start in** (beta-sampler) | — | `0:/Audiothurgist/startup.json` — the one device setting on the card (`docs/packages/pads.md` § Start in); not copied from an old card (it has none) |
 | **An old card** | — | the module lists nothing from the root; the page says so and offers **Copy them in** |
 | **Getting a break onto the card** | take the card out | the page: drop or pick a file (WAV of any kind, AIFF, MP3, FLAC, OGG…), and the module writes it |
 
@@ -70,7 +69,7 @@ for the source).
 
 ## Protocol
 
-`0x67 CARD`, capability `"card": 1` beside `"keys": 1`. Every reply starts with
+`0x67 CARD`. Every reply starts with
 a status: HostLink's 0 OK · 2 BAD_ARGS · 3 BAD_STATE · 6 TOO_LARGE, then the
 card's own **20 EXISTS** (Kyklophoria's `kStatCardExists`) · **21 NO_CARD** ·
 **22 CARD_FULL**.
@@ -120,9 +119,8 @@ State tail, appended after byte 275 (the page gates on length ≥ 293):
 288 u16 copied · 290 u16 skipped (the last copy) · 292 u8 nFiles            — ends at 293
 ```
 
-`setState` (219) reads **3** while an upload is written or a copy runs, so an
-older page's set pill shows "busy" instead of offering a save that would be
-refused. The survey (`bb::SurveyCard`) runs at boot, after a copy and on
+`setState` (219) reads **3** while an upload is written or a copy runs, so the
+set pill shows "busy" instead of offering a save that would be refused. The survey (`bb::SurveyCard`) runs at boot, after a copy and on
 RESCAN; `pending` counts copy candidates whose destination is missing.
 
 **Throughput.** One chunk per round trip. On the fake (6 ms latency) the page

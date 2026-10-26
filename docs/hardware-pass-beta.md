@@ -13,9 +13,18 @@ pad drops and 45 s of sample memory, the sampler start-up, each key's own
 gain / tune / Plays incl. Loop and Ratchet, Spread across keys; md5
 2607927a…). `beta5-sampler-7e9c4d3` is the same without the spread,
 `beta4-pads-553cf02` without the start-up and the key settings, and `beta3-card-190ce8d` without the pads, if a bug in the new
-work gets in the way of the rest. **Before flashing**, do §10d step 1 on
-the firmware you have now;
-a card with the Amen and one break with no hats; the page from
+work gets in the way of the rest.
+
+**On `beta-clean`** (a build of that branch, flashed together with the page
+from the same commit): Start In is an Options byte, so **flashing it drops
+the saved presets once** — each slot that has a backup on the card
+(`Audiothurgist/presets/<slot>.json`) comes back at the first power-up with
+its options, knobs, sample and name, but not its motion locks or the
+brightness; a slot without a backup is gone. Re-make the locks you care
+about and save the slot again. Beyond that, `beta-clean` only differs where
+§10d and §10e say so (Start In on the page's Options, Loop reversed).
+
+Bring a card with the Amen and one break with no hats; the page from
 https://ernestg4.github.io/Audiothurgist/ on the desktop and, if you have the
 OTG adapter, the phone. Close `/program`.
 
@@ -26,10 +35,11 @@ moves your breaks into the new folder and proves the copy, and everything
 from §0 on then has the Amen to play.
 
 **This build powers up** as a sampler (Pads, the
-pattern stopped). Do **§10d's first three steps right after flashing** (they
-check your presets and the new start-up); then hold B1 (the boot preset's beat comes back) or pick Classic on the page and
-press ▶ before §0 — or set Options → Start-up → *As saved* and power-cycle,
-and the rest of this pass boots as written.
+pattern stopped). Do **§10d's first two steps right after flashing** (they
+check the new start-up); then hold B1 (the boot preset's beat comes back) or pick Classic on the page and
+press ▶ before §0 — or set Start In to *As saved* (beta6: Options → Start-up;
+`beta-clean`: Options → Power-up, then save slot 0) and power-cycle, and the
+rest of this pass boots as written.
 
 ## 0. Boot, identity, load (3 min)
 
@@ -171,7 +181,7 @@ and the rest of this pass boots as written.
 
 ## 10b. The card — one folder, uploads, an old card copied in (8 min)
 
-Firmware with `"card": 1` (`docs/packages/card.md`). The first two boxes
+`docs/packages/card.md`. The first two boxes
 you did at the start; do the rest here.
 Bring the **old card** (WAVs in the root, a `sets/` and a `presets/`) and,
 for the last box, a blank one. A clock on J3 and a break playing throughout.
@@ -202,7 +212,7 @@ for the last box, a blank one. A clock on J3 and a break playing throughout.
 
 ## 10c. Samples onto pads, an empty kit, 45 s of memory (10 min)
 
-Firmware with `"pads": 1` (`docs/packages/pads.md`). Nothing of this has run
+`docs/packages/pads.md`. Nothing of this has run
 on hardware. A clock on J3 and a break playing, Classic, for the first three
 boxes; bring a few one-shots (a mono kick, a **stereo** pad or loop, a 30 s
 file) on the computer.
@@ -244,48 +254,51 @@ file) on the computer.
 
 ## 10d. Start as a sampler; import and play single samples (10 min)
 
-`beta-sampler` (`docs/packages/pads.md` § Start in). Nothing of this has run
+`beta-sampler` (`docs/packages/pads.md` § Start In). Nothing of this has run
 on hardware. Bring a mono one-shot, a **stereo** sample and a quiet file
-(a soft hat) on the computer; a clock on J3 for step 9.
+(a soft hat) on the computer; a clock on J3 for step 8.
 
-1. **Before flashing**, on beta4: note one saved preset slot with something
-   you will recognise (a grammar other than Classic, a motion lock). Flash.
-2. **Power up.** *See*: B1 breathing cool white (stopped), the P1 bar ring
+1. **Power up.** *See*: B1 breathing cool white (stopped), the P1 bar ring
    dimmed with only the playhead going round (Pads writes nothing), no
-   gates out. Nothing plays until a key does.
-3. **Your presets survived**: Settings (B2 + B3 2 s) → load the slot from
-   step 1. *See*: its grammar, knobs and **its lock** back, exactly as on
-   beta4 (the Options block and the schema did not change). Power-cycle
-   again: Pads, stopped — Start in overrides the boot preset's grammar, not
+   gates out. Nothing plays until a key does. (On `beta-clean` this is the
+   first power-up after the presets were dropped: Start In takes its
+   default, Sampler, even for a slot restored from its backup.)
+2. **The preset is untouched**: Settings (B2 + B3 2 s) → load a slot with a
+   grammar other than Classic. *See*: its grammar, running. Power-cycle
+   again: Pads, stopped — Start In overrides the boot preset's grammar, not
    the preset.
-4. **Connect the page.** *See*: the Play tab opens on the pads, a line over
+3. **Connect the page.** *See*: the Play tab opens on the pads, a line over
    them "Sampler — the pads play samples…" with **Classic** / **Grids**
    buttons, the transport "**sampler** · Pads", the Pads chip lit, the Jacks
    card "Voice map" with J4 live.
-5. **Keys play while stopped**: a page pad, J4 + a J6 gate, and the panel.
+4. **Keys play while stopped**: a page pad, J4 + a J6 gate, and the panel.
    Each sounds its key; the transport stays stopped.
-6. **Drop the mono one-shot on C1, the stereo sample on C♯1.** *See*: "✓",
+5. **Drop the mono one-shot on C1, the stereo sample on C♯1.** *See*: "✓",
    the line "mono, …" then "stereo, … — the kit is stereo now"; Options →
    Sampling reads Stereo. Play both from the page and from J4 (C1 = 0 V,
    C♯1 = 1/12 V): each as the file is; C♯1 in stereo (pan it).
-7. **Normalise drops**: tick it (beside *Choose samples…*), drop the quiet
+6. **Normalise drops**: tick it (beside *Choose samples…*), drop the quiet
    file on D1. *See*: "normalised +x dB" in the line and D1 near full
    level. Untick, reload the page: it stays unticked (and ticked if you leave
    it ticked).
-8. **Save set** (the Unsaved kit note) as `smpkit`. Power-cycle: Pads,
+7. **Save set** (the Unsaved kit note) as `smpkit`. Power-cycle: Pads,
    stopped again, the pads back on the break (memory). Load `smpkit`: C1,
    C♯1, D1 back, stereo, still a sampler.
-9. **The flip**: with the clock on J3, press **Classic** in the sampler line.
+8. **The flip**: with the clock on J3, press **Classic** in the sampler line.
    *See*: nothing starts; B1 still breathes; under the modes "Stopped —
    press ▶ to start Classic", ▶ ringed in orange. Press ▶ (or hold B1
    600 ms): *listen for* the beat coming in **on the beat**, in time with
    the clock, not from step 1 at a random moment.
-10. **Start in = As saved**: Options → Start-up → As saved (the page says
-    so). Power-cycle: the boot preset's grammar, **running**, as beta4 did.
-    Take the card out and power-cycle: Pads, stopped (no card = Sampler).
-    Card back, set it to Sampler again.
+9. **Start In = As saved**: Options → Power-up → Start In → As saved; the
+   sampler line stops saying it powers up like this. Power-cycle without
+   saving: Pads, stopped (Start In is the boot preset's, and the preset still
+   says Sampler). Set As saved again and **save slot 0** (Settings, or
+   `/program`); power-cycle: the boot preset's grammar, **running**. Take the
+   card out and power-cycle: the same (no card changes nothing now). Set it
+   back to Sampler and save slot 0 again. In `/program` the Options panel
+   shows Start In with the other options.
 
-11. **No computer**: unplug USB, power-cycle (Sampler). Play a few keys
+10. **No computer**: unplug USB, power-cycle (Sampler). Play a few keys
     from J4, then **hold B1 600 ms, let go**. *Listen for*: the boot preset's
     beat (its grammar comes back) starting on the beat. Hold B1 again: it
     stops and stays on that grammar. On the page the same holds for ▶ while
@@ -297,7 +310,7 @@ no-op and the beat come only from choosing a grammar? ____
 
 ## 10e. Each key's own gain, tune and Plays (10 min)
 
-Firmware with `"keyp": 1` (`docs/packages/keyp.md`). Nothing of this has run
+`docs/packages/keyp.md`. Nothing of this has run
 on hardware. A break loaded and two pads dropped (a kick on C1, a long pad or
 vocal on D1), the page on the Kit tab, the clock on J3.
 
@@ -322,7 +335,9 @@ vocal on D1), the page on the Kit tab, the clock on J3.
        sample (not into the next pad), the seam is smooth enough to use
        (*listen for*: a click at the wrap; report how bad), and it fades on
        the release. While it loops, play other keys and run the pattern:
-       the loop keeps going.
+       the loop keeps going. **Reversed** (Voice map, J5 at style 1): it
+       loops D1 **backward** from its end, the same seam, the same release
+       (beta6 played it once backward and held; `beta-clean` loops it).
 7. [ ] C1 Plays → **Ratchet**, every ½ sample: hold C1 — the kick retriggers
        from its start twice per kick length, *no click at the seams*, until
        you let go; J7 sends a trigger per hit. Try ¼ and ⅛ (faster), and the
@@ -344,7 +359,7 @@ vocal on D1), the page on the Kit tab, the clock on J3.
 
 ## 10f. One sample, played chromatically (8 min)
 
-Firmware built from `beta-chromatic` (`"keyp": 2`; not in the beta5 .bin —
+Firmware built from `beta-chromatic` (not in the beta5 .bin —
 `docs/packages/chroma.md`). Nothing of this has run on hardware. A tonal
 sample with a clear pitch (a bass pluck, a piano note, a sung vowel) dropped
 on **G1**, nothing else on a pad; a V/oct sequencer into **J4** and its gate

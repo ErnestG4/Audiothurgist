@@ -610,7 +610,7 @@ canvases.forEach(sizeCanvas);
 function ctx(c) { if (!c._cw) sizeCanvas(c); const g = c.getContext('2d'); g.setTransform(c._d, 0, 0, c._d, 0, 0); return [g, c._cw, c._ch]; }
 /* the play grammars: Play (the loop is what you play in) and Pads (nothing is written) — the bar there is the kit's */
 const playish = s => !!s && (s.grammar === GR.play || s.grammar === GR.pads);
-/* beta-sampler: Pads with the transport stopped — how the module powers up (Start in = Sampler): a plain sampler */
+/* beta-sampler: Pads with the transport stopped — how the module powers up (Start In = Sampler): a plain sampler */
 const samplerish = s => !!s && s.grammar === GR.pads && !!s.muted;
 /* a step's class (0 kick · 1 snare · 2 hat · 3 other, -1 at rest) and its colour; the strip also letters it, so the class is not told by colour alone */
 function stepCls(s) { if (!st || s >= st.nSlices) return -1; const src = st.src[s]; return src < 0 ? -1 : (src < st.stepClass.length ? st.stepClass[src] : srcClass(src)) & 3; }

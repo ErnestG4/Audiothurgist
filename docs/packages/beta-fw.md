@@ -98,7 +98,7 @@ journaled, joined to the step it follows. `UndoRec` grew from 440 to 2 336 B
 | 32 PLAY_KEY | `u8 key 0..23, u8 down 1 / up 0` | `u8 status` | the key as a CV note plays it (style 0, Key Plays honoured), any grammar, any jack map; up releases a held key, a no-op for one-shot. Waits ≤ 2 ms for the shared call / release slot. BAD_ARGS key > 23 or down > 1; BAD_STATE no material |
 | 33 KEYS_FROM_MARKERS | `[u8 gen]` | `u8 status, u8 tableGen, u8 count` | live markers in time order → keys 0..; a key that owns a recording is skipped and kept; keys past the markers → their span slice. One SetKeyMap = one step; nothing posted (no empty step) when the map already follows. `count` = keys given a marker |
 | 34 CLEAR_MARKERS | `[u8 gen]` | `u8 status, u8 tableGen, u8 count` | every live marker, grey and orange, tombstoned; keys on them → their span slice. One step |
-| 35 SET_MUTE | `u8 1 stopped / 0 running` | `u8 status` | op 2 still toggles |
+| 35 SET_MUTE | `u8 1 stopped / 0 running` | `u8 status` | a start in Pads brings the last drum grammar back; op 2 (the old toggle) is gone |
 | 36 AUTOSLICE | `u8 k 0..64, u8 flags (b0 re-roll · b1 join) [, u8 gen]` | `u8 status, u8 tableGen, u8 count` | below. `count` = the grey markers now. BAD_ARGS k > 64 or unknown flag bits |
 
 A **marker** (`Engine::IsMarker`) is a live entry past the grid, inside the
@@ -180,9 +180,10 @@ reads its 263 and ignores the rest.
 | 274 | `u8 autoK` | the AUTOSLICE count last applied; 0 none, and after FROM_ONSETS, CLEAR_MARKERS or new material |
 | 275 | `u8 nMarkers` | live markers (`Engine::MarkerCount`) |
 
-Descriptor: `"edit":2` (TAP_MARK's new refusal, dedupe and fourth reply
-byte), `"keys":1` (ACTION 32..36 and this tail). HELLO and the descriptor
-carry `0.13.0-beta` from one constant, `kFirmwareVersion`.
+This beta's descriptor said `"edit":2` and `"keys":1`; since `beta-clean` it says only
+`{"api": n}`, the one number the page checks (the page and the firmware ship
+together). HELLO and the descriptor carry `0.13.0-beta` from one constant,
+`kFirmwareVersion`.
 
 ## What is host-tested
 

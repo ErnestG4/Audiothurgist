@@ -26,15 +26,16 @@ selftest §7e / §9f. **Nothing here has run on hardware**; the checklist is
 | **Plays** | Follow · One-shot · Held · Loop · Ratchet | Follow | Follow = Options → Key Plays; One-shot never holds; Held reads on until the release; Loop holds and loops the key's own entry; Ratchet holds and retriggers it |
 | **Ratchet rate** (Ratchet only) | the whole entry · ½ · ¼ · ⅛ of it · an 8th · a 16th · a 32nd at the tempo | whole | how often the entry starts again |
 
-All zero is neutral, and a neutral key plays **exactly** as before: the gain
-and rate are exactly 1.0 (no transcendental is evaluated for 0), a multiply by
-1.0 leaves every bit, and the ratchet's tick is skipped while no ratchet runs.
-`keyp_check` §1 proves it: a rich session (a stereo break in Classic with the
-Zoom tail pitched up, adaptive fades, two pads, one-shot / held / reversed /
-ratcheted / staccato calls, then Play's looper recording and replaying keyed
-calls, plus a mono session) hashes to the golden taken from the untouched
-engine (beta 7039813), and so does the same session with every key set away
-and back to neutral through the edit op.
+All zero is neutral: unity gain, no tune (both exactly 1.0 — no
+transcendental is evaluated for 0), Plays as Options → Key Plays says, and the
+ratchet's tick skipped while no ratchet runs. Setting a key and setting it back
+leaves nothing behind: `keyp_check` §1 renders a rich session (a stereo break
+in Classic with the Zoom tail pitched up, adaptive fades, two pads, one-shot /
+held / reversed / ratcheted / staccato calls, then Play's looper recording and
+replaying keyed calls) with every key set away and back to neutral through the
+edit op, and gets the untouched session's bits. (The package was first built
+to hash an untouched session to the pre-KEYP golden; that constraint is gone —
+see Loop below.)
 
 ## Where the settings apply — the decision
 
@@ -75,9 +76,14 @@ same planes keeps them; a set brings its own back.
   forward over `[start, end − 2 − (rate + 2))`, the wrap bridged by the
   click compensator) until the release, which fades it with the normal
   choke geometry, forward from wherever it is, never past the entry's end.
-  Another key's hit or a step never chokes it (`WouldChoke` is false for a
-  held loop). Reversed, or an entry too short for its rate's loop (a grid
-  slice under ~100 samples at 16×), it plays as plain Held.
+  **Reversed** (J5's reverse style, or a looper event recorded reversed) it
+  loops **backward**: from the entry's top down to `start + (rate + 2)`, then
+  back up to the top (`Voice::kTailBack`, the same click bridge — the test's
+  worst sample-to-sample step at the seam is 0.022, the tone's own slope); the
+  release turns it forward and fades it the same way. Another key's hit or a
+  step never chokes it (`WouldChoke` is false for a held loop). An entry too
+  short for its rate's loop (a grid slice under ~100 samples at 16×) plays as
+  plain Held.
 - **Ratchet** — held, the entry starting again from its start every period:
   its own length as it plays (length ÷ |rate|, so tune and P4 shorten it) ×
   1, ½, ¼ or ⅛, or a note value at the tempo (8th = two grid steps, 16th =
@@ -102,10 +108,10 @@ same planes keeps them; a set brings its own back.
     call), so they are in. They follow the tempo at the call; a tempo change
     mid-ratchet takes effect at the next press.
 
-## Protocol — ACTION 37 and `0x69 GET_KEYS`, capability `"keyp": 1`
+## Protocol — ACTION 37 and `0x69 GET_KEYS`
 
-No bytes were added to the 0x60 state tail: the page reads 0x69 whenever the
-tail's `tableGen` (byte 255) moves, and every KEY_PARAMS, undo, redo and load
+The state carries no copy of the settings: the page reads 0x69 whenever the
+state's `tableGen` (byte 255) moves, and every KEY_PARAMS, undo, redo and load
 moves it.
 
 ```
@@ -128,13 +134,10 @@ moves it.
   `kKeyP` record for this key, the cursor at the end, the generation live);
   otherwise it is a step of its own — never glued onto an AUTOSLICE, a
   marker or another key's drag. The autoslice sweep's pattern, made strict.
-- A firmware before this answers ACTION 37 with BAD_ARGS (unknown op) and
-  0x69 with UNSUPPORTED; the page shows none of it without `"keyp"`.
-- **`"keyp": 2`** (CHROMA, `docs/packages/chroma.md`) adds ACTION 38
-  SPREAD_KEYS — one key's sample on all 24 keys, a semitone a key, written
-  through these same settings and journaled in the same `kKeyP` record (a
-  join never folds into a spread's record). Everything above is unchanged;
-  read `"keyp" ≥ 1` as "the settings".
+- ACTION 38 SPREAD_KEYS (CHROMA, `docs/packages/chroma.md`) puts one key's
+  sample on all 24 keys, a semitone a key, written through these same
+  settings and journaled in the same `kKeyP` record (a join never folds into
+  a spread's record).
 
 ## The journal
 
@@ -150,13 +153,13 @@ changed; a ratchet whose key leaves the mode stops.
 "keyp":[{"key":3,"gain":-6.5,"cents":700,"plays":2},{"key":7,"gain":2,"cents":-1200,"plays":4,"rat":1}]
 ```
 
-Written only for the keys that are not neutral, and only when one is — an
-untouched kit's file is byte for byte what it was (`"rat"` only when not 0).
+Written only for the keys that are not neutral, and only when one is (a kit
+without settings has no `"keyp"`; `"rat"` only when not 0).
 Read tolerantly: a key outside 0..23 (or none) skipped, values clamped to
 their ranges (an unknown plays → Follow, an unknown rate → the entry), dB
 rounded to ½ dB, unknown fields skipped, a later entry for the same key wins.
-A file without `"keyp"` loads neutral; an older firmware skips the key whole
-(the reader's `Skip`, tested by renaming it). Still schema 1. The autosave
+A file without `"keyp"` loads neutral; a reader that does not know a key skips
+it whole (the reader's `Skip`, tested by renaming it). Still schema 1. The autosave
 writes it (a settings edit moves the generation, which arms it), and so does
 the loose file's sidecar; the load applies it after the key table.
 
@@ -169,8 +172,7 @@ sliders play live, one request at a time, every send of a drag after its first
 with JOIN: one undo step, one history line ("C♯1 settings: −6 dB · ratchet
 1/16"). A key cell — and a Play pad — with settings shows them in words, in the
 accent's ink (orange = "yours", as a placed marker; no new hue, ≥ 4.5:1 on every
-surface; the words are the cue, not the colour). Without `"keyp"` none of it
-shows and 0x69 is never asked. Editing from a Play pad is not offered: a pad's
+surface; the words are the cue, not the colour). Editing from a Play pad is not offered: a pad's
 press is a note (a long press is a held one), so the pads only show the words
 and their title points at the Kit.
 
@@ -194,16 +196,19 @@ and their title points at the Kit.
 
 ## Tests
 
-- `tests/keyp_check.cpp` (**98**, ASan/UBSan, in `tests/run.sh`): §1 neutral is
-  the pre-KEYP golden; §2 gain and tune at the call (a pad's own rate × P4 ×
+- `tests/keyp_check.cpp` (**138** with CHROMA's §6, ASan/UBSan, in
+  `tests/run.sh`): §1 every key set away and back to neutral renders the
+  untouched session's bits; §2 gain and tune at the call (a pad's own rate × P4 ×
   tune, a grid key's varispeed × P4 × tune, the style and reverse, keyless
   calls / auditions / neutral keys unity, the ratchet double, the output
   scaled exactly, every key set while the steps render the neutral bits, a
   step never adopting a gained voice, a looper replay taking the settings
   set after it was played); §3 Plays (Follow, One-shot over the option, Held
   under it, Loop looping three lengths inside its entry, unchoked by another
-  hit and the steps, fading on the release, at rate 16 still inside, reversed
-  and too short → Held, the looper recording the resolved hold); §3b Ratchet
+  hit and the steps, fading on the release, at rate 16 still inside, the
+  forward seam bridged; reversed: looping backward from the top for three
+  lengths, at rate 16 too, its seam bridged, its release; too short → Held;
+  the looper recording the resolved hold); §3b Ratchet
   (the periods for every rate and with the tune, evenly spaced, no click, one
   hit sounding, the release, the gain on each hit, leaving the mode and its
   undo stop it, filling the step with no gate, the eight-bar cap, a looper
@@ -216,10 +221,10 @@ and their title points at the Kit.
   skipping it, odd values, ½ dB rounding, an engine → set → engine round trip
   rendering every key's bits the same). **Checked to bite**: the gain
   multiply, Plays' resolution, the tune, the continuity guard, the loop's
-  choke guard and margin, a hard cut at the ratchet's retrigger, its tick and
-  its stop on release — each removed fails checks.
-- `web/selftest.mjs` §7e / §9f (682 → **712**): the protocol over the fake and
-  the page through real events (above); the descriptor parity covers `"keyp"`.
+  choke guard and margin, the backward wrap, a hard cut at the ratchet's
+  retrigger, its tick and its stop on release — each removed fails checks.
+- `web/selftest.mjs` §7e / §9g: the protocol over the fake and the page
+  through real events (above).
 
 ## Known / deferred
 

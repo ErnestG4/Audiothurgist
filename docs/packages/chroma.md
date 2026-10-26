@@ -9,7 +9,7 @@ adds it as one explicit edit, so nothing changes until you ask.*
 Owns `EditOp::SpreadKeys`, `Engine::SpreadPlan` / `EdSpreadKeys` /
 `kSpreadKeepPads` in `core/bb_engine.h` + `core/bb_edit.h` (and two lines of
 `core/bb_undo.h`); the `/* CHROMA */` lines of `src/audiothurgist.cpp`
-(ACTION 38, `HandleSpread`, the descriptor's `"keyp": 2`); keyp_check §6; the
+(ACTION 38, `HandleSpread`); keyp_check §6; the
 CHROMA block of `web/hostlink.js`, the Kit's Spread button and its prompt in
 `web/index.html`, `Editor.spreadKeys` and the history label in `web/edit.js`,
 the fake's spread in `web/demo.js`, selftest §7f / §9h. **Nothing here has run
@@ -86,7 +86,7 @@ sampler player who wants a melodic key *and* a drum pad or two (the usual
 case) gets it in one press. *Over* is one click away for "make this a
 one-sample instrument". This is a call for the bench (§10f.6, Calls 8).
 
-## Protocol — ACTION 38, capability `"keyp": 2`
+## Protocol — ACTION 38
 
 ```
 0x63 ACTION 38 SPREAD_KEYS ← u8 root 0..23, u8 flags (b0 keep pads) [, u8 gen]
@@ -101,9 +101,7 @@ one-sample instrument". This is a call for the bench (§10f.6, Calls 8).
   thread with no edit in flight): a spread that changes nothing answers OK
   with the same tableGen and posts nothing — no empty undo step
   (KEYS_FROM_MARKERS' rule). A stale gen is BAD_STATE even then.
-- `"keyp": 2` = everything `"keyp": 1` was, plus ACTION 38. A firmware before
-  it answers 38 with BAD_ARGS (unknown op); the page shows no button below 2.
-- No bytes added to the 0x60 tail: the spread moves `tableGen`, and the page
+- No bytes added to the 0x60 state: the spread moves `tableGen`, and the page
   reads the map (0x60) and the settings (0x69) again, as for KEY_PARAMS.
 
 ## The journal
@@ -141,7 +139,7 @@ changed. **`UndoRec` does not grow** (2 336 B, the union's `kp` member is
 ## The page
 
 The Kit's settings row ends with **Spread G1 chromatically (C1 … B2)** (the
-root named; hidden without `"keyp": 2`, off while a take runs or the link is
+root named; off while a take runs or the link is
 busy, off for an empty kit's key). The prompt above; then the cells and the
 Play pads say each key's tune in the accent's words the keyp work draws
 ("−7 st", "+2 dB · +4 st · ratchet ½"), and the history says "G1 spread
@@ -177,9 +175,9 @@ the root's entry is selected — they all play it.
   and the keep-pads exception each fail checks.
 - `web/selftest.mjs` §7f (the protocol over the fake) and §9h (the page through
   real clicks: the prompt and each answer, the words on the cells and the
-  pads, the history line, Undo, the no-prompt path, the empty kit,
-  `?demo=kit,nospread`) — 760 → **792**; checked to bite (the cents rule in
-  the fake, the prompt skipped, the no-op, keep ignored, the capability).
+  pads, the history line, Undo, the no-prompt path, the empty kit) — 760 →
+  **792** then; checked to bite (the cents rule in the fake, the prompt
+  skipped, the no-op, keep ignored).
   Looked at in Chromium at 390 and 1100 px, light and dark: no console
   errors, no horizontal scroll.
 
