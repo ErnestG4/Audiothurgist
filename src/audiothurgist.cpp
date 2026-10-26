@@ -232,7 +232,7 @@ struct HoldButton : IButton
     float TimeHeldMs() const override { return Pressed() ? b.TimeHeldMs() - ms : 0.f; }
 };
 static HoldButton gLockBtn(hw.buttons[kButtonB1], 300.f);
-/* The motion arena (11.5 KB) lives in SDRAM, not DTCM (review M7); the
+/* The motion arena (11.5 KB) lives in SDRAM, not DTCM; the
  * ParamLock object itself must stay in .bss (its ctor runs before hw.Init). */
 using Locks = ParamLock<2 * kNumPots>;
 static uint16_t ALCHEMY_SDRAM_BSS gLockArena[Locks::kArenaSamples];
@@ -336,9 +336,7 @@ static ClockSel gClockSel;
  * quantised with note-CENTER windows (boundaries are the knife-edge bug
  * class), negatives clamp to key 0 — through the Kit's key table
  * (Engine::KeySlice). Voice map: J6 gate, J5 style; Brain map: J5 gate,
- * plain. Replace-don't-layer; CHOKE vs PUNCH dropdown. (The M3 MONO keymap
- * — 0 V mute, ten latched modifier keyswitches, sixteen slice keys two
- * octaves up — went in v0.13.) */
+ * plain. Replace-don't-layer; CHOKE vs PUNCH dropdown. */
 static constexpr uint8_t kVoiceVoctChan = 1u;  /* J4 */
 static constexpr uint8_t kVoiceGateChan = 2u;  /* J5 */
 static int            gCvKey     = -1;    /* BETA: the key the jacks called last (released on the gate's fall / a map change) */
@@ -386,7 +384,7 @@ struct GateLvlSel
     uint8_t sel = 0;
 };
 static GateLvlSel gGateLvlSel;
-/* ── GRAMMAR (jungle branch) ────────────────────────────────────────────
+/* ── GRAMMAR ────────────────────────────────────────────────────────────
  * Browser dropdown: which pattern grammar the engine speaks. Classic is the
  * shipped BreakFix generator (byte-identical); Collins adds the Chop Codex
  * upgrades (position-weighted moves, odd cuts, fill + snap-back, stutter
@@ -436,7 +434,7 @@ static Sel gKeyPlays;    /* 17 SAMPLE: Voice map keys play their slice, or read 
 /* SAMPLE end */
 /* LOOPER (docs/packages/sample-looper.md): Play's memory. Off / 8ths = the
  * unquantized looper (events at their own sample; 8ths snaps at record time);
- * 16ths = the punch-into-steps bar exactly as before. Bytes 18..20 belong to
+ * 16ths = the punch-into-steps bar. Bytes 18..20 belong to
  * the record phase (Sampling, Record Source, Record). */
 static const char* kQuantizeDisp = "{\"kind\":\"enum\",\"labels\":[\"Off (as played)\",\"16ths (punch the bar)\",\"8ths\"]}";
 static Sel gQuantize;    /* 21 LOOPER: audio reads .sel */
@@ -788,7 +786,7 @@ static bool           gWasExt   = false; /* ext/internal transition tracking */
  * since the tick, so a control-thread stall (HostLink, LED render, a load)
  * no longer freezes the playhead and then jumps it — the "thinking moment"
  * that broke verbatim runs through the 160-sample continuity window. */
-/* ── Time base (v0.9.6) ──────────────────────────────────────────────
+/* ── Time base ───────────────────────────────────────────────────────
  * daisy::System::GetUs() is TIM2 (200 MHz, 32-bit) divided down: it WRAPS
  * EVERY 21.5 s (CNT / 200), while everything downstream — MusicalClock,
  * ClockFollower, CvGate, our ext window and diag windows — assumes a 2^32-µs
@@ -822,7 +820,7 @@ static volatile uint16_t gDiagAudioUs   = 0;   /* worst audio-callback duration,
 static volatile uint16_t gDiagJumps     = 0;   /* playhead forward jumps > 1.5 steps (lifetime) */
 static volatile uint16_t gDiagRegens    = 0;   /* pattern regenerations (lifetime) */
 static volatile uint32_t gDiagAudioCur  = 0;   /* audio: running max, rolled by OnPoll */
-/* Stall forensics (v0.9.5): WHAT the control thread was doing when the
+/* Stall forensics: WHAT the control thread was doing when the
  * worst poll gap of the last second happened, how late a gate write lands
  * after the audio thread armed it, and audio callbacks over budget.
  * Phases: 1 in OnPoll · 2 SDK between polls (host poll/delay) · 3 OnFrame ·
@@ -1083,7 +1081,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
                        engine.SyncRecordedMeta();   /* SAMPLE */
                        gReclass = false; }
     /* SAMPLE: a call carries its key and the held rule; a release follows the call it belongs to */
-    if(gRelKey >= 0) { engine.ReleaseKey(gRelKey); gRelKey = -1; }   /* the fall preceded the rise: release first (review M3) */
+    if(gRelKey >= 0) { engine.ReleaseKey(gRelKey); gRelKey = -1; }   /* the fall preceded the rise: release first */
     if(gCallReq)     { engine.CallSlice(gCallIdx, gCallMul, gCallRev, gCallPunch, gCallRat, gCallLen, gCallHeld, gCallKey); gCallReq = false; }
     /* SAMPLE end */
     /* EDIT: one edit per block, before Process; clearing the flag is the ack */
@@ -1184,7 +1182,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
         if(fired)
         {
             int sl = engine.gateSlice[c];
-            float sa = (sl >= 0 && sl < bb::Engine::kMaxTable) ? engine.sliceSal[sl] : 1.f;   /* recorded keys too (review L10) */
+            float sa = (sl >= 0 && sl < bb::Engine::kMaxTable) ? engine.sliceSal[sl] : 1.f;   /* recorded keys too */
             volts = bb::GateVolts(vel, sa, engine.gateAccent[c]);
         }
         bb::GateArm(gGateCd[c], gGateLvl[c], gGateRetrig[c], fired, glen, volts, n);
@@ -1558,9 +1556,9 @@ static void OnPoll(uint32_t /*t_ms*/)
         gClock.SetSteered(false);
         if(!gClock.Running() || gClock.TicksPerUs() <= 0.)
         {
-            /* Lost BEFORE lock with a stopped NCO (the v0.7.1 review finding).
-             * Cannot happen now that the NCO runs through acquisition, kept
-             * as the safety net: restart at the pre-clock tempo. */
+            /* Lost BEFORE lock with a stopped NCO. Cannot happen while the
+             * NCO runs through acquisition; the safety net: restart at the
+             * pre-clock tempo. */
             gClock.SetBpm(gPreExtBpm);
             gClock.Start();
         }
@@ -1658,7 +1656,7 @@ static void OnPoll(uint32_t /*t_ms*/)
         gSnap[wi].tick32  = gLastTick;   /* the tick NowUs() just read */
         gSnap[wi].running = gClock.Running();
         gSnap[wi].map     = gMap;
-        __asm__ volatile("dmb" ::: "memory");   /* record complete before the index (review B5) */
+        __asm__ volatile("dmb" ::: "memory");   /* record complete before the index */
         gSnapIdx = wi;
         /* Diagnostics: worst poll gap, worst audio callback, pulse jitter — rolled per second. */
         static uint32_t s_lastUs = 0, s_rollUs = 0, s_gapMax = 0;
@@ -1701,7 +1699,7 @@ static void OnPoll(uint32_t /*t_ms*/)
     const float j4v   = hw.cv[kVoiceVoctChan].Volts();
     const int   j4key = bb::keys::KeyOf(j4v, s_j4Last);
     gJ4mV = bb::keys::MilliVolts(j4v); gJ4Key = (uint8_t)j4key;
-    /* a key held from the jacks when the map changes is released (review L1, kept); the page's held pads are its own */
+    /* a key held from the jacks when the map changes is released; the page's held pads are its own */
     static uint8_t s_prevMap = 0xFFu;
     if(gJackMapCur != s_prevMap) { if(gCvKey >= 0) gRelKey = gCvKey; gCvKey = -1; s_prevMap = gJackMapCur; }
     /* BETA (2026-10-23, "sometimes playing the last note"): the gate's sample-and-hold —
@@ -1749,7 +1747,7 @@ static void OnPoll(uint32_t /*t_ms*/)
                         if(!gKeyTake && !gKeyTakeDone && !gTakeActive && !PadBusy() /* PADS */ && engine.RecArm(j4key))
                         { gKeyTake = true; gKeyTakeKey = j4key; gRecPeak = 0.f; }
                     }
-                    else engine.ClearKey(j4key);   /* 8: Clear (forgets the recorded entry's key too, review L2) */
+                    else engine.ClearKey(j4key);   /* 8: Clear (forgets the recorded entry's key too) */
                 }
             }
             /* RECORD end */
@@ -1969,7 +1967,7 @@ static void OnPoll(uint32_t /*t_ms*/)
 /* Clock keep-alive for long control-thread analyses (loads, re-slices): the
  * pure core calls bb::Yield() at ~ms granularity; we tick the NCO and
  * republish the audio thread's snapshot so its extrapolation never reaches
- * the 50 ms cap — the loop keeps time through a load (review M6). Same
+ * the 50 ms cap — the loop keeps time through a load. Same
  * thread as OnPoll, never re-entered from it. */
 static void KeepClock()
 {
@@ -2266,14 +2264,14 @@ static void PrepareMaterial(int len, int* cues, int nCues, bool stereo, int know
     if(knownBars > 0) bb::NormalisePlanes(gLoad, stereo ? gLoadR : nullptr, len);
     else
     {
-        len = bb::ConditionBuffer(gLoad, len, kSr, gDet, &ci, gBars.sel == 0 /* review M5 */);
+        len = bb::ConditionBuffer(gLoad, len, kSr, gDet, &ci, gBars.sel == 0);
         if(stereo) bb::ConditionPlane(gLoadR, ci, len);   /* the R plane takes the same cut and gain */
     }
     gCondBars = ci.bars > 0 ? ci.bars : knownBars;
     gPendCues = nCues >= 2;
 
     /* cue chunk positions are file positions: re-base by the head cut
-     * (silence + downbeat) and drop what fell outside (review M1) —
+     * (silence + downbeat) and drop what fell outside —
      * bb::CuesToOnsets, the same code factored out */
     if(nCues >= 2) gPendN = bb::CuesToOnsets(cues, nCues, ci.trimmedStart, len, kSr, gPendOnsets, bb::Engine::kMaxSlices);
     else           gPendN = gDet.Detect(gLoad, len, kSr, gPendOnsets, kMaxOnsets, nullptr);
@@ -2414,7 +2412,7 @@ static int AddSetEntry(const char* name)
 static bool SnapshotLooper()
 {
     gSetSnapReq = true;
-    {   /* wait ≥ 2 audio blocks by the clock, not by iterations (review M5) */
+    {   /* wait ≥ 2 audio blocks by the clock, not by iterations */
         const uint32_t t0 = TickNow();
         while(gSetSnapReq && (TickNow() - t0) < 2000u * gTicksPerUs) bb::Yield();
     }
@@ -2486,7 +2484,7 @@ static void SaveSet(const char* name)
     /* room: the WAV's exact size + the JSON's ceiling against FatFs's cached free count (unknown → try) */
     bbwav::WriteSpec spec;
     spec.left = engine.buf; spec.right = s.stereo ? engine.bufR : nullptr; spec.len = s.len; spec.sr = (uint32_t)kSr;
-    spec.cues = nullptr; spec.nCues = s.nSlices;   /* size estimate only (review L8) */
+    spec.cues = nullptr; spec.nCues = s.nSlices;   /* size estimate only */
     const uint32_t need = bbwav::FileSize(spec) + (uint32_t)bb::kSetJsonMax;
     uint32_t totalKib = 0, freeKib = 0; bool freeValid = false;
     if(sd.VolumeKib(totalKib, freeKib, freeValid) && freeValid && (uint64_t)freeKib * 1024u < (uint64_t)need + 65536u)
@@ -2496,7 +2494,7 @@ static void SaveSet(const char* name)
     bb::SetLockPath(name, lock, sizeof lock);
     sd.Lock(lock);
     gSetTotal = need - (uint32_t)bb::kSetJsonMax; gSetDone = 0;
-    f_unlink(json);   /* a failed or interrupted save leaves at most a WAV, never a mismatched pair (review M2) */
+    f_unlink(json);   /* a failed or interrupted save leaves at most a WAV, never a mismatched pair */
     bool wavOk = f_open(&gSetFil, wav, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK;
     if(wavOk)
     {
@@ -3029,7 +3027,7 @@ static void HandleCard(const hostlink::ParsedFrame& f, hostlink::FrameWriter& w)
 static void ServiceLoad()
 {
     gDiagPhase = 8;
-    if(!gLoadReq || gApply || gReapply || gTakeActive /* RECORD: the loop take owns gLoad */ || PadBusy() /* PADS: waits for the drop */) return;   /* review L1 */
+    if(!gLoadReq || gApply || gReapply || gTakeActive /* RECORD: the loop take owns gLoad */ || PadBusy() /* PADS: waits for the drop */) return;
     gLoadReq = false;
 
     /* SETS: the entry — from the list, or ACTION 15's name (gLoadIdx = -1) */
@@ -3073,7 +3071,7 @@ static void ServiceLoad()
  *                     u8 chop(0..255), u8 histN, u8 histDepth, u8 callFlash,
  *                     f32 bpm, f32 mult, i8 stepSrc[64], u8 stepClass[64],
  *                     u16 pollGapUs, u16 audioUs, u16 jumps, u16 regens (diag),
- *                     u16 lockMask, f32 nativeBpm, u8 gridBars, u8 barsOpt (v0.8.0)
+ *                     u16 lockMask, f32 nativeBpm, u8 gridBars, u8 barsOpt,
  *                     u16 jitterUs, u8 multZone, u8 clkFlags, u16 jitterRmsUs (CLOCK, 164..169)
  *                     … u8 jackMap (175), u8 looperEvents (176, LOOPER)
  *   0x63 ACTION ops 7 clear locks · 8 page(u8 0/1)
@@ -3954,9 +3952,9 @@ struct StateExt : hostlink::IHostlinkExtension
                 memcpy(&u, &bpm, 4); w.U32(u); memcpy(&u, &mult, 4); w.U32(u);
                 w.Bytes((const uint8_t*)engine.stepSrc, bb::Engine::kMaxSlices);
                 w.Bytes(engine.stepClass, bb::Engine::kMaxSlices);
-                /* diagnostics tail (v0.7.3): u16 pollGapUs, u16 audioUs, u16 jumps, u16 regens */
+                /* 148 diagnostics: u16 pollGapUs, u16 audioUs, u16 jumps, u16 regens */
                 w.U16(gDiagPollGapUs); w.U16(gDiagAudioUs); w.U16(gDiagJumps); w.U16(gDiagRegens);
-                /* v0.8.0 tail: u16 lockMask (bit page*6+pot), f32 nativeBpm, u8 bars(grid), u8 barsOpt */
+                /* 156: u16 lockMask (bit page*6+pot), f32 nativeBpm, u8 bars(grid), u8 barsOpt */
                 uint16_t lm = 0;
                 for(uint8_t pg = 0; pg < 2; pg++)
                     for(uint8_t p = 0; p < kNumPots; p++)
@@ -3969,7 +3967,7 @@ struct StateExt : hostlink::IHostlinkExtension
                  * above is the applied one); u8 clkFlags b0 P2 engaged · b1 switch pending ·
                  * b2 lock aligned (~2 s) · b4-7 ext transitions mod 16; u16 jitterRmsUs. */
                 w.U16(gDiagJitterUs); w.U8((uint8_t)gZone.zone); w.U8(gDiagClkFlags); w.U16(gDiagJitterRmsUs);
-                /* v0.9.5 forensics: u8 stallPhase, u16 gateLateUs, u16 overruns (170..174) */
+                /* 170 forensics: u8 stallPhase, u16 gateLateUs, u16 overruns */
                 w.U8(gDiagStallPhase); w.U16(gDiagGateLateUs); w.U16(gDiagOverruns);
                 w.U8(gJackMapCur == 1u ? 1u : 0u);   /* 175: jack map (0 Brain, 1 Voice) */
                 /* WEB: sample-mode tail (176..218), fed by RECORD's state and LOOPER's count. */
@@ -4122,7 +4120,7 @@ struct StateExt : hostlink::IHostlinkExtension
                      * consume on their gesture paths; 11 is the Key Plays option itself. */
                     case 9:   /* WEB → RECORD: arm a take into key */
                         if(f.len < 2 || f.body[1] >= bb::Engine::kKeys) { w.U8(2u); return; }
-                        /* a second arm from the browser STOPS a browser take (review H1) */
+                        /* a second arm from the browser STOPS a browser take */
                         if(!(gKeyTake && gWebTake) && (engine.recArmed || engine.recPending || gKeyTake || gTakeActive || PadBusy())) { w.U8(3u); return; }   /* BAD_STATE; PADS: a drop owns freePos */
                         gWebRecArm = (int8_t)f.body[1];
                         break;
@@ -4377,7 +4375,7 @@ int main()
         if(len > 0)
         {
             bb::ConditionInfo ci;                                  /* SLICE */
-            gDet.mode = gOnsetDet.sel;                             /* review M4: SDRAM object, no NSDMI */
+            gDet.mode = gOnsetDet.sel;                             /* an SDRAM object: no NSDMI, set here */
             len = bb::ConditionBuffer(gPlay, len, kSr, gDet, &ci, gBars.sel == 0);
             gCondBars = ci.bars;
             int no = (nCues >= 2) ? 0 : gDet.Detect(gPlay, len, kSr, gPendOnsets, kMaxOnsets, nullptr);
@@ -4385,21 +4383,20 @@ int main()
             {
                 for(int i = 0; i < nCues && no < bb::Engine::kMaxSlices; i++)
                 {
-                    const int q = cues[i] - ci.trimmedStart;   /* review M1 */
+                    const int q = cues[i] - ci.trimmedStart;
                     if(q >= 0 && q < len) gPendOnsets[no++] = q;
                 }
                 if(no == 0) gPendOnsets[no++] = 0;
             }
             gPendCues = nCues >= 2;
             gPendN    = no;
-            /* SLICE: the boot load takes the same bar rule as a later load
-             * (v0.8.0 sliced it by the prior alone) */
+            /* SLICE: the boot load takes the same bar rule as a later load */
             int barsN = 0;
             const int nsl = SliceCountFor(gPlay, len, gPendOnsets, no, gCondBars, &barsN);
             gGridBars = barsN > 0 ? barsN : 1;   /* RECORD */
             static uint8_t cls[bb::Engine::kMaxSlices];
             ClassifySteps(gPlay, len, cls, gClass.mode, gSal, nsl, engine.stepBands /* GATES: audio not started */);
-            memcpy(engine.sliceSal, gSal, sizeof gSal);   /* GRAM tiers at boot (review M3); SAMPLE: the source's size */
+            memcpy(engine.sliceSal, gSal, sizeof gSal);   /* GRAM tiers at boot; SAMPLE: the source's size */
             engine.swing = SwingFor(len, gPendOnsets, no, nsl, barsN);   /* SLICE: boot honours Swing */
             engine.SetMaterial(gPlay, len, kSr, gPendOnsets, no, cls, nsl, nullptr, kBufMax /* SAMPLE */);
             ComputeDensity(gPlay, len, engine.sliceDens, engine.nSlices);   /* PLAY: audio not started yet */
@@ -4417,7 +4414,7 @@ int main()
         memcpy(gPendOnsets, onsets, sizeof(int) * (size_t)no);   /* SLICE: a later Bars/Swing/Onsets
         gPendN = no; gPendCues = false;                              re-apply needs the table (review) */
         ClassifySteps(gPlay, len, cls, gClass.mode, gSal, 0, engine.stepBands /* GATES */);
-        memcpy(engine.sliceSal, gSal, sizeof gSal);   /* review M3; SAMPLE: the source's size */
+        memcpy(engine.sliceSal, gSal, sizeof gSal);   /* GRAM tiers; SAMPLE: the source's size */
         engine.SetMaterial(gPlay, len, kSr, onsets, no, cls, 0, nullptr, kBufMax /* SAMPLE */);
         ComputeDensity(gPlay, len, engine.sliceDens, engine.nSlices);   /* PLAY: audio not started yet */
         ComputeEnvelope(gPlay, len, gEnv);
@@ -4426,7 +4423,7 @@ int main()
     gKitOnCard = len > 0 ? len : engine.bufLen;   /* PADS: a card file, or the synth break (made again at every boot) */
     gClock.SetBpm(engine.NativeBpm());
     gClock.Start();
-    bb::gYield = KeepClock;   /* loads no longer freeze the playhead */
+    bb::gYield = KeepClock;   /* a load yields to the clock: the playhead keeps time through it */
     gFollower.SetLossPolicy(ClockLossPolicy::Freewheel);
     /* CLOCK: no auto-start. The NCO is kept running through acquisition (see
      * OnPoll), and DeclareLock's Start() on an already-running NCO is not a
@@ -4436,10 +4433,10 @@ int main()
     gFollower.SetAutoStart(false);
     /* NOT gFollower.Enable() here: Enable() does SetSteered(true) + Stop() +
      * SetTicksPerUs(0) while it waits for lock, and SetBpm is a no-op while
-     * steered — arming at boot froze unpatched playback after one step
-     * (v0.3.3/0.3.4). The PLL is armed on the internal→ext transition in
+     * steered — arming at boot froze unpatched playback after one step.
+     * The PLL is armed on the internal→ext transition in
      * OnPoll, exactly when a clock actually appears. */
-    gClkEdge.Init(kNumCvInputs);   /* edge detector needs Init (channels) — never called in v0.3.x */
+    gClkEdge.Init(kNumCvInputs);   /* the edge detector needs Init (channels) */
 
     host.Extend(fs_ext);
     host.Extend(gStateExt);          /* web frontend: state / envelope / scope / actions */
@@ -4571,7 +4568,7 @@ int main()
             gClockSel.dirty = false;
             gFollower.SetExtPpqn(kPpqnTable[gClockSel.sel]);
         }
-        /* GRAMMAR (jungle branch): mode → engine, reroll so it's audible now */
+        /* GRAMMAR: mode → engine, reroll so it's audible now */
         if(gGrammar.dirty && !gPendReroll)
         {
             gGrammar.dirty     = false;

@@ -91,7 +91,7 @@ inline int MarkersToCues(const int* m, int n, int len, int minGap, int* cues, in
     return nc;
 }
 
-/* The load pipeline's cue path (ServiceLoad, review M1), factored: cue
+/* The load pipeline's cue path (ServiceLoad), factored: cue
  * positions are FILE positions — re-base by the conditioning's head cut,
  * drop what fell outside [0, len), sort, and open the table with 0 unless
  * the first cue lies within 20 ms of it. `cues` is rewritten in place
@@ -172,7 +172,7 @@ struct TakeRecorder
         target = (targetLen > 0 && targetLen < capacity) ? targetLen : capacity;
         pos    = 0;
         peak   = 0.f;
-        __asm__ volatile("" ::: "memory"); running = true;   // last: publishes the take to the audio thread (review L3)
+        __asm__ volatile("" ::: "memory"); running = true;   // last: publishes the take to the audio thread
     }
     /* AUDIO. Append a block; `inR` feeds R (nullptr: L copied to R). */
     void Feed(const float* in, const float* inR, int n)

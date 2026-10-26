@@ -1100,7 +1100,7 @@ struct Engine
     int ReadEnd(int idx) const
     {
         if(idx < nSlices) return bufLen;
-        const int e = slices[idx].start + slices[idx].len;   /* clamped: a torn Slice read must stay in the plane (review L4) */
+        const int e = slices[idx].start + slices[idx].len;   /* clamped: a torn Slice read must stay in the plane */
         return e > bufCap ? bufCap : (e < 0 ? 0 : e);
     }
     /* PADS (docs/packages/pads.md): a key call on a RECORDING — an entry past the grid that starts at or past the
@@ -1378,7 +1378,7 @@ struct Engine
         recStart = freePos;
         recPos   = freePos;
         recFull  = false;
-        __asm__ volatile("" ::: "memory"); recArmed = true;   // last: publishes the take to the audio thread (compiler fence, review L3)
+        __asm__ volatile("" ::: "memory"); recArmed = true;   // last: publishes the take to the audio thread (compiler fence)
         return true;
     }
     // AUDIO. Append n input samples at the write head while armed. `inR`
@@ -1436,7 +1436,7 @@ struct Engine
     // count, key — each step leaves a consistent table.
     int CommitSlice(int key, int start, int len, uint8_t cls, float sal, float dens, bool hit)
     {
-        if(!buf || key < 0 || key >= kKeys || len < kRecMin || start < 0 || start > bufCap || len > bufCap - start) return -1;   /* overflow-safe (review M1) */
+        if(!buf || key < 0 || key >= kKeys || len < kRecMin || start < 0 || start > bufCap || len > bufCap - start) return -1;   /* overflow-safe */
         int t = RecordedEntry(key);
         if(t < 0)
         {
@@ -1516,7 +1516,7 @@ struct Engine
     static constexpr int kLooperFiresPerBlock = 48;
     /* Style 8 / browser Clear: the key goes back to its span slice AND its
      * recorded entry forgets the key, so a re-apply (DefaultKeyTable) does
-     * not re-claim it (review L2). The region stays until the next load. */
+     * not re-claim it. The region stays until the next load. */
     void ClearKey(int key)
     {
         if(key < 0 || key >= kKeys) return;
@@ -1910,7 +1910,7 @@ struct Engine
         bool on[kVoices];
         for(int v = 0; v < kVoices; v++) on[v] = voices[v].active;
         int seg = 0;
-        int fires = 0;   /* per-block cap: with 8ths quantise 256 events can share one block (review M4) */
+        int fires = 0;   /* per-block cap: with 8ths quantise 256 events can share one block */
         if(looper.n > 0 && LooperActive())
             for(int pass = 0; pass < 3; pass++)
             {
@@ -2012,7 +2012,7 @@ struct Engine
          * voice would gate before the next hit. The tail policy then loops
          * it; such a voice is not extendable, so no lookahead grace. */
         /* consumption of the slot in SOURCE samples: pitch × the slot's own
-         * slice length (under swing the odd slots are shorter — review M2) */
+         * slice length (under swing the odd slots are shorter) */
         const float slotSrc = swung ? (float)slices[k].len : nativeStep;
         const bool outlast = (tailMode == 1 || tailMode == 2) && !stepRev[k] && !reverse
                              && pitch * slotSrc - (float)cell.len > 160.f;

@@ -40,7 +40,7 @@ struct OnsetDetector
     static constexpr int   kPeakM     = 3;      // mean window −m·w … +w
     static constexpr float kPeakDelta = 0.35f;  // × global mean of the function
 
-    int mode;   // no in-class initialiser: instances live in NOLOAD SDRAM (review M4)
+    int mode;   // no in-class initialiser: instances live in NOLOAD SDRAM
 
     float win[kN];
     float re[kN], im[kN];

@@ -392,7 +392,7 @@ inline void ClassifySteps(const float* x, int len, float sr, uint8_t* cls, int m
     int nsl = nslOverride >= 1 ? nslOverride : GridSlices(len, sr);
     if(nsl > Engine::kMaxSlices) nsl = Engine::kMaxSlices;
     const int step = nsl > 0 ? len / nsl : 0;
-    if(step < 1)   /* sub-slice material: all silent, no NaN (review L3) */
+    if(step < 1)   /* sub-slice material: all silent, no NaN */
     {
         for(int s = 0; s < Engine::kMaxSlices; s++) { cls[s] = 3; if(sal) sal[s] = 0.f; if(densOut) densOut[s] = 0.f; if(bandsOut) bandsOut[s] = 0; }
         return;
