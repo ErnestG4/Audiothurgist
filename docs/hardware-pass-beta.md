@@ -7,12 +7,12 @@ proves the ground under the next, so **stop and report at the first
 failure**. Write **ok** or what you saw next to each box. "Listen for" is what
 tells pass from fail.
 
-Setup: `audiothurgist-beta5-sampler-7e9c4d3.bin` from the Desktop's
+Setup: `audiothurgist-beta6-chromatic-30f3f15.bin` from the Desktop's
 `Audiothurgist-flash/` flashed (0.13.0-beta: the CV fix, the card folder,
 pad drops and 45 s of sample memory, the sampler start-up, each key's own
-gain / tune / Plays incl. Loop and Ratchet; md5 36c7d426…).
-`beta4-pads-553cf02` is the same without the start-up and the key
-settings, and `beta3-card-190ce8d` without the pads, if a bug in the new
+gain / tune / Plays incl. Loop and Ratchet, Spread across keys; md5
+2607927a…). `beta5-sampler-7e9c4d3` is the same without the spread,
+`beta4-pads-553cf02` without the start-up and the key settings, and `beta3-card-190ce8d` without the pads, if a bug in the new
 work gets in the way of the rest. **Before flashing**, do §10d step 1 on
 the firmware you have now;
 a card with the Amen and one break with no hats; the page from
