@@ -230,7 +230,13 @@ class FakeDevice {
      * branch expects (Classic, running). Sampler: Pads, the transport stopped, as the firmware's boot. */
     if (this.opts.bootCard) this.cardFs = this.opts.bootCard;
     this.startIn = !this.opts.pads ? 1 : !this.cardMounted || this.opts.bootCard ? this.startupOnCard() : this.opts.startIn != null ? this.opts.startIn : 1;   /* no card: Sampler, as the firmware */
+    this.lastDrum = this.grammar !== GRAM.pads ? this.grammar : 0;   /* START: ▶ in Pads comes back to this beat */
     if (this.opts.pads && this.startIn === 0) { const g = this.grammar; this.options[O['grammar.mode']] = GRAM.pads; this.setGrammar(GRAM.pads, g); this.muted = true; }
+  }
+  /* START: as the firmware's TransportStart — a start made in Pads brings back the last drum grammar first */
+  transportStart() {
+    if (this.grammar === GRAM.pads) { const g = this.grammar; this.options[O['grammar.mode']] = this.lastDrum; this.setGrammar(this.lastDrum, g); }
+    this.muted = false;
   }
   /* START: what the card's startup.json says (the firmware's bb::StartupRead: anything but "saved" is Sampler) */
   startupOnCard() {
@@ -796,6 +802,7 @@ class FakeDevice {
   looperClear() { if (this.grammar === GRAM.play) this.src.fill(-1); this.loopEvents = []; this.looperEvents = 0; }
   /* a grammar change: Play starts from an empty loop, the others draw a fill */
   setGrammar(g, before) {
+    if (g !== GRAM.pads) this.lastDrum = g;
     if (g === before) return; if (g === GRAM.play) { this.src.fill(-1); this.loopEvents = []; this.looperEvents = 0; } else this.dice();
     /* entering Pads puts the markers on the keys once, as its own undo step */
     if (g === GRAM.pads && this.opts.keys && this.liveMarkers().length && this.bufLen) { const sn = this.tableSnap(); this.journalCheck(); this.edKeysFromMarkers(); this.bumpGen(); this.journalPush(sn); }
@@ -1057,7 +1064,7 @@ class FakeDevice {
         switch (op) {
           case 0: this.dice(); break;
           case 1: this.newMaterial(); this.histN = Math.min(16, this.histN + 1); break;
-          case 2: this.muted = !this.muted; break;   /* the toggle (0.12's only transport) */
+          case 2: if (this.muted) this.transportStart(); else this.muted = true; break;   /* the toggle (0.12's only transport) */
           case 3: if (a < this.nSlices && b < this.nSlices) { this.src[a] = b; this.callFlash = b; this.callT = 4; } break;   /* the flash is the slice */
           case 4: this.flowing = !!a; break;
           case 5: this.histDepth = Math.min(this.histN - 1, a); break;
@@ -1083,7 +1090,7 @@ class FakeDevice {
             if (!this.opts.keys) { ok = false; break; }
             return Uint8Array.from(this.applyEdit(op, body));
           case 32: { if (!this.opts.keys || body.length < 3) { ok = false; break; } const r = this.playKey(a, b); if (r) { U8(r); return Uint8Array.from(w); } break; }
-          case 35: if (!this.opts.keys || body.length < 2 || a > 1) ok = false; else this.muted = !!a; break;
+          case 35: if (!this.opts.keys || body.length < 2 || a > 1) ok = false; else if (a) this.muted = true; else this.transportStart(); break;
           /* START: 40 START_IN(0 Sampler / 1 As saved) — written to the card for the next power-up; NO_CARD without one */
           case 40: if (!this.opts.pads || body.length < 2 || a > 1) ok = false;
             else if (!this.cardMounted) { U8(21); return Uint8Array.from(w); }
