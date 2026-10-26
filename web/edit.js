@@ -171,6 +171,10 @@ class History {
   redo(gen) { for (let i = 0; i < this.items.length; i++) if (this.items[i].undone) { this.items[i].undone = false; break; } this.gen = gen; }
   /* the state's tail: a gen the page has not labelled is the module's; a redo depth of 0 means nothing is undone */
   note(gen, undoDepth = 0, redoDepth = 0) {
+    /* a state behind an edit's reply (polled before the module applied it, or sent before the edit and answered
+     * after): the gens only move forward, so one up to 127 behind the newest is stale — dropped whole, or it read
+     * as "changed on the module" and its old redo depth wiped the undo's mark (the selftest flake, 2026-10-26) */
+    if (gen != null && this.gen != null && gen !== this.gen && ((this.gen - gen) & 255) < 128) return false;
     this.undoDepth = undoDepth; this.redoDepth = redoDepth;
     if (!redoDepth && this.items.some(x => x.undone)) this.items = this.items.filter(x => !x.undone);
     if (gen == null) return false; if (this.gen == null) { this.gen = gen; return false; } if (gen !== this.gen) { this.push(gen, histLabel('module')); return true; } return false;
