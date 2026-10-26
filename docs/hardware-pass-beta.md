@@ -7,10 +7,14 @@ proves the ground under the next, so **stop and report at the first
 failure**. Write **ok** or what you saw next to each box. "Listen for" is what
 tells pass from fail.
 
-Setup: `audiothurgist-beta4-pads-553cf02.bin` from the Desktop's
+Setup: `audiothurgist-beta5-sampler-7e9c4d3.bin` from the Desktop's
 `Audiothurgist-flash/` flashed (0.13.0-beta: the CV fix, the card folder,
-pad drops and 45 s of sample memory; `beta3-card-190ce8d` is the same
-without the pads, if a pads bug gets in the way of the rest);
+pad drops and 45 s of sample memory, the sampler start-up, each key's own
+gain / tune / Plays incl. Loop and Ratchet; md5 36c7d426…).
+`beta4-pads-553cf02` is the same without the start-up and the key
+settings, and `beta3-card-190ce8d` without the pads, if a bug in the new
+work gets in the way of the rest. **Before flashing**, do §10d step 1 on
+the firmware you have now;
 a card with the Amen and one break with no hats; the page from
 https://ernestg4.github.io/Audiothurgist/ on the desktop and, if you have the
 OTG adapter, the phone. Close `/program`.
@@ -21,9 +25,9 @@ the old way (WAVs in the root) boots to the synth break with nothing on P5.
 moves your breaks into the new folder and proves the copy, and everything
 from §0 on then has the Amen to play.
 
-**With a `beta-sampler` build** the module powers up as a sampler (Pads, the
+**This build powers up** as a sampler (Pads, the
 pattern stopped). Do **§10d's first three steps right after flashing** (they
-check your presets and the new start-up); then pick Classic on the page and
+check your presets and the new start-up); then hold B1 (the boot preset's beat comes back) or pick Classic on the page and
 press ▶ before §0 — or set Options → Start-up → *As saved* and power-cycle,
 and the rest of this pass boots as written.
 
