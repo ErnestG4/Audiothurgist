@@ -975,6 +975,137 @@ await link.start();
   await lf.close();
 }
 
+/* ── 7d. PADS (0x68, capability "pads": 1): the tail from 293, the plan and the PCM16 encoder, then a drop over the fake
+ *        module byte for byte, one undo step, a replaced pad held, every refusal both ways (a card job or a load while a
+ *        drop is open), the abort and the 5 s timeout, New empty kit, and a pads-only kit end to end through a set save,
+ *        a power-cycle and the load back ── */
+{
+  /* the tail, synthetic */
+  const b = stateBody(315); const dvb = new DataView(b.buffer);
+  b[293] = 1; b[294] = 64; b[295] = 1; b[296] = 7; b[297] = 5; b[298] = 1 | 2; dvb.setUint32(299, 1234567, true); dvb.setUint32(303, 2148000, true); dvb.setUint32(307, 9600, true); dvb.setUint32(311, 0x800021, true);
+  const sp = HL.parseState(b).pads;
+  check('state 315: the pads tail (state, progress, result, seq, key, flags, free, total, held, the pads\' mask)', sp && HL.PADS.STATE[sp.state] === 'receiving' && sp.progress === 64 && HL.PADS.RESULT[sp.result] === 'no room' && sp.seq === 7 && sp.key === 5
+    && sp.unsaved && sp.noBreak && !sp.madeStereo && sp.free === 1234567 && sp.total === 2148000 && sp.held === 9600 && sp.mask === 0x800021, JSON.stringify(sp));
+  check('state 293: no pads tail (null); 255 → key −1', HL.parseState(stateBody(293)).pads === null && (b[297] = 255, HL.parseState(b).pads.key === -1));
+  /* the plan and the encoder */
+  const q1 = HL.padPlan(2, 44100, 44100 * 3, null), q2 = HL.padPlan(6, 48000, 48000, 12000), q3 = HL.padPlan(1, 96000, 96000, 300);
+  check('padPlan: 3 s at 44.1 → 144000 frames at 48 k, stereo, uncut; 6 channels → 2, cut to the room; under 480 frames: too short', q1.frames === 144000 && q1.channels === 2 && !q1.cut && q1.resample && q1.bytes === 144000 * 4
+    && q2.channels === 2 && q2.frames === 12000 && q2.cut && !q2.resample && q3.frames === 300 && q3.tooShort && q3.cut, JSON.stringify([q1, q2, q3]));
+  const pc = HL.encodePcm16([Float32Array.of(0, 0.5, -1, 2, NaN), Float32Array.of(0.25, -0.25, 1, -2, 0)]), pdv = new DataView(pc.buffer);
+  check('encodePcm16: raw interleaved L R, no header, the encodeWav scale, clamped, NaN → 0', pc.length === 20 && pdv.getInt16(0, true) === 0 && pdv.getInt16(2, true) === 8192 && pdv.getInt16(4, true) === 16384 && pdv.getInt16(6, true) === -8192
+    && pdv.getInt16(8, true) === -32767 && pdv.getInt16(10, true) === 32767 && pdv.getInt16(12, true) === 32767 && pdv.getInt16(14, true) === -32767 && pdv.getInt16(16, true) === 0);
+  check('encodePcm16 matches encodeWav\'s data chunk sample for sample', (() => { const L = new Float32Array(500).map((_, i) => Math.sin(i / 7)), R = L.map(v => -v / 2); const a = HL.encodePcm16([L, R]), w = HL.encodeWav([L, R], 48000); return Buffer.from(a).equals(Buffer.from(w.subarray(44))); })());
+
+  /* over the fake: a drop */
+  const d = new DEMO.FakeDevice({ latencyMs: 1 });
+  const l = new HL.Link(new DEMO.FakePort(d)); await l.start();
+  const info = await HL.hello(l), desc = await HL.getDescriptor(l, info);
+  const state = async () => HL.parseState(await l.request(HL.CMD.state));
+  const settle = async seq0 => { for (let i = 0; i < 200; i++) { const s = await state(); if (s.pads.seq !== seq0 && s.pads.state === 0) return s; d.padOp.t -= 500; await new Promise(r => setTimeout(r, 5)); } return null; };
+  const err = async f => { try { await f(); return 'ok'; } catch (e) { return e.message; } };
+  let s = await state();
+  check('pads: "pads": 1, a 315-byte body, the 45 s planes, a 4 s break: 41 s for pads, nothing held, nothing unsaved', HL.caps(desc).pads === 1 && s.pads && s.bufCap === 45 * 48000 && s.pads.total === 45 * 48000 - s.bufLen && s.pads.free === s.pads.total && s.pads.held === 0 && !s.pads.unsaved && !s.pads.noBreak && s.pads.mask === 0);
+  const bodies = []; { const h = d.handle.bind(d); d.handle = (t, x) => { if (t === HL.CMD.pads) bodies.push(x.length); return h(t, x); }; }
+  const L1 = new Float32Array(30000).map((_, i) => Math.sin(i / 9) * 0.6), pcm1 = HL.encodePcm16([L1]), prog = [];
+  let polls = 0; const poller = setInterval(() => { l.request(HL.CMD.state, undefined, { key: 'state' }).then(() => polls++, () => {}); }, 20);
+  const u0 = s.undoDepth, f0 = s.freePos, seq0 = s.pads.seq;
+  const r = await HL.uploadPad(l, 5, 1, pcm1, { maxBody: info.maxBody, onProgress: (a, t, k) => prog.push([a, t, k]) });
+  clearInterval(poller);
+  check('drop: every byte acknowledged in order, progress to the end, the room said at the begin', r.bytes === pcm1.length && prog.length === Math.ceil(pcm1.length / HL.CARD.chunkFor(info.maxBody)) && prog.every((p, i) => i === 0 || p[0] > prog[i - 1][0]) && r.room === s.pads.free);
+  check('drop: every request fits max_body, the polls interleave', bodies.length > 1 && Math.max(...bodies) <= info.maxBody && polls >= 3, Math.max(...bodies) + ' / polls ' + polls);
+  s = await state(); check('…then the module commits (state 2, "committing")', s.pads.state === 2 && HL.PADS.STATE[s.pads.state] === 'committing');
+  s = await settle(seq0);
+  const t5 = s && s.keySlice[5], e5 = t5 != null ? d.table[t5] : null;
+  check('…committed: key 5 owns [freePos, +30000), freePos moved, one undo step, the mask, unsaved', s && s.pads.result === 0 && e5 && e5.key === 5 && e5.start === f0 && e5.len === 30000 && s.freePos === f0 + 30000 && s.undoDepth === u0 + 1 && s.pads.mask === 1 << 5 && s.pads.unsaved && s.pads.free === s.pads.total - 30000);
+  check('…the samples in the plane exactly as sent (no trim, no normalise)', Array.from(d.buf.subarray(f0, f0 + 30000)).every((v, i) => v === new DataView(pcm1.buffer).getInt16(i * 2, true) / 32768));
+  /* replace it: the slot reused, the old region held; undo puts the first back */
+  const pcm2 = HL.encodePcm16([new Float32Array(9600).fill(0.3)]), seqB = (await state()).pads.seq;
+  await HL.uploadPad(l, 5, 1, pcm2); s = await settle(seqB);
+  check('a second drop on key 5: the same slot, the new region, the old one held (30000), one more undo step', s.keySlice[5] === t5 && d.table[t5].start === f0 + 30000 && d.table[t5].len === 9600 && s.pads.held === 30000 && s.undoDepth === u0 + 2);
+  await HL.editUndo(l); s = await state();
+  check('Undo: the first sample back on key 5, freePos stays (nothing reclaimed), the second region held now', d.table[t5].start === f0 && d.table[t5].len === 30000 && s.freePos === f0 + 39600 && s.pads.held === 9600);
+  await HL.editRedo(l); s = await state();
+  check('Redo: the second again', d.table[t5].start === f0 + 30000 && s.pads.held === 30000);
+  /* a stereo drop onto the mono kit: the kit turns stereo (Sampling → Stereo), both planes as sent */
+  const SL = new Float32Array(4800).map((_, i) => Math.sin(i / 3) * 0.5), SR = SL.map(v => -v * 0.5), pcmS = HL.encodePcm16([SL, SR]), seqS = (await state()).pads.seq, fS = (await state()).freePos;
+  check('the kit is mono before', !(await state()).stereo);
+  await HL.uploadPad(l, 6, 2, pcmS); s = await settle(seqS);
+  const dvS = new DataView(pcmS.buffer);
+  check('a stereo drop: the kit is stereo, Sampling → Stereo, "made stereo" said, both planes exactly as sent, the old material copied into R', s.stereo && s.pads.madeStereo && d.options[DEMO.O.sampling] === 1
+    && Array.from(d.buf.subarray(fS, fS + 4800)).every((v, i) => v === dvS.getInt16(i * 4, true) / 32768) && Array.from(d.bufR.subarray(fS, fS + 4800)).every((v, i) => v === dvS.getInt16(i * 4 + 2, true) / 32768)
+    && d.bufR[100] === d.buf[100] && d.bufR[f0 + 10] === d.buf[f0 + 10]);
+  const w1 = await HL.fetchWave(l, fS, 100, 1), w0 = await HL.fetchWave(l, fS, 100, 0);
+  check('GET_WAVE plane 1 reads the R plane', w1.data[10] !== w0.data[10] && Math.sign(w1.data[10]) === -Math.sign(w0.data[10]));
+  /* the refusals */
+  check('BEGIN: key 24, three channels, under 480 frames → BAD_ARGS', await err(() => l.request(HL.CMD.pads, Uint8Array.of(0, 24, 1, 0, 4, 0, 0))) === 'BAD_ARGS' && await err(() => l.request(HL.CMD.pads, Uint8Array.of(0, 3, 3, 0, 4, 0, 0))) === 'BAD_ARGS' && await err(() => HL.uploadPad(l, 3, 1, new Uint8Array(400))) === 'BAD_ARGS' && await err(() => l.request(HL.CMD.pads, Uint8Array.of(0, 3, 1, 100, 0, 0, 0))) === 'BAD_ARGS');
+  const room = (await state()).pads.free;
+  check('BEGIN: more than the room → TOO_LARGE, nothing taken', await err(() => l.request(HL.CMD.pads, Uint8Array.of(0, 3, 1, ...[room + 1].flatMap(v => [v & 255, v >> 8 & 255, v >> 16 & 255, v >>> 24])))) === 'TOO_LARGE' && (await state()).pads.state === 0);
+  check('DATA with nothing open: BAD_STATE', await err(() => l.request(HL.CMD.pads, Uint8Array.of(1, 4, 0, 0, 0, 0, 0, 0, 0, 1, 2))) === 'BAD_STATE');
+  d.set.pending = { op: 14, name: 'x' }; check('BAD_STATE while a set op waits', await err(() => HL.uploadPad(l, 3, 1, pcm2)) === 'BAD_STATE' && await err(() => HL.newKit(l)) === 'BAD_STATE'); d.set.pending = null;
+  d.rec.state = 2; check('BAD_STATE while a take runs', await err(() => HL.uploadPad(l, 3, 1, pcm2)) === 'BAD_STATE'); d.rec.state = 0;
+  await l.request(HL.CMD.card, Uint8Array.of(0, 100, 0, 0, 0, 0, ...HL.nameBytes('card first')));
+  check('BAD_STATE while a card upload arrives', await err(() => HL.uploadPad(l, 3, 1, pcm2)) === 'BAD_STATE'); await l.request(HL.CMD.card, Uint8Array.of(2));
+  /* the reverse: while a drop is open, no card job, no load, no set op, no take */
+  await l.request(HL.CMD.pads, Uint8Array.of(0, 3, 1, 0x80, 0x25, 0, 0));
+  check('while a drop arrives: a card upload, a copy, a load, a set save, a take, New empty kit are all BAD_STATE', await err(() => HL.uploadBreak(l, 'later', HL.encodeWav([new Float32Array(24000)], 48000))) === 'BAD_STATE' && await err(() => HL.copyOldCard(l)) === 'BAD_STATE'
+    && await err(() => l.request(HL.CMD.action, Uint8Array.of(HL.ACT.load, 1))) === 'BAD_STATE' && await err(() => HL.saveSet(l, 'during')) === 'BAD_STATE' && await err(() => l.request(HL.CMD.action, Uint8Array.of(HL.ACT.recArm, 2))) === 'BAD_STATE' && await err(() => HL.newKit(l)) === 'BAD_STATE');
+  check('…edits stay open while the bytes arrive (they never touch freePos)', (await HL.editNudgeAll(l, 5, HL.EDIT.grid)).ok);
+  await l.request(HL.CMD.pads, Uint8Array.of(2));
+  s = await state(); check('ABORT: the drop forgotten, result "cancelled", nothing published', s.pads.state === 0 && HL.PADS.RESULT[s.pads.result] === 'cancelled' && s.keySlice[3] === d.spanSlice(3));
+  await l.request(HL.CMD.pads, Uint8Array.of(0, 3, 1, 0x80, 0x25, 0, 0)); d.padUp.last -= 6000;
+  s = await state(); check('a drop quiet for 5 s is dropped (result timed out)', s.pads.state === 0 && HL.PADS.RESULT[s.pads.result] === 'timed out');
+  { const tot = 9600 * 2; await l.request(HL.CMD.pads, Uint8Array.of(0, 3, 1, 0x80, 0x25, 0, 0));
+    check('out of sequence: BAD_ARGS, the drop dropped', await err(() => l.request(HL.CMD.pads, Uint8Array.of(1, tot & 255, tot >> 8, 0, 0, 10, 0, 0, 0, 1, 2))) === 'BAD_ARGS' && (await state()).pads.state === 0); }
+  /* two drops at once through the shared queue both land, in order (the card's serial()) */
+  { const run = HL.serial(), done = [];
+    const job = (k, v) => run(async () => { const q0 = (await state()).pads.seq; await HL.uploadPad(l, k, 1, HL.encodePcm16([new Float32Array(4800).fill(v)])); done.push(k); await settle(q0); });
+    await Promise.all([job(10, 0.1), job(11, -0.1)]);
+    s = await state(); check('two drops through the queue: both land, in order', done.join() === '10,11' && d.table[s.keySlice[10]].key === 10 && d.table[s.keySlice[11]].key === 11 && d.buf[d.table[s.keySlice[11]].start] < 0); }
+  /* paths 1 and 2 still work beside the pads at the new memory size: AUTOSLICE markers in the break, a take into a key */
+  { const a = await HL.autoslice(l, 6, false, (await state()).tableGen); await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.recArm, 20));
+    for (let i = 0; i < 60 && (await state()).recState; i++) { d.rec.t -= 800; await new Promise(r => setTimeout(r, 2)); }
+    s = await state(); check('path 1 (autoslice into the break) and path 2 (a take into key 20) beside the pads', a.ok && s.nMarkers === 6 && d.table[s.keySlice[20]].key === 20 && d.table[s.keySlice[5]].key === 5 && s.pads.mask === ((1 << 5) | (1 << 6) | (1 << 10) | (1 << 11) | (1 << 20))); }
+  await l.close();
+
+  /* a pads-only kit, end to end: New empty kit, drops, a key played, a set save, a power-cycle, the load back */
+  const e = new DEMO.FakeDevice({ latencyMs: 1 }), le = new HL.Link(new DEMO.FakePort(e)); await le.start(); await HL.hello(le);
+  const ste = async () => HL.parseState(await le.request(HL.CMD.state));
+  const settleE = async q0 => { for (let i = 0; i < 200; i++) { const x = await ste(); if (x.pads.seq !== q0 && x.pads.state === 0) return x; e.padOp.t -= 500; await new Promise(r => setTimeout(r, 5)); } return null; };
+  let x = await ste();
+  await HL.newKit(le); x = await settleE(x.pads.seq);
+  check('New empty kit: no break (the ¼ s stub, 16 slices), Pads, 44.75 s for pads, the undo history ended, nothing to lose', x && x.pads.noBreak && x.bufLen === DEMO.PAD_STUB && x.nSlices === 16 && x.grammar === DEMO.GRAM.pads && x.pads.total === 45 * 48000 - DEMO.PAD_STUB && x.pads.free === x.pads.total && x.undoDepth === 0 && !x.pads.unsaved && x.jackMap === 1, JSON.stringify(x && x.pads));
+  const kick = new Float32Array(9600).map((_, i) => Math.sin(i * 0.02) * Math.exp(-i / 2000)), hatL = new Float32Array(4800).map((_, i) => ((i * 7919) % 13 - 6) / 7 * Math.exp(-i / 500)), hatR = hatL.map(v => v * 0.7);
+  for (const [k, planes] of [[0, [kick]], [2, [hatL, hatR]]]) { const q0 = (await ste()).pads.seq; await HL.uploadPad(le, k, planes.length, HL.encodePcm16(planes)); x = await settleE(q0); }
+  check('two pads dropped onto the empty kit (a mono kick, a stereo hat): the kit stereo, unsaved', x.pads.mask === 0b101 && x.stereo && x.pads.unsaved && x.pads.noBreak);
+  const pk = await HL.playKey(le, 2, true);
+  check('PLAY_KEY on the hat\'s pad: the voice starts at the hat', pk.ok && e.voice && e.voice.start === e.table[x.keySlice[2]].start && e.keyFlash === 2);
+  await HL.saveSet(le, 'pads_only'); for (let i = 0; i < 60 && (await ste()).setState; i++) { e.set.t -= 300; }
+  for (let i = 0; i < 60 && (x = await ste()).setSeq === 0; i++) { e.set.t -= 300; await new Promise(r => setTimeout(r, 2)); }
+  check('Save set: the kit on the card — nothing unsaved now', x.setResult === 0 && x.setName === 'pads_only' && !x.pads.unsaved && e.sets.has('pads_only'));
+  await le.close();
+  /* the power-cycle: a fresh module, the same card */
+  const e2 = new DEMO.FakeDevice({ latencyMs: 1 }); e2.sets = e.sets; e2.cardFs = e.cardFs; e2.files = e.files.slice();
+  const l2 = new HL.Link(new DEMO.FakePort(e2)); await l2.start(); await HL.hello(l2);
+  const st2 = async () => HL.parseState(await l2.request(HL.CMD.state));
+  let y = await st2();
+  check('after the power-cycle: the boot break, not the kit (the sounds were in memory)', !y.pads.noBreak && y.pads.mask === 0 && y.bufLen !== DEMO.PAD_STUB);
+  await HL.loadSet(l2, 'pads_only'); for (let i = 0; i < 60 && ((y = await st2()).setSeq === 0 || y.setState); i++) { e2.set.t -= 300; await new Promise(r => setTimeout(r, 2)); }
+  check('Load set "pads_only": the pads-only kit back — no break, the two pads on their keys, stereo, both planes as dropped, nothing unsaved',
+    y.setResult === 0 && y.pads.noBreak && y.bufLen === DEMO.PAD_STUB && y.pads.mask === 0b101 && y.stereo && !y.pads.unsaved
+    && Array.from(e2.buf.subarray(e2.table[y.keySlice[0]].start, e2.table[y.keySlice[0]].start + 9600)).every((v, i) => v === e.buf[e.table[x.keySlice[0]].start + i])
+    && Array.from(e2.bufR.subarray(e2.table[y.keySlice[2]].start, e2.table[y.keySlice[2]].start + 4800)).every((v, i) => v === e.bufR[e.table[x.keySlice[2]].start + i]));
+  const pk2 = await HL.playKey(l2, 0, true);
+  check('…and the kick\'s pad plays it', pk2.ok && e2.voice && e2.voice.start === e2.table[y.keySlice[0]].start);
+  const q9 = y.pads.seq; await HL.uploadPad(l2, 9, 1, HL.encodePcm16([new Float32Array(2400).fill(0.2)])); for (let i = 0; i < 100 && ((y = await st2()).pads.seq === q9 || y.pads.state); i++) { e2.padOp.t -= 500; }
+  check('a drop after the load: unsaved again (the card holds the kit as it was)', y.pads.unsaved && y.pads.mask === 0b1000000101);
+  await l2.close();
+  /* a firmware before the pads work */
+  const of = new DEMO.FakeDevice({ latencyMs: 1, tail: 293 }), lf = new HL.Link(new DEMO.FakePort(of)); await lf.start(); const iof = await HL.hello(lf);
+  const sf = HL.parseState(await lf.request(HL.CMD.state)), cf = HL.caps(await HL.getDescriptor(lf, iof));
+  check('a firmware before the pads work: no "pads", a 293-byte body (pads null), 0x68 UNSUPPORTED', cf.pads === 0 && cf.card === 1 && sf.pads === null && sf.card !== null && await err(() => HL.newKit(lf)) === 'UNSUPPORTED');
+  await lf.close();
+}
+
 /* ── 8. EDIT-UI: the pure editor (edit.js) — magnets, clamps, handles, positions, labels, the drop rule, the onset
  *       preview, the audition window, the gesture recogniser — then the Editor driven against the fake module ── */
 const ED = require('./edit.js');
@@ -1660,6 +1791,102 @@ const sentAct = (G, ...pre) => G('demoDevice.acts').some(a => pre.every((v, i) =
   const { D, G } = await loadPage('?demo=nocardfw');
   check('pre-card firmware: no panel, no "Add breaks…", no banner, no 0x67 asked', await until(() => G('!!(st && keysOk)')) && G('cardOk') === false && G("$('cardCard').hidden") === true && G("$('p_add').hidden") === true && G("$('cardnote').hidden") === true && !G('demoDevice.log').includes(0x67) && G('st.card') === null);
   check('pre-card firmware page: no errors', D.unknownIds.size === 0 && D.errors.length === 0, D.errors.join(' | ').slice(0, 300));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+}
+/* ── 9e. PADS, the page itself: files dropped on a Play pad (the drop event), on a Kit key cell, chosen through the
+ *        picker (the change event), several onto one pad; each decoded by a stand-in for the browser's decoder, cut to
+ *        the room, sent, placed; the pad's progress and result, the room meter, the unsaved note and its Save set, New
+ *        empty kit (a "no" sends nothing), a stereo drop that turns the kit stereo, a busy module, a hidden tab; then
+ *        `?demo=nopads`'s hidden controls ── */
+{
+  const { D, G } = await loadPage('?demo');
+  check('pads page: connects with "pads" — the room meter, the picker and New empty kit shown, no unsaved note',
+    await until(() => G('!!(st && st.pads && padsOk && table)')) && await until(() => G("$('pd_bar').hidden") === false) && G("$('pd_unsaved').hidden") === true && G("$('pads_drop_help').hidden") === false
+    && /^pads: 41\.00 s of 41\.00 s free$/.test(G("$('pd_room').textContent")), D.errors.join(' | ').slice(0, 300) + ' ' + G("$('pd_room').textContent"));
+  /* the browser's decoder, stood in: the name says how long and how many channels; 44.1 kHz unless it says 48 */
+  G(`cardDecode = async f => { const secs = (/(\\d+(?:\\.\\d+)?)s/.exec(f.name) || [0, 1])[1] * 1, sr = /48k/.test(f.name) ? 48000 : 44100, n = Math.round(sr * secs), ch = /stereo/.test(f.name) ? 2 : 1;
+    return { numberOfChannels: ch, sampleRate: sr, length: n, getChannelData: c => new Float32Array(n).map((_, i) => (c ? -0.3 : 0.3) * Math.sin(i / 5)) }; }`);
+  spyActs(G); G('demoDevice.padOps = []'); G(`(() => { const d = demoDevice, h = d.handle; d.handle = (t, b) => { if (t === 0x68) d.padOps.push(b[0]); return h(t, b); }; })()`);
+  const pad = k => G(`padEls[${k}].el`), files = (...names) => ({ dataTransfer: { files: names.map(name => ({ name, size: 10 })), types: ['Files'] } });
+  /* dragover lights the pad; a drop loads it */
+  fireEv(pad(4), 'dragover', files('x.wav'));
+  check('a file dragged over a pad lights it as a drop target', pad(4).className.includes('dropover'));
+  fireEv(pad(4), 'drop', files('kick 0.5s 48k.wav'));
+  check('dropped on E1: decoded, sent (0x68 BEGIN / DATA), placed — the pad says ✓ and its length, the line says what it became',
+    await until(() => G("padJobs.length === 1 && padJobs[0].state === 'done'"), 15000) && G('demoDevice.padOps')[0] === HL.PADS.begin && G('demoDevice.padOps').includes(HL.PADS.data) && !pad(4).className.includes('dropover')
+    && await until(() => /^✓ 0\.50 s$/.test(G('padEls[4].sub.textContent'))) && /^E1: kick 0\.5s 48k\.wav — mono, 0\.50 s/.test(G("$('pd_msg').textContent")), G("$('pd_msg').textContent") + ' / ' + G('padEls[4].sub.textContent'));
+  check('…on the module: key 4 owns 24000 frames, the pad\'s fill full, the room meter down by 0.5 s, the unsaved note up',
+    await until(() => G('st.pads.mask') === 16) && G('demoDevice.table[demoDevice.keySlice[4]].len') === 24000 && G('padEls[4].fill.style.width') === '100%' && await until(() => /^pads: 40\.50 s of 41\.00 s free$/.test(G("$('pd_room').textContent"))) && G("$('pd_unsaved').hidden") === false);
+  check('…one undo step on the module (Undo takes the drop back)', await until(() => G('st.undoDepth') === 1));
+  /* after a while the pad shows what it plays */
+  await until(() => G('padJob[4]') === null, 6000); await sleep(150);
+  check('…then the pad shows its sample\'s length (a recording)', await until(() => /^0\.50 s$/.test(G('padEls[4].sub.textContent'))), G('padEls[4].sub.textContent'));
+  /* three files on G♯2 (key 20): 20, 21, 22 in order */
+  fireEv(pad(20), 'drop', files('a 0.1s.wav', 'b 0.2s.wav', 'c 0.3s.wav'));
+  check('three files dropped on G♯2: that pad and the next two, in order, one at a time', await until(() => G("padJobs.length === 4 && padJobs.slice(1).every(j => j.state === 'done')"), 20000)
+    && G('padJobs.slice(1).map(j => j.key).join()') === '20,21,22' && await until(() => G('st.pads.mask') === (16 | (7 << 20))) && Math.abs(G('demoDevice.table[demoDevice.keySlice[22]].len') - Math.round(0.3 * 48000)) <= 1);
+  fireEv(pad(23), 'drop', files('y 0.1s.wav', 'z 0.1s.wav'));
+  check('two files on B2 (the last pad): one placed, the other said left over', await until(() => G("padJobs.length === 5 && padJobs[4].state === 'done'"), 15000) && /left over/.test(G("$('msg').textContent")));
+  /* a Kit key cell, and the picker for the selected key */
+  G("showTab('tab_kit')"); await sleep(80);
+  check('the Kit tab: "Load into …" shown, the buffer says the pads\' room', G("$('k_load').hidden") === false && /for pads/.test(G("$('u_free').textContent")));
+  fireEv(G('keyCells[9].el'), 'drop', files('cell 0.25s.wav'));
+  check('dropped on the Kit\'s A1 cell: key 9 loaded', await until(() => G("padJobs.length === 6 && padJobs[5].state === 'done'"), 15000) && G('padJobs[5].key') === 9 && await until(() => (G('st.pads.mask') & 512) !== 0));
+  G('selectKey(11)'); fireEv(G("$('k_load')"), 'click', {});
+  fireEv(G("$('pd_file')"), 'change', { target: { files: [{ name: 'picked 0.2s.wav', size: 10 }], value: 'x' } });
+  check('"Load into B1…" then a file chosen: key 11 loaded (the phone path)', await until(() => G("padJobs.length === 7 && padJobs[6].state === 'done'"), 15000) && G('padJobs[6].key') === 11);
+  G("showTab('tab_play')"); G("$('pd_key').value = '13'"); fireEv(G("$('pd_pick')"), 'click', {});
+  fireEv(G("$('pd_file')"), 'change', { target: { files: [{ name: 'into 0.2s.wav', size: 10 }] } });
+  check('Play\'s picker with "into C♯2": key 13 loaded', await until(() => G("padJobs.length === 8 && padJobs[7].state === 'done'"), 15000) && G('padJobs[7].key') === 13);
+  /* a stereo file onto the mono kit */
+  fireEv(pad(1), 'drop', files('wide stereo 0.4s.wav'));
+  check('a stereo file: placed stereo, the line says the kit is stereo now (Sampling → Stereo), the Options re-read', await until(() => G("padJobs.length === 9 && padJobs[8].state === 'done'"), 15000) && /the kit is stereo now/.test(G("$('pd_msg').textContent")) && await until(() => G('st.stereo') === true) && await until(() => G("optByte('sampling')") === 1), G("$('pd_msg').textContent"));
+  /* a busy module */
+  G("demoDevice.set.pending = { op: 14, name: 'x' }");
+  fireEv(pad(17), 'drop', files('busy 0.1s.wav'));
+  check('a busy module (a set op waiting): said plainly, nothing placed', await until(() => G("padJobs.length === 10 && padJobs[9].state === 'failed'"), 15000) && /busy/.test(G("$('pd_msg').textContent")) && (G('st.pads.mask') & (1 << 17)) === 0);
+  G("demoDevice.set.pending = null; demoDevice.set.state = 0");
+  /* a hidden tab: the waits ask for the state themselves */
+  G("document.visibilityState = 'hidden'");
+  fireEv(pad(17), 'drop', files('hidden 0.1s.wav'));
+  check('a hidden tab (no background polls): the drop is still placed and said so', await until(() => G("padJobs.length === 11 && padJobs[10].state !== 'queued' && padJobs[10].state !== 'decoding' && padJobs[10].state !== 'sending' && padJobs[10].state !== 'committing'"), 15000) && G('padJobs[10].state') === 'done', G("$('pd_msg').textContent"));
+  G("document.visibilityState = 'visible'");
+  /* an undecodable file */
+  G(`window.__dec = cardDecode; cardDecode = async () => { throw new Error('EncodingError'); }`);
+  fireEv(pad(18), 'drop', files('notes.txt'));
+  check('an undecodable file: said, nothing sent', await until(() => G("padJobs.length === 12 && padJobs[11].state === 'failed'")) && /cannot decode/.test(G("$('pd_msg').textContent")));
+  G('cardDecode = window.__dec');
+  /* too long for the room: cut to it, and said */
+  G('demoDevice.freePos = DEMO.BUF_CAP - 48000');
+  fireEv(pad(15), 'drop', files('long 3s.wav'));
+  check('a file longer than the room: the first second placed (all the room left), and said', await until(() => G("padJobs.length === 13 && padJobs[12].state === 'done'"), 15000) && /the first 1\.00 s of 3\.0 s, all the room left/.test(G("$('pd_msg').textContent")) && G('demoDevice.table[demoDevice.keySlice[15]].len') === 48000, G("$('pd_msg').textContent"));
+  fireEv(pad(16), 'drop', files('more 0.1s.wav'));
+  check('…then no room at all: refused before the wire, the room said', await until(() => G("padJobs.length === 14 && padJobs[13].state === 'failed'"), 15000) && /no room left for pads \(0\.00 s free/.test(G("$('pd_msg').textContent")) && await until(() => /✕/.test(G('padEls[16].sub.textContent'))), G("$('pd_msg').textContent"));
+  /* the unsaved note's Save set: with no name → the Kit's Set section; with a name → saved, the note goes */
+  fireEv(G("$('pd_save')"), 'click', {});
+  check('Save set… with no name: the Kit tab\'s Set section, asked for a name', G('kitShown') === true && /name the set/.test(G("$('msg').textContent")));
+  G("showTab('tab_play'); $('s_name').value = 'my_kit'"); fireEv(G("$('pd_save')"), 'click', {});
+  check('…with a name: ACTION 14 "my_kit", saved, the unsaved note gone', await until(() => sentAct(G, HL.ACT.saveSet)) && await until(() => G('st.setName') === 'my_kit' && G('st.pads.unsaved') === false, 8000) && await until(() => G("$('pd_unsaved').hidden") === true));
+  /* New empty kit: asks, a "no" sends nothing; a "yes" clears the break and switches to Pads */
+  G('confirmAnswer = false'); const c0 = G('confirms'); fireEv(G("$('pd_new')"), 'click', {}); await sleep(80);
+  check('New empty kit asks first — a "no" sends nothing', G('confirms') === c0 + 1 && !G('demoDevice.padOps').includes(HL.PADS.newKit));
+  G('confirmAnswer = true'); fireEv(G("$('pd_new')"), 'click', {});
+  check('…a "yes": NEW_KIT, no break, Pads, the whole memory for pads, every pad empty, the line says so',
+    await until(() => G('demoDevice.padOps').includes(HL.PADS.newKit)) && await until(() => G('st.pads && st.pads.noBreak') === true && G('st.grammar') === 6 && G('st.pads.mask') === 0, 8000)
+    && await until(() => /^pads: 44\.75 s of 44\.75 s free · no break$/.test(G("$('pd_room').textContent"))) && await until(() => /New empty kit — no break, Pads/.test(G("$('msg').textContent"))) && await until(() => G('padEls[0].sub.textContent') === 'empty'), G("$('pd_room').textContent") + ' / ' + G("$('msg').textContent") + ' / ' + G('padEls[0].sub.textContent'));
+  fireEv(pad(0), 'drop', files('first 0.2s.wav'));
+  check('…and the empty kit takes a drop like any other', await until(() => G("padJobs.length === 15 && padJobs[14].state === 'done'"), 15000) && await until(() => G('st.pads.mask') === 1));
+  check('pads page: no unknown ids, no runtime errors', D.unknownIds.size === 0 && D.errors.length === 0, [...D.unknownIds].join(',') + ' ' + D.errors.join(' | ').slice(0, 300));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+  check('disconnect: the pads controls hidden', G("$('pd_bar').hidden") === true && G('padsOk') === false);
+}
+{
+  const { D, G } = await loadPage('?demo=nopads');
+  check('pre-pads firmware: the pads play, but no room meter, no picker, no New empty kit, no drop help, no 0x68 asked', await until(() => G('!!(st && keysOk && table)')) && G('padsOk') === false && G("$('padsCard').hidden") === false
+    && G("$('pd_bar').hidden") === true && G("$('pads_drop_help').hidden") === true && G("$('k_load').hidden") === true && !G('demoDevice.log').includes(0x68) && G('st.pads') === null);
+  fireEv(G('padEls[3].el'), 'drop', { dataTransfer: { files: [{ name: 'x.wav' }], types: ['Files'] } }); await sleep(100);
+  check('…a drop on a pad there is not taken (nothing sent)', !G('demoDevice.log').includes(0x68) && G('padJobs.length') === 0);
+  check('pre-pads page: no errors', D.unknownIds.size === 0 && D.errors.length === 0, D.errors.join(' | ').slice(0, 300));
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
 }
 /* ── 9c. Contrast, measured: every text token against every surface it sits on, in both themes, ≥ 4.5:1; and no

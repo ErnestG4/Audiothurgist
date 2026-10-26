@@ -12,6 +12,11 @@
 // staging plane, each as big as the first) to keep a stereo file's planes
 // apart: L → out, R → outR, *gotR = true. A mono file, or no planes given,
 // takes the mono path unchanged (byte-identical), *gotR = false.
+// PADS (docs/packages/pads.md): a file already at outSr is decoded straight
+// into out (and outR) — no staging, no resample (which at ratio 1 is the
+// identity) — so the staging planes need only hold what a resampled load
+// can be (the shell sizes them for a 17 s break at 96 kHz) while a 48 kHz
+// set may fill the whole output plane. The cap is then outMax (and maxSec).
 #include <cstdint>
 #include <cstring>
 #include "bb_yield.h"
@@ -57,6 +62,7 @@ static int Load(const char* name,
 {
     const bool wantR = outR && stageR;   /* RECORD */
     bool       isR   = false;
+    bool       direct = false;   /* PADS: the file is at outSr */
     if(gotR) *gotR = false;
     BBWAV_DMA_SECTION alignas(32) static uint8_t ioBuf[16384]; // DMA-safe staging
     *err   = 0;
@@ -127,6 +133,8 @@ static int Load(const char* name,
             uint32_t  frames = sz / fb;
             uint32_t  cap    = (uint32_t)((uint64_t)maxSec * rate);
             if(frames > cap) frames = cap;
+            direct = (float)rate == outSr;   /* PADS: no resample — decode into the output planes */
+            if(direct) { stage = out; stageR = outR; stageMax = outMax; }
             if(frames > (uint32_t)stageMax) frames = stageMax;
             uint32_t done = 0;
             while(done < frames)
@@ -202,7 +210,8 @@ static int Load(const char* name,
     float ratio  = outSr / (float)rate;
     int   outLen = (int)(nStage * ratio);
     if(outLen > outMax) outLen = outMax;
-    for(int i = 0; i < outLen; i++)
+    if(direct) outLen = nStage;   /* PADS: already there, sample for sample */
+    for(int i = 0; i < outLen && !direct; i++)
     {
         float src = i / ratio;
         int   i0  = (int)src;

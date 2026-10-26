@@ -131,6 +131,13 @@
   .padk small{font-size:11px;font-weight:500;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
   .padk.sh{background:var(--raise)} .padk.down{background:var(--pad-hi);transform:translateY(1px)} .padk.flash{box-shadow:inset 0 0 0 2px var(--accent)}
   .padk.c0{border-bottom-color:var(--kick)} .padk.c1{border-bottom-color:var(--snare)} .padk.c2{border-bottom-color:var(--hat)} .padk.c3{border-bottom-color:var(--other)}
+  /* PADS: a pad (or a Kit key cell) a file is dragged over; a drop's progress along the pad's foot; the room meter; the unsaved note */
+  .padk.dropover,.key.dropover{outline:2px dashed var(--accent);outline-offset:-2px;background:var(--pad-hi)}
+  .padk .pf{position:absolute;left:0;bottom:-4px;height:4px;width:0;background:var(--accent);border-radius:0 0 0 8px;transition:width .1s linear} .padk .pf.ok{background:var(--ok-ink)} .padk .pf.bad{background:var(--bad-ink)}
+  .padk.busy small{color:var(--accent-ink)} .padk.bad small{color:var(--bad-ink)}
+  .pdrow{margin:0 0 10px;gap:8px 12px} .pdroom{display:flex;align-items:center;gap:8px;flex:1 1 240px;min-width:0} .pdroom .bar{flex:1 1 70px;min-width:60px;max-width:220px} .pdroom .note{margin:0}
+  .pdroom .bar i.held{background:var(--ink3)}
+  .pdnote{background:var(--warn-bg);border:1px solid var(--warn-line);color:var(--warn-ink);padding:8px 10px;border-radius:10px;margin:0 0 10px;display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center} .pdnote[hidden]{display:none} .pdnote span{flex:1 1 220px;font-size:13px}
   #play.m-pads .padk{min-height:88px} #padsCard{order:1} .late{order:2} #play.m-pads #padsCard,#play.m-play #padsCard{order:-1} #modesCard{order:-2}
   .jk{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px 12px;font-size:13px;align-items:baseline}
   .jk .j{font-weight:700;color:var(--ink)} .jk .r{color:var(--ink2)} .jk .r b{color:var(--ink)}
@@ -247,8 +254,16 @@
   </section>
   <section id="padsCard" class="wide" hidden>
     <h2>Pads — the 24 keys <span class="wvbtns"><span id="pads_follow" class="pill" hidden>keys follow markers</span><span id="pads_plays" class="pill">one-shot</span></span></h2>
+    <div id="pd_bar" class="row pdrow" hidden>
+      <div class="pdroom"><div class="bar usage" id="pd_meter" title="the pads' share of the sample memory (what the break leaves): used · held by replaced pads · free"><i class="rec" id="pd_used"></i><i class="held" id="pd_held"></i></div><span id="pd_room" class="note num">pads —</span></div>
+      <label class="ctl inl">into<select id="pd_key" class="inline" title="the pad a chosen file goes to — several files fill that pad and the ones after it"></select></label>
+      <button id="pd_pick" class="mini primary" title="choose audio files for a pad (on a phone: the way to drop a sample)">Choose samples…</button><input id="pd_file" type="file" accept="audio/*,.wav,.wave,.aif,.aiff,.mp3,.flac,.ogg,.m4a" multiple hidden>
+      <button id="pd_new" class="mini danger" title="NEW_KIT: no break — every pad and marker gone, the whole memory for pads, the module in Pads (asks first)">New empty kit</button>
+    </div>
+    <div id="pd_unsaved" class="pdnote" role="status" hidden><span id="pd_unsaved_text">Unsaved kit: these sounds live in the module's memory only — a power-off loses them. Save the kit as a set to keep it.</span><button id="pd_save" class="mini primary" title="the Kit tab's Set: name it and save (ACTION 14) — the break, every pad, the table and the options">Save set…</button></div>
     <div id="pads" class="pads"></div>
-    <p id="pads_help" class="note">Press to play a key as a CV note would (several fingers at once). In <b>Play</b> what you play is written into the loop; in <b>Pads</b> nothing is written. A pad lights whenever its key is called — from here, the CV jacks or the panel.</p>
+    <p id="pd_msg" class="note" role="status" hidden></p>
+    <p id="pads_help" class="note">Press to play a key as a CV note would (several fingers at once). In <b>Play</b> what you play is written into the loop; in <b>Pads</b> nothing is written. A pad lights whenever its key is called — from here, the CV jacks or the panel. <span id="pads_drop_help" hidden><b>Drop audio files on a pad</b> to load them into it (several files fill that pad and the next ones): mono or stereo, as the file is — no trim, no normalise.</span></p>
   </section>
   <section class="wide">
     <h2>The bar</h2>
@@ -324,6 +339,7 @@
     <div class="row" style="margin-top:8px;gap:12px">
       <button id="k_rec" class="mini" title="arm a take into the selected key (ACTION 9); the panel's record gesture does the same">● Record into —</button>
       <button id="k_clr" class="mini" title="clear the selected key's recording (ACTION 10)">✕ Clear —</button>
+      <button id="k_load" class="mini" hidden title="choose an audio file for the selected key (0x68 PADS) — or drop one on any key">⤓ Load into —</button>
       <label class="ctl inl">Key plays<select id="k_plays" class="inline" title="Options → Key Plays (ACTION 11): one-shot plays the slice; held reads on until the gate falls"><option value="0">One-shot (the slice)</option><option value="1">Held (until the gate falls)</option></select></label>
       <span id="k_recstate" class="pill">record —</span>
       <div class="bar meterbar idle" id="k_meterbox" title="input peak, last audio block"><i id="k_meter"></i></div>
@@ -387,8 +403,9 @@
     <h2>Buffer</h2>
     <div class="bar usage" id="k_usage"><i class="mat" id="u_mat"></i><i class="rec" id="u_rec"></i></div>
     <div class="kv" style="margin-top:8px">
-      <span>break</span><b id="u_break">—</b><span>recordings</span><b id="u_recs">—</b><span>free</span><b id="u_free">—</b><span>planes</span><b id="u_planes">—</b><span>table</span><b id="u_table">—</b>
+      <span>break</span><b id="u_break">—</b><span>recordings</span><b id="u_recs">—</b><span>free</span><b id="u_free">—</b><span id="u_held_l" hidden>held</span><b id="u_held" hidden>—</b><span>planes</span><b id="u_planes">—</b><span>table</span><b id="u_table">—</b>
     </div>
+    <p id="u_held_help" class="note" hidden>“Held” is memory a replaced, cleared or undone recording still takes: it comes back only with new material (a break loaded, a loop take, New empty kit) — saving the set and loading it back keeps it.</p>
   </section>
   <section>
     <h2>Looper</h2>
@@ -836,6 +853,123 @@ const padEls = [], padDown = new Map();
     host.appendChild(el); padEls.push({ el, sub: el.querySelector('small'), sig: '' });
   }
 })();
+/* ───────────── PADS (0x68, capability "pads": 1): a sample dropped onto a pad ─────────────
+ * Drop audio files on a pad (Play) or a key cell (Kit), or choose them (phones): the browser decodes each (48 kHz, as
+ * the card upload does), keeps it mono or stereo, cuts it to the room the module has left (the tail's pads.free, read
+ * fresh before each one) and sends raw PCM16 (HL.uploadPad); the module converts it in place and publishes it as that
+ * key's recording — one undo step. Several files fill the pad and the ones after it. Every card and pad job shares
+ * one queue (cardRun): a drop never interleaves with a card upload on the wire. The waits ask for the state themselves
+ * (never the background poll, which stops while the tab is hidden) and give up only when the module stands still. */
+let padsOk = false;
+let padStallMs = 30000;                     /* how long the module's pads state may stand still before a wait gives up (the selftest shortens it) */
+const padJobs = [];                         /* every drop this session, in order */
+const padJob = new Array(24).fill(null);    /* the drop shown on each pad (its progress, then its result for a while) */
+const dtHasFiles = e => !!(e && e.dataTransfer && e.dataTransfer.types && Array.from(e.dataTransfer.types).includes('Files'));
+function padDropTarget(el, k) {
+  el.addEventListener('dragover', e => { if (!padsOk || !link || !dtHasFiles(e)) return; e.preventDefault(); e.stopPropagation(); el.classList.add('dropover'); });
+  el.addEventListener('dragleave', () => el.classList.remove('dropover'));
+  el.addEventListener('drop', e => { if (!padsOk || !link || !dtHasFiles(e)) return; e.preventDefault(); e.stopPropagation(); el.classList.remove('dropover'); padAddFiles(e.dataTransfer.files, k); });
+}
+padEls.forEach((p, k) => { padDropTarget(p.el, k); const f = document.createElement('i'); f.className = 'pf'; p.el.appendChild(f); p.fill = f; });
+const padSecs = n => (n / 48000).toFixed(2) + ' s';
+function padShow(job, text, kind, frac) { job.text = text; job.kind = kind || ''; if (frac != null) job.frac = frac; padJob[job.key] = job; setText('pd_msg', `${keyName(job.key)}: ${text}`); $('pd_msg').hidden = false; $('pd_msg').className = 'note' + (kind === 'bad' ? ' bad' : ''); invalidate(D.pads); }
+function padAddFiles(files, k0) {
+  if (!padsOk || !link) { say('connect to a module that takes samples onto pads first', true); return; }
+  const list = Array.from(files || []); let k = Math.max(0, Math.min(23, k0 | 0));
+  for (const file of list) {
+    if (k > 23) { say(`${list.length - list.indexOf(file)} file${list.length - list.indexOf(file) === 1 ? '' : 's'} left over — there is no pad after B2`, true); break; }
+    const job = { file, key: k++, state: 'queued', frac: 0, text: '', kind: '' };
+    padJobs.push(job); padShow(job, 'waiting…', 'busy', 0);
+    cardRun(() => padUpload(job)).catch(e => warn('pad', e));
+  }
+}
+/* the module's pads state, asked for (not the background poll) */
+async function padState() { const b = await link.request(CMD.state, undefined, { key: 'padstate', urgent: true }), s = parseState(b); if (s) onState(b); return s && s.pads; }   /* its own key: a background poll already in flight would hand back a state older than the room */
+/* wait for the module to finish the op it took (seq past seq0, idle) — gives up only once its state and progress stand still */
+async function padSettle(seq0, stallMs = padStallMs) {
+  let last = -1, tMove = performance.now();
+  for (;;) {
+    if (!link) throw new Error('disconnected');
+    let p = null;
+    try { p = await padState(); } catch (e) { /* a lost reply: ask again */ }
+    if (p && p.seq !== seq0 && p.state === 0) return p;
+    const mark = p ? p.state * 256 + p.progress : last;
+    if (mark !== last) { last = mark; tMove = performance.now(); }
+    else if (performance.now() - tMove > stallMs) throw new Error('the module did not finish in time');
+    await new Promise(r => setTimeout(r, 60));
+  }
+}
+async function padUpload(job) {
+  if (job.cancelled) return;
+  if (!link) { padShow(job, 'not connected', 'bad'); job.state = 'failed'; return; }
+  job.state = 'decoding'; padShow(job, 'decoding…', 'busy', 0);
+  let ab;
+  try { ab = await cardDecode(job.file); }
+  catch (e) { job.state = 'failed'; padShow(job, `${job.file.name}: this browser cannot decode it (${e && e.message || e})`, 'bad', 0); return; }
+  let p0;
+  try { p0 = await padState(); } catch (e) { job.state = 'failed'; padShow(job, 'the module did not answer: ' + e.message, 'bad', 0); return; }
+  if (!p0) { job.state = 'failed'; padShow(job, 'this firmware has no pads state', 'bad', 0); return; }
+  const plan = HL.padPlan(ab.numberOfChannels, ab.sampleRate, ab.length, p0.free); job.plan = plan;
+  if (p0.free < HL.PADS.minFrames) { job.state = 'failed'; padShow(job, `no room left for pads (${padSecs(p0.free)} free${p0.held ? `, ${padSecs(p0.held)} held by replaced pads` : ''}) — save the kit, or start a New empty kit`, 'bad', 0); return; }
+  if (plan.tooShort) { job.state = 'failed'; padShow(job, `${job.file.name}: too short (${(plan.seconds * 1000).toFixed(0)} ms; a pad needs 10 ms)`, 'bad', 0); return; }
+  const planes = []; for (let c = 0; c < plan.channels; c++) planes.push(ab.getChannelData(c).subarray(0, plan.frames));
+  const bytes = HL.encodePcm16(planes, plan.frames), what = `${plan.channels === 2 ? 'stereo' : 'mono'}, ${padSecs(plan.frames)}${plan.cut ? ` — the first ${padSecs(plan.frames)} of ${plan.sourceSeconds.toFixed(1)} s, all the room left` : ''}`;
+  job.what = what; job.state = 'sending'; padShow(job, `sending 0 % · ${what}`, 'busy', 0);
+  try {
+    const r = await HL.uploadPad(link, job.key, plan.channels, bytes, { maxBody: info && info.maxBody, cancel: () => job.cancelled || !link,
+      onProgress: (a, t, kbps) => padShow(job, `sending ${Math.round(100 * a / t)} % · ${kbps.toFixed(0)} KB/s`, 'busy', a / t) });
+    job.kbps = r.kbps; job.state = 'committing'; padShow(job, 'in — the module is placing it…', 'busy', 1);
+    const p = await padSettle(p0.seq);
+    if (p.result) { job.state = 'failed'; padShow(job, `not placed: ${HL.PADS.RESULT[p.result] || 'error ' + p.result}${p.result === 1 ? ` (${padSecs(p.free)} free)` : ''}`, 'bad', 0); return; }
+    job.state = 'done';
+    padShow(job, `${job.file.name} — ${what}${p.madeStereo && plan.channels === 2 ? ' — the kit is stereo now (Options → Sampling: Stereo)' : ''}`, 'ok', 1);
+    if (p.madeStereo) refreshLive();
+    setTimeout(() => { if (padJob[job.key] === job) { padJob[job.key] = null; invalidate(D.pads); } }, 4000);
+    refetchKit();
+  } catch (e) {
+    const m = e && e.message || String(e); job.state = 'failed';
+    if (m === 'TOO_LARGE') { let f = null; try { f = (await padState()).free; } catch {} padShow(job, `no room: ${f == null ? 'less' : padSecs(f)} left for pads — drop it again to take the first part, or save the kit and start a New empty kit`, 'bad', 0); }
+    else if (m === 'BAD_STATE') padShow(job, 'the module is busy (a set saving or loading, a take, a file loading, a card upload or another drop) — drop it again in a moment', 'bad', 0);
+    else if (m === 'cancelled') padShow(job, 'cancelled — nothing placed', 'bad', 0);
+    else padShow(job, 'failed: ' + m, 'bad', 0);
+  }
+}
+async function padNewKit() {
+  if (!link || !padsOk) return;
+  const p = st && st.pads, lose = p && p.unsaved ? ' The kit holds sounds the card does not have — they are lost.' : '';
+  if (!confirm(`New empty kit: the break, every pad and every marker go, the whole memory is for pads, and the module switches to Pads.${lose} This cannot be undone.`)) return;
+  await cardRun(async () => {
+    let p0; try { p0 = await padState(); } catch (e) { say('New empty kit: the module did not answer', true); return; }
+    try { await HL.newKit(link); }
+    catch (e) { say(e.message === 'BAD_STATE' ? 'New empty kit: the module is busy (a set op, a load, a take, a card upload or a drop) — try again in a moment' : 'New empty kit refused: ' + e.message, true); return; }
+    try { const q = await padSettle(p0.seq); say(q.result ? 'New empty kit: ' + (HL.PADS.RESULT[q.result] || q.result) : `New empty kit — no break, Pads, ${padSecs(q.free)} for pads`, !!q.result); }
+    catch (e) { say('New empty kit: ' + e.message, true); }
+    padJob.fill(null); refreshLive(); refetchKit();
+  }).catch(e => warn('kit', e));
+}
+/* the room, the unsaved note, the controls (drawn with the pads) */
+function drawPadsBar() {
+  const p = st && st.pads, on = padsOk && !!p;
+  $('pd_bar').hidden = !on; $('pads_drop_help').hidden = !on; $('k_load').hidden = !on;
+  $('pd_unsaved').hidden = !(on && p.unsaved);
+  if (!on) return;
+  const total = Math.max(1, p.total), used = Math.max(0, p.total - p.free - p.held);
+  $('pd_used').style.width = (used / total * 100).toFixed(2) + '%'; $('pd_held').style.left = (used / total * 100).toFixed(2) + '%'; $('pd_held').style.width = (p.held / total * 100).toFixed(2) + '%';
+  setText('pd_room', `pads: ${padSecs(p.free)} of ${padSecs(p.total)} free${p.held ? ` · ${padSecs(p.held)} held by replaced pads` : ''}${p.noBreak ? ' · no break' : ''}`);
+  $('pd_room').title = p.held ? 'Held: memory that replaced, cleared or undone recordings still take. It comes back with new material (a break loaded, a loop take, New empty kit) — a set save and load keep it.' : '';
+  const busy = p.state !== 0; $('pd_new').disabled = busy; $('pd_pick').disabled = !link;
+  const sel = $('pd_key'); if (!sel.children.length || sel.children.length !== 24) { sel.innerHTML = Array.from({ length: 24 }, (_, k) => `<option value="${k}">${keyName(k)}</option>`).join(''); }
+}
+$('pd_new').onclick = () => padNewKit();
+$('pd_pick').onclick = () => { padPickKey = Math.max(0, Math.min(23, +$('pd_key').value || 0)); const i = $('pd_file'); if (i.click) i.click(); };
+$('k_load').onclick = () => { padPickKey = selKey; const i = $('pd_file'); if (i.click) i.click(); };
+let padPickKey = 0;
+$('pd_file').addEventListener('change', e => { const t = e.target; padAddFiles(t && t.files, padPickKey); try { t.value = ''; } catch {} });
+$('pd_save').onclick = () => {
+  const name = $('s_name').value.trim();
+  if (setsOk && setNameOk(name)) { setOp(ACT.saveSet); say(`saving the kit as set “${name}”…`); return; }
+  showTab('tab_kit'); const el = $('s_name'); if (el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.focus(); say('name the set (letters, digits, _ -), then Save set');
+};
 const padFlash = new Array(24).fill(0);
 function flashKey(k) { if (k < 0 || k > 23) return; flashAt[k] = performance.now(); const p = padEls[k]; p.el.classList.add('flash'); clearTimeout(padFlash[k]); padFlash[k] = setTimeout(() => p.el.classList.remove('flash'), 220); invalidate(D.wave | D.jacks); }
 function drawPads() {
@@ -843,10 +977,15 @@ function drawPads() {
   if (!keysOk || !st) return;
   for (let k = 0; k < 24; k++) {
     const p = padEls[k], t = st.keySlice ? st.keySlice[k] : -1, e = table && t >= 0 && t < table.entries.length ? table.entries[t] : null;
-    const what = !e ? (t >= 0 ? `slice ${t}` : '—') : t < table.nSlices ? `slice ${t}` : e.key >= 0 ? 'recording' : `marker ${t}`, cls = e ? e.cls & 3 : -1;
-    const sig = what + '|' + cls; if (sig === p.sig) continue; p.sig = sig;
-    p.sub.textContent = what; p.el.className = p.el.className.replace(/\s*c\d/g, '') + (cls >= 0 ? ' c' + cls : '');
+    const j = padJob[k], noBreak = !!(st.pads && st.pads.noBreak);
+    const what = j ? (j.kind === 'busy' ? (j.state === 'sending' ? `↑ ${Math.round(j.frac * 100)} %` : j.state === 'committing' ? 'placing…' : '…') : j.kind === 'ok' ? '✓ ' + padSecs(j.plan ? j.plan.frames : 0) : '✕ not loaded')
+      : !e ? (t >= 0 ? `slice ${t}` : '—') : t < table.nSlices ? (noBreak ? 'empty' : `slice ${t}`) : e.key >= 0 ? padSecs(e.len) : `marker ${t}`, cls = e && !(noBreak && t < table.nSlices) ? e.cls & 3 : -1;
+    const sig = what + '|' + cls + '|' + (j ? j.kind + j.frac : ''); if (sig === p.sig) continue; p.sig = sig;
+    p.sub.textContent = what; p.el.className = p.el.className.replace(/\s*(c\d|busy|bad)\b/g, '') + (cls >= 0 ? ' c' + cls : '') + (j && j.kind === 'busy' ? ' busy' : j && j.kind === 'bad' ? ' bad' : '');
+    if (p.fill) { p.fill.style.width = j ? Math.round((j.kind === 'bad' ? 1 : j.frac) * 100) + '%' : '0'; p.fill.className = 'pf' + (j && j.kind === 'ok' ? ' ok' : j && j.kind === 'bad' ? ' bad' : ''); }
+    p.el.title = j && j.text ? `${keyName(k)} — ${j.text}` : `key ${k} (${keyName(k)}) — PLAY_KEY${padsOk ? ' · drop an audio file here to load it' : ''}`;
   }
+  drawPadsBar();
   $('pads_follow').hidden = !st.keysFollow;
   setPill('pads_plays', (st.keyPlays != null ? st.keyPlays : optByte('key.plays')) === 1 ? 'held until you let go' : 'one-shot', '');
 }
@@ -1035,7 +1174,7 @@ const keyCells = [];
     rec.onclick = e => { e.stopPropagation(); selectKey(k); action(ACT.recArm, k); };
     clr.onclick = e => { e.stopPropagation(); selectKey(k); action(ACT.recClear, k); };
     for (const b of [rec, clr]) b.addEventListener('pointerdown', e => e.stopPropagation());
-    cellPointer(el, k);
+    cellPointer(el, k); padDropTarget(el, k);   /* PADS: a file dropped on a key cell loads it into that key */
     host.appendChild(el); keyCells.push({ el, info: el.querySelector('.info'), meta: el.querySelector('.meta'), rec, clr, sig: '' });
   }
 })();
@@ -1126,6 +1265,7 @@ function drawKit() {
   const e = entryOfKey(selKey), rec = keyRecorded(e), kn = keyName(selKey);
   $('k_rec').textContent = `● Record into ${kn}`; $('k_rec').disabled = !kitOk || rs !== 0;
   $('k_clr').textContent = `✕ Clear ${kn}`; $('k_clr').disabled = !kitOk || !rec;
+  $('k_load').textContent = `⤓ Load into ${kn}…`; $('k_load').disabled = !padsOk || !link;
   setPill('k_recstate', rs ? `record ${REC[rs]} · ${rk >= 0 ? keyName(rk) : '—'}` : 'record idle', rs === 2 ? 'warn' : rs ? 'ok' : '');
   const lvl = st.inLevel || 0; $('k_meter').style.width = Math.round(lvl / 2.55) + '%'; $('k_meterbox').classList.toggle('hot', lvl > 230); $('k_meterbox').classList.toggle('idle', !rs);
   const kp = st.keyPlays != null ? st.keyPlays : optByte('key.plays'); const ks = $('k_plays'); if (kp != null && document.activeElement !== ks && ks.value !== String(kp)) ks.value = String(kp); ks.disabled = !kitOk;
@@ -1133,7 +1273,10 @@ function drawKit() {
     const recs = Math.max(0, st.freePos - st.bufLen);
     $('u_mat').style.width = (st.bufLen / st.bufCap * 100).toFixed(2) + '%'; $('u_rec').style.left = (st.bufLen / st.bufCap * 100).toFixed(2) + '%'; $('u_rec').style.width = (recs / st.bufCap * 100).toFixed(2) + '%';
     setText('u_break', secs(st.bufLen)); setText('u_recs', recs ? `${secs(recs)} (${table ? table.nTable - table.nSlices : '?'} key${table && table.nTable - table.nSlices === 1 ? '' : 's'})` : 'none');
-    setText('u_free', secs(st.bufCap - st.freePos) + ' of ' + secs(st.bufCap)); setText('u_planes', st.stereo ? 'stereo (L · R)' : 'mono');
+    const pp = st.pads;   /* PADS: the free room is the pads' (and the takes'): what the break leaves */
+    setText('u_free', pp ? `${secs(pp.free)} of ${secs(pp.total)} for pads (the buffer: ${secs(st.bufCap)})` : secs(st.bufCap - st.freePos) + ' of ' + secs(st.bufCap)); setText('u_planes', st.stereo ? 'stereo (L · R)' : 'mono');
+    const held = pp ? pp.held : 0; $('u_held_l').hidden = $('u_held').hidden = $('u_held_help').hidden = !held; if (held) setText('u_held', secs(held));
+    if (pp && pp.noBreak) setText('u_break', 'none — an empty kit (¼ s of silence holds the grid)');
     setText('u_table', table ? tableLine() : (st.nTable != null ? `${st.nTable} entries` : '—'));
   }
   if (editOk) drawEditor();
@@ -1809,13 +1952,13 @@ $('cd_file').addEventListener('change', e => { const t = e.target; cardAddFiles(
 /* The readouts are readouts of the module: after it goes they must not keep its last values (Kyklophoria's
  * 2026-09-13 review — block, link, cpu all read as live with nothing connected). */
 function clearReadouts() {
-  for (const id of ['k_cls', 'k_chop', 'k_hist', 'k_file', 'k_native', 'k_grid', 'k_clock', 'jk_key', 'jk_j5', 'jk_j6', 'jk_j78', 'jk_why', 'l_count', 'u_break', 'u_recs', 'u_free', 'u_planes', 'u_table', 'cpuText', 'chop_pos']) setText(id, '—');
+  for (const id of ['k_cls', 'k_chop', 'k_hist', 'k_file', 'k_native', 'k_grid', 'k_clock', 'jk_key', 'jk_j5', 'jk_j6', 'jk_j78', 'jk_why', 'l_count', 'u_break', 'u_recs', 'u_free', 'u_held', 'u_planes', 'u_table', 'cpuText', 'chop_pos', 'pd_room']) setText(id, '—');
   if (!$('k_bars').firstElementChild) setText('k_bars', '—');
   setText('jk_mv', ''); setText('mode_what', ''); lastText.delete('mode_what'); $('mode_what').innerHTML = '';
   for (const [id, s] of [['modpill', 'not connected'], ['pagepill', 'page —'], ['syncpill', 'clock —'], ['linkpill', 'link —'], ['jackpill', 'jacks —'], ['diagpill', 'diag —'], ['kit_status', '—'], ['ctl_page', '—'], ['jk_map', '—'], ['mode_jacks', '—'], ['mk_n', '—'], ['ed_gen', '—'], ['k_recstate', 'record —']]) setPill(id, s, '');
   clearCpu(); for (const sv of [sBpm, sJit, sJitR, sLoad, sLoadMax]) sv.avg = sv.shown = null;
   if (jkLit >= 0) { jkStrip[jkLit].classList.remove('on'); jkLit = -1; }
-  padEls.forEach(p => { p.sig = ''; p.sub.textContent = '—'; p.el.classList.remove('down', 'flash'); }); padDown.clear(); flashAt.fill(0);
+  padEls.forEach(p => { p.sig = ''; p.sub.textContent = '—'; p.el.classList.remove('down', 'flash', 'busy', 'bad', 'dropover'); if (p.fill) p.fill.style.width = '0'; }); padDown.clear(); flashAt.fill(0);
   modeChips.forEach(c => { c.el.classList.remove('on'); c.el.disabled = true; });
   $('chop_why').hidden = true; $('mk_follow').hidden = true; $('pads_follow').hidden = true;
   for (const id of ['ring', 'strip', 'wave', 'outscope']) { const [g, w, h] = ctx($(id)); g.clearRect(0, 0, w, h); }
@@ -1826,6 +1969,7 @@ function setDisconnected() {
   table = null; tableSig = ''; bufSig = ''; hits = null; hitsGen = -1; kitOk = false; wave.cache.clear(); wave.queue.length = 0; wave.planSig = ''; keyCells.forEach(c => { c.sig = ''; });
   editOk = false; keysOk = false; copyArm = -1; ed.selT = -1; ed.drag = null; ed.local = null; ed.history = new ED.History(); histSig = fieldSig = ''; closeMenu(); ghost(null); dropHi(-1); setEditorShown(false);
   setsOk = false; setSeqShown = -1; setAsked = null; setPill('s_status', '—', ''); $('s_save').disabled = $('s_load').disabled = true;
+  padsOk = false; for (const j of padJobs) j.cancelled = true; padJob.fill(null); $('pd_bar').hidden = true; $('pd_unsaved').hidden = true; $('pd_msg').hidden = true; $('k_load').hidden = true;
   cardOk = false; for (const j of cardJobs) j.cancelled = true; $('cardCard').hidden = true; $('cardnote').hidden = true; $('p_add').hidden = true;
   scope2Ok = scopeCvOk = false; clearTimeout(sc.timer); sc.timer = null; sc.frames.length = 0; sc.fps = sc.rps = sc.bps = 0; sc.err = ''; invalidate(D.bigscope);
   $('connect').textContent = 'Connect'; $('connect').disabled = !serialApi(); $('demo').disabled = false; $('demo').hidden = false; $('padsCard').hidden = true;
@@ -1867,6 +2011,7 @@ async function connectPort(port, isDemo) {
     setEditorShown(editOk);
     setsOk = !!cp.sets;                       /* ACTION 14 / 15 + the 219.. tail */
     cardOk = cp.card >= 1;                    /* CARD: 0x67 (upload, copy an old card in, the list) + the 276.. tail */
+    padsOk = keysOk && cp.pads >= 1;          /* PADS: 0x68 (a sample dropped onto a pad, New empty kit) + the 293.. tail */
     $('cardCard').hidden = !cardOk; $('p_add').hidden = !cardOk; $('cardnote').hidden = true;
     scope2Ok = cp.scope2 >= 1;                /* SCOPE: the 0x62 body (audio channels) */
     scopeCvOk = cp.scope2 >= 2;               /* SCOPE: … with the J3..J8 ext */
@@ -1950,11 +2095,12 @@ async function connect() {
  * `scope` opens the Scope tab (`cv` / `gates` press that preset), `noin`
  * leaves J1/J2 silent, `body512` announces the protocol's default max_body; CARD: `oldcard` the old layout (WAVs in
  * the root, sets/ and presets/ beside them, no Audiothurgist folder), `nocard` no card in, `nocardfw` a 0.13 firmware
- * before the card work (no "card", the 276-byte body), `card` opens the Kit tab's Card panel. */
+ * before the card work (no "card", the 276-byte body), `card` opens the Kit tab's Card panel; PADS: `nopads` a firmware
+ * before the pads work (no "pads", the 293-byte body), `emptykit` starts from New empty kit (no break, Pads). */
 async function connectDemo(flags = '') {
   if (link) return; notice('');
   const f = new Set(flags.split(',').filter(Boolean));
-  const tail = f.has('old') ? 148 : f.has('short') ? 167 : f.has('v099') ? 176 : f.has('nosets') ? 219 : f.has('noedit') ? 255 : f.has('noundo') ? 262 : f.has('old12') ? 263 : f.has('nocardfw') ? 276 : 293;
+  const tail = f.has('old') ? 148 : f.has('short') ? 167 : f.has('v099') ? 176 : f.has('nosets') ? 219 : f.has('noedit') ? 255 : f.has('noundo') ? 262 : f.has('old12') ? 263 : f.has('nocardfw') ? 276 : f.has('nopads') ? 293 : 315;
   demoDevice = new DEMO.FakeDevice({ tail, latencyMs: 6, oldcard: f.has('oldcard'), nocard: f.has('nocard'), kit: f.has('kit') || f.has('pads'), swing: f.has('kit') || f.has('swing'), inputs: !f.has('noin'), maxBody: f.has('body512') ? 512 : DEMO.MAX_BODY, edit: !(f.has('noedit') || f.has('nosets') || f.has('v099') || f.has('short') || f.has('old')) });
   const d = demoDevice;
   if (f.has('scope')) showTab('tab_scope');
@@ -1968,6 +2114,7 @@ async function connectDemo(flags = '') {
   if (f.has('grids')) d.options[G] = 2; if (f.has('euclid')) d.options[G] = 3; if (f.has('camp')) d.options[G] = 4;
   if (f.has('play')) { d.setGrammar(DEMO.GRAM.play, d.grammar); d.options[G] = DEMO.GRAM.play; }
   if (f.has('pads')) { d.options[G] = DEMO.GRAM.pads; d.applyEdit(36, Uint8Array.of(36, 6, 0)); }
+  if (f.has('emptykit')) d.padNewKit();
   if (f.has('locks')) d.lockMask = 0x0049;
   demoPort = new DEMO.FakePort(d);
   await connectPort(demoPort, true);

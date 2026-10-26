@@ -188,6 +188,48 @@ for the last box, a blank one. A clock on J3 and a break playing throughout.
 - [ ] Blank card: the first upload creates `Audiothurgist/breaks` itself;
       a preset save adds `Audiothurgist/presets/<slot>.json`.
 
+## 10c. Samples onto pads, an empty kit, 45 s of memory (10 min)
+
+Firmware with `"pads": 1` (`docs/packages/pads.md`). Nothing of this has run
+on hardware. A clock on J3 and a break playing, Classic, for the first three
+boxes; bring a few one-shots (a mono kick, a **stereo** pad or loop, a 30 s
+file) on the computer.
+
+- [ ] Boot: the page's Pads row reads "pads: 28.00 s of 28.00 s free" with a
+      17 s break loaded (more with a shorter one). A 17 s break still loads
+      whole; a take into a key (J5 style 7) still records — path 2.
+- [ ] Drop the kick on a pad **while the break plays with the clock on J3**.
+      *Listen for*: **no glitch, no dropout and no drift against the clock**
+      while it transfers and while the module places it (a fraction of a
+      second); the J4 keys keep answering during it. The pad says "✓".
+- [ ] Play that key from the page, from J4 (Voice map: J6 gate) and from the
+      panel (Pads, any key the ring shows): it plays the kick as the file
+      is — no trim, no level change — and at the same pitch at 90 and 170 BPM
+      (P2) and with the clock: recordings keep their pitch now; P4 still
+      transposes. *Call*: is that right for takes too (path 2)? ____
+- [ ] Drop the **stereo** file: the line says the kit is stereo now, Options →
+      Sampling reads Stereo, the pad plays in stereo (pan it), and the break
+      sounds exactly as before on both sides. *Listen for*: no click at the
+      moment the kit turns stereo, with a pad held.
+- [ ] Undo (Kit → Edit): the drop is gone, the key plays what it did before;
+      Redo brings it back.
+- [ ] Drop onto the same pad again: the new one plays; the room line now says
+      "… held by replaced pads". Save the set and load it back: still held
+      (not reclaimed — expected).
+- [ ] Drop the 30 s file with less room than that: "the first … of 30.0 s,
+      all the room left"; then any drop: "no room left".
+- [ ] While a drop transfers, start a set save / a card upload / B3-hold load:
+      each refused or held, never both at once; the drop still lands.
+- [ ] **New empty kit** (asks first): the break goes, Pads, "44.75 s free · no
+      break", every pad empty (silent), the clock keeps its tempo, no gate on
+      J6–J8. Drop three samples on three pads (one stereo).
+- [ ] The **unsaved kit** note shows; **Save set** as `padkit`; the note goes.
+- [ ] **Power-cycle**. The boot material plays (the kit was in memory); load
+      `padkit` (P5 + B3 or the page): no break, the three pads on their keys,
+      stereo, no tempo jump, playable from the page, J4 and the panel.
+- [ ] Load a break after it: the break plays at its own tempo; the pads are
+      gone (new material); a take into a key works.
+
 ## 11. Scope (3 min)
 
 - [ ] Scope tab: Out L/R trace the beat (this tab was hidden by a duplicate

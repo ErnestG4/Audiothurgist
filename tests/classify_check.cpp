@@ -73,7 +73,7 @@ int main(int argc, char** argv)
     {
         std::vector<float> x; float sr;
         if(!LoadWav(argv[a], x, sr)) { printf("%s: cannot read\n", argv[a]); continue; }
-        /* engine caps material at 25 s; analyse the first 8 bars' worth at most */
+        /* loads cap material at 17 s (the 45 s planes keep the rest for pads); analyse the first 8 bars' worth at most */
         int len = (int)x.size(); if(len > (int)(sr * 25)) len = (int)(sr * 25);
         int nsl = bb::GridSlices(len, sr);
         const char* base = strrchr(argv[a], '/'); base = base ? base + 1 : argv[a];

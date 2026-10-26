@@ -40,7 +40,8 @@ sample name means the same thing in both layouts.
 - **Uploads convert in the browser**: `decodeAudioData` already reads float
   WAV, AIFF, MP3, FLAC; the module's loader reads PCM 16/24 only. The page
   sends exactly what the module loads best: ≤ 17 s (kLoadSec — the rest of the
-  25 s plane is for takes into keys), 48 kHz, mono or stereo, PCM16.
+  plane is for takes into keys and, since PADS, samples dropped onto pads: 45 s
+  planes, `docs/packages/pads.md`), 48 kHz, mono or stereo, PCM16.
 
 ## Where the bytes wait, and why there
 

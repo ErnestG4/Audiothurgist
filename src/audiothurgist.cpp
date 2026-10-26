@@ -72,6 +72,7 @@
 #pragma GCC optimize("Os")
 #include "bb_card.h"     /* CARD: the one folder, upload names, the receiver, the copy plan (docs/packages/card.md) */
 #include "bb_cardfs.h"   /* CARD: scan, survey, copy, the upload's write — FatFs, host-tested over a shim */
+#include "bb_pads.h"     /* PADS: a drop's bytes → planes, the room, the empty kit (docs/packages/pads.md) */
 #pragma GCC pop_options
 #ifndef BB_GIT_HASH
 #define BB_GIT_HASH "local"
@@ -87,14 +88,22 @@ using namespace alchemy;
 static constexpr const char* kFirmwareVersion = "0.13.0-beta";
 
 constexpr float kSr       = 48000.f;
-constexpr int   kMaxSec   = 25;
+/* PADS (docs/packages/pads.md): the planes grew 25 → 45 s. A break (a load, a loop take) still fills at most
+ * kLoadSec = 17 s, so takes into keys and samples dropped onto pads always find kRecSec = 28 s past it (an empty
+ * kit: 44.75 s). The staging is sized by what a RESAMPLED load needs — a 17 s break at up to 96 kHz — because a
+ * file already at 48 kHz (every set, every page upload) decodes straight into the plane (core/wav_loader.h); a
+ * set may fill the whole 45 s plane. SDRAM 63.8 % → 77.6 %. */
+constexpr int   kMaxSec   = 45;
 constexpr int   kBufMax   = 48000 * kMaxSec;
-constexpr int   kStageMax = 96000 * kMaxSec;   /* native-rate decode staging */
 /* RECORD: a load (or a loop take) fills at most kLoadSec of a plane, so
  * RecArm always finds kRecSec of room past the material for takes into keys */
-constexpr int   kRecSec   = 8;
+constexpr int   kRecSec   = 28;
 constexpr int   kLoadSec  = kMaxSec - kRecSec;   /* 17 s */
 constexpr int   kLoadMax  = 48000 * kLoadSec;
+constexpr int   kStageMax = 96000 * kLoadSec;    /* native-rate decode staging: a 17 s break at 96 kHz (PADS) */
+static_assert(kLoadSec == 17, "the break's cap is the page's (HL.cardPlan cuts at 17 s) and kUpMax's");
+static_assert(kStageMax >= 96000 * kLoadSec, "a 96 kHz break of kLoadSec must fit the staging");
+static_assert((long long)kBufMax * 4 <= 0x7FFFFFFFLL, "positions and byte offsets into a plane stay int");
 constexpr int   kScratch  = 128;
 constexpr int   kMaxFiles = 256;
 constexpr int   kMaxOnsets = 128;
@@ -723,6 +732,28 @@ static uint16_t         gCardCopied = 0, gCardSkipped = 0;
 static bb::CardSurvey   gSurvey;                      /* what the card holds, old and new (280..) */
 static uint8_t          CardProgress();               /* the op's progress byte (OnRender, the tail) */
 /* ── end CARD ──────────────────────────────────────────────────────────── */
+/* ── PADS ── a sample dropped onto a pad (docs/packages/pads.md; the rules are core/bb_pads.h). 0x68 PADS
+ * receives PCM16 straight into the L plane past freePos — where nothing reads (every entry ends at or before
+ * freePos; takes are refused while a drop is open; GET_WAVE and the audition stop at freePos) — each chunk a
+ * memcpy (bb::UploadRx). Once the last byte is in, the main loop converts in place, writes the R plane, analyses
+ * the head and posts EditOp::Record (one undo step). Nothing is written to the card: a set save keeps it. ── */
+static bb::UploadRx     gPadRx;                       /* POD; buf / cap set per drop */
+static volatile uint8_t gPadState   = 0;              /* bb::PadState (tail 293) */
+static volatile uint8_t gPadProg    = 0;              /* receive / commit progress 0..255 (294) */
+static volatile uint8_t gPadResult  = 0;              /* bb::PadResult of the last op (295) */
+static volatile uint8_t gPadSeq     = 0;              /* bumps per finished op (296) */
+static volatile uint8_t gPadKey     = 255;            /* the drop's key, 255 none (297) */
+static volatile uint8_t gPadReq     = 0;              /* main loop: 1 commit the drop · 2 stage an empty kit · 3 finish it once applied */
+static volatile bool    gPadAdoptR  = false;          /* main → audio: engine.AdoptR(gPlayR), cleared = the ack */
+static float*           gPadPlane   = nullptr;        /* the L plane the bytes went into (engine.buf at the begin) */
+static int              gPadStart   = 0, gPadFrames = 0, gPadCh = 0;
+static uint32_t         gPadLastMs  = 0;              /* the last chunk: 5 s of silence drops the drop */
+static bool             gPadTicking = false;          /* the main loop is inside a drop's commit: KeepClock runs the loop at 1 kHz */
+static bool             gPadStereo  = false;          /* the last drop made the kit stereo (and Sampling → Stereo) */
+static bool             gNoBreak    = false;          /* the material is an empty kit's silent stub (no native tempo) */
+static int              gKitOnCard  = 0;              /* frames per plane the card holds of this kit (the unsaved note) */
+static bool PadBusy() { return gPadState != bb::kPadIdle || gPadReq != 0u; }
+/* ── end PADS ──────────────────────────────────────────────────────────── */
 /* ── CLOCK ── control-thread clock state; the math is core/bb_clockmath.h ── */
 static volatile float gClkFlash = 0.f;   /* B1 white flash per detected pulse */
 static volatile float gClkMult  = 1.f;   /* APPLIED multiplier (telemetry mirror of gMap.mult) */
@@ -1021,6 +1052,8 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
     /* LOOPER end */
     /* SETS: a save's looper snapshot, taken between two blocks */
     if(gSetSnapReq) { gSetLooper->Adopt(engine.looper); gSetSnapReq = false; }
+    /* PADS: a stereo drop onto a mono kit — the R plane (L copied in by the main loop) joins at a block's start */
+    if(gPadAdoptR) { engine.AdoptR(gPlayR); gPadAdoptR = false; }
 
     if(gPendReslice) { engine.Reslice();   gPendReslice = false; }
     if(gPendReroll)  { engine.RerollFill(); gPendReroll  = false; }
@@ -1448,7 +1481,7 @@ static void OnPoll(uint32_t /*t_ms*/)
     if(gNeedNativeTempo)
     {
         gNeedNativeTempo = false;
-        gClock.SetBpm(engine.NativeBpm());
+        if(!gNoBreak) gClock.SetBpm(engine.NativeBpm());   /* PADS: an empty kit has no tempo of its own — the clock keeps its */
         gP2Ref = -1e9f;   /* re-latch: P2 re-engages on movement */
     }
 
@@ -1693,7 +1726,7 @@ static void OnPoll(uint32_t /*t_ms*/)
                 {
                     if(st == 7)
                     {
-                        if(!gKeyTake && !gKeyTakeDone && !gTakeActive && engine.RecArm(j4key))
+                        if(!gKeyTake && !gKeyTakeDone && !gTakeActive && !PadBusy() /* PADS */ && engine.RecArm(j4key))
                         { gKeyTake = true; gKeyTakeKey = j4key; gRecPeak = 0.f; }
                     }
                     else engine.ClearKey(j4key);   /* 8: Clear (forgets the recorded entry's key too, review L2) */
@@ -1873,7 +1906,7 @@ static void OnPoll(uint32_t /*t_ms*/)
         const bool tap = b3.FallingEdge();
         if(!gTakeActive)
         {
-            if((tap || j6) && gRecord.sel == 1 && !gLoadReq && !gApply && !gReapply && !gKeyTake)
+            if((tap || j6) && gRecord.sel == 1 && !gLoadReq && !gApply && !gReapply && !gKeyTake && !PadBusy() /* PADS */)
             {
                 const bool clocked = gWasExt;
                 const int  bars    = gBars.sel >= 1 ? 1 << (gBars.sel - 1) : (gGridBars > 0 ? gGridBars : 1);
@@ -1898,7 +1931,7 @@ static void OnPoll(uint32_t /*t_ms*/)
     /* RECORD end */
     /* B3: tap = reslice · hold = load next WAV on the card. */
     if(b3.Pressed() && b3.TimeHeldMs() > 400.f && !s_b3_loaded
-       && gNumFiles > 0 && !gLoadReq && !gApply)
+       && gNumFiles > 0 && !gLoadReq && !gApply && !PadBusy() /* PADS: a drop is arriving */)
     {
         gLoadIdx    = gSelFile;
         gLoadReq    = true;
@@ -1936,10 +1969,13 @@ static void KeepClock()
      * panel, LEDs, HostLink — at 25 Hz. Never re-entered from inside itself
      * (a preset save inside Tick yields here too; a load request raised in
      * there waits for the main loop as always). */
-    if(gSetState && !gInTick)
+    /* PADS: through a drop's commit (≤ a few hundred ms of conversion and analysis) the loop runs at its own
+     * 1 kHz, so the jacks' keys and the panel never wait on it */
+    const bool padTick = gPadTicking;   /* set only inside ServicePads' commit, never while loop.Tick runs */
+    if((gSetState || padTick) && !gInTick)
     {
         const uint32_t now = daisy::System::GetNow();
-        if((uint32_t)(now - gSetTickMs) >= 40u)
+        if((uint32_t)(now - gSetTickMs) >= (gSetState ? 40u : 1u))
         {
             gSetTickMs = now;
             gInTick    = true;
@@ -2233,6 +2269,9 @@ static void PrepareMaterial(int len, int* cues, int nCues, bool stereo, int know
     gPendStereo = stereo;
     gLoadFlash  = 1.f;
     gSetCurName[0] = 0;     /* SETS: a loose file or a take, not a set */
+    gNoBreak   = false;                       /* PADS: a break again */
+    gKitOnCard = gCurFile >= 0 ? len : 0;     /* PADS: a card file is on the card; a take is not */
+    gPadStereo = false;
     if(sidecar) StageSidecar(len);   /* EDIT-PERSIST: a loose file's saved table, before the apply */
     gAutoArm    = true;              /* EDIT-PERSIST: the post-apply generation is the card's */
     gApply      = true;     /* audio thread swaps + SetMaterial */
@@ -2455,6 +2494,7 @@ static void SaveSet(const char* name)
     gCurFile = AddSetEntry(name);
     strncpy(gSetCurName, name, sizeof gSetCurName - 1); gSetCurName[sizeof gSetCurName - 1] = 0;
     gSetWavLen = s.len; gSetWavStereo = s.stereo;   /* EDIT-PERSIST: what an autosave may describe */
+    gKitOnCard = s.len;                              /* PADS: the kit is on the card now */
     gAutoClean = engine.tableGen; gAutoSeen = gAutoClean;
     SetFinish(0);
 }
@@ -2500,6 +2540,9 @@ static int LoadSet(const char* name, int fileIdx)
     if(len <= 0 || len < gSet->len) { SetFinish(7); return -1; }   /* unreadable, or cut short of what the JSON describes */
     if(!bb::PlanSet(*gSet, gSetPlan)) { SetFinish(7); return -1; }
     const bb::SetPlan& p = gSetPlan;
+    gNoBreak   = bb::IsEmptyKit(gLoad, p.material);   /* PADS: a pads-only kit's set — its silent stub is no tempo */
+    gKitOnCard = gSet->len;
+    gPadStereo = false;
     /* stage what PrepareMaterial stages, minus the conditioning */
     const int nsl = p.nGrid;
     gDet.mode  = gOnsetDet.sel;
@@ -2720,7 +2763,7 @@ static void ServiceAutosave()
     if(gen != gAutoSeen) { gAutoSeen = gen; gAutoT0 = NowUs(); return; }   /* the table moved: (re)start the 2 s */
     if(gAutosave.sel == 0) return;                                         /* Off: the timer idles, the edit stays pending */
     if((uint32_t)(NowUs() - gAutoT0) < kAutosaveUs) return;
-    if(gSetState || gSetReq || gLoadReq || gApply || gReapply || gTakeActive || gKeyTake || engine.recArmed || engine.recPending) return;   /* try again next pass */
+    if(gSetState || gSetReq || gLoadReq || gApply || gReapply || gTakeActive || gKeyTake || engine.recArmed || engine.recPending || gPadReq) return;   /* try again next pass */
     const bool ok = AutosaveNow();
     gAutoClean = gen;   /* one attempt per generation, success or failure */
     if(!ok) SetFinish(8);
@@ -2741,7 +2784,7 @@ static void ServiceSets()
         /* EDIT-PERSIST: the file's key map (24 one-byte writes the audio thread reads whole; an old file has none) */
         if(gSetPlan.hasKeys) engine.SetKeyTable(live);
     }
-    if(gSetReq && !gLoadReq && !gApply && !gReapply && !gTakeActive && !gSetState)
+    if(gSetReq && !gLoadReq && !gApply && !gReapply && !gTakeActive && !gSetState && !PadBusy() /* PADS */)
     {
         const uint8_t req = gSetReq;
         gSetReq = 0;
@@ -2770,7 +2813,7 @@ static void CardFinish(uint8_t r)
 static bool CardBusy()   /* what an upload or a copy waits behind (BAD_STATE at the request) */
 {
     const bool take = gKeyTake || gTakeActive || gKeyArm || engine.recArmed || engine.recPending;
-    return take || gSetState || gSetReq || gCardReq || gLoadReq || gApply || gReapply;
+    return take || gSetState || gSetReq || gCardReq || gLoadReq || gApply || gReapply || PadBusy();   /* PADS: and the reverse (HandlePads) */
 }
 static void CardSurveyNow() { bb::SurveyCard(&gDir, &gFno, gSurvey); }
 static void CardMerge()   /* new breaks / sets join the list's end: every index held stays valid */
@@ -2954,7 +2997,7 @@ static void HandleCard(const hostlink::ParsedFrame& f, hostlink::FrameWriter& w)
 static void ServiceLoad()
 {
     gDiagPhase = 8;
-    if(!gLoadReq || gApply || gReapply || gTakeActive /* RECORD: the loop take owns gLoad */) return;   /* review L1 */
+    if(!gLoadReq || gApply || gReapply || gTakeActive /* RECORD: the loop take owns gLoad */ || PadBusy() /* PADS: waits for the drop */) return;   /* review L1 */
     gLoadReq = false;
 
     /* SETS: the entry — from the list, or ACTION 15's name (gLoadIdx = -1) */
@@ -3105,6 +3148,9 @@ static void ServiceLoad()
  *                   the Brain map) · 272 u8 keyFlash (255 none) · 273 u8 keySeq · 274 u8 autoK · 275 u8 nMarkers — ends at 276
  *   CARD (docs/packages/card.md; capability "card": 1): 0x67 CARD — upload a break, copy an old card in, rescan,
  *                   the list (HandleCard has the ops); state tail 276..292 (StateExt's 0x60 has the bytes) — ends at 293
+ *   PADS (docs/packages/pads.md; capability "pads": 1): 0x68 PADS — a PCM16 sample dropped onto a pad (BEGIN / DATA /
+ *                   ABORT, committed as EditOp::Record: one undo step), NEW_KIT (no break, Pads); state tail 293..314
+ *                   (state, progress, result, seq, key, flags, free, total, held, the pads' key mask) — ends at 315
  *   0x65 GET_TABLE  ← [u8 first, u8 count, u8 form] — form 1 = entries carry a trailing u8 flags
  *                   (b0 orange · b1 tombstone), 14 bytes each; absent / 0 = the 13-byte form. */
 /* WEB → RECORD: ACTION 9 / 10. -1 = nothing requested; the consumer clears
@@ -3144,7 +3190,8 @@ static uint8_t EditToStatus(bb::EditStatus s)
 static bool EditBusy()
 {
     const bool rec = gKeyTake || gTakeActive || gKeyArm || gRecord.sel == 1 || engine.recArmed || engine.recPending;
-    return rec || gSetState || gSetReq || gLoadReq || gApply || gReapply || gEditPend;
+    return rec || gSetState || gSetReq || gLoadReq || gApply || gReapply || gEditPend
+        || gPadState >= bb::kPadCommitting || gPadReq;   /* PADS: a drop's commit posts its own edit; receiving is no bar */
 }
 /* Post one request and wait for the audio thread's answer — by the clock, not by iterations, yielding
  * to KeepClock. A timeout (the audio thread never ran: 4 ms is eight blocks) reads as NoMaterial. */
@@ -3624,6 +3671,167 @@ static void ServicePanel()
 }
 /* ── end EDIT-PANEL ────────────────────────────────────────────────────── */
 
+/* ── PADS: the main loop's half and the 0x68 command (docs/packages/pads.md) ─────────────────────────── */
+#pragma GCC push_options
+#pragma GCC optimize("Os")   /* PADS: like the card code, nothing here is time-critical (it yields) — built for size */
+static void PadFinish(uint8_t r)
+{
+    gPadResult = r; gPadState = bb::kPadIdle; gPadProg = 0; gPadReq = 0;
+    gPadSeq = (uint8_t)(gPadSeq + 1u);
+    if(r && r != bb::kPadAborted) gSetErrT = 36.f;   /* the panel's red blink, as a refused set op */
+}
+/* What a drop's begin (and an empty kit) waits behind: a set op, a load, a take, a card job, another drop's commit. */
+static bool PadRefused()
+{
+    const bool take = gKeyTake || gKeyTakeDone || gTakeActive || gKeyArm || gRecord.sel == 1 || engine.recArmed || engine.recPending;
+    return take || gSetState || gSetReq || gLoadReq || gApply || gReapply || gCardReq || gCardState != bb::kCardIdle
+        || gPadState >= bb::kPadCommitting || gPadReq || !engine.buf || engine.nSlices < 1;
+}
+/* The commit: the bytes the drop left in the L plane past freePos → floats in place, the R plane, the analysis of
+ * the head, then EditOp::Record through the edit mailbox (one undo step; the audio thread publishes the entry
+ * and moves freePos). KeepClock runs the whole control loop at 1 kHz meanwhile (gPadTicking). */
+static void PadCommit()
+{
+    if(engine.buf != gPadPlane || engine.freePos != gPadStart || engine.recArmed || engine.recPending
+       || gPadStart + gPadFrames > engine.bufCap)
+    { PadFinish(bb::kPadMoved); return; }   /* the planes changed under the drop: nothing reads the bytes, nothing is published */
+    gPadTicking = true;
+    float* const L = gPadPlane;
+    const bool   adopt = gPadCh == 2 && engine.bufR == nullptr;   /* a stereo drop onto a mono kit: the kit turns stereo */
+    float* const R = engine.bufR ? engine.bufR : (adopt ? gPlayR : nullptr);
+    gPadProg = 32;
+    bb::PcmToPlanes(L, R, gPadStart, gPadFrames, gPadCh);
+    gPadProg = 128;
+    if(adopt)
+    {
+        for(int i = 0; i < gPadStart; i++) { gPlayR[i] = L[i]; if((i & 4095) == 4095) bb::Yield(); }   /* what is there sounds the same on both sides */
+        __asm__ volatile("dmb" ::: "memory");
+        gPadAdoptR = true;
+        const uint32_t t0 = TickNow();
+        while(gPadAdoptR && (TickNow() - t0) < 4000u * gTicksPerUs) bb::Yield();
+        if(gPadAdoptR) { gPadAdoptR = false; gPadTicking = false; PadFinish(bb::kPadMoved); return; }
+        gSampling.sel = bb::kSampStereo; gSampling.dirty = false;   /* Options → Sampling follows the kit (loads and takes stay stereo) */
+        gPadStereo = true;
+    }
+    gPadProg = 192;
+    uint8_t cls = 3; float sal = 0.f, dens = 0.f; bool hit = false;
+    bb::AnalyseRegion(L, gPadStart, gPadFrames < bb::kPadAnalyseMax ? gPadFrames : bb::kPadAnalyseMax, kSr, gClass.mode, cls, sal, dens, hit);
+    bb::EditReq r;
+    r.op = bb::EditOp::Record; r.key = gPadKey; r.start = gPadStart; r.len = gPadFrames;
+    r.meta = {cls, sal, dens, hit}; r.flags = bb::EditReq::kMeta;
+    int idx = -1;
+    const bb::EditStatus st = PostEdit(r, &idx);
+    gPadTicking = false;
+    PadFinish(st == bb::EditStatus::Ok ? bb::kPadOk : st == bb::EditStatus::Full ? bb::kPadFull : bb::kPadMoved);
+}
+/* New empty kit: kPadStubLen samples of silence as the material (16 grid slices, class "other", no salience — so
+ * no gate ever fires from it), staged like a load into the other buffer and swapped by the audio thread (the
+ * table, the looper and the undo history start over, exactly as a load), the grammar → Pads (the keys are the
+ * instrument; the jacks follow it to the Voice map), the clock keeps its tempo. */
+static void PadNewKit()
+{
+    const bool stereo = gSampling.sel == bb::kSampStereo;
+    bb::MakeEmptyKit(gLoad, stereo ? gLoadR : nullptr);
+    gPendN = 0; gPendCues = false; gCondBars = 0; gGridBars = 1; gPendSwing = 0.5f; gPendHint = bb::kPadStubSlices;
+    for(int i = 0; i < bb::Engine::kMaxSlices; i++) { gPendClass[i] = 3; gPendSal[i] = 0.f; gPendBands[i] = 0; gPendDens[i] = 0.f; }
+    memset(gPendEnv, 128, sizeof gPendEnv);
+    memset(&gSetPlan, 0, sizeof gSetPlan);
+    gSetPendGrid = false; gSetPendCommit = false; gSetPendLooper = false;
+    gPendLen = bb::kPadStubLen; gPendStereo = stereo;
+    gCurFile = -1; gSetCurName[0] = 0; gSetWavLen = 0; gSetWavStereo = false;
+    gNoBreak = true; gKitOnCard = 0; gPadStereo = false;
+    gLoadFlash = 1.f;
+    gAutoArm   = true;
+    if(gGrammar.mode != 6u) { gGrammar.mode = 6u; gGrammar.dirty = true; }
+    gApply = true;
+    gPadReq = 3u;   /* finish once the audio thread has swapped */
+}
+/* Main loop: a drop gone quiet, then the commit or the empty kit — never while a swap is pending. */
+static void ServicePads()
+{
+    if(gPadState == bb::kPadReceiving && (uint32_t)(daisy::System::GetNow() - gPadLastMs) > 5000u)
+    { gPadRx.Reset(); PadFinish(bb::kPadTimeout); }
+    if(!gPadReq) return;
+    if(gPadReq == 3u) { if(!gApply) PadFinish(bb::kPadOk); return; }
+    if(gApply || gReapply || gEditPend) return;
+    const uint8_t req = gPadReq;
+    if(req == 1u) PadCommit();
+    else if(req == 2u) PadNewKit();
+}
+/* 0x68 PADS (capability "pads": 1) — every op answers u8 status first:
+ *   0 BEGIN    ← u8 key (0..23), u8 ch (1 | 2), u32 frames (48 kHz) → status, u32 room (frames free past freePos
+ *              now), u32 bufCap. BAD_ARGS a key / channel count / fewer than 480 frames · TOO_LARGE more frames
+ *              than the room (the reply says how many fit) · BAD_STATE a set op, a load, a take (armed, running,
+ *              pending, J5 style 7, Record armed), a card job, another drop's commit, no material. A begin while a
+ *              drop is still arriving replaces it.
+ *   1 DATA     ← u32 total (bytes = frames × ch × 2), u32 offset, PCM16 LE bytes (interleaved L R) → status,
+ *              u32 have, u8 done (0 more · 1 complete: the commit is queued). In order from zero; out of sequence,
+ *              a changed total or past the end is BAD_ARGS and drops the drop.
+ *   2 ABORT    → status (the drop forgotten; nothing published)
+ *   3 NEW_KIT  → status: the break cleared (a silent ¼ s stub), every pad and marker gone, the grammar → Pads;
+ *              the undo history ends as at a load. BAD_STATE as a begin, or while a drop arrives.
+ * The state tail from 293 reports state, progress, result, the key, the kit's flags and the room. */
+static void PadsTail(hostlink::FrameWriter& w)   /* the state tail's 293..314 (the 0x60 comment has the bytes) */
+{
+    const bb::PadRoom room = bb::PadRoomOf(engine);
+    uint32_t prog = gPadProg;
+    if(gPadState == bb::kPadReceiving) prog = gPadRx.Progress();
+    w.U8(gPadState); w.U8((uint8_t)prog); w.U8(gPadResult); w.U8(gPadSeq); w.U8(gPadKey);   /* 293..297 */
+    w.U8((uint8_t)((bb::KitUnsaved(engine, gKitOnCard, gNoBreak) ? 1u : 0u) | (gNoBreak ? 2u : 0u) | (gPadStereo ? 4u : 0u)));   /* 298 */
+    w.U32(room.free); w.U32(room.total); w.U32(room.held);                                     /* 299, 303, 307 */
+    w.U32(bb::PadMask(engine));                                                                /* 311 — ends at 315 */
+}
+static void HandlePads(const hostlink::ParsedFrame& f, hostlink::FrameWriter& w)
+{
+    if(f.len < 1) { w.U8(bb::kStBadArgs); return; }
+    auto rd32 = [&](int at) { return (uint32_t)f.body[at] | ((uint32_t)f.body[at + 1] << 8) | ((uint32_t)f.body[at + 2] << 16) | ((uint32_t)f.body[at + 3] << 24); };
+    const uint32_t free = engine.buf && engine.bufCap > engine.freePos ? (uint32_t)(engine.bufCap - engine.freePos) : 0u;
+    switch(f.body[0])
+    {
+        case 0:
+        {
+            if(f.len < 7) { w.U8(bb::kStBadArgs); w.U32(free); w.U32((uint32_t)engine.bufCap); return; }
+            const int key = f.body[1], ch = f.body[2];
+            const uint32_t frames = rd32(3);
+            uint8_t st = bb::PadBeginCheck(key, ch, frames, free);
+            if(st == bb::kStOk && PadRefused()) st = bb::kStBadState;
+            if(st != bb::kStOk) { w.U8(st); w.U32(free); w.U32((uint32_t)engine.bufCap); return; }
+            gPadPlane = engine.buf; gPadStart = engine.freePos; gPadFrames = (int)frames; gPadCh = ch; gPadKey = (uint8_t)key;
+            gPadRx.buf = (uint8_t*)(engine.buf + engine.freePos);   /* the L plane past freePos: nothing reads it */
+            gPadRx.cap = bb::PadBytes(frames, ch);
+            gPadRx.Begin(gPadRx.cap);
+            gPadLastMs = daisy::System::GetNow();
+            gPadState = bb::kPadReceiving; gPadProg = 0;
+            w.U8(bb::kStOk); w.U32(free); w.U32((uint32_t)engine.bufCap);
+            return;
+        }
+        case 1:
+        {
+            if(f.len < 9) { w.U8(bb::kStBadArgs); return; }
+            if(gPadState != bb::kPadReceiving) { w.U8(bb::kStBadState); return; }
+            const uint8_t r = gPadRx.Take(rd32(1), rd32(5), f.body + 9, (uint32_t)f.len - 9u);
+            if(r != bb::kStOk) { PadFinish(bb::kPadBadArgs); w.U8(r); return; }
+            gPadLastMs = daisy::System::GetNow();
+            uint8_t done = 0u;
+            if(gPadRx.Done()) { gPadState = bb::kPadCommitting; gPadProg = 0; gPadReq = 1u; done = 1u; }
+            w.U8(bb::kStOk); w.U32(gPadRx.have); w.U8(done);
+            return;
+        }
+        case 2:
+            if(gPadState == bb::kPadReceiving) { gPadRx.Reset(); PadFinish(bb::kPadAborted); }
+            w.U8(bb::kStOk);
+            return;
+        case 3:
+            if(PadRefused() || gPadState != bb::kPadIdle) { w.U8(bb::kStBadState); return; }
+            gPadState = bb::kPadClearing; gPadKey = 255u; gPadReq = 2u;
+            w.U8(bb::kStOk);
+            return;
+        default: w.U8(bb::kStBadArgs); return;
+    }
+}
+#pragma GCC pop_options
+/* ── end PADS ──────────────────────────────────────────────────────────── */
+
 struct StateExt : hostlink::IHostlinkExtension
 {
     uint8_t FirstCmd() const override { return 0x60u; }
@@ -3640,7 +3848,9 @@ struct StateExt : hostlink::IHostlinkExtension
          * state tail from 263 (flags2, load, J4 → key, J5 style, key flash, autoK, nMarkers). */
         /* CARD: "card":1 = everything under 0:/Audiothurgist, the 0x67 command (upload, copy an old card in, rescan,
          * list) and the state tail from 276. */
-        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102,\"sets\":1,\"scope2\":2,\"edit\":2,\"keys\":1,\"card\":1}";
+        /* PADS: "pads":1 = 0x68 (a sample dropped onto a pad, New empty kit), the 45 s planes, recordings at their
+         * own rate, and the state tail from 293. */
+        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102,\"sets\":1,\"scope2\":2,\"edit\":2,\"keys\":1,\"card\":1,\"pads\":1}";
     }
     /* WEB: one float → i8 (±127), saturating. */
     static int8_t ToI8(float v)
@@ -3733,6 +3943,15 @@ struct StateExt : hostlink::IHostlinkExtension
                  * folder · b5 something not copied in yet) · u16 rootWavs · u16 pending · u16 breaks · u8 lastIdx (the last
                  * upload's list index, 255 none) · u16 copied · u16 skipped (the last copy) · u8 nFiles — ends at 293. */
                 CardTail(w);
+                /* PADS tail (293..314, docs/packages/pads.md): u8 padState (0 idle · 1 receiving · 2 committing ·
+                 * 3 clearing: New empty kit) · u8 progress 0..255 · u8 result of the last op (0 ok · 1 no room ·
+                 * 2 busy · 3 bad args · 4 table full · 5 timed out · 6 aborted · 7 the planes moved under it) · u8 seq
+                 * (bumps per finished op) · u8 key (255 none) · u8 flags (b0 the kit holds audio the card does not:
+                 * a power-off loses it · b1 an empty kit: no break · b2 the last drop made the kit stereo, Sampling →
+                 * Stereo) · u32 free (frames past freePos) · u32 total (the pads' share: bufCap − bufLen) · u32 held
+                 * (below freePos, held by replaced / undone recordings: not reclaimed until new material) · u32 pads
+                 * (bit k = key k holds a recording) — ends at 315. */
+                PadsTail(w);
                 return;
             }
             case 0x61u:
@@ -3816,6 +4035,7 @@ struct StateExt : hostlink::IHostlinkExtension
                         }
                         break;
                     case 6:
+                        if(PadBusy()) { w.U8(3u); return; }   /* PADS: a drop is arriving into these planes */
                         if(f.len >= 2 && f.body[1] < gNumFiles && !gLoadReq && !gApply) { gLoadIdx = f.body[1]; gLoadReq = true; }
                         break;
                     case 7: locks.Clear(); break;              /* clear every motion lock */
@@ -3831,7 +4051,7 @@ struct StateExt : hostlink::IHostlinkExtension
                     case 9:   /* WEB → RECORD: arm a take into key */
                         if(f.len < 2 || f.body[1] >= bb::Engine::kKeys) { w.U8(2u); return; }
                         /* a second arm from the browser STOPS a browser take (review H1) */
-                        if(!(gKeyTake && gWebTake) && (engine.recArmed || engine.recPending || gKeyTake || gTakeActive)) { w.U8(3u); return; }   /* BAD_STATE */
+                        if(!(gKeyTake && gWebTake) && (engine.recArmed || engine.recPending || gKeyTake || gTakeActive || PadBusy())) { w.U8(3u); return; }   /* BAD_STATE; PADS: a drop owns freePos */
                         gWebRecArm = (int8_t)f.body[1];
                         break;
                     case 10:  /* WEB → RECORD: clear key's recording */
@@ -3856,7 +4076,7 @@ struct StateExt : hostlink::IHostlinkExtension
                         char nm[bb::kSetMaxName];
                         memcpy(nm, f.body + 1, n); nm[n] = 0;
                         if(!bb::SetNameOk(nm)) { w.U8(2u); return; }
-                        if(gSetState || gSetReq || gLoadReq || gApply || gReapply || gTakeActive || (op == 14u && (gKeyTake || engine.recArmed || engine.recPending)))
+                        if(gSetState || gSetReq || gLoadReq || gApply || gReapply || gTakeActive || PadBusy() /* PADS */ || (op == 14u && (gKeyTake || engine.recArmed || engine.recPending)))
                         { w.U8(3u); return; }
                         memcpy(gSetReqName, nm, n + 1u);
                         gSetReq = op == 14u ? 1u : 2u;
@@ -3971,6 +4191,7 @@ struct StateExt : hostlink::IHostlinkExtension
                 return;
             }
             case 0x67u: HandleCard(f, w); return;   /* CARD: uploads, the old card copied in, the list */
+            case 0x68u: HandlePads(f, w); return;   /* PADS: a sample dropped onto a pad, New empty kit */
             default: w.U8(1u); return;   /* UNSUPPORTED */
         }
     }
@@ -4117,6 +4338,7 @@ int main()
         ComputeEnvelope(gPlay, len, gEnv);
     }
 
+    gKitOnCard = len > 0 ? len : engine.bufLen;   /* PADS: a card file, or the synth break (made again at every boot) */
     gClock.SetBpm(engine.NativeBpm());
     gClock.Start();
     bb::gYield = KeepClock;   /* loads no longer freeze the playhead */
@@ -4167,7 +4389,7 @@ int main()
         gDiagPhase = 2;
         loop.Tick();
         gDiagPhase = 7;
-        if(gSample.dirty && !gLoadReq && !gApply)
+        if(gSample.dirty && !gLoadReq && !gApply && !PadBusy() /* PADS */)
         {
             gSample.dirty = false;
             gLoadIdx = gSample.idx < gNumFiles ? gSample.idx : 0;
@@ -4235,7 +4457,7 @@ int main()
             {
                 const int k = gWebRecArm; gWebRecArm = -1;
                 if(gKeyTake && gWebTake) { gKeyTakeDone = true; }   /* a browser take stops on the next arm */
-                else if(k < bb::Engine::kKeys && !gKeyTake && !gKeyTakeDone && !gTakeActive && engine.RecArm(k))
+                else if(k < bb::Engine::kKeys && !gKeyTake && !gKeyTakeDone && !gTakeActive && !PadBusy() /* PADS */ && engine.RecArm(k))
                 { gKeyTake = true; gKeyTakeKey = k; gRecPeak = 0.f; gWebTake = true; }
             }
             if(gWebLooperUndo)  { gWebLooperUndo = false; gPendUndo = true; }
@@ -4277,7 +4499,7 @@ int main()
          * engine keeps recordings only on the same planes — else it applies
          * at the next load or loop take. Record Source is read live by the
          * audio thread; Record → Off stops an unclocked take. */
-        if(gSampling.dirty && !gApply && !gReapply && !gLoadReq && !gReclass && !gTakeActive && !gKeyTake && engine.bufLen > 0)
+        if(gSampling.dirty && !gApply && !gReapply && !gLoadReq && !gReclass && !gTakeActive && !gKeyTake && !PadBusy() /* PADS */ && engine.bufLen > 0)
         {
             gSampling.dirty = false;
             const bool wantR = gSampling.sel == bb::kSampStereo, haveR = engine.bufR != nullptr;
@@ -4295,6 +4517,7 @@ int main()
         ServicePanel();   /* EDIT-PANEL: the Edit page's posts (the mailbox waits here, never in OnPoll) */
         ServiceSets();   /* SETS: a loaded set's recordings, ACTION 14 / 15, the preset backups */
         ServiceCard();   /* CARD: an upload's write, the old card copied in, a rescan */
+        ServicePads();   /* PADS: a drop's commit, New empty kit */
         ServiceLoad();
     }
 }
