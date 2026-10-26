@@ -192,6 +192,8 @@ static Manual manual =
             "32nd at the tempo), set in the browser's Kit tab "
             "and saved with the set; they ride every call through the key — CV, "
             "the pads, Play's loop — never the pattern's steps. "
+            "**Spread across keys** (Kit tab) puts one key's sample on all "
+            "24, a semitone apart: J4's V/oct plays it as a melody. "
             "A dropped sample lives in memory "
             "until you save a set. While a take runs the buttons "
             "are full red and P6 shows the input level. **Cards**: "

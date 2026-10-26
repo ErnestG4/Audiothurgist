@@ -220,6 +220,7 @@ inline bool Engine::UndoSwap(UndoRec& r)
             const KeyParam was = keyp[k], to = r.u.kp[k];
             if(memcmp(&was, &to, sizeof was) != 0) { PutKeyParam(k, to.Valid() ? to : KeyParam{0, 0, 0, 0, 0}); if(keyp[k].plays != KeyParam::kRatchet) keyRatOn &= ~(1u << k); }
             r.u.kp[k] = was;
+            if(r.keys[k] != keySlice[k]) keyRatOn &= ~(1u << k);   /* CHROMA: a key the step re-points stops its ratchet (it ran on the old entry) */
         }
     }
     else if(r.kind == UndoRec::kSnap)
@@ -315,6 +316,7 @@ inline bool Engine::UndoBegin(const EditReq& r)
         case EditOp::SetKey:
         case EditOp::SetKeyMap: n = 0; break;   // the key map alone (BETA: SetKeyMap too)
         case EditOp::SetKeyParams: UndoCaptureKeyP(s, r.key); undo->armed = 1; return true;   /* KEYP */
+        case EditOp::SpreadKeys:   UndoCaptureKeyP(s, r.key); undo->armed = 1; return true;   /* CHROMA: the same record — the map and every key's settings */
         case EditOp::SwapKeys:
             if(r.a >= 0 && r.a < kKeys) idx[0] = keySlice[r.a];
             if(r.b >= 0 && r.b < kKeys) idx[1] = keySlice[r.b];
@@ -343,7 +345,7 @@ inline bool Engine::UndoQuiet(const EditReq& r) const
     if(undo->gen != tableGen || undo->count <= 0 || undo->cur != undo->count) return false;
     if(r.op == EditOp::SetKeyMap) return true;
     const UndoRec& last = undo->Slot(undo->count - 1);
-    if(r.op == EditOp::SetKeyParams) return last.kind == UndoRec::kKeyP && last.first == r.key;   /* KEYP: a drag of one key's slider */
+    if(r.op == EditOp::SetKeyParams) return last.kind == UndoRec::kKeyP && last.op == (uint8_t)EditOp::SetKeyParams && last.first == r.key;   /* KEYP: a drag of one key's slider (CHROMA: never folded into a spread's record) */
     if(last.kind != UndoRec::kSnap) return false;
     switch(r.op)
     {

@@ -647,6 +647,177 @@ static void TestJson()
     }
 }
 
+/* ── 6. CHROMA: spread across keys ────────────────────────────────────── */
+static bb::EditStatus Spread(bb::Engine& e, int root, int flags = 0, int* count = nullptr, uint8_t gen = 0)
+{
+    bb::EditReq q; q.op = bb::EditOp::SpreadKeys; q.key = root; q.a = flags; q.gen = gen;
+    int n = -1; const bb::EditStatus st = e.ApplyEdit(q, &n);
+    if(count) *count = n;
+    return st;
+}
+struct KeyState { int8_t keys[24]; bb::KeyParam kp[24]; float g[24], r[24]; };
+static KeyState Keys(const bb::Engine& e)
+{
+    KeyState k;
+    memcpy(k.keys, e.keySlice, sizeof k.keys); memcpy(k.kp, e.keyp, sizeof k.kp); memcpy(k.g, e.keyGain, sizeof k.g); memcpy(k.r, e.keyRate, sizeof k.r);
+    return k;
+}
+static bool SameKeys(const KeyState& a, const KeyState& b) { return !memcmp(&a, &b, sizeof a); }
+// the rate a call through key j starts its voice at (P4, the tempo and the key's tune all in), 0 = none
+static float CallRate(bb::Engine& e, int j)
+{
+    Silence(e); e.CallSlice(e.KeySlice(j), 1.f, false, false, false, 1.f, false, j);
+    const bb::Voice* v = Fresh(e);
+    return v ? v->rate : 0.f;
+}
+static void TestSpread()
+{
+    SECTION("CHROMA: spread across keys — one sample on every key, a semitone a key, one undo step");
+    static std::vector<float> L(kCap), R(kCap);
+    bb::Engine e; Setup(e, L.data(), R.data()); e.muted = true;
+    const int root = 2, t = e.KeySlice(root), pad7 = e.KeySlice(7);
+    CHECK(e.OwnRate(t) && pad7 != t, "key 2 is a pad (its own rate), key 7 another pad");
+    SetKp(e, root, -12, 30, 2);   // the root: −6 dB, +30 cents, Held
+    SetKp(e, 11, 6, -500, 1);     // a key with settings of its own (the spread replaces them)
+    const KeyState before = Keys(e);
+    const int d0 = e.UndoDepth(); const uint8_t g0 = e.tableGen;
+    int n = -1;
+    CHECK(Spread(e, root, 0, &n) == bb::EditStatus::Ok && n == 23 && e.tableGen != g0, "spread key 2: Ok, 23 keys on it, the generation moves");
+    CHECK(e.UndoDepth() == d0 + 1, "one undo step (depth %d → %d)", d0, e.UndoDepth());
+    bool map = true, kp = true;
+    for(int j = 0; j < 24; j++)
+    {
+        map = map && e.KeySlice(j) == t;
+        const int want = (j - root) * 100 + 30;
+        kp = kp && e.keyp[j].cents == want && e.keyp[j].gain == -12 && e.keyp[j].plays == 2 && e.keyp[j].rat == 0 && e.keyp[j].spare == 0;
+    }
+    CHECK(map, "every key plays the root's entry (key 7's pad replaced)");
+    CHECK(kp, "key j: (j − 2) × 100 + 30 cents, the root's gain and Plays");
+    CHECK(!memcmp(&e.keyp[root], &before.kp[root], sizeof(bb::KeyParam)) && e.keyRate[root] == before.r[root], "the root itself untouched");
+    CHECK(e.tableKey[pad7] == 7 && !(e.tableFlags[pad7] & bb::Engine::kFlagTomb), "key 7's own recording stays in the table (owned, unplayed — undo brings it back)");
+    // the tuning: rate_j = 2^((j − k)/12) × rate_k, at two tempi, and a pad's pitch does not follow the tempo
+    float rk90 = 0.f;
+    for(int pass = 0; pass < 2; pass++)
+    {
+        e.SetBpm(pass ? 170.f : 90.f); e.pitch = 1.25f;
+        const float rk = CallRate(e, root);
+        bool tuned = rk > 0.f; float worst = 0.f;
+        for(int j = 0; j < 24; j++)
+        {
+            const float want = rk * powf(2.f, (float)(j - root) / 12.f), got = CallRate(e, j);
+            const float err = fabsf(got - want) / want; if(err > worst) worst = err;
+            tuned = tuned && err <= 2e-6f;
+        }
+        CHECK(tuned, "at %d BPM: key j's rate = 2^((j − 2)/12) × the root's (worst relative error %.2g)", pass ? 170 : 90, worst);
+        if(!pass) rk90 = rk;
+        else CHECK(rk == rk90 && Near(rk, 1.25f * powf(2.f, 0.3f / 12.f), 1e-6f), "a pad: the same pitch at 90 and 170 BPM (its own rate × P4 × the tune: %g)", rk);
+    }
+    // the shell's guard: a second spread plans nothing new
+    { int8_t k2[24]; bb::KeyParam p2[24]; const int m = e.SpreadPlan(root, 0, k2, p2);
+      CHECK(m == 23 && !memcmp(k2, e.keySlice, sizeof k2) && !memcmp(p2, e.keyp, sizeof p2), "the same spread again plans exactly what is there (the shell posts nothing)"); }
+    // undo puts back every key's map and settings, gain and rate bit for bit; redo the spread
+    const KeyState spread = Keys(e);
+    CHECK(Undo(e) == bb::EditStatus::Ok && SameKeys(Keys(e), before), "Undo: all 24 keys' map, settings, gain and rate exactly as before");
+    CHECK(e.UndoDepth() == d0, "…one step back");
+    CHECK(Undo(e, true) == bb::EditStatus::Ok && SameKeys(Keys(e), spread), "Redo: the spread again, exactly");
+    // a drag of the root's slider after the spread: a step of its own, never folded into the spread's record
+    SetKp(e, root, -20, 30, 2, true);
+    CHECK(e.UndoDepth() == d0 + 2, "a joined KEY_PARAMS right after a spread: its own step (depth %d)", e.UndoDepth());
+    Undo(e);
+    CHECK(SameKeys(Keys(e), spread), "…undone alone: the spread stays");
+    Undo(e);
+    CHECK(SameKeys(Keys(e), before), "then the spread");
+
+    // keep pads: a key playing a recording other than the root's is left alone
+    {
+        const int dk = e.UndoDepth();
+        CHECK(Spread(e, root, bb::Engine::kSpreadKeepPads, &n) == bb::EditStatus::Ok && n == 22, "keep pads: 22 keys spread (%d)", n);
+        CHECK(e.KeySlice(7) == pad7 && !memcmp(&e.keyp[7], &before.kp[7], sizeof(bb::KeyParam)), "key 7 (its own pad) kept, map and settings");
+        CHECK(e.KeySlice(11) == t && e.keyp[11].cents == 930, "key 11 (a grid key with settings) spread: +9 st from the root, +30 cents");
+        CHECK(e.UndoDepth() == dk + 1 && Undo(e) == bb::EditStatus::Ok && SameKeys(Keys(e), before), "one step; undone exactly");
+        // a key that copies the root's pad is not a pad to keep (it already plays the root's entry)
+        { bb::EditReq k; k.op = bb::EditOp::SetKey; k.key = 20; k.t = t; e.ApplyEdit(k); }
+        Spread(e, root, bb::Engine::kSpreadKeepPads, &n);
+        CHECK(n == 22 && e.keyp[20].cents == 1830, "a key already on the root's pad is spread (+18 st)");
+        Undo(e); Undo(e);
+        CHECK(SameKeys(Keys(e), before), "(both undone)");
+    }
+    // the ends of the keyboard: any root fits (±23 semitones), the root's own tune clamped at ±24
+    {
+        Spread(e, 0); bool ok = true; for(int j = 1; j < 24; j++) ok = ok && e.keyp[j].cents == j * 100;
+        CHECK(ok && e.keyp[23].cents == 2300, "root C1 (key 0): +23 st at the top");
+        Undo(e);
+        Spread(e, 23); ok = true; for(int j = 0; j < 23; j++) ok = ok && e.keyp[j].cents == (j - 23) * 100;
+        CHECK(ok && e.keyp[0].cents == -2300, "root B2 (key 23): −23 st at the bottom");
+        Undo(e);
+        SetKp(e, 0, 0, 500, 0);
+        Spread(e, 0);
+        CHECK(e.keyp[18].cents == 2300 && e.keyp[19].cents == 2400 && e.keyp[23].cents == 2400, "a root tuned +5 st: the keys past +24 st clamp there (19..23 at +2400)");
+        Undo(e); Undo(e);
+    }
+    // a grid slice spread: tuned the same, but its pitch follows the tempo (a varispeed slice of the break)
+    {
+        Spread(e, 5);
+        e.pitch = 1.f;
+        e.SetBpm(90.f);  const float a5 = CallRate(e, 5), a17 = CallRate(e, 17);
+        e.SetBpm(170.f); const float b5 = CallRate(e, 5), b17 = CallRate(e, 17);
+        CHECK(!e.OwnRate(e.KeySlice(5)) && Near(a17 / a5, 2.f, 2e-6f) && Near(b17 / b5, 2.f, 2e-6f), "a grid key spread: an octave up 12 keys on, at 90 and at 170 BPM");
+        CHECK(Near(b5 / a5, 170.f / 90.f, 1e-5f), "…and the whole spread follows the tempo (×%g from 90 to 170 BPM)", b5 / a5);
+        Undo(e);
+    }
+    // a running ratchet on a spread key stops (its key was re-pointed); undo of a re-point stops one too
+    {
+        SetKp(e, 9, 0, 0, 4, false, 1);
+        Silence(e); e.CallSlice(e.KeySlice(9), 1.f, false, false, false, 1.f, true, 9);
+        const bool ran = (e.keyRatOn >> 9) & 1u;
+        Spread(e, root);
+        CHECK(ran && !((e.keyRatOn >> 9) & 1u), "a ratchet running on key 9 stops when the spread re-points it");
+        Undo(e);
+        SetKp(e, root, 0, 0, 4, false, 1);
+        Spread(e, root);   // every key a ratchet on the pad
+        Silence(e); e.CallSlice(e.KeySlice(9), 1.f, false, false, false, 1.f, true, 9);
+        const bool ran2 = (e.keyRatOn >> 9) & 1u;
+        Undo(e);
+        CHECK(ran2 && !((e.keyRatOn >> 9) & 1u), "undoing the spread stops key 9's ratchet on the root's pad (a ratchet before and after)");
+        Undo(e); Undo(e); Silence(e); e.keyRatOn = 0;
+    }
+    // the refusals: nothing written, no step
+    {
+        const KeyState k0 = Keys(e); const int dr = e.UndoDepth(); const uint8_t gr = e.tableGen;
+        const bool bad = Spread(e, 24) == bb::EditStatus::BadArgs && Spread(e, -1) == bb::EditStatus::BadArgs && Spread(e, 3, 2) == bb::EditStatus::BadArgs;
+        CHECK(bad && SameKeys(Keys(e), k0) && e.UndoDepth() == dr && e.tableGen == gr, "a root out of 0..23, an unknown flag: BadArgs, nothing written, no step");
+        CHECK(Spread(e, 3, 0, nullptr, (uint8_t)(e.tableGen + 1)) == bb::EditStatus::Stale && SameKeys(Keys(e), k0), "a stale gen: Stale");
+    }
+    CHECK(sizeof(bb::UndoRec) == 2336, "the journal's record did not grow (%zu B)", sizeof(bb::UndoRec));
+
+    // the set: a spread (pads replaced) saves and loads as it is — the map onto the root's pad, 24 tunes; the pad
+    // it replaced comes back still in the table
+    {
+        static std::vector<float> L2(kCap), R2(kCap);
+        static bb::SetInfo s, u; static bb::SetPlan p;
+        bb::Engine a; Setup(a, L.data(), R.data());
+        SetKp(a, 7, -4, 0, 0);
+        Spread(a, 7);
+        bb::Looper none;
+        new(&s) bb::SetInfo(); bb::SetFromEngine(a, none, s, true, kSr);
+        s.bars = 1; s.bpm = a.NativeBpm();
+        const std::string j = Emit(s);
+        CHECK(bb::SetReader::Json(j.data(), j.size(), u) && bb::PlanSet(u, p), "a spread kit saved and planned (%zu B of JSON)", j.size());
+        memcpy(L2.data(), L.data(), (size_t)a.freePos * sizeof(float)); memcpy(R2.data(), R.data(), (size_t)a.freePos * sizeof(float));
+        bb::Engine b; b.Init(31); b.SetUndoJournal(&gJ2);
+        b.SetMaterial(L2.data(), p.material, (float)kSr, p.onsets, p.nOnsets, p.cls, p.nGrid, R2.data(), kCap);
+        b.SetGridBoundaries(p.starts, p.nGrid, p.gridFlags);
+        int8_t live[24];
+        bb::CommitSetRecordings(b, u, p, [](int, int) { return 0.f; }, live);
+        if(p.hasKeys) b.SetKeyTable(live);
+        bb::KeyParam kq[24]; bb::KeyParamsFromSet(u, kq); b.SetKeyParams(kq);
+        bool same = true; const int bt = b.KeySlice(7);
+        for(int k = 0; k < 24; k++) same = same && b.KeySlice(k) == bt && !memcmp(&a.keyp[k], &b.keyp[k], sizeof(bb::KeyParam)) && a.keyRate[k] == b.keyRate[k];
+        CHECK(same && b.slices[bt].start == a.slices[a.KeySlice(7)].start, "after the load: every key on key 7's pad, every tune as saved");
+        CHECK(b.RecordedEntry(2) >= 0 && b.RecordedEntry(2) != bt, "key 2's replaced pad is still in the kit (owned by key 2, unplayed)");
+    }
+}
+
 int main(int argc, char** argv)
 {
     (void)argc; (void)argv;
@@ -656,6 +827,7 @@ int main(int argc, char** argv)
     TestRatchet();
     TestJournal();
     TestJson();
+    TestSpread();
     printf("\nkeyp_check: %d passed, %d failed\n", gPass, gFail);
     return gFail ? 1 : 0;
 }

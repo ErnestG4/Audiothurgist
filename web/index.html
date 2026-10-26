@@ -198,6 +198,7 @@
   .kprow{margin-top:8px;gap:10px;align-items:center;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--raise)}
   .kprow .kpk{min-width:3.2em} .kprow input[type=range]{width:120px;vertical-align:middle} .kprow .kpv{display:inline-block;min-width:4.6em;text-align:right;color:var(--ink)}
   .kprow .kpc{width:4.2em} .kprow.set{border-color:var(--accent)} @media(max-width:640px){.kprow input[type=range]{width:96px}}
+  .kprow .kpspread{white-space:normal;text-align:left;max-width:100%}   /* CHROMA */
   #kitwave,#onsethist{touch-action:none}
   .edmenu{position:absolute;z-index:5;background:var(--btn);border:1px solid var(--line-hi);border-radius:10px;padding:6px;display:flex;flex-direction:column;gap:4px;min-width:200px;box-shadow:0 6px 24px var(--shadow)}
   .edmenu .t{font-size:12px;color:var(--ink2);padding:2px 6px;max-width:260px} .edmenu.red .t{color:var(--bad-ink)} .edmenu button{text-align:left;min-height:44px}
@@ -371,6 +372,7 @@
       <label id="kp_rat_l" class="ctl inl" hidden title="the ratchet's rate: the sample again from its start every whole, ½, ¼ or ⅛ of its own length (as it plays), or every 8th / 16th / 32nd at the tempo">every <select id="kp_rat" class="inline"><option value="0">whole sample</option><option value="1">½ sample</option><option value="2">¼ sample</option><option value="3">⅛ sample</option><option value="4">8th (tempo)</option><option value="5">16th (tempo)</option><option value="6">32nd (tempo)</option></select></label>
       <button id="kp_hear" class="mini" title="play the key as a pad does (hold for a held or looping key)">▶ hear</button>
       <button id="kp_reset" class="mini" title="this key back to neutral: 0 dB, no tune, Follow Key Plays (one undo step)">reset</button>
+      <button id="kp_spread" class="mini kpspread" hidden title="SPREAD_KEYS (ACTION 38): this key's sample on every key, a semitone a key — J4's V/oct plays it as a melody. Every other key takes its tune (its distance from this key, in semitones, plus this key's cents), this key's gain and Plays; this key stays as it is. Asks first when it would replace pads with their own samples. One undo step puts every key back.">Spread — chromatically (C1 … B2)</button>
     </div>
     <p id="kit_help" class="note">Click a key to see its material below (on a phone, ● and ✕ act on the selected key). An empty key plays its span of the break; a recorded key plays its take. ● arms a take into that key (the next gate on J6 / the panel gesture starts it); ✕ clears a recording.</p>
     <p id="kit_help_edit" class="note" hidden><b>Keys:</b> tap one to hear it and see it below · drag a key onto another to <b>swap</b> (a prompt when the target is taken; <span class="bad">magenta</span> when a recording would lose its only key) · long-press a key, then drop or tap another, to <b>copy</b> it there · drag a slice up from the waveform onto a key to assign it.</p>
@@ -1524,10 +1526,11 @@ function showMenu(items, cx, cy, t) {
   placeMenu(cx, cy);
 }
 const CHOICE_LABEL = { swap: 'swap the two keys', replace: 'replace (the target loses it)', cancel: 'cancel' };
+/* plan.title / ch.label: CHROMA's spread prompt brings its own words (the key-drop prompt uses the defaults) */
 function showChoice(plan, cx, cy) {
   closeMenu(); const m = $('ed_menu'); m.classList.toggle('red', !!plan.red);
-  m.innerHTML = `<div class="t">${plan.red ? 'that key is the only one playing a recording — replacing orphans it' : 'that key is taken'}</div>`;
-  for (const ch of plan.choices) { const b = document.createElement('button'); b.textContent = CHOICE_LABEL[ch.id] || ch.id; if (ch.id === plan.def) b.className = 'primary'; b.onclick = () => closeMenu(ch.id); m.appendChild(b); }
+  m.innerHTML = `<div class="t">${plan.title ? esc(plan.title) : plan.red ? 'that key is the only one playing a recording — replacing orphans it' : 'that key is taken'}</div>`;
+  for (const ch of plan.choices) { const b = document.createElement('button'); b.textContent = ch.label || CHOICE_LABEL[ch.id] || ch.id; if (ch.id === plan.def) b.className = 'primary'; b.onclick = () => closeMenu(ch.id); m.appendChild(b); }
   placeMenu(cx == null ? 0 : cx, cy == null ? 0 : cy);
   return new Promise(res => { choiceResolve = res; });
 }
@@ -1584,7 +1587,7 @@ $('l_undo').onclick = () => action(ACT.looperUndo); $('l_clear').onclick = () =>
  * when it has any. The sliders play live: each value goes out while you drag (one at a time — the newest waits for the
  * last reply), every send after the drag's first with JOIN, so a whole drag is one undo step (the autoslice slider's
  * way). The module's answer is the truth: the row follows the settings read back, except while you hold a control. */
-let keypOk = false, keyp = null, keypGen = -1;
+let keypOk = false, keyp = null, keypGen = -1, spreadOk = false;   /* CHROMA: spreadOk = "keyp": 2 (ACTION 38) */
 let kpBusy = false, kpWant = null, kpDrag = false, kpSent = 0, kpKey = -1, kpTouch = 0;
 const keypOf = k => keypOk && keyp && keyp[k] ? HL.keypText(keyp[k]) : '';
 const kpGainText = g => g ? HL.keypGainText(g) : '0 dB';
@@ -1601,6 +1604,7 @@ function drawKeyp() {
   const busy = !link || !st || !st.bufLen; for (const id of ['kp_gain', 'kp_semi', 'kp_cents', 'kp_plays', 'kp_rat', 'kp_hear', 'kp_reset']) $(id).disabled = busy;
   $('kp_rat_l').hidden = +$('kp_plays').value !== HL.KEYP.ratchet;
   $('kp_reset').disabled = busy || HL.keypNeutral(p);
+  drawSpread(k, busy);   /* CHROMA */
   if (held && kpKey === k) return;   /* your hand is on it: the reply will come round */
   const semi = Math.trunc(p.cents / 100), fine = p.cents - semi * 100;
   if (document.activeElement !== $('kp_gain') && +$('kp_gain').value !== p.gain) $('kp_gain').value = String(p.gain);
@@ -1611,6 +1615,37 @@ function drawKeyp() {
   $('kp_rat_l').hidden = +$('kp_plays').value !== HL.KEYP.ratchet;
   setText('kp_gain_v', kpGainText(p.gain)); setText('kp_semi_v', kpSemiText(p.cents));
 }
+/* ───────────── CHROMA (ACTION 38, capability "keyp": 2): one sample, played chromatically ─────────────
+ * "Spread G1 chromatically (C1 … B2)": the selected key's sample on all 24 keys, key j tuned (j − G1) semitones plus
+ * G1's own cents, with G1's gain and Plays; G1 stays as it is. J4's V/oct then plays a melody from one sample. Keys that
+ * play their own pads would lose them (the samples stay in the kit, unplayed) — the prompt asks first, the way the
+ * key-drop prompt does when a recording would lose its only key: keep those pads (the default), spread over them too,
+ * or cancel. One undo step puts every key's map and settings back. */
+const emptyKey = k => { const e = entryOfKey(k); return !!(e && st && st.pads && st.pads.noBreak && e.t < table.nSlices); };   /* an empty kit's key: nothing to spread */
+function drawSpread(k, busy) {
+  const b = $('kp_spread'); b.hidden = !spreadOk; if (!spreadOk) return;
+  const kn = keyName(k), empty = !!table && emptyKey(k);
+  setText('kp_spread', `Spread ${kn} chromatically (${keyName(0)} … ${keyName(23)})`);
+  b.disabled = busy || !table || !st || !st.keySlice || empty || !!st.recState;
+  b.title = empty ? `${kn} is empty — drop a sample on it first, then spread it` : `SPREAD_KEYS (ACTION 38): ${kn}'s sample on every key, a semitone a key — J4's V/oct plays it as a melody. Every other key takes its tune (its distance from ${kn} in semitones, plus ${kn}'s cents), ${kn}'s gain and Plays; ${kn} stays as it is. Asks first when it would replace pads with their own samples. One undo step puts every key back.`;
+}
+async function spreadKey(cx, cy) {
+  if (!link || !spreadOk || !st || !st.keySlice || !table) return;
+  const k = selKey, kn = keyName(k), plan = HL.spreadPlan(st.keySlice, table.entries, table.nSlices, k);
+  let keep = false;
+  if (plan.pads.length) {
+    const n = plan.pads.length, names = plan.pads.map(keyName).join(', ');
+    $('wv_wrap').scrollIntoView && $('wv_wrap').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    const id = await showChoice({ red: true, def: 'keep',
+      title: `${n} key${n === 1 ? '' : 's'} play${n === 1 ? 's' : ''} a pad of ${n === 1 ? 'its' : 'their'} own (${names}) — spreading ${kn} over ${n === 1 ? 'it' : 'them'} leaves ${n === 1 ? 'that sample' : 'those samples'} unplayed (still in the kit; Undo brings ${n === 1 ? 'it' : 'them'} back)`,
+      choices: [{ id: 'keep', label: `spread around ${n === 1 ? 'it' : 'them'} (keep ${names})` }, { id: 'over', label: `spread over ${n === 1 ? 'it' : 'them'} too (all 24 keys)` }, { id: 'cancel' }] }, cx, cy);
+    if (!id || id === 'cancel') { setEdStatus('spread cancelled', ''); return; }
+    keep = id === 'keep';
+  }
+  await ed.spreadKeys(k, keep);
+  invalidate(D.kit | D.pads);
+}
+$('kp_spread').addEventListener('click', e => { spreadKey(e.clientX, e.clientY); });
 function kpLabels() { const p = kpFromRow(); setText('kp_gain_v', kpGainText(p.gain)); setText('kp_semi_v', kpSemiText(p.cents)); }
 /* one send at a time; `join` for every send of a drag after its first */
 function kpQueue(p, join) {
@@ -2133,6 +2168,7 @@ function setDisconnected() {
   editOk = false; keysOk = false; copyArm = -1; ed.selT = -1; ed.drag = null; ed.local = null; ed.history = new ED.History(); histSig = fieldSig = ''; closeMenu(); ghost(null); dropHi(-1); setEditorShown(false);
   setsOk = false; setSeqShown = -1; setAsked = null; setPill('s_status', '—', ''); $('s_save').disabled = $('s_load').disabled = true;
   keypOk = false; keyp = null; keypGen = -1; kpWant = null; kpBusy = false; kpDrag = false; $('kp_row').hidden = true;   /* KEYP */
+  spreadOk = false; $('kp_spread').hidden = true;   /* CHROMA */
   padsOk = false; startOk = false; startSel = startNote = null; $('pd_sampler').hidden = true; $('mode_cue').hidden = true; lastText.delete('mode_cue'); for (const j of padJobs) j.cancelled = true; padJob.fill(null); $('pd_bar').hidden = true; $('pd_unsaved').hidden = true; $('pd_msg').hidden = true; $('k_load').hidden = true;
   cardOk = false; for (const j of cardJobs) j.cancelled = true; $('cardCard').hidden = true; $('cardnote').hidden = true; $('p_add').hidden = true;
   scope2Ok = scopeCvOk = false; clearTimeout(sc.timer); sc.timer = null; sc.frames.length = 0; sc.fps = sc.rps = sc.bps = 0; sc.err = ''; invalidate(D.bigscope);
@@ -2178,6 +2214,7 @@ async function connectPort(port, isDemo) {
     padsOk = keysOk && cp.pads >= 1;          /* PADS: 0x68 (a sample dropped onto a pad, New empty kit) + the 293.. tail */
     startOk = padsOk && cp.startIn >= 1;      /* beta-sampler: Start in — ACTION 40, GET_STATE flags b5 */
     keypOk = editOk && cp.keyp >= 1;          /* KEYP: ACTION 37 KEY_PARAMS + 0x69 GET_KEYS (no tail bytes) */
+    spreadOk = keypOk && cp.keyp >= 2;        /* CHROMA: ACTION 38 SPREAD_KEYS */
     $('cardCard').hidden = !cardOk; $('p_add').hidden = !cardOk; $('cardnote').hidden = true;
     scope2Ok = cp.scope2 >= 1;                /* SCOPE: the 0x62 body (audio channels) */
     scopeCvOk = cp.scope2 >= 2;               /* SCOPE: … with the J3..J8 ext */
@@ -2265,12 +2302,13 @@ async function connect() {
  * before the pads work (no "pads", the 293-byte body), `emptykit` starts from New empty kit (no break, Pads); START
  * (beta-sampler): `sampler` powers the fake up as the firmware does by default — Start in = Sampler: Pads, the transport
  * stopped (the Demo button does this; a bare `?demo` keeps the old boot, Classic running, that the selftest drives). KEYP: `keyp`
- * opens the Kit with four keys' settings set (gain, tune, loop, a ½ ratchet), `nokeyp` a firmware before them. */
+ * opens the Kit with four keys' settings set (gain, tune, loop, a ½ ratchet), `nokeyp` a firmware before them; CHROMA:
+ * `nospread` a firmware with the settings but before SPREAD_KEYS ("keyp": 1). */
 async function connectDemo(flags = '') {
   if (link) return; notice('');
   const f = new Set(flags.split(',').filter(Boolean));
   const tail = f.has('old') ? 148 : f.has('short') ? 167 : f.has('v099') ? 176 : f.has('nosets') ? 219 : f.has('noedit') ? 255 : f.has('noundo') ? 262 : f.has('old12') ? 263 : f.has('nocardfw') ? 276 : f.has('nopads') ? 293 : 315;
-  demoDevice = new DEMO.FakeDevice({ tail, latencyMs: 6, startIn: f.has('sampler') ? 0 : undefined, oldcard: f.has('oldcard'), nocard: f.has('nocard'), kit: f.has('kit') || f.has('pads'), swing: f.has('kit') || f.has('swing'), inputs: !f.has('noin'), maxBody: f.has('body512') ? 512 : DEMO.MAX_BODY, keyp: f.has('nokeyp') ? false : undefined, edit: !(f.has('noedit') || f.has('nosets') || f.has('v099') || f.has('short') || f.has('old')) });
+  demoDevice = new DEMO.FakeDevice({ tail, latencyMs: 6, startIn: f.has('sampler') ? 0 : undefined, oldcard: f.has('oldcard'), nocard: f.has('nocard'), kit: f.has('kit') || f.has('pads'), swing: f.has('kit') || f.has('swing'), inputs: !f.has('noin'), maxBody: f.has('body512') ? 512 : DEMO.MAX_BODY, keyp: f.has('nokeyp') ? false : undefined, spread: f.has('nospread') ? false : undefined, edit: !(f.has('noedit') || f.has('nosets') || f.has('v099') || f.has('short') || f.has('old')) });
   const d = demoDevice;
   if (f.has('scope')) showTab('tab_scope');
   if (f.has('cv')) $('sc_p_cv').onclick(); if (f.has('gates')) $('sc_p_gates').onclick();

@@ -250,6 +250,53 @@ inline EditStatus Engine::EdSetKeyParams(const EditReq& r)
     return PutKeyParam(r.key, p) ? EditStatus::Ok : EditStatus::BadArgs;
 }
 
+/* CHROMA (docs/packages/chroma.md): play one sample chromatically. The plan: every key j ≠ root plays the root's
+ * entry, its settings the root's (gain, Plays, the ratchet's rate) with cents = (j − root) × 100 + the root's own,
+ * clamped to ±2400 (a root with its own tune near the limit flattens the far end — the only way a key can miss its
+ * semitone). With kSpreadKeepPads a key that plays a recording other than the root's entry (a pad with its own
+ * sample) is left exactly as it is. The root itself is untouched: it stays the reference. Pure; `keys` / `kp` are
+ * the whole map and every key's settings after the spread. */
+BB_COLD inline int Engine::SpreadPlan(int root, int flags, int8_t* keys, KeyParam* kp) const
+{
+    if(root < 0 || root >= kKeys || (flags & ~kSpreadKeepPads)) return -1;
+    const int t = keySlice[root];
+    if(t < 0 || t >= nTable || (tableFlags[t] & kFlagTomb)) return -1;
+    const KeyParam base = keyp[root];
+    int n = 0;
+    for(int j = 0; j < kKeys; j++)
+    {
+        keys[j] = keySlice[j]; kp[j] = keyp[j];
+        if(j == root) continue;
+        const int u = keySlice[j];
+        if((flags & kSpreadKeepPads) && u != t && u >= nSlices && u < nTable && !(tableFlags[u] & kFlagTomb) && tableKey[u] >= 0) continue;
+        int c = (j - root) * 100 + base.cents;
+        if(c > KeyParam::kCentsMax) c = KeyParam::kCentsMax;
+        if(c < -KeyParam::kCentsMax) c = -KeyParam::kCentsMax;
+        keys[j] = (int8_t)t;
+        kp[j] = base; kp[j].cents = (int16_t)c; kp[j].spare = 0;
+        n++;
+    }
+    return n;
+}
+/* The op: the plan in. A key that moved or changed its settings stops a running ratchet (it is a re-point and an
+ * edit, as SetKeyParams' leaving the mode). The journal's kKeyP record (UndoBegin) already holds the whole key map
+ * and every key's settings: undo puts both back in one step. `count` = the keys now on the root (the reply's byte). */
+BB_COLD inline EditStatus Engine::EdSpreadKeys(const EditReq& r, int& count)
+{
+    int8_t keys[kKeys]; KeyParam kp[kKeys];
+    const int n = SpreadPlan(r.key, r.a, keys, kp);
+    if(n < 0) return EditStatus::BadArgs;
+    for(int j = 0; j < kKeys; j++)
+    {
+        if(keys[j] == keySlice[j] && memcmp(&kp[j], &keyp[j], sizeof(KeyParam)) == 0) continue;
+        keyRatOn &= ~(1u << j);
+        keySlice[j] = keys[j];
+        PutKeyParam(j, kp[j]);
+    }
+    count = n;
+    return EditStatus::Ok;
+}
+
 inline int Engine::FreeSlot() const
 {
     for(int t = nSlices; t < nTable; t++)
@@ -600,6 +647,8 @@ inline EditStatus Engine::EdNudge(int delta, int which)
  *   SetKeyParams  key, a = gain ½ dB, b = cents, —              KEYP: −48…+12, ±2400, 0..4, 0..6; the table untouched. kQuiet
  *                 i = plays, len = ratchet rate                 joins the previous record only when it is this key's
  *                                                               settings (a drag) — otherwise a step of its own
+ *   SpreadKeys    key = the root, a = flags     —                CHROMA: the root's entry on every key, a semitone a key;
+ *                 (b0 kSpreadKeepPads)                          one kKeyP record; *newIdx = the keys spread
  *
  * `meta` is copied verbatim when flags has kMeta (the control thread ran
  * bb::AnalyseEntry on the span first); ops marked — ignore it. The entry a
@@ -629,6 +678,7 @@ inline EditStatus Engine::ApplyEdit(const EditReq& r, int* newIdx)
         case EditOp::SetKeyMap:   st = EdSetKeyMap(r.keys); break;               /* BETA */
         case EditOp::Record:      st = EdRecord(r, idx); break;                   /* PADS: meta applied inside */
         case EditOp::SetKeyParams: st = EdSetKeyParams(r); break;                /* KEYP */
+        case EditOp::SpreadKeys:  st = EdSpreadKeys(r, idx); break;              /* CHROMA: idx = the keys spread */
         case EditOp::AddEntry:    st = EdAdd(r, idx); break;                      // meta and flags applied inside
         case EditOp::Split:       st = EdSplit(r, idx); break;                    // meta → the new half, inside
         case EditOp::Merge:       st = EdMerge(r.t); who = r.t; break;

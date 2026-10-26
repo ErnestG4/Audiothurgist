@@ -72,6 +72,17 @@ tempo). They ride every call through the key — CV, the pads, Play's loop —
 never the pattern's steps; they are saved with the set, and an untouched key
 plays exactly as before. Details: `docs/packages/keyp.md`.
 
+**Play one sample chromatically** — the mono sampler's way: put a sound on a
+key, select it in the Kit and press **Spread [key] chromatically (C1 … B2)**.
+Every key then plays that sample, each a semitone from the next (the key you
+spread from stays where it is; a key 7 above it plays a fifth up), with its
+gain and Plays — so J4's V/oct plays a melody from one sample (0 V = C1, as
+always). If other keys hold pads of their own the page asks first: spread
+around them (the default — they keep their pads), over them too, or cancel. One
+**Undo** puts every key back. A recording or a dropped pad stays in tune at any
+tempo; a slice of the break spread this way still follows the tempo. Details:
+`docs/packages/chroma.md`.
+
 Recordings and dropped samples play at their own pitch (P4 transposes them);
 the break's slices follow the tempo. The sample memory is 45 s per channel: a
 break takes at most 17 s and the pads get the rest — or press **New empty
