@@ -308,7 +308,8 @@ enum class EditOp : uint8_t
     Redo,          // EDIT-UNDO: one step forward
     SetKeyMap,     // BETA: the whole key map from `keys` (−1 = the key's default) — KEYS_FROM_MARKERS, Pads
     Record,        // PADS: key `key` owns [start, start + len) — a recording (a drop onto a pad), CommitSlice through the journal
-    SetKeyParams   // KEYP: key `key`'s settings — a = gain (½ dB), b = cents, i = plays, len = the ratchet's rate (KeyParam)
+    SetKeyParams,  // KEYP: key `key`'s settings — a = gain (½ dB), b = cents, i = plays, len = the ratchet's rate (KeyParam)
+    SpreadKeys     // CHROMA: key `key`'s entry on every key, tuned a semitone a key from it — a = flags (kSpreadKeepPads)
 };
 /* KEYP (docs/packages/keyp.md): one key's settings — how loud, how far tuned, how it plays. All zero is
  * neutral: the key plays exactly as before this package. A POD (it lives in the journal's union). */
@@ -1738,6 +1739,15 @@ struct Engine
     EditStatus EdSetKeyMap(const int8_t* keys);
     EditStatus EdRecord(const EditReq& r, int& idx);                   // PADS: a keyed recording through the journal
     EditStatus EdSetKeyParams(const EditReq& r);                       // KEYP: one key's gain / tune / plays
+    /* CHROMA (docs/packages/chroma.md): "spread across keys" — the root key's entry on every key, key j tuned
+     * (j − root) semitones + the root's cents (clamped to ±24 st), the root's gain and Plays copied. a = flags:
+     * b0 kSpreadKeepPads leaves a key that plays a recording (other than the root's entry) as it is. One undo
+     * step (a kKeyP record: the key map and every key's settings). SpreadPlan is the pure half (the shell asks it
+     * first: a spread that changes nothing posts nothing); returns the keys it points at the root (not counting
+     * the root), −1 for a bad root. */
+    static constexpr int kSpreadKeepPads = 1;
+    int        SpreadPlan(int root, int flags, int8_t* keys, KeyParam* kp) const;   /* BB_COLD at the definition (once per edit) */
+    EditStatus EdSpreadKeys(const EditReq& r, int& count);
     bool       IsMarker(int t) const;
     bool       IsGrey(int t) const;                                    // a marker that is not orange (FROM_ONSETS / AUTOSLICE own these)
     int        MarkerCount() const;

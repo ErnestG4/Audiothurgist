@@ -3200,6 +3200,12 @@ static void ServiceLoad()
  *                   · 5 a 16th · 6 a 32nd, u8 flags b0 join [, u8 gen]) → u8 status, u8 tableGen; one undo step
  *                   (b0: folded into this key's previous step — a slider's drag)
  *   0x69 GET_KEYS   → u8 status, u8 n = 24, n × {i8 gain, u8 plays, i16 cents, u8 rate}
+ *   CHROMA (docs/packages/chroma.md; capability "keyp": 2): one sample played chromatically —
+ *   0x63 ACTION     38 SPREAD_KEYS(u8 root 0..23, u8 flags b0 keep pads [, u8 gen]) → u8 status, u8 tableGen, u8 count:
+ *                   every key j ≠ root plays the root's entry, tuned (j − root) × 100 + the root's cents (clamped to
+ *                   ±2400), the root's gain and Plays (and ratchet rate); b0 leaves a key that plays a recording other
+ *                   than the root's as it is. count = the keys on the root's entry besides it. One undo step (the key
+ *                   map and all 24 keys' settings); a spread that changes nothing posts nothing (no empty step)
  *   0x65 GET_TABLE  ← [u8 first, u8 count, u8 form] — form 1 = entries carry a trailing u8 flags
  *                   (b0 orange · b1 tombstone), 14 bytes each; absent / 0 = the 13-byte form. */
 /* WEB → RECORD: ACTION 9 / 10. -1 = nothing requested; the consumer clears
@@ -3221,9 +3227,10 @@ struct EditBody
     uint32_t U32() { uint32_t v = (uint32_t)p[at] | ((uint32_t)p[at + 1] << 8) | ((uint32_t)p[at + 2] << 16) | ((uint32_t)p[at + 3] << 24); at += 4; return v; }
     uint8_t  Gen() const { return at < n ? p[at] : 0u; }
 };
-static const uint8_t kEditNeed[22] = {5u, 9u, 10u, 5u, 1u, 1u, 2u, 2u, 3u, 2u, 3u, 7u, 0u, 2u, 0u, 0u,   /* field bytes of ops 16..31 */
+static const uint8_t kEditNeed[23] = {5u, 9u, 10u, 5u, 1u, 1u, 2u, 2u, 3u, 2u, 3u, 7u, 0u, 2u, 0u, 0u,   /* field bytes of ops 16..31 */
                                       2u, 0u, 0u, 1u, 2u,                                                 /* BETA: 32..36 */
-                                      7u};                                                                /* KEYP: 37 */
+                                      7u,                                                                 /* KEYP: 37 */
+                                      2u};                                                                /* CHROMA: 38 */
 /* HostLink status for an EditStatus: Ok → 0; a refusal of the arguments → BAD_ARGS; a refusal of the
  * moment (stale gen, no room, no material) → BAD_STATE. */
 static uint8_t EditToStatus(bb::EditStatus s)
@@ -3395,8 +3402,29 @@ static bb::EditStatus Autoslice(int k, bool reroll, bool join, uint8_t gen, int*
     gAutoGen = engine.tableGen;
     return EditStatus::Ok;
 }
+/* CHROMA (docs/packages/chroma.md): ACTION 38 SPREAD_KEYS(u8 root, u8 flags b0 keep pads [, u8 gen]) → status, gen,
+ * count — HandleEdit's case, out of line (once per press, built for size: kept inside HandleEdit it tipped GCC into
+ * not inlining HandleEdit, +1.2 KB of SRAM). Planned here first (Engine::SpreadPlan, pure): a spread that is already
+ * there posts nothing — no empty undo step — as KEYS_FROM_MARKERS. Otherwise one SpreadKeys edit: one kKeyP record.
+ * Not a marker op: in Pads the keys follow the markers again only when the markers next change (SET_KEY's rule). */
+static BB_COLD void HandleSpread(EditBody& b, hostlink::FrameWriter& w)
+{
+    const int root = b.U8(); const uint8_t fl = b.U8(); const uint8_t gen = b.Gen();
+    if(root >= bb::Engine::kKeys || (fl & ~(uint8_t)bb::Engine::kSpreadKeepPads)) { w.U8(2u); return; }
+    int8_t keys[bb::Engine::kKeys]; bb::KeyParam kp[bb::Engine::kKeys];
+    int n = engine.SpreadPlan(root, fl, keys, kp);
+    if(n < 0) { w.U8(2u); return; }
+    if(memcmp(keys, engine.keySlice, sizeof keys) != 0 || memcmp(kp, engine.keyp, sizeof kp) != 0)
+    {
+        bb::EditReq r; r.op = bb::EditOp::SpreadKeys; r.key = root; r.a = fl; r.gen = gen;
+        const uint8_t st = EditToStatus(PostEdit(r, &n));
+        if(st != 0u) { w.U8(st); return; }
+    }
+    else if(gen != 0u && gen != engine.tableGen) { w.U8(3u); return; }   /* a stale view is stale even with nothing to do */
+    w.U8(0u); w.U8(engine.tableGen); w.U8((uint8_t)(n < 0 ? 255 : n));
+}
 /* ACTION 16..31, and BETA's table ops 33 / 34 / 36 (32 PLAY_KEY and 35 SET_MUTE are not table ops: the
- * 0x63 switch answers them). Writes the whole reply. */
+ * 0x63 switch answers them); KEYP's 37, CHROMA's 38. Writes the whole reply. */
 static void HandleEdit(uint8_t op, const hostlink::ParsedFrame& f, hostlink::FrameWriter& w)
 {
     using bb::EditOp; using bb::EditReq; using bb::EditStatus;
@@ -3541,6 +3569,11 @@ static void HandleEdit(uint8_t op, const hostlink::ParsedFrame& f, hostlink::Fra
             r.op = EditOp::SetKeyParams; r.key = key; r.a = gain; r.b = cents; r.i = plays; r.len = rat;
             if(fl & 1u) r.flags = EditReq::kQuiet;
             break;
+        }
+        case 38:
+        {
+            HandleSpread(b, w);   /* CHROMA: SPREAD_KEYS (above: out of line) */
+            return;
         }
         case 29:
         {
@@ -3913,8 +3946,9 @@ struct StateExt : hostlink::IHostlinkExtension
         /* PADS: "pads":1 = 0x68 (a sample dropped onto a pad, New empty kit), the 45 s planes, recordings at their
          * own rate, and the state tail from 293. */
         /* START: "startIn":1 = ACTION 40 and GET_STATE byte 3 b5 (Start in = As saved). */
-        /* KEYP: "keyp":1 = per-key gain / tune / plays — ACTION 37 KEY_PARAMS and 0x69 GET_KEYS (no tail bytes). */
-        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102,\"sets\":1,\"scope2\":2,\"edit\":2,\"keys\":1,\"card\":1,\"pads\":1,\"startIn\":1,\"keyp\":1}";
+        /* KEYP: "keyp":1 = per-key gain / tune / plays — ACTION 37 KEY_PARAMS and 0x69 GET_KEYS (no tail bytes).
+         * CHROMA: "keyp":2 = and ACTION 38 SPREAD_KEYS (one sample across the keys, a semitone a key). */
+        return "\"audiothurgist\":{\"ext\":1,\"state\":96,\"env\":97,\"scope\":98,\"action\":99,\"wave\":100,\"table\":101,\"hits\":102,\"sets\":1,\"scope2\":2,\"edit\":2,\"keys\":1,\"card\":1,\"pads\":1,\"startIn\":1,\"keyp\":2}";
     }
     /* WEB: one float → i8 (±127), saturating. */
     static int8_t ToI8(float v)
@@ -4152,6 +4186,7 @@ struct StateExt : hostlink::IHostlinkExtension
                     case 30: case 31:
                     case 33: case 34: case 36:   /* BETA: KEYS_FROM_MARKERS, CLEAR_MARKERS, AUTOSLICE — table ops, the same rules */
                     case 37:                     /* KEYP: KEY_PARAMS — through the edit mailbox and the journal, the same rules */
+                    case 38:                     /* CHROMA: SPREAD_KEYS — the same */
                         HandleEdit(op, f, w); return;
                     case 32:
                     {
