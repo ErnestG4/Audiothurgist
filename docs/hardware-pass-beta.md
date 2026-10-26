@@ -7,22 +7,15 @@ proves the ground under the next, so **stop and report at the first
 failure**. Write **ok** or what you saw next to each box. "Listen for" is what
 tells pass from fail.
 
-Setup: `audiothurgist-beta6-chromatic-30f3f15.bin` from the Desktop's
-`Audiothurgist-flash/` flashed (0.13.0-beta: the CV fix, the card folder,
-pad drops and 45 s of sample memory, the sampler start-up, each key's own
-gain / tune / Plays incl. Loop and Ratchet, Spread across keys; md5
-2607927a…). `beta5-sampler-7e9c4d3` is the same without the spread,
-`beta4-pads-553cf02` without the start-up and the key settings, and `beta3-card-190ce8d` without the pads, if a bug in the new
-work gets in the way of the rest.
-
-**On `beta-clean`** (a build of that branch, flashed together with the page
-from the same commit): Start In is an Options byte, so **flashing it drops
-the saved presets once** — each slot that has a backup on the card
-(`Audiothurgist/presets/<slot>.json`) comes back at the first power-up with
-its options, knobs, sample and name, but not its motion locks or the
-brightness; a slot without a backup is gone. Re-make the locks you care
-about and save the slot again. Beyond that, `beta-clean` only differs where
-§10d and §10e say so (Start In on the page's Options, Loop reversed).
+Setup: `audiothurgist-beta7-clean-c80709e.bin` from the Desktop's
+`Audiothurgist-flash/` flashed (md5 f6d45945…), and the page from the same
+commit (GitHub Pages after the push). The page checks the firmware's api
+number and refuses any other build, so the two always go together.
+**Flashing it drops the saved presets once**: each slot that has a backup on
+the card (`Audiothurgist/presets/<slot>.json`) comes back at the first
+power-up with its options, knobs, sample and name, but not its motion locks
+or the brightness. A slot without a backup is gone. Re-make the locks you
+care about and save the slot again.
 
 Bring a card with the Amen and one break with no hats; the page from
 https://ernestg4.github.io/Audiothurgist/ on the desktop and, if you have the
@@ -37,8 +30,8 @@ from §0 on then has the Amen to play.
 **This build powers up** as a sampler (Pads, the
 pattern stopped). Do **§10d's first two steps right after flashing** (they
 check the new start-up); then hold B1 (the boot preset's beat comes back) or pick Classic on the page and
-press ▶ before §0 — or set Start In to *As saved* (beta6: Options → Start-up;
-`beta-clean`: Options → Power-up, then save slot 0) and power-cycle, and the
+press ▶ before §0 — or set Start In to *As saved* (Options → Power-up, then
+save slot 0) and power-cycle, and the
 rest of this pass boots as written.
 
 ## 0. Boot, identity, load (3 min)
@@ -254,15 +247,14 @@ file) on the computer.
 
 ## 10d. Start as a sampler; import and play single samples (10 min)
 
-`beta-sampler` (`docs/packages/pads.md` § Start In). Nothing of this has run
-on hardware. Bring a mono one-shot, a **stereo** sample and a quiet file
+`docs/packages/pads.md` § Start In. Bring a mono one-shot, a **stereo** sample and a quiet file
 (a soft hat) on the computer; a clock on J3 for step 8.
 
 1. **Power up.** *See*: B1 breathing cool white (stopped), the P1 bar ring
    dimmed with only the playhead going round (Pads writes nothing), no
-   gates out. Nothing plays until a key does. (On `beta-clean` this is the
-   first power-up after the presets were dropped: Start In takes its
-   default, Sampler, even for a slot restored from its backup.)
+   gates out. Nothing plays until a key does. (The first power-up after
+   flashing: Start In takes its default, Sampler, even for a slot restored
+   from its backup.)
 2. **The preset is untouched**: Settings (B2 + B3 2 s) → load a slot with a
    grammar other than Classic. *See*: its grammar, running. Power-cycle
    again: Pads, stopped — Start In overrides the boot preset's grammar, not
@@ -337,7 +329,6 @@ vocal on D1), the page on the Kit tab, the clock on J3.
        the release. While it loops, play other keys and run the pattern:
        the loop keeps going. **Reversed** (Voice map, J5 at style 1): it
        loops D1 **backward** from its end, the same seam, the same release
-       (beta6 played it once backward and held; `beta-clean` loops it).
 7. [ ] C1 Plays → **Ratchet**, every ½ sample: hold C1 — the kick retriggers
        from its start twice per kick length, *no click at the seams*, until
        you let go; J7 sends a trigger per hit. Try ¼ and ⅛ (faster), and the
@@ -359,8 +350,7 @@ vocal on D1), the page on the Kit tab, the clock on J3.
 
 ## 10f. One sample, played chromatically (8 min)
 
-Firmware built from `beta-chromatic` (not in the beta5 .bin —
-`docs/packages/chroma.md`). Nothing of this has run on hardware. A tonal
+See `docs/packages/chroma.md`. Nothing of this has run on hardware. A tonal
 sample with a clear pitch (a bass pluck, a piano note, a sung vowel) dropped
 on **G1**, nothing else on a pad; a V/oct sequencer into **J4** and its gate
 into J6; a tuner on the output if you have one; the page on the Kit tab.
