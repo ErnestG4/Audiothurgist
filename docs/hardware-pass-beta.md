@@ -342,6 +342,44 @@ vocal on D1), the page on the Kit tab, the clock on J3.
         four keys ratcheting at ⅛, note loadAvg / loadMax ____ (expected:
         within a few ‰ of the same scene with neutral keys).
 
+## 10f. One sample, played chromatically (8 min)
+
+Firmware built from `beta-chromatic` (`"keyp": 2`; not in the beta5 .bin —
+`docs/packages/chroma.md`). Nothing of this has run on hardware. A tonal
+sample with a clear pitch (a bass pluck, a piano note, a sung vowel) dropped
+on **G1**, nothing else on a pad; a V/oct sequencer into **J4** and its gate
+into J6; a tuner on the output if you have one; the page on the Kit tab.
+
+1. [ ] Select G1, press **Spread G1 chromatically (C1 … B2)**: no prompt; the
+       cells now read −7 st … −1 st under C1 … F♯1, nothing under G1, +1 st …
+       +16 st under G♯1 … B2. One history line.
+2. [ ] Sequence a melody on J4 (a major scale up and down, then a tune you
+       know). *Listen for*: one sample, every note in tune with the
+       sequencer's other voices — G1 (≈ 0.583 V) is the sample at its own
+       pitch, G2 (≈ 1.583 V) exactly an octave up (tuner: same note, ±5
+       cents), C1 (0 V) a fifth below G1.
+3. [ ] The same melody at **90 BPM, then 170 BPM** (P2, or the clock on J3):
+       the pitch does **not** move — only the notes' timing. P4 still
+       transposes the whole spread together.
+4. [ ] G1's own settings came along: set G1 Plays → Held *before* spreading
+       (Undo, change it, spread again) and every note holds for its gate.
+5. [ ] **Undo** once (Kit → Edit): every key back as it was (the words gone,
+       J4 plays the kit again). Redo: the melody again.
+6. [ ] Drop a kick on C1, spread G1 again: the red prompt names C1. *spread
+       around them* — C1 is still the kick, the rest the melody; Undo,
+       spread, *spread over them too* — C1 is G1's sample −7 st (the kick is
+       still in the kit: Undo brings it back). *Call*: which should be the
+       default? ____
+7. [ ] A slice of the break instead (Undo first; the Amen loaded, select a
+       key that plays a snare slice, spread it, *around* the pads): J4 plays
+       the snare chromatically, and here moving P2 from 90
+       to 170 BPM **does** raise the whole spread with the tempo (expected:
+       a break's slice varispeeds).
+8. [ ] Save the set with a spread, load something else, load it back (and
+       once after a power-cycle): the melody comes back on J4.
+9. [ ] The ends: spread from C1 (B2 = +23 st) and from B2 (C1 = −23 st) —
+       note how the extremes sound (aliasing high up, grain low down) ____.
+
 ## 11. Scope (3 min)
 
 - [ ] Scope tab: Out L/R trace the beat (this tab was hidden by a duplicate
@@ -369,6 +407,14 @@ vocal on D1), the page on the Kit tab, the clock on J3.
 7. **The card folder at boot**: make `Audiothurgist/breaks` on a card that
    has none (so a computer shows where breaks go), or only on the first
    write (now)?
+8. **Spread across keys and pads** (§10f.6): the prompt's default is *spread
+   around them* (keys with their own pads keep them). Flip to *over them*?
+9. **What a spread copies**: every key takes the root's gain and Plays (and
+   its cents on top of the semitones). Keep, or tune only and leave each
+   key's gain / Plays?
+10. **Spread in Pads with markers**: like a hand-made key map, it stands until
+    the markers next change — then the keys follow the markers again (their
+    tunes stay). Wanted?
 
 ## Known and not to be reported
 

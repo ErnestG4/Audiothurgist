@@ -130,6 +130,11 @@ moves it.
   marker or another key's drag. The autoslice sweep's pattern, made strict.
 - A firmware before this answers ACTION 37 with BAD_ARGS (unknown op) and
   0x69 with UNSUPPORTED; the page shows none of it without `"keyp"`.
+- **`"keyp": 2`** (CHROMA, `docs/packages/chroma.md`) adds ACTION 38
+  SPREAD_KEYS — one key's sample on all 24 keys, a semitone a key, written
+  through these same settings and journaled in the same `kKeyP` record (a
+  join never folds into a spread's record). Everything above is unchanged;
+  read `"keyp" ≥ 1` as "the settings".
 
 ## The journal
 
