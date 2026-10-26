@@ -19,7 +19,7 @@ const PROTO = 1;
 const CMD = {
   hello: 0x01, getDescriptor: 0x02, blobBegin: 0x12, blobData: 0x13, blobCommit: 0x14,
   getLive: 0x20, reboot: 0x40,
-  state: 0x60, env: 0x61, scope: 0x62, action: 0x63, wave: 0x64, table: 0x65, hits: 0x66, card: 0x67,
+  state: 0x60, env: 0x61, scope: 0x62, action: 0x63, wave: 0x64, table: 0x65, hits: 0x66, card: 0x67, pads: 0x68,
 };
 const ACT = { dice: 0, reslice: 1, mute: 2, punch: 3, flow: 4, scrub: 5, load: 6, clearLocks: 7, page: 8,
   recArm: 9, recClear: 10, keyPlays: 11, looperUndo: 12, looperClear: 13, saveSet: 14, loadSet: 15,
@@ -387,6 +387,18 @@ function parseState(b) {
       hasBreaks: !!(f & CARD.F.breaks), rootWavs: u16(b, 281), pending: u16(b, 283), breaks: u16(b, 285),
       lastIdx: b[287] === 255 ? -1 : b[287], copied: u16(b, 288), skipped: u16(b, 290), nFiles: b[292] };
   }
+  /* PADS tail (→ 315, capability "pads": 1): 293 state (PADS.STATE), 294 progress 0..255, 295 result of the last op
+   * (PADS.RESULT), 296 seq (bumps per finished op), 297 key (the drop's, -1 none), 298 flags (PADS.F: the kit holds audio
+   * the card does not · an empty kit, no break · the last drop made the kit stereo), 299 free (frames past freePos),
+   * 303 total (the pads' share: bufCap − bufLen), 307 held (frames below freePos that replaced or undone recordings
+   * still hold — not reclaimed until new material), 311 the pads (bit k = key k holds a recording). Older: null. */
+  st.pads = null;
+  if (b.length >= 315) {
+    const f = b[298];
+    st.pads = { state: b[293], progress: b[294], result: b[295], seq: b[296], key: b[297] === 255 ? -1 : b[297], flags: f,
+      unsaved: !!(f & PADS.F.unsaved), noBreak: !!(f & PADS.F.noBreak), madeStereo: !!(f & PADS.F.madeStereo),
+      free: u32(b, 299), total: u32(b, 303), held: u32(b, 307), mask: u32(b, 311) };
+  }
   return st;
 }
 /* GET_WAVE: one window of the material buffer — n ≤ 480 output bytes, each
@@ -506,7 +518,7 @@ const autoslice      = (link, k, reroll = false, gen = 0, join = false) => editO
 /* What the descriptor's "audiothurgist" object says the firmware can do (each 0 when absent). */
 function caps(desc) {
   const a = (desc && desc.audiothurgist) || {};
-  return { ext: a.ext | 0, table: !!a.table, sets: a.sets | 0, scope2: a.scope2 | 0, edit: a.edit | 0, keys: a.keys | 0, card: a.card | 0 };
+  return { ext: a.ext | 0, table: !!a.table, sets: a.sets | 0, scope2: a.scope2 | 0, edit: a.edit | 0, keys: a.keys | 0, card: a.card | 0, pads: a.pads | 0 };
 }
 
 /* ───────────── CARD (0x67, capability "card": 1) ─────────────
@@ -601,6 +613,62 @@ async function cardList(link) {
   } while (first < total);
   return out;
 }
+
+/* ───────────── PADS (0x68, capability "pads": 1) ─────────────
+ * A sample dropped onto a pad: the page decodes the file (48 kHz, as the card upload does), keeps two channels at most,
+ * cuts it to the room the module has left past freePos (the state tail's pads.free) and sends raw PCM16 — little-endian,
+ * interleaved L R for stereo, no header — in order from byte 0, one chunk per round trip: BEGIN(key, ch, frames), then
+ * DATA(total, offset, bytes) until the last byte. The module holds the bytes in its sample memory past freePos, then its
+ * main loop converts them in place and publishes the pad as key `key`'s recording — one undo step (the tail's pads seq
+ * says when). Nothing is written to the card: a set save keeps the kit, a power-off loses it (pads.unsaved).
+ * NEW_KIT clears the break (a silent ¼ s stub), every pad and marker, and puts the module in Pads. */
+const PADS = { begin: 0, data: 1, abort: 2, newKit: 3, sr: 48000, minFrames: 480, stubFrames: 12000,
+  STATE: ['idle', 'receiving', 'committing', 'clearing'],
+  RESULT: ['ok', 'no room', 'busy', 'bad args', 'the table is full', 'timed out', 'cancelled', 'the module moved under it'],
+  F: { unsaved: 1, noBreak: 2, madeStereo: 4 } };
+/* What a pad gets from a decoded buffer: ≤ 2 channels (more: the first two), at 48 kHz, cut to `room` frames (the
+ * module's free frames; null = uncut). tooShort under 480 frames (10 ms, the module's floor). */
+function padPlan(channels, sampleRate, frames, room = null) {
+  const ch = Math.max(1, Math.min(2, channels | 0)), sr = sampleRate || PADS.sr;
+  const at48 = Math.round(frames * PADS.sr / sr), keep = room == null ? at48 : Math.max(0, Math.min(at48, room));
+  return { channels: ch, frames: keep, seconds: keep / PADS.sr, sourceSeconds: frames / sr, cut: keep < at48, resample: sr !== PADS.sr,
+    bytes: keep * ch * 2, tooShort: keep < PADS.minFrames };
+}
+/* Planes (one or two Float32Arrays) → raw PCM16 LE, interleaved, the encodeWav scale (±1 → ±32767, clamped, NaN → 0). */
+function encodePcm16(planes, frames) {
+  const ch = planes.length, n = frames == null ? Math.min(...planes.map(p => p.length)) : frames;
+  const out = new Uint8Array(n * ch * 2), dv = new DataView(out.buffer);
+  let at = 0;
+  for (let i = 0; i < n; i++) for (let c = 0; c < ch; c++) {
+    let v = planes[c][i]; v = v > 1 ? 1 : v < -1 ? -1 : (v === v ? v : 0);
+    dv.setInt16(at, Math.round(v * 32767), true); at += 2;
+  }
+  return out;
+}
+/* Send `bytes` (encodePcm16's) as key `key`'s pad. One chunk per round trip at normal priority (the page's clicks go
+ * first, its polls interleave). onProgress(acked, total, kbps). Resolves { bytes, ms, kbps, room } once the module holds
+ * every byte (its commit follows: watch the tail's pads seq); rejects with the module's status name (TOO_LARGE: more
+ * than the room · BAD_STATE: a set op, a load, a take, a card job or another drop's commit · BAD_ARGS) or 'cancelled'. */
+async function uploadPad(link, key, ch, bytes, opts = {}) {
+  const frames = Math.floor(bytes.length / (ch * 2)), total = frames * ch * 2, chunk = opts.chunk || CARD.chunkFor(opts.maxBody), t0 = _now();
+  if (key < 0 || key > 23 || (ch !== 1 && ch !== 2) || frames < PADS.minFrames) throw new Error('BAD_ARGS');
+  const r0 = await link.request(CMD.pads, Uint8Array.of(PADS.begin, key, ch, ...u32b(frames)), { urgent: true, timeoutMs: 4000 });
+  const room = r0.length >= 5 ? u32(r0, 1) : null;
+  let off = 0;
+  while (off < total) {
+    if (opts.cancel && opts.cancel()) { await link.request(CMD.pads, Uint8Array.of(PADS.abort), { urgent: true }).catch(() => {}); throw new Error('cancelled'); }
+    const n = Math.min(chunk, total - off), body = new Uint8Array(9 + n);
+    body[0] = PADS.data; body.set(u32b(total), 1); body.set(u32b(off), 5); body.set(bytes.subarray(off, off + n), 9);
+    const r = await link.request(CMD.pads, body, { timeoutMs: 4000 });
+    const have = u32(r, 1);
+    if (have !== off + n) throw new Error('out of step (the module holds ' + have + ' of ' + total + ')');
+    off = have;
+    if (opts.onProgress) opts.onProgress(off, total, off / Math.max(1, _now() - t0));
+  }
+  const ms = Math.max(1, _now() - t0);
+  return { bytes: total, ms, kbps: total / ms, room };
+}
+const newKit = link => link.request(CMD.pads, Uint8Array.of(PADS.newKit), { urgent: true });
 
 /* GET_ENV: fetch nSlices × 16 envelope bytes in ≤30-slice chunks. */
 async function fetchEnv(link, n) {
@@ -743,6 +811,7 @@ const api = { PROTO, CMD, ACT, REC, NOTE_NAMES, keyName, STATUS, statusName, crc
   SET_STATE, SET_RESULT, setNameOk, setLabelName, nameBytes, saveSet, loadSet,
   EDIT, editOp, editBoundary, editEntry, editAdd, editSplit, editMerge, editTombstone, editSetKey, editSwapKeys, editNudgeAll, editPromote, editFromOnsets, audition, release, tapMark, editUndo, editRedo,
   KEYS, playKey, keysFromMarkers, clearMarkers, setMute, autoslice, caps,
-  CARD, breakNameOk, breakName, uploadPlan, encodeWav, serial, uploadBreak, copyOldCard, cardRescan, cardList };
+  CARD, breakNameOk, breakName, uploadPlan, encodeWav, serial, uploadBreak, copyOldCard, cardRescan, cardList,
+  PADS, padPlan, encodePcm16, uploadPad, newKit };
 if (typeof module === 'object' && module.exports) module.exports = api; else root.HL = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
