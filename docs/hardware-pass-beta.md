@@ -281,11 +281,15 @@ on hardware. Bring a mono one-shot, a **stereo** sample and a quiet file
     Take the card out and power-cycle: Pads, stopped (no card = Sampler).
     Card back, set it to Sampler again.
 
-*Call*: with Start in = Sampler and no computer, the panel has no way to
-pick a grammar except a preset load (Settings → load), and B1 held in Pads
-starts nothing audible (Pads has no pattern). Should the first B1 hold /
-▶ after a sampler power-up bring the boot preset's grammar back and start
-it? ____
+11. **No computer**: unplug USB, power-cycle (Sampler). Play a few keys
+    from J4, then **hold B1 600 ms, let go**. *Listen for*: the boot preset's
+    beat (its grammar comes back) starting on the beat. Hold B1 again: it
+    stops and stays on that grammar. On the page the same holds for ▶ while
+    the mode chips show Pads.
+
+*Call*: a start made in Pads brings back the last drum grammar (built
+overnight, e35b0e7). Keep it, or should ▶ / B1 in Pads stay a silent
+no-op and the beat come only from choosing a grammar? ____
 
 ## 11. Scope (3 min)
 
