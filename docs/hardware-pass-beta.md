@@ -7,8 +7,10 @@ proves the ground under the next, so **stop and report at the first
 failure**. Write **ok** or what you saw next to each box. "Listen for" is what
 tells pass from fail.
 
-Setup: `audiothurgist-beta3-card-190ce8d.bin` from the Desktop's
-`Audiothurgist-flash/` flashed (0.13.0-beta, the CV fix and the card folder);
+Setup: `audiothurgist-beta4-pads-553cf02.bin` from the Desktop's
+`Audiothurgist-flash/` flashed (0.13.0-beta: the CV fix, the card folder,
+pad drops and 45 s of sample memory; `beta3-card-190ce8d` is the same
+without the pads, if a pads bug gets in the way of the rest);
 a card with the Amen and one break with no hats; the page from
 https://ernestg4.github.io/Audiothurgist/ on the desktop and, if you have the
 OTG adapter, the phone. Close `/program`.
