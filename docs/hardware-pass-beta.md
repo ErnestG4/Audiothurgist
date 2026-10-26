@@ -21,6 +21,12 @@ the old way (WAVs in the root) boots to the synth break with nothing on P5.
 moves your breaks into the new folder and proves the copy, and everything
 from §0 on then has the Amen to play.
 
+**With a `beta-sampler` build** the module powers up as a sampler (Pads, the
+pattern stopped). Do **§10d's first three steps right after flashing** (they
+check your presets and the new start-up); then pick Classic on the page and
+press ▶ before §0 — or set Options → Start-up → *As saved* and power-cycle,
+and the rest of this pass boots as written.
+
 ## 0. Boot, identity, load (3 min)
 
 - [ ] Boots to the Perform page. The page's status line names
@@ -231,6 +237,55 @@ file) on the computer.
       stereo, no tempo jump, playable from the page, J4 and the panel.
 - [ ] Load a break after it: the break plays at its own tempo; the pads are
       gone (new material); a take into a key works.
+
+## 10d. Start as a sampler; import and play single samples (10 min)
+
+`beta-sampler` (`docs/packages/pads.md` § Start in). Nothing of this has run
+on hardware. Bring a mono one-shot, a **stereo** sample and a quiet file
+(a soft hat) on the computer; a clock on J3 for step 9.
+
+1. **Before flashing**, on beta4: note one saved preset slot with something
+   you will recognise (a grammar other than Classic, a motion lock). Flash.
+2. **Power up.** *See*: B1 breathing cool white (stopped), the P1 bar ring
+   dimmed with only the playhead going round (Pads writes nothing), no
+   gates out. Nothing plays until a key does.
+3. **Your presets survived**: Settings (B2 + B3 2 s) → load the slot from
+   step 1. *See*: its grammar, knobs and **its lock** back, exactly as on
+   beta4 (the Options block and the schema did not change). Power-cycle
+   again: Pads, stopped — Start in overrides the boot preset's grammar, not
+   the preset.
+4. **Connect the page.** *See*: the Play tab opens on the pads, a line over
+   them "Sampler — the pads play samples…" with **Classic** / **Grids**
+   buttons, the transport "**sampler** · Pads", the Pads chip lit, the Jacks
+   card "Voice map" with J4 live.
+5. **Keys play while stopped**: a page pad, J4 + a J6 gate, and the panel.
+   Each sounds its key; the transport stays stopped.
+6. **Drop the mono one-shot on C1, the stereo sample on C♯1.** *See*: "✓",
+   the line "mono, …" then "stereo, … — the kit is stereo now"; Options →
+   Sampling reads Stereo. Play both from the page and from J4 (C1 = 0 V,
+   C♯1 = 1/12 V): each as the file is; C♯1 in stereo (pan it).
+7. **Normalise drops**: tick it (beside *Choose samples…*), drop the quiet
+   file on D1. *See*: "normalised +x dB" in the line and D1 near full
+   level. Untick, reload the page: it stays unticked (and ticked if you leave
+   it ticked).
+8. **Save set** (the Unsaved kit note) as `smpkit`. Power-cycle: Pads,
+   stopped again, the pads back on the break (memory). Load `smpkit`: C1,
+   C♯1, D1 back, stereo, still a sampler.
+9. **The flip**: with the clock on J3, press **Classic** in the sampler line.
+   *See*: nothing starts; B1 still breathes; under the modes "Stopped —
+   press ▶ to start Classic", ▶ ringed in orange. Press ▶ (or hold B1
+   600 ms): *listen for* the beat coming in **on the beat**, in time with
+   the clock, not from step 1 at a random moment.
+10. **Start in = As saved**: Options → Start-up → As saved (the page says
+    so). Power-cycle: the boot preset's grammar, **running**, as beta4 did.
+    Take the card out and power-cycle: Pads, stopped (no card = Sampler).
+    Card back, set it to Sampler again.
+
+*Call*: with Start in = Sampler and no computer, the panel has no way to
+pick a grammar except a preset load (Settings → load), and B1 held in Pads
+starts nothing audible (Pads has no pattern). Should the first B1 hold /
+▶ after a sampler power-up bring the boot preset's grammar back and start
+it? ____
 
 ## 11. Scope (3 min)
 

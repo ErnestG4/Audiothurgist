@@ -17,6 +17,7 @@ Nothing here has run on hardware; the checklist at the end is Combust's.*
 | **Breaks** | `0:/*.wav` — every WAV in the card root | `0:/Audiothurgist/breaks/*.wav` (sorted, then the sets) |
 | **Sets** | `0:/sets/<name>.wav` + `.json`, sidecars `0:/sets/<wav>.slices.json` | `0:/Audiothurgist/sets/…` |
 | **Preset backups** | `0:/presets/<slot>.json` | `0:/Audiothurgist/presets/<slot>.json` |
+| **Start in** (beta-sampler) | — | `0:/Audiothurgist/startup.json` — the one device setting on the card (`docs/packages/pads.md` § Start in); not copied from an old card (it has none) |
 | **An old card** | — | the module lists nothing from the root; the page says so and offers **Copy them in** |
 | **Getting a break onto the card** | take the card out | the page: drop or pick a file (WAV of any kind, AIFF, MP3, FLAC, OGG…), and the module writes it |
 
