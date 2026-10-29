@@ -2132,6 +2132,12 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
   check('review: an Undo inside the row\'s hold shows in the row (0 dB again)', G("$('kp_gain').value") === '0' && G("$('kp_gain_v').textContent") === '0 dB', G("$('kp_gain_v').textContent"));
   G("$('kp_plays').value = '1'"); fireEv(G("$('kp_plays')"), 'change', {});
   check('review: …and the next touch (Plays → One-shot) does not bring the undone −6 dB back', await until(() => G('demoDevice.keyp[1].plays') === 1 && !G('kpBusy')) && G('demoDevice.keyp[1].gain') === 0, 'module gain ' + G('demoDevice.keyp[1].gain'));
+  /* KEYP: a change for another key made while this key's send is in flight is sent too (it was dropped) */
+  await until(() => !G('kpBusy') && !G('kpWant'));
+  G('selectKey(1)'); G('invalidate(D.kit)'); await sleep(60);
+  G("$('kp_plays').value = '2'"); fireEv(G("$('kp_plays')"), 'change', {});
+  G('selectKey(2)'); G("$('kp_plays').value = '3'"); fireEv(G("$('kp_plays')"), 'change', {});
+  check('review: C♯1 → Held, then D1 → Loop before C♯1\'s reply: both reach the module', await until(() => G('demoDevice.keyp[2].plays') === 3) && G('demoDevice.keyp[1].plays') === 2, 'C♯1 ' + G('demoDevice.keyp[1].plays') + ', D1 ' + G('demoDevice.keyp[2].plays'));
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
 }
 /* ── 9c. Contrast, measured: every text token against every surface it sits on, in both themes, ≥ 4.5:1; and no

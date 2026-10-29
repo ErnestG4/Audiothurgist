@@ -1631,15 +1631,14 @@ async function spreadKey(cx, cy) {
 $('kp_spread').addEventListener('click', e => { spreadKey(e.clientX, e.clientY); });
 function kpLabels() { const p = kpFromRow(); setText('kp_gain_v', kpGainText(p.gain)); setText('kp_semi_v', kpSemiText(p.cents)); }
 /* one send at a time; `join` for every send of a drag after its first */
-function kpQueue(p, join) {
+function kpQueue(p, join, key = selKey) {
   if (!link) return;
-  const key = selKey;
   if (kpBusy) { kpWant = { p, join: true, key }; return; }
   kpBusy = true; kpKey = key; kpTouch = performance.now();
   const j = join && kpSent > 0; kpSent++;
   Promise.resolve(ed.keyParams(key, p, j)).then(r => { if (r && r.ok) kpOwnGen = r.tableGen; }).catch(() => {}).finally(() => {
     kpBusy = false;
-    if (kpWant) { const w = kpWant; kpWant = null; if (w.key === key) { kpBusy = false; kpQueue(w.p, w.join); return; } }
+    if (kpWant) { const w = kpWant; kpWant = null; if (w.key !== key) kpSent = 0; kpQueue(w.p, w.join && w.key === key, w.key); return; }   /* another key's change: its own step */
     if (!kpDrag) kpSent = 0;
     invalidate(D.kit | D.pads);
   });
