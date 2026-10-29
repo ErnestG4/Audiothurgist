@@ -1573,7 +1573,7 @@ $('l_undo').onclick = () => action(ACT.looperUndo); $('l_clear').onclick = () =>
  * last reply), every send after the drag's first with JOIN, so a whole drag is one undo step (the autoslice slider's
  * way). The module's answer is the truth: the row follows the settings read back, except while you hold a control. */
 let keyp = null, keypGen = -1;
-let kpBusy = false, kpWant = null, kpDrag = false, kpSent = 0, kpKey = -1, kpTouch = 0;
+let kpBusy = false, kpWant = null, kpDrag = false, kpSent = 0, kpKey = -1, kpTouch = 0, kpOwnGen = -1;   /* kpOwnGen: the tableGen our last KEY_PARAMS left */
 const keypOf = k => keyp && keyp[k] ? HL.keypText(keyp[k]) : '';
 const kpGainText = g => g ? HL.keypGainText(g) : '0 dB';
 const kpSemiText = c => { const s = Math.trunc(c / 100); return (s > 0 ? '+' : s < 0 ? '−' : '') + Math.abs(s) + ' st'; };
@@ -1637,7 +1637,7 @@ function kpQueue(p, join) {
   if (kpBusy) { kpWant = { p, join: true, key }; return; }
   kpBusy = true; kpKey = key; kpTouch = performance.now();
   const j = join && kpSent > 0; kpSent++;
-  Promise.resolve(ed.keyParams(key, p, j)).catch(() => {}).finally(() => {
+  Promise.resolve(ed.keyParams(key, p, j)).then(r => { if (r && r.ok) kpOwnGen = r.tableGen; }).catch(() => {}).finally(() => {
     kpBusy = false;
     if (kpWant) { const w = kpWant; kpWant = null; if (w.key === key) { kpBusy = false; kpQueue(w.p, w.join); return; } }
     if (!kpDrag) kpSent = 0;
@@ -1672,7 +1672,7 @@ function syncKit(s) {
     }, e => warn('table', e)).finally(() => { poll.pTable = null; });
   }
   /* KEYP: the 24 keys' settings (0x69), read again whenever tableGen moves — every KEY_PARAMS, undo and load bumps it */
-  if (s.tableGen !== keypGen && !poll.pKeyp) { const g = s.tableGen; poll.pKeyp = HL.fetchKeyParams(link, { key: 'keyp' }).then(a => { keyp = a; keypGen = g; invalidate(D.kit | D.pads); }, e => warn('keys', e)).finally(() => { poll.pKeyp = null; }); }
+  if (s.tableGen !== keypGen && !poll.pKeyp) { const g = s.tableGen; poll.pKeyp = HL.fetchKeyParams(link, { key: 'keyp' }).then(a => { keyp = a; keypGen = g; if (kpOwnGen >= 0 && ((kpOwnGen - g) & 255) >= 128) kpTouch = -Infinity;   /* the settings moved past our last send (Undo, Redo, a spread, a load): the row lets go and shows them */ invalidate(D.kit | D.pads); }, e => warn('keys', e)).finally(() => { poll.pKeyp = null; }); }
   if (s.matGen !== hitsGen && !poll.pHits) { const gen = s.matGen; poll.pHits = fetchHits(link).then(hh => { hits = hh; hitsGen = gen; invalidate(D.kitwave | D.wave); }, e => warn('hits', e)).finally(() => { poll.pHits = null; }); }
 }
 
@@ -2111,7 +2111,7 @@ function setDisconnected() {
   table = null; tableSig = ''; bufSig = ''; hits = null; hitsGen = -1; wave.cache.clear(); wave.queue.length = 0; wave.planSig = ''; keyCells.forEach(c => { c.sig = ''; });
   copyArm = -1; ed.selT = -1; ed.drag = null; ed.local = null; ed.history = new ED.History(); histSig = fieldSig = ''; closeMenu(); ghost(null); dropHi(-1); setConnectedUi(false);
   setSeqShown = -1; setAsked = null; setPill('s_status', '—', ''); $('s_save').disabled = $('s_load').disabled = true;
-  keyp = null; keypGen = -1; kpWant = null; kpBusy = false; kpDrag = false;   /* KEYP */
+  keyp = null; keypGen = -1; kpWant = null; kpBusy = false; kpDrag = false; kpOwnGen = -1;   /* KEYP */
   $('pd_sampler').hidden = true; $('mode_cue').hidden = true; lastText.delete('mode_cue'); for (const j of padJobs) j.cancelled = true; padJob.fill(null); $('pd_unsaved').hidden = true; $('pd_msg').hidden = true;
   for (const j of cardJobs) j.cancelled = true; $('cardnote').hidden = true;
   clearTimeout(sc.timer); sc.timer = null; sc.frames.length = 0; sc.fps = sc.rps = sc.bps = 0; sc.err = ''; invalidate(D.bigscope);

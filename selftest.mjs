@@ -2117,6 +2117,23 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
   check('disconnect: the button hidden', G("$('kp_spread').hidden") === true);
 }
+/* ── 9i. Review of the beta's page (2026-10-29): races a player can hit on the bench ── */
+{
+  /* KEYP: the row holds what your hand set for 1.5 s; an Undo landing inside that window must still show in the row,
+   * or the next touch (the row is sent whole) writes the undone value straight back */
+  const { D, G } = await loadPage('?demo=keyp');
+  await until(() => G('!!(st && keyp && table && st.bufLen)'));
+  G("showTab('tab_kit')"); G('selectKey(1)'); G('invalidate(D.kit)'); await sleep(80);
+  const gain = G("$('kp_gain')");
+  G("$('kp_gain').value = '-12'"); fireEv(gain, 'input', {}); fireEv(gain, 'change', {});
+  await until(() => !G('kpBusy') && G('keyp[1].gain') === -12);
+  fireEv(G("$('ed_undo')"), 'click', {});
+  await until(() => G('keyp && keyp[1].gain') === 0); await sleep(60); G('invalidate(D.kit)'); await sleep(60);
+  check('review: an Undo inside the row\'s hold shows in the row (0 dB again)', G("$('kp_gain').value") === '0' && G("$('kp_gain_v').textContent") === '0 dB', G("$('kp_gain_v').textContent"));
+  G("$('kp_plays').value = '1'"); fireEv(G("$('kp_plays')"), 'change', {});
+  check('review: …and the next touch (Plays → One-shot) does not bring the undone −6 dB back', await until(() => G('demoDevice.keyp[1].plays') === 1 && !G('kpBusy')) && G('demoDevice.keyp[1].gain') === 0, 'module gain ' + G('demoDevice.keyp[1].gain'));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+}
 /* ── 9c. Contrast, measured: every text token against every surface it sits on, in both themes, ≥ 4.5:1; and no
  *        colour outside the token blocks — not in a CSS rule, not in an inline style, not in the script ── */
 {
