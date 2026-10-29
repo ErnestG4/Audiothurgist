@@ -1042,17 +1042,18 @@ await link.start();
   const keys = () => HL.fetchKeyParams(l);
   const err = async f => { try { await f(); return 'ok'; } catch (e) { return e.message; } };
   let k = await keys();
-  check('keyp: GET_KEYS: 24 keys, 5 bytes each, every one neutral', k.length === 24 && k.every(HL.keypNeutral) && (await l.request(HL.CMD.keys, new Uint8Array(0))).length === 2 + 24 * 5);
+  check('keyp: GET_KEYS: 24 keys, 13 bytes each (ENV), every one neutral', k.length === 24 && k.every(HL.keypNeutral) && (await l.request(HL.CMD.keys, new Uint8Array(0))).length === 2 + 24 * 13);
   let s0 = await state();
   let r = await HL.keyParams(l, 3, { gain: -12, cents: 700, plays: 2 });
   k = await keys(); let s = await state();
   check('KEY_PARAMS: OK with the new tableGen, read back exactly, one undo step', r.ok && r.tableGen === s.tableGen && r.tableGen !== s0.tableGen && k[3].gain === -12 && k[3].cents === 700 && k[3].plays === 2 && s.undoDepth === s0.undoDepth + 1);
   check('the words: "−6 dB · +7 st · held"; a ratchet says its rate', HL.keypText(k[3]) === '−6 dB · +7 st · held' && HL.keypText({ gain: 0, cents: 0, plays: 4, rat: 5 }) === 'ratchet 1/16' && HL.keypText(k[4]) === '');
   const raw = async b => (await HL.editOp(l, HL.ACT.keyParams, b)).status;
-  const bad = [[24, 0, 0, 0, 0, 0, 0], [3, 13, 0, 0, 0, 0, 0], [3, 0xCF, 0, 0, 0, 0, 0], [3, 0, 0x61, 0x09, 0, 0, 0], [3, 0, 0, 0, 5, 0, 0], [3, 0, 0, 0, 4, 7, 0], [3, 0, 0, 0, 0, 0, 2]];
+  const E8 = [0, 0, 0, 0, 0, 0, 0, 0];   /* ENV: the envelope and group, neutral */
+  const bad = [[24, 0, 0, 0, 0, 0, ...E8, 0], [3, 13, 0, 0, 0, 0, ...E8, 0], [3, 0xCF, 0, 0, 0, 0, ...E8, 0], [3, 0, 0x61, 0x09, 0, 0, ...E8, 0], [3, 0, 0, 0, 5, 0, ...E8, 0], [3, 0, 0, 0, 4, 7, ...E8, 0], [3, 0, 0, 0, 0, 0, ...E8, 2]];
   const st2 = []; for (const b of bad) st2.push(await raw(b));
   check('KEY_PARAMS: key 24, gain +6.5 / −24.5 dB, 24.01 st, plays 5, ratchet rate 7, unknown flags → BAD_ARGS, nothing written', st2.every(x => x === 2) && (await keys())[3].gain === -12, JSON.stringify(st2));
-  check('KEY_PARAMS short (no flags byte) → BAD_ARGS', await raw([3, 0, 0, 0, 0, 0]) === 2);
+  check('KEY_PARAMS short (no flags byte) → BAD_ARGS', await raw([3, 0, 0, 0, 0, 0, ...E8]) === 2);
   check('a stale gen → BAD_STATE', (await HL.keyParams(l, 3, { gain: -2 }, false, ((await state()).tableGen % 255) + 1)).status === 3);
   r = await HL.editUndo(l); k = await keys();
   check('Undo: key 3 neutral again', r.ok && HL.keypNeutral(k[3]));
@@ -1128,6 +1129,67 @@ await link.start();
   check('Save set with a spread: done', !!(await setOp(HL.saveSet, 'chroma_kit')));
   await HL.editUndo(l);
   check('Load set: the spread comes back (the map and every tune)', !!(await setOp(HL.loadSet, 'chroma_kit')) && await snap() === want);
+  await l.close();
+}
+
+/* ── 7g. ENV (ACTION 37 + 0x69, api 2): each key's amp envelope and choke group — KEY_PARAMS carrying them, read back
+ *        13 bytes a key, the refusals, the words, one undo step per edit and one per drag, a spread copying them, a set
+ *        carrying them; the fake's sound: a held key's Release after its up, a one-shot's Decay to no sustain, a key in a
+ *        group cutting the others in it (never itself) ── */
+{
+  const d = new DEMO.FakeDevice({ latencyMs: 1, kit: true });
+  const l = new HL.Link(new DEMO.FakePort(d)); await l.start();
+  const info = await HL.hello(l), desc = await HL.getDescriptor(l, info);
+  const state = async () => HL.parseState(await l.request(HL.CMD.state));
+  const keys = () => HL.fetchKeyParams(l);
+  check('env: api 2 on both sides; GET_KEYS 13 bytes a key, every key neutral (no envelope, no group)', HL.API === 2 && HL.apiOf(desc) === 2 && (await l.request(HL.CMD.keys, new Uint8Array(0))).length === 2 + 24 * 13 && (await keys()).every(p => HL.keypNeutral(p) && p.atk === 0 && p.grp === 0));
+  let s0 = await state();
+  let r = await HL.keyParams(l, 3, { gain: -4, plays: 2, atk: 20, dec: 300, sus: 12, rel: 1200, grp: 2 });
+  let k = await keys(), s = await state();
+  check('KEY_PARAMS with A 20 ms · D 300 ms · S −12 dB · R 1.2 s · choke 2: read back exactly, one undo step', r.ok && k[3].atk === 20 && k[3].dec === 300 && k[3].sus === 12 && k[3].rel === 1200 && k[3].grp === 2 && k[3].gain === -4 && s.undoDepth === s0.undoDepth + 1, JSON.stringify(k[3]));
+  check('the words: "−2 dB · held · A 20 ms · D 300 ms · S −12 dB · R 1.2 s · choke 2"; no sustain says off; Decay alone (full sustain) says nothing',
+    HL.keypText(k[3]) === '−2 dB · held · A 20 ms · D 300 ms · S −12 dB · R 1.2 s · choke 2' && HL.keypText({ plays: 1, dec: 250, sus: 60 }) === 'one-shot · D 250 ms · S off' && HL.keypText({ dec: 250 }) === '' && !HL.keypNeutral({ dec: 250 }), HL.keypText(k[3]));
+  check('the sliders\' curve: 0 → 0, 50 → ⅛ of the max, 100 → the max; and back', HL.envMs(0, 2000) === 0 && HL.envMs(50, 4000) === 500 && HL.envMs(100, 2000) === 2000 && HL.envPos(500, 4000) === 50 && HL.envPos(4000, 4000) === 100 && HL.envPos(0, 2000) === 0);
+  const raw = async b => (await HL.editOp(l, HL.ACT.keyParams, b)).status;
+  const body = (f = {}) => { const v = Object.assign({ key: 3, atk: 0, dec: 0, sus: 0, rel: 0, grp: 0 }, f); return [v.key, 0, 0, 0, 0, 0, v.atk & 0xff, v.atk >> 8, v.dec & 0xff, v.dec >> 8, v.sus, v.rel & 0xff, v.rel >> 8, v.grp, 0]; };
+  const bad = [];
+  for (const f of [{ atk: 2001 }, { dec: 4001 }, { sus: 61 }, { rel: 4001 }, { grp: 5 }]) bad.push(await raw(body(f)));
+  check('KEY_PARAMS: attack 2001 ms, decay 4001 ms, sustain 61 dB down, release 4001 ms, group 5 → BAD_ARGS, nothing written', bad.every(x => x === 2) && (await keys())[3].rel === 1200, JSON.stringify(bad));
+  check('…the far ends (2 s, 4 s, none, 4 s, group 4) → OK', await raw(body({ atk: 2000, dec: 4000, sus: 60, rel: 4000, grp: 4 })) === 0 && (await keys())[3].grp === 4);
+  check('…the old 7-byte body (no envelope) → BAD_ARGS', await raw([3, 0, 0, 0, 0, 0, 0]) === 2);
+  await HL.editUndo(l);
+  check('Undo: the step before (A 20 ms … choke 2) back', (await keys())[3].atk === 20 && (await keys())[3].grp === 2);
+  /* a release drag: one step */
+  s0 = await state();
+  for (let i = 0; i < 10; i++) await HL.keyParams(l, 3, Object.assign({}, k[3], { rel: 100 * (i + 1) }), i > 0);
+  s = await state();
+  check('a release slider drag (10 sends, JOIN after the first): one undo step, the last value', s.undoDepth === s0.undoDepth + 1 && (await keys())[3].rel === 1000);
+  /* the fake's sound: Release after the up, a one-shot's decay, the choke group */
+  await HL.keyParams(l, 3, { plays: 2, rel: 400, grp: 1 });
+  await HL.playKey(l, 3, true); const v3 = d.voice;
+  await HL.playKey(l, 3, false);
+  check('a held key\'s up: it rings on for its 400 ms release', v3 && v3.key === 3 && v3.released && v3.until > Date.now() + 250);
+  await HL.keyParams(l, 7, { plays: 1, grp: 1 });
+  await HL.playKey(l, 7, true);
+  check('…a key of the same group (7) cuts it (5 ms)', v3.choked && v3.until <= Date.now() + 5 && d.voice.key === 7);
+  await HL.keyParams(l, 14, { plays: 1, grp: 2 }); await HL.playKey(l, 14, true); const v14 = d.voice;
+  await HL.playKey(l, 7, true); const v7 = d.voice;
+  await HL.playKey(l, 7, true);
+  check('…another group\'s key rings on; the same key struck again never cuts itself', !v14.choked && v14.until > Date.now() + 100 && !v7.choked);
+  await HL.keyParams(l, 14, { plays: 1, dec: 120, sus: 60 }); await HL.playKey(l, 14, true);
+  check('a one-shot with D 120 ms and no sustain: done at 120 ms, not at its sample\'s end', d.voice.key === 14 && d.voice.until - d.voice.t === 120);
+  /* a spread carries the envelope and the group */
+  await HL.keyParams(l, 3, { gain: 0, plays: 2, atk: 5, dec: 200, sus: 6, rel: 700, grp: 3 });
+  r = await HL.spreadKeys(l, 3); k = await keys();
+  check('SPREAD_KEYS: every key takes the root\'s envelope and group (one monophonic, chromatic instrument)', r.ok && k.every(p => p.atk === 5 && p.dec === 200 && p.sus === 6 && p.rel === 700 && p.grp === 3), JSON.stringify(k[0]));
+  const s1 = await state(); await HL.editUndo(l);
+  check('…one undo step takes it back', (await state()).undoDepth === s1.undoDepth - 1 && (await keys())[0].grp === 0);
+  /* a set carries them */
+  const setOp = async (fn, name) => { const q = (await state()).setSeq; await fn(l, name); for (let i = 0; i < 100; i++) { d.set.t -= 1000; const x = await state(); if (x.setSeq !== q && !x.setState) return x; } return null; };
+  const want = JSON.stringify(await keys());
+  check('Save set', !!(await setOp(HL.saveSet, 'env_kit')));
+  await HL.keyParams(l, 3, {}); await HL.keyParams(l, 7, {});
+  check('Load set: every envelope and group back', !!(await setOp(HL.loadSet, 'env_kit')) && JSON.stringify(await keys()) === want);
   await l.close();
 }
 
@@ -2048,7 +2110,7 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
   for (const v of [-2, -4, -6, -8, -10, -12]) { G(`$('kp_gain').value = '${v}'`); fireEv(gain, 'input', {}); await sleep(5); }
   fireEv(gain, 'change', {});
   check('the gain dragged to −6 dB: the module has it, sent live (KEY_PARAMS more than once, the later ones with JOIN)',
-    await until(() => G('demoDevice.keyp[1].gain') === -12 && !G('kpBusy')) && G('demoDevice.acts.filter(a => a[0] === 37).length') >= 2 && G('demoDevice.acts.filter(a => a[0] === 37).slice(1).every(a => (a[7] & 1) === 1)'), JSON.stringify(G('demoDevice.acts.filter(a => a[0] === 37)')));
+    await until(() => G('demoDevice.keyp[1].gain') === -12 && !G('kpBusy')) && G('demoDevice.acts.filter(a => a[0] === 37).length') >= 2 && G('demoDevice.acts.filter(a => a[0] === 37).slice(1).every(a => (a[15] & 1) === 1)'), JSON.stringify(G('demoDevice.acts.filter(a => a[0] === 37)')));
   check('…one undo step on the module, one history line ("C♯1 settings: −6 dB"), the cell says it', await until(() => G('st.undoDepth') === d0 + 1) && G("ed.history.list().filter(x => /^C♯1 settings/.test(x.label)).length") === 1
     && G("ed.history.list()[0].label") === 'C♯1 settings: −6 dB' && await until(() => G('keyCells[1].kp.textContent') === '−6 dB'), G("ed.history.list().map(x => x.label).join(' | ')"));
   /* Plays → Ratchet, then its rate */
