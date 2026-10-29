@@ -2179,6 +2179,69 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
   check('disconnect: the button hidden', G("$('kp_spread').hidden") === true);
 }
+/* ── 9i. ENV, the page: the settings row's envelope line in the Kit (a release drag sent live, one undo step and one
+ *        history line; sustain, decay, the choke group; a gain edit leaving an odd release exactly as it was; the dims),
+ *        then the same row from a Play pad's ⋯ — the sheet for that key (the row moved, not copied), an attack set there,
+ *        the pads still playing under it, ⋯ on another pad retargeting it, Esc / ✕ / another tab putting the row back ── */
+{
+  const { D, G } = await loadPage('?demo=keyp');
+  check('env page: connected, the row with its envelope line under the keys', await until(() => G('!!(st && keyp && table)')) && G("$('kp_row').hidden") === false && G("$('kp_env').hidden") === false, D.errors.join(' | ').slice(0, 300));
+  G('selectKey(1)'); G('invalidate(D.kit)'); await sleep(80);
+  check('C♯1: no envelope — every time 0 ms, sustain 0 dB, no group; Decay dims (nothing to fall to), so does Release (Follow = one-shot here)',
+    +G("$('kp_atk').value") === 0 && G("$('kp_rel_v').textContent") === '0 ms' && G("$('kp_sus_v').textContent") === '0 dB' && +G("$('kp_grp').value") === 0 && G("$('kp_dec_l').className").includes('dim') && G("$('kp_rel_l').className").includes('dim'),
+    [G("$('kp_atk').value"), G("$('kp_rel_v').textContent"), G("$('kp_sus_v').textContent"), G("$('kp_dec_l').className"), G("$('kp_rel_l').className"), G('st.keyPlays')].join(' | '));
+  spyActs(G);
+  /* Plays → Held, then a release drag */
+  G("$('kp_plays').value = '2'"); fireEv(G("$('kp_plays')"), 'change', {});
+  await until(() => G('demoDevice.keyp[1].plays') === 2 && !G('kpBusy'));
+  check('Held: Release no longer dims', !G("$('kp_rel_l').className").includes('dim'));
+  const d0 = G('st.undoDepth'), rel = G("$('kp_rel')"); G('demoDevice.acts = []');
+  for (const v of [20, 30, 40, 50]) { G(`$('kp_rel').value = '${v}'`); fireEv(rel, 'input', {}); await sleep(5); }
+  fireEv(rel, 'change', {});
+  check('the release dragged to 50 (500 ms on the curve): the module has it, sent live, JOIN after the first send', await until(() => G('demoDevice.keyp[1].rel') === 500 && !G('kpBusy'))
+    && G('demoDevice.acts.filter(a => a[0] === 37).length') >= 2 && G('demoDevice.acts.filter(a => a[0] === 37).slice(1).every(a => (a[15] & 1) === 1)') && G("$('kp_rel_v').textContent") === '500 ms', JSON.stringify(G('demoDevice.acts.filter(a => a[0] === 37).map(a => a[15])')));
+  check('…one undo step, one history line ("C♯1 settings: held · R 500 ms"), the cell says it', await until(() => G('st.undoDepth') === d0 + 1) && await until(() => G('ed.history.list()[0].label') === 'C♯1 settings: held · R 500 ms') && await until(() => G('keyCells[1].kp.textContent') === 'held · R 500 ms'), G("ed.history.list().map(x => x.label).slice(0, 3).join(' | ')"));
+  /* sustain off, a decay, the group */
+  G("$('kp_sus').value = '-60'"); fireEv(G("$('kp_sus')"), 'input', {}); fireEv(G("$('kp_sus')"), 'change', {});
+  check('sustain to the bottom: "off" on the module (60) and in the row; Decay no longer dims', await until(() => G('demoDevice.keyp[1].sus') === 60 && !G('kpBusy')) && G("$('kp_sus_v').textContent") === 'off' && !G("$('kp_dec_l').className").includes('dim'));
+  G("$('kp_dec').value = '40'"); fireEv(G("$('kp_dec')"), 'input', {}); fireEv(G("$('kp_dec')"), 'change', {});
+  check('decay to 40 (256 ms)', await until(() => G('demoDevice.keyp[1].dec') === 256 && !G('kpBusy')));
+  G("$('kp_grp').value = '2'"); fireEv(G("$('kp_grp')"), 'change', {});
+  check('choke group 2: sent, the cell says "choke 2"', await until(() => G('demoDevice.keyp[1].grp') === 2) && await until(() => /choke 2$/.test(G('keyCells[1].kp.textContent'))), G('keyCells[1].kp.textContent'));
+  await until(() => !G('kpBusy'));
+  /* an odd release (a set's 1 234 ms, off the curve) survives a gain edit */
+  G('demoDevice.keyp[1].rel = 1234; demoDevice.bumpGen()'); await until(() => G('keyp[1].rel') === 1234); G('kpTouch = 0; invalidate(D.kit)'); await sleep(60);   /* (the row's 1.5 s hands-on guard waived: a new edit) */
+  G("$('kp_gain').value = '-4'"); fireEv(G("$('kp_gain')"), 'input', {}); fireEv(G("$('kp_gain')"), 'change', {});
+  check('a gain edit on a key with a 1 234 ms release: the gain sent, the release exactly as it was (not the curve\'s nearest)', await until(() => G('demoDevice.keyp[1].gain') === -4 && !G('kpBusy')) && G('demoDevice.keyp[1].rel') === 1234 && G('demoDevice.keyp[1].dec') === 256);
+  /* the Play tab: ⋯ on a pad */
+  G("showTab('tab_play')"); await sleep(40); G('demoDevice.acts = []');
+  const set5 = G('padEls[5].set');
+  fireEv(set5, 'pointerdown', {});
+  check('⋯ is not a note: its press plays nothing', !G('demoDevice.acts.some(a => a[0] === 32)'));
+  fireEv(set5, 'click', {}); await sleep(40);
+  check('⋯ on F1: the sheet opens on F1 — the Kit\'s row moved into it (one set of controls), F1\'s values, the pad ringed', G("$('kp_sheet').hidden") === false && G("$('kp_row')._parent === $('kp_slot')") && G("$('kp_key').textContent") === 'F1' && G("$('kp_gain').value") === '0' && G("$('kp_sheet_t').textContent").startsWith('F1 — settings') && G('padEls[5].el.className').includes('kpon') && G("padEls[5].set.getAttribute('aria-expanded')") === 'true');
+  const atk = G("$('kp_atk')");
+  for (const v of [10, 20, 30]) { G(`$('kp_atk').value = '${v}'`); fireEv(atk, 'input', {}); await sleep(5); }
+  fireEv(atk, 'change', {});
+  check('an attack set in the sheet (30 → 54 ms) lands on F1, not on the Kit\'s selected C♯1', await until(() => G('demoDevice.keyp[5].atk') === 54 && !G('kpBusy')) && G('demoDevice.keyp[1].atk') === 0);
+  check('…the pad and the sheet\'s title say it', await until(() => G('padEls[5].kp.textContent') === 'A 54 ms') && /F1 — settings: A 54 ms/.test(G("$('kp_sheet_t').textContent")), G('padEls[5].kp.textContent'));
+  fireEv(G('padEls[5].el'), 'pointerdown', { pointerId: 7 }); fireEv(G('padEls[5].el'), 'pointerup', { pointerId: 7 });
+  check('the pads still play under the sheet (PLAY_KEY for F1), and it stays open', await until(() => G('demoDevice.acts.some(a => a[0] === 32 && a[1] === 5)')) && G("$('kp_sheet').hidden") === false);
+  fireEv(G('padEls[7].set'), 'click', {}); await sleep(60);
+  check('⋯ on G1: the same sheet, now G1\'s (+2 dB, −12 st, Ratchet ½)', G("$('kp_key').textContent") === 'G1' && G("$('kp_gain').value") === '4' && G("$('kp_plays').value") === '4' && !G('padEls[5].el.className').includes('kpon') && G('padEls[7].el.className').includes('kpon'));
+  fireEv(G("$('kp_sheet')"), 'keydown', { key: 'Escape' }); await sleep(60);
+  check('Esc: the sheet closes, the row back under the Kit\'s keys on the selected key (C♯1)', G("$('kp_sheet').hidden") === true && G("$('kp_row')._parent === $('kp_home')") && G("$('kp_key').textContent") === 'C♯1' && !G('padEls[7].el.className').includes('kpon'));
+  fireEv(G('padEls[3].set'), 'click', {}); await sleep(30);
+  fireEv(G("$('kp_sheet_x')"), 'click', {});
+  check('✕ closes it too', G("$('kp_sheet').hidden") === true && G("$('kp_row')._parent === $('kp_home')"));
+  fireEv(G('padEls[3].set'), 'click', {}); await sleep(30);
+  G("showTab('tab_kit')");
+  check('…and so does another tab', G("$('kp_sheet').hidden") === true && G("$('kp_row')._parent === $('kp_home')") && G("$('kp_row').hidden") === false);
+  check('env page: no errors, no unknown ids', D.unknownIds.size === 0 && D.errors.length === 0, D.errors.join(' | ').slice(0, 300) + [...D.unknownIds].join(','));
+  G("showTab('tab_play')"); fireEv(G('padEls[3].set'), 'click', {}); await sleep(30);
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+  check('disconnect: the sheet closed, the row home and hidden', G("$('kp_sheet').hidden") === true && G("$('kp_row')._parent === $('kp_home')") && G("$('kp_row').hidden") === true);
+}
 /* ── 9c. Contrast, measured: every text token against every surface it sits on, in both themes, ≥ 4.5:1; and no
  *        colour outside the token blocks — not in a CSS rule, not in an inline style, not in the script ── */
 {
