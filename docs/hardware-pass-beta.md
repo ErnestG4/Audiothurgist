@@ -87,7 +87,10 @@ rest of this pass boots as written.
 - [ ] **A sequencer that changes pitch with its gate** (the last-note fix,
       23 Oct): a fast run of different notes into J4 with gates on J6 —
       *listen for* every hit playing **its own** key, never the previous
-      one. Then very short triggers (1–2 ms): each still plays.
+      one. Then very short triggers (1–2 ms): each still plays — and with
+      the key on **Held**, **Loop** or **Ratchet** (Kit → the key's Plays, or
+      Key Plays = Held) each short trigger still **releases**: a short note,
+      never a key left sounding.
 - [ ] J5 at 1/12 V: reverse. J5 style 7 (7/12 V): record into the key held;
       style 8: clear it.
 - [ ] Brain map (Classic, Jacks = Follow grammar): gate on **J5**, the same
@@ -256,15 +259,17 @@ file) on the computer.
    flashing: Start In takes its default, Sampler, even for a slot restored
    from its backup.)
 2. **The preset is untouched**: Settings (B2 + B3 2 s) → load a slot with a
-   grammar other than Classic. *See*: its grammar, running. Power-cycle
+   grammar other than Classic. *See*: its grammar, **stopped** (B1 still
+   breathes); ▶ (or B1 held 600 ms) starts it on the beat. Power-cycle
    again: Pads, stopped — Start In overrides the boot preset's grammar, not
-   the preset.
+   the preset. (A preset **saved** in this sampler state keeps the beat it
+   came with, not Pads; one you put on Pads yourself saves as Pads.)
 3. **Connect the page.** *See*: the Play tab opens on the pads, a line over
    them "Sampler — the pads play samples…" with **Classic** / **Grids**
    buttons, the transport "**sampler** · Pads", the Pads chip lit, the Jacks
    card "Voice map" with J4 live.
-4. **Keys play while stopped**: a page pad, J4 + a J6 gate, and the panel.
-   Each sounds its key; the transport stays stopped.
+4. **Keys play while stopped**: a page pad, and J4 + a J6 gate. Each sounds
+   its key; the transport stays stopped. (The panel has no way to play a key.)
 5. **Drop the mono one-shot on C1, the stereo sample on C♯1.** *See*: "✓",
    the line "mono, …" then "stereo, … — the kit is stereo now"; Options →
    Sampling reads Stereo. Play both from the page and from J4 (C1 = 0 V,
@@ -309,8 +314,8 @@ vocal on D1), the page on the Kit tab, the clock on J3.
 1. [ ] Untouched: everything sounds exactly as before this firmware — the
        break in Classic, a key from J4, Play's loop. No key cell or pad shows
        any orange words.
-2. [ ] C1 selected, Gain to −12 dB: C1 is clearly quieter from the page, from
-       J4 and from the panel's Pads; the break's own kick (the pattern's
+2. [ ] C1 selected, Gain to −12 dB: C1 is clearly quieter from the page's
+       pads and from J4; the break's own kick (the pattern's
        steps) is **not** quieter. Gain to +6 dB: louder, no distortion on a
        normalised take beyond the output's own clip (report if it clips).
 3. [ ] Drag the Gain slider through its range and back: it follows live, and
@@ -328,7 +333,11 @@ vocal on D1), the page on the Kit tab, the clock on J3.
        (*listen for*: a click at the wrap; report how bad), and it fades on
        the release. While it loops, play other keys and run the pattern:
        the loop keeps going. **Reversed** (Voice map, J5 at style 1): it
-       loops D1 **backward** from its end, the same seam, the same release
+       loops D1 **backward** from its end, the same seam, the same release.
+       Turn J5 between 0 and style 1 while the gate stays up: each change
+       re-strikes D1 and the new loop **replaces** the old one (a short fade
+       under it) — one loop at a time, never two stacked. Release right as
+       it wraps: the fade is as long as anywhere else (no click).
 7. [ ] C1 Plays → **Ratchet**, every ½ sample: hold C1 — the kick retriggers
        from its start twice per kick length, *no click at the seams*, until
        you let go; J7 sends a trigger per hit. Try ¼ and ⅛ (faster), and the
