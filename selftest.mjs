@@ -2140,6 +2140,15 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
   check('review: C♯1 → Held, then D1 → Loop before C♯1\'s reply: both reach the module', await until(() => G('demoDevice.keyp[2].plays') === 3) && G('demoDevice.keyp[1].plays') === 2, 'C♯1 ' + G('demoDevice.keyp[1].plays') + ', D1 ' + G('demoDevice.keyp[2].plays'));
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
 }
+{
+  /* connect: a descriptor that does not come through (one lost reply) is not "the wrong firmware — flash the .bin" */
+  const { G } = await loadPage('');
+  G(`(() => { const d = new DEMO.FakeDevice({ latencyMs: 6, startIn: 0 }), h = d.handle.bind(d); let n = 0;
+    d.handle = (t, b) => { if (t === 0x02 && n++ === 1) return null; return h(t, b); };
+    demoDevice = d; demoPort = new DEMO.FakePort(d); window.__p = connectPort(demoPort, true); })()`);
+  await G('__p').catch(() => {}); await sleep(50);
+  check('review: a lost descriptor reply says connect again, not flash the firmware', G('link') === null && /connect again/.test(G("$('notice').textContent")) && !/Flash/.test(G("$('notice').textContent")), G("$('notice').textContent"));
+}
 /* ── 9c. Contrast, measured: every text token against every surface it sits on, in both themes, ≥ 4.5:1; and no
  *        colour outside the token blocks — not in a CSS rule, not in an inline style, not in the script ── */
 {
