@@ -2146,6 +2146,19 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
     fireEv(gain, 'change', {}); G("$('ed_undo').onclick()"); }
   await until(() => !G('kpBusy') && !G('kpWant') && !G('ed.busy')); await sleep(300);
   check('review: Undo right after a gain drag — the drag is undone, nothing of it sent after the Undo', G('demoDevice.keyp[4].gain') === 0, 'E1 gain ' + G('demoDevice.keyp[4].gain'));
+  /* KEYP: a drag that ends where it began fires no change: the pointer's up still ends the drag, the row follows the module again */
+  await until(() => !G('kpBusy') && !G('kpWant') && !G('ed.busy'));
+  G('selectKey(5)'); G('invalidate(D.kit)'); await sleep(60);
+  { const gain = G("$('kp_gain')");
+    for (const v of ['-4', '0']) { G(`$('kp_gain').value = '${v}'`); fireEv(gain, 'input', {}); await sleep(20); }
+    fireEv(gain, 'pointerup', {}); }
+  await until(() => !G('kpBusy') && !G('kpWant')); await sleep(60);
+  check('review: a drag back to its start (no change event) ends on the pointer\'s up', G('kpDrag') === false);
+  { const k = G("$('as_k')"), v0 = k.value;
+    for (const v of ['2', v0]) { G(`$('as_k').value = '${v}'`); fireEv(k, 'input', {}); await sleep(20); }
+    fireEv(k, 'pointerup', {}); }
+  await until(() => !G('asBusy') && G('asWant') == null); await sleep(60);
+  check('review: …and so does the autoslice count\'s', G('asDrag') === false && G('asTouched') === false);
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
 }
 {

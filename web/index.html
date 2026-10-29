@@ -1649,6 +1649,10 @@ for (const id of ['kp_gain', 'kp_semi']) {
   $(id).addEventListener('input', () => { if (!kpDrag) { kpDrag = true; kpSent = 0; } kpTouch = performance.now(); kpLabels(); kpQueue(kpFromRow(), true); });
   $(id).addEventListener('change', () => { const was = kpDrag; kpDrag = false; kpTouch = performance.now(); kpLabels(); kpQueue(kpFromRow(), was); });
 }
+/* a drag that ends where it began fires no change: the pointer's up (or a cancel, or the focus leaving) ends it too — after
+ * the change, if one comes, so a real drag's last send keeps its JOIN */
+const kpDragEnd = () => setTimeout(() => { if (!kpDrag) return; kpDrag = false; kpTouch = performance.now(); if (!kpBusy && !kpWant) kpSent = 0; invalidate(D.kit); }, 0);
+for (const id of ['kp_gain', 'kp_semi']) for (const ev of ['pointerup', 'pointercancel', 'blur']) $(id).addEventListener(ev, kpDragEnd);
 $('kp_cents').addEventListener('change', () => { kpTouch = performance.now(); kpSent = 0; kpLabels(); kpQueue(kpFromRow(), false); });
 $('kp_plays').addEventListener('change', () => { kpTouch = performance.now(); kpSent = 0; $('kp_rat_l').hidden = +$('kp_plays').value !== HL.KEYP.ratchet; kpQueue(kpFromRow(), false); });
 $('kp_rat').addEventListener('change', () => { kpTouch = performance.now(); kpSent = 0; kpQueue(kpFromRow(), false); });
@@ -1699,6 +1703,8 @@ function asQueue(k) {
   Promise.resolve(ed.autoslice(k, false, join)).catch(() => {}).finally(() => { asBusy = false; if (asWant != null) { const w = asWant; asWant = null; asQueue(w); } else if (!asDrag) asSent = 0; });
 }
 $('as_k').addEventListener('input', e => { if (!asDrag) { asDrag = true; asSent = 0; asLast = -1; } asTouched = true; setText('as_n', e.target.value); asQueue(+e.target.value); });
+{ const asDragEnd = () => setTimeout(() => { if (!asDrag) return; asDrag = false; asTouched = false; if (!asBusy) asSent = 0; }, 0);   /* the same for the count: a drag with no change still ends */
+  for (const ev of ['pointerup', 'pointercancel', 'blur']) $('as_k').addEventListener(ev, asDragEnd); }
 $('as_k').addEventListener('change', e => { asTouched = false; if (!asDrag) { asSent = 0; asLast = -1; } asDrag = false; asQueue(+e.target.value); if (!asBusy) asSent = 0; });
 $('as_go').onclick = () => { if (link) ed.autoslice(+$('as_k').value, false); };
 $('as_reroll').onclick = () => { if (link) ed.autoslice(+$('as_k').value, true); };
