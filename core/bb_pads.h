@@ -38,7 +38,7 @@ constexpr int kPadAnalyseMax  = 48000;    // a pad's class / salience / density 
 constexpr uint8_t kPadMaxCh   = 2;
 
 /* 0x68 PADS op state (state tail 293) and the last op's result (295) */
-enum PadState : uint8_t { kPadIdle = 0, kPadReceiving = 1, kPadCommitting = 2, kPadClearing = 3 };
+enum PadState : uint8_t { kPadIdle = 0, kPadReceiving = 1, kPadCommitting = 2, kPadClearing = 3, kPadReclaiming = 4 /* RECLAIM: op 4 */ };
 enum PadResult : uint8_t
 {
     kPadOk = 0, kPadNoRoom = 1, kPadBusy = 2, kPadBadArgs = 3, kPadFull = 4, kPadTimeout = 5,

@@ -47,13 +47,13 @@ struct ReclaimPlan
 
     int Reclaimed() const { return oldFree > newFree ? oldFree - newFree : 0; }
     // the run holding p (a[i] <= p < b[i]), else the last run before it, else −1
-    int RunAt(int p) const
+    BB_COLD int RunAt(int p) const
     {
         int lo = 0, hi = nRun - 1, r = -1;
         while(lo <= hi) { const int m = (lo + hi) >> 1; if(a[m] <= p) { r = m; lo = m + 1; } else hi = m - 1; }
         return r;
     }
-    int Map(int p) const
+    BB_COLD int Map(int p) const
     {
         if(p >= oldFree) return p - Reclaimed();
         const int i = RunAt(p);
@@ -61,7 +61,7 @@ struct ReclaimPlan
         return p < b[i] ? dst[i] + (p - a[i]) : dst[i] + (b[i] - a[i]);
     }
     // [lo, hi) lies inside one kept run (an empty span anywhere is inside)
-    bool Inside(int lo, int hi) const
+    BB_COLD bool Inside(int lo, int hi) const
     {
         if(hi <= lo) return true;
         const int i = RunAt(lo);
@@ -69,7 +69,7 @@ struct ReclaimPlan
     }
     // keep [lo, hi) (clamped to [0, oldFree)); merges with what it touches. Past kMaxRuns a span that touches
     // nothing joins the run before it (the gap between them is kept too: less is reclaimed, nothing breaks).
-    void Add(int lo, int hi)
+    BB_COLD void Add(int lo, int hi)
     {
         if(lo < 0) lo = 0;
         if(hi > oldFree) hi = oldFree;
@@ -106,54 +106,41 @@ struct ReclaimPlan
     }
 };
 
-// The undo record's spans that a restore could bring back live: [start, start + len) of every entry past the grid
-// it holds inside its own nTable (a slot past it is not live in the state the record restores), a tombstone never.
-// A NUDGE_ALL record holds starts only: their spans take the length the slot has when the record is restored (`len`).
-template <typename F>
-inline void ReclaimRecordSpans(const Engine& e, const UndoRec& r, const int* len, F f)
-{
-    if(r.kind == UndoRec::kKeyP) return;
-    if(r.kind == UndoRec::kStarts)
-    {
-        for(int j = 0; j < r.n; j++)
-        {
-            const int t = r.first + j;
-            if(t < e.nSlices || t >= r.nTable || t >= Engine::kMaxTable) continue;
-            f(r.u.nudge.start[j], r.u.nudge.start[j] + len[t]);
-        }
-        return;
-    }
-    const int n = r.kind == UndoRec::kSnap ? (r.n < Engine::kMaxTable ? r.n : Engine::kMaxTable) : (r.n < 2 ? r.n : 2);
-    for(int j = 0; j < n; j++)
-    {
-        const UndoEntry& u = r.u.e[j];
-        if(u.idx < e.nSlices || u.idx >= r.nTable || u.len <= 0 || (u.flags & Engine::kFlagTomb)) continue;
-        f(u.start, u.start + u.len);
-    }
-}
 inline bool ReclaimJournalLive(const Engine& e) { return e.undo && e.undo->gen == e.tableGen && e.undo->count > 0; }
-// Every span the live journal can bring back, as f(record index, lo, hi): the undo half walked back from the cursor
-// and the redo half forward from it, each slot's length followed through the records on the way (what a NUDGE_ALL
-// record's starts will be restored beside).
-template <typename F>
-inline void ReclaimJournalSpans(const Engine& e, F f)
+// Every span the live journal can bring back — of each record, [start, start + len) of every entry past the grid it
+// holds inside its own nTable (a slot past it is not live in the state the record restores), a tombstone never; a
+// NUDGE_ALL record holds starts only, beside the length the slot will have when the record is restored, so the undo
+// half is walked back from the cursor and the redo half forward from it, each slot's length followed through the
+// records on the way. `add`: each span joins the plan's kept runs (kReclaimFree). Else (kReclaimAll) the walk finds
+// the records that need a span the plan does not keep: keepFrom past the newest of them in the undo half, keepTo at
+// the first in the redo half. One body for both (the module's code lives in SRAM).
+BB_COLD inline void ReclaimJournalSpans(const Engine& e, ReclaimPlan& p, bool add)
 {
     if(!ReclaimJournalLive(e)) return;
     const UndoJournal& j = *e.undo;
     int len[Engine::kMaxTable];
-    auto walk = [&](int i)
-    {
-        const UndoRec& r = j.Slot(i);
-        ReclaimRecordSpans(e, r, len, [&](int lo, int hi) { f(i, lo, hi); });
-        if(r.kind != UndoRec::kEntries && r.kind != UndoRec::kSnap) return;
-        const int n = r.kind == UndoRec::kSnap ? (r.n < Engine::kMaxTable ? r.n : Engine::kMaxTable) : (r.n < 2 ? r.n : 2);
-        for(int k = 0; k < n; k++) if(r.u.e[k].idx < Engine::kMaxTable) len[r.u.e[k].idx] = r.u.e[k].len;
-    };
     for(int pass = 0; pass < 2; pass++)
     {
         for(int t = 0; t < Engine::kMaxTable; t++) len[t] = t < e.nTable ? e.slices[t].len : 0;
-        if(pass == 0) for(int i = j.cur - 1; i >= 0; i--) walk(i);
-        else          for(int i = j.cur; i < j.count; i++) walk(i);
+        const int n0 = pass == 0 ? j.cur : j.count - j.cur;
+        for(int k = 0; k < n0; k++)
+        {
+            const int i = pass == 0 ? j.cur - 1 - k : j.cur + k;
+            const UndoRec& r = j.Slot(i);
+            if(r.kind == UndoRec::kKeyP) continue;
+            const bool starts = r.kind == UndoRec::kStarts;
+            const int n = starts || r.kind == UndoRec::kSnap ? (r.n < Engine::kMaxTable ? r.n : Engine::kMaxTable) : (r.n < 2 ? r.n : 2);
+            for(int q = 0; q < n; q++)
+            {
+                int t, lo, l;
+                if(starts) { t = r.first + q; lo = r.u.nudge.start[q]; l = t < Engine::kMaxTable ? len[t] : 0; }
+                else { const UndoEntry& u = r.u.e[q]; t = u.idx; lo = u.start; l = (u.flags & Engine::kFlagTomb) ? 0 : u.len; }
+                if(t < e.nSlices || t >= r.nTable || t >= Engine::kMaxTable || l <= 0) continue;
+                if(add) p.Add(lo, lo + l);
+                else if(!p.Inside(lo, lo + l)) { if(i < j.cur) { if(i + 1 > p.keepFrom) p.keepFrom = i + 1; } else if(i < p.keepTo) p.keepTo = i; }
+            }
+            if(!starts) for(int q = 0; q < n; q++) if(r.u.e[q].idx < Engine::kMaxTable) len[r.u.e[q].idx] = r.u.e[q].len;
+        }
     }
 }
 
@@ -169,7 +156,7 @@ BB_COLD inline bool BuildReclaimPlan(const Engine& e, uint8_t mode, ReclaimPlan&
     p.Add(0, e.bufLen);
     for(int t = e.nSlices; t < e.nTable && t < Engine::kMaxTable; t++)
         if(!e.IsTomb(t) && e.slices[t].len > 0) p.Add(e.slices[t].start, e.slices[t].start + e.slices[t].len);
-    if(mode == kReclaimFree) ReclaimJournalSpans(e, [&](int, int lo, int hi) { p.Add(lo, hi); });
+    if(mode == kReclaimFree) ReclaimJournalSpans(e, p, true);
     p.Finish();
     return true;
 }
@@ -181,25 +168,19 @@ BB_COLD inline void ReclaimPlanJournal(const Engine& e, ReclaimPlan& p)
 {
     if(!p.undoLive) { p.keepFrom = p.keepTo = 0; p.dropSteps = 0; return; }
     const UndoJournal& j = *e.undo;
-    int from = 0, to = j.count;
+    p.keepFrom = 0; p.keepTo = j.count;
     if(p.mode == kReclaimAll)
     {
-        ReclaimJournalSpans(e, [&](int i, int lo, int hi)
-        {
-            if(p.Inside(lo, hi)) return;
-            if(i < j.cur) { if(i + 1 > from) from = i + 1; }
-            else if(i < to) to = i;
-        });
-        while(from < j.cur && !j.Slot(from).head) from++;    // the rest of that step goes with it
-        while(to < j.count && to > j.cur && !j.Slot(to).head) to--;   // back to the step's head
+        ReclaimJournalSpans(e, p, false);
+        while(p.keepFrom < j.cur && !j.Slot(p.keepFrom).head) p.keepFrom++;                   // the rest of that step goes with it
+        while(p.keepTo < j.count && p.keepTo > j.cur && !j.Slot(p.keepTo).head) p.keepTo--;   // back to the step's head
     }
-    p.keepFrom = from; p.keepTo = to;
-    p.dropSteps = (from > 0 ? j.Steps(0, from) : 0) + (to < j.count ? j.Steps(to, j.count) : 0);
+    p.dropSteps = (p.keepFrom > 0 ? j.Steps(0, p.keepFrom) : 0) + (p.keepTo < j.count ? j.Steps(p.keepTo, j.count) : 0);
 }
 
 // The kept runs from `src` into `dst` (another buffer of the same capacity), each to its new place. Yields every
 // 16 Ki samples. CONTROL thread: `src` is the playing plane (read only), `dst` the free one.
-inline void ReclaimCopy(const ReclaimPlan& p, const float* src, float* dst)
+BB_COLD inline void ReclaimCopy(const ReclaimPlan& p, const float* src, float* dst)
 {
     if(!src || !dst) return;
     constexpr int kChunk = 16384;
@@ -212,42 +193,52 @@ inline void ReclaimCopy(const ReclaimPlan& p, const float* src, float* dst)
         }
 }
 
-// A voice's reach: from where it started (or where it is, if lower) to its read limit.
-inline void ReclaimVoiceSpan(const Voice& v, int& lo, int& hi)
-{
-    lo = v.start < (int)v.pos ? v.start : (int)v.pos;
-    if(v.tail && (int)v.loopA < lo) lo = (int)v.loopA;
-    hi = v.bound > v.end ? v.bound : v.end;
-}
-// AUDIO, at block start while a reclaim runs: every sounding voice whose reach is not inside one kept run fades out
-// (a held one is released; a reversed one turns forward first, as a release does — value-continuous — so the ramp
-// runs). Returns how many still sound outside the kept runs (the swap waits for 0, a while at most).
-inline int ReclaimFade(Engine& e, const ReclaimPlan& p)
+// AUDIO, at block start, every sounding voice against the plan. Its reach — from where it started (or where it is,
+// if lower; a loop's start) to its read limit — inside one kept run: `swap` moves it with the run, else it is left.
+// Outside (a replaced pad still ringing, an audition across a gap): without `swap` it fades (a held one lets go; a
+// reversed one turns forward first, as a release does — value-continuous — so the ramp runs; one already in its
+// ramp is left to finish); with `swap` it is cut, its last output carried on as the steal's ~1 ms bridge. Returns
+// how many sound outside (the shell waits for 0 before the swap, a while at most). One body for both: SRAM.
+BB_COLD inline int ReclaimVoices(Engine& e, const ReclaimPlan& p, bool swap)
 {
     int outside = 0;
     for(int i = 0; i < Engine::kVoices; i++)
     {
         Voice& v = e.voices[i];
         if(!v.active) continue;
-        int lo, hi;
-        ReclaimVoiceSpan(v, lo, hi);
-        if(p.Inside(lo, hi)) continue;
-        outside++;
-        if(v.held) { v.Release(); continue; }
-        if(v.tail || v.rate < 0.f || v.pos < (double)v.natEnd)
+        int lo = v.start < (int)v.pos ? v.start : (int)v.pos;
+        if(v.tail && (int)v.loopA < lo) lo = (int)v.loopA;
+        const int hi = v.bound > v.end ? v.bound : v.end;
+        if(p.Inside(lo, hi))
         {
+            if(!swap) continue;
+            const int d = p.Map(lo) - lo;
+            v.pos += (double)d; v.start += d; v.natEnd += d; v.end += d; v.bound += d;
+            v.loopA += (double)d; v.loopB += (double)d;
+            continue;
+        }
+        outside++;
+        if(swap)
+        {
+            v.clickComp += v.lastOut; v.clickCompR += v.lastOutR;
+            v.lastOut = v.lastOutR = 0.f;
+            v.active = false; v.held = false; v.key = -1; v.tail = 0;
+        }
+        else if(v.held || v.tail || v.rate < 0.f || v.pos < (double)v.natEnd)
+        {
+            v.held = false; v.key = -1;
             if(!v.tail && v.rate < 0.f) v.rate = -v.rate;
             v.Fade(v.epShape);
         }
     }
     return outside;
 }
+inline int ReclaimFade(Engine& e, const ReclaimPlan& p) { return ReclaimVoices(e, p, false); }
 
 // AUDIO, at block start: the compacted planes in, every position moved with them — the entries past the grid (and
-// their loop points), freePos, each sounding voice (one still reading a region that went is cut: its last output
-// carries on as the steal's ~1 ms bridge). False, and nothing touched, when the table or the material moved since
-// the plan (the control thread plans again). `R` = nullptr for mono material.
-inline bool ReclaimSwap(Engine& e, const ReclaimPlan& p, float* L, float* R)
+// their loop points), freePos, each sounding voice (ReclaimVoices). False, and nothing touched, when the table or the
+// material moved since the plan (the control thread plans again). `R` = nullptr for mono material.
+BB_COLD inline bool ReclaimSwap(Engine& e, const ReclaimPlan& p, float* L, float* R)
 {
     if(!L || e.tableGen != p.gen || e.freePos != p.oldFree || e.bufLen != p.bufLen || e.recArmed || e.recPending) return false;
     for(int t = e.nSlices; t < Engine::kMaxTable; t++)
@@ -259,24 +250,7 @@ inline bool ReclaimSwap(Engine& e, const ReclaimPlan& p, float* L, float* R)
         else e.loopState[t] = 0;
         e.slices[t].start = to;
     }
-    for(int i = 0; i < Engine::kVoices; i++)
-    {
-        Voice& v = e.voices[i];
-        if(!v.active) continue;
-        int lo, hi;
-        ReclaimVoiceSpan(v, lo, hi);
-        if(p.Inside(lo, hi))
-        {
-            const int d = p.Map(lo) - lo;
-            if(!d) continue;
-            v.pos += (double)d; v.start += d; v.natEnd += d; v.end += d; v.bound += d;
-            v.loopA += (double)d; v.loopB += (double)d;
-            continue;
-        }
-        v.clickComp += v.lastOut; v.clickCompR += v.lastOutR;
-        v.lastOut = v.lastOutR = 0.f;
-        v.active = false; v.held = false; v.key = -1; v.tail = 0;
-    }
+    ReclaimVoices(e, p, true);
     e.freePos = p.newFree;
     e.buf  = L;
     e.bufR = e.bufR ? R : nullptr;
@@ -335,7 +309,7 @@ struct CardMap
         len = p.nRun > 0 ? p.newFree : 0;
     }
     // [start, start + frames) in the card's copy, when it lies inside one segment
-    bool ToCard(int start, int frames, int& out) const
+    BB_COLD bool ToCard(int start, int frames, int& out) const
     {
         if(!ok || frames < 0) return false;
         int lo = 0, hi = n - 1, r = -1;
@@ -346,7 +320,7 @@ struct CardMap
     }
     // `in` with its live side moved by a reclaim: each segment cut at the plan's runs, what fell in a gap dropped,
     // pieces contiguous on both sides joined again.
-    void Follow(const CardMap& in, const ReclaimPlan& p)
+    BB_COLD void Follow(const CardMap& in, const ReclaimPlan& p)
     {
         Clear();
         ok = in.ok; len = in.len;
@@ -369,7 +343,7 @@ struct CardMap
 
 // A set save's layout: the break and the live spans, packed — the plan of a kReclaimAll (its runs; the journal is not
 // consulted) as a map. The WAV is then written through m's segments and the JSON through m.
-inline bool PackForCard(const Engine& e, ReclaimPlan& p, CardMap& m)
+BB_COLD inline bool PackForCard(const Engine& e, ReclaimPlan& p, CardMap& m)
 {
     if(!BuildReclaimPlan(e, kReclaimAll, p)) { m.Clear(); return false; }
     m.FromPlan(p);
@@ -379,7 +353,7 @@ inline bool PackForCard(const Engine& e, ReclaimPlan& p, CardMap& m)
 // Does the kit hold audio the card does not? The material must lie in the card's copy where it lies in the planes
 // (an empty kit's silent stub counts as on the card: it is nothing), and every live entry past the grid somewhere
 // in it.
-inline bool KitUnsaved(const Engine& e, const CardMap& m, bool stub)
+BB_COLD inline bool KitUnsaved(const Engine& e, const CardMap& m, bool stub)
 {
     if(!e.buf) return false;
     if(!m.ok) return true;

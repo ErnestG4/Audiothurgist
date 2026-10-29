@@ -190,17 +190,20 @@ inline int FindEntry(const char* files, size_t stride, int n, const char* entry)
 // length (a take since the save is not in the WAV), the loose-file sidecar
 // passes bufLen (the break only). Per-entry `flags` = the orange bit;
 // `grid` = nSlices; `keys` = keySlice through the map.
-// RECLAIM: the positions go through `toFile(start, len, out)` — an entry past the grid is written at `out` when it
-// returns true, skipped like a tombstone when it returns false; `len` is the file's frames per plane. The plain form
-// below bounds by maxLen; SetFromEngine(…, const CardMap&) writes the card's positions (bb_reclaim.h): a save packs
-// the live spans, the autosave describes the WAV already on the card.
-template <typename ToFile>
-inline void SetFromEngineWith(const Engine& e, const Looper& lp, SetInfo& s, bool stereo, int sr, int len, ToFile toFile)
+// RECLAIM: the positions go through the card map (bb_reclaim.h) — an entry past the grid is written where the card's
+// copy holds it, skipped like a tombstone when the map cannot place it (a take past the WAV, as ever); `len` is the
+// copy's frames per plane. A save packs the live spans (PackForCard), the autosave describes the WAV already on the
+// card (the map a reclaim moved), the plain form below a copy of [0, maxLen) as it lies (CardMap::Identity). The
+// material must lie in the copy where it lies in the planes (ToCard(0, bufLen) = 0): false, and nothing written,
+// when it does not.
+BB_COLD inline bool SetFromEngine(const Engine& e, const Looper& lp, SetInfo& s, bool stereo, int sr, const CardMap& m)
 {
+    int c = 0;
+    if(!m.ok || (e.bufLen > 0 && !(m.ToCard(0, e.bufLen < m.len ? e.bufLen : m.len, c) && c == 0))) return false;
     s.sr       = sr;
     s.stereo   = stereo;
-    s.len      = len;
-    s.material = e.bufLen < len ? e.bufLen : len;
+    s.len      = m.len;
+    s.material = e.bufLen < m.len ? e.bufLen : m.len;
     s.swing    = e.swing;
     s.nGrid    = e.nSlices;
     s.nSlices  = 0;
@@ -212,7 +215,7 @@ inline void SetFromEngineWith(const Engine& e, const Looper& lp, SetInfo& s, boo
         if(t >= e.nSlices)
         {
             const bool live = !(e.tableFlags[t] & Engine::kFlagTomb) && e.slices[t].len > 0 && e.slices[t].start >= 0
-                              && toFile(e.slices[t].start, e.slices[t].len, at);
+                              && m.ToCard(e.slices[t].start, e.slices[t].len, at);
             if(!live) continue;
         }
         map[t] = (int8_t)s.nSlices;
@@ -252,22 +255,13 @@ inline void SetFromEngineWith(const Engine& e, const Looper& lp, SetInfo& s, boo
         o.vel   = ev.vel;
         o.slice = sl;
     }
+    return true;
 }
-
 inline void SetFromEngine(const Engine& e, const Looper& lp, SetInfo& s, bool stereo, int sr, int maxLen = 0)
 {
-    const int lim = (maxLen > 0 && maxLen < e.freePos) ? maxLen : e.freePos;
-    SetFromEngineWith(e, lp, s, stereo, sr, lim, [lim](int start, int len, int& out) { out = start; return start <= lim && len <= lim - start; });
-}
-// RECLAIM: through the card map — the entries where the card's copy holds them (one the map cannot place is not in
-// that copy: skipped, as a take past the WAV always was), `len` the copy's. The material must lie in the copy where
-// it lies in the planes (CardMap::ToCard(0, bufLen) = 0): false, and nothing written, when it does not.
-inline bool SetFromEngine(const Engine& e, const Looper& lp, SetInfo& s, bool stereo, int sr, const CardMap& m)
-{
-    int c = 0;
-    if(!m.ok || !m.ToCard(0, e.bufLen, c) || c != 0) return false;
-    SetFromEngineWith(e, lp, s, stereo, sr, m.len, [&m](int start, int len, int& out) { return m.ToCard(start, len, out); });
-    return true;
+    CardMap m;
+    m.Identity((maxLen > 0 && maxLen < e.freePos) ? maxLen : e.freePos);
+    SetFromEngine(e, lp, s, stereo, sr, m);
 }
 
 // What a set load hands SetMaterial, and the entries that follow it.
