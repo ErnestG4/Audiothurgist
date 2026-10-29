@@ -17,10 +17,9 @@
 //     writes the R plane, analyses the head, and posts EditOp::Record: one
 //     undo step, the key owns the region, freePos moves past it.
 //   * Room: what is left past freePos, the pads' whole share (the plane past
-//     the break), and what replaced recordings still hold below freePos. That
-//     last part is NOT reclaimed — not by a save (the set's WAV is [0,
-//     freePos) whole), not by a load of the set; only new material (a break,
-//     a loop take, New empty kit) starts the planes over.
+//     the break), and what replaced recordings still hold below freePos — the
+//     held memory a reclaim gives back (core/bb_reclaim.h: the kept runs moved
+//     down, every position following; a set save writes the live spans only).
 //   * An empty kit: kStubLen samples of digital silence as the "break" — 16
 //     grid slices of 750, the shortest material the loader takes back (¼ s) —
 //     so every path that wants material (the grid, the clock, the set format)
@@ -138,21 +137,7 @@ inline PadRoom PadRoomOf(const Engine& e)
     return r;
 }
 
-// Does the kit hold audio the card does not? `onCard` = the frames per plane the card's copy holds: a set's WAV
-// length, a loose break's material length, 0 for a take or an empty kit (its silent stub counts as on the card:
-// it is nothing). True when the material itself is not there, or a live entry reaches past it.
-inline bool KitUnsaved(const Engine& e, int onCard, bool stub)
-{
-    if(!e.buf) return false;
-    if(!stub && e.bufLen > onCard) return true;
-    const int lim = stub && onCard < e.bufLen ? e.bufLen : onCard;
-    for(int t = e.nSlices; t < e.nTable && t < Engine::kMaxTable; t++)
-    {
-        if(e.IsTomb(t) || e.slices[t].len <= 0) continue;
-        if(e.slices[t].start + e.slices[t].len > lim) return true;
-    }
-    return false;
-}
+// (KitUnsaved — does the kit hold audio the card does not? — reads the card map: core/bb_reclaim.h.)
 
 // An empty kit's material: kPadStubLen zeros into L (and R when given).
 inline void MakeEmptyKit(float* L, float* R)

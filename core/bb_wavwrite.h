@@ -51,6 +51,11 @@ struct WriteSpec
     Format       fmt    = kPcm16;
     const int*   cues   = nullptr;  // sample offsets (slice starts), or null
     int          nCues  = 0;
+    /* RECLAIM: a gathered write — the file's frames are the planes' [segFrom[i], segFrom[i] + segLen[i]) one after
+     * another (a set saved with only its live spans); the lengths must add up to len. nSeg 0: [0, len) as it lies. */
+    const int*   segFrom = nullptr;
+    const int*   segLen  = nullptr;
+    int          nSeg    = 0;
 };
 
 // Same formula as alchemy::SdDmaStagingPad (kept here so core/ stays free
@@ -176,6 +181,13 @@ inline bool Write(Sink sink, const WriteSpec& s, uint8_t* staging, size_t stagin
     const int      fb    = bps * ch;
     const uint32_t data  = (uint32_t)s.len * (uint32_t)fb;
     const bool     cues  = s.nCues > 0 && s.cues;
+    if(s.nSeg > 0)   /* RECLAIM: the segments must cover the file exactly */
+    {
+        if(!s.segFrom || !s.segLen) return false;
+        long long sum = 0;
+        for(int i = 0; i < s.nSeg; i++) { if(s.segLen[i] < 0 || s.segFrom[i] < 0) return false; sum += s.segLen[i]; }
+        if(sum != (long long)s.len) return false;
+    }
 
     detail::Out o{sink, staging, stagingBytes};
     o.Begin();
@@ -209,7 +221,8 @@ inline bool Write(Sink sink, const WriteSpec& s, uint8_t* staging, size_t stagin
     o.Tag("data"); o.U32(data);
     if(!o.Flush()) return false;              // header out; frames start on a fresh fill
 
-    int done = 0;
+    int done = 0, si = 0, so = 0;   // RECLAIM: the segment being read, and how far into it
+    while(si < s.nSeg && s.segLen[si] == 0) si++;
     while(done < s.len && o.ok)
     {
         size_t frames = (o.room - 3u) / (size_t)fb;   // keep 3 spare bytes (SDK rule 3)
@@ -218,8 +231,14 @@ inline bool Write(Sink sink, const WriteSpec& s, uint8_t* staging, size_t stagin
         uint8_t* p = o.cur;
         for(size_t i = 0; i < frames; i++)
         {
-            detail::Encode(p, s.left[done + (int)i], s.fmt); p += bps;
-            if(ch == 2) { detail::Encode(p, s.right[done + (int)i], s.fmt); p += bps; }
+            int at = done + (int)i;
+            if(s.nSeg > 0)
+            {
+                at = s.segFrom[si] + so;
+                if(++so >= s.segLen[si]) { so = 0; si++; while(si < s.nSeg && s.segLen[si] == 0) si++; }
+            }
+            detail::Encode(p, s.left[at], s.fmt); p += bps;
+            if(ch == 2) { detail::Encode(p, s.right[at], s.fmt); p += bps; }
         }
         o.fill = frames * (size_t)fb;
         done += (int)frames;

@@ -170,8 +170,11 @@ struct SetWriter
     // sets/<name>.wav — planes L (and R when stereo), cues = slice starts.
     // fmt: kPcm16 (the format bbwav::Load reads back; default), kPcm24 or
     // kFloat32 (host-readable only until the loader learns floats).
+    // RECLAIM: segFrom / segLen / nSeg gather the file from the planes' live spans (CardMap's segments, in order);
+    // nSeg 0 writes [0, len) as it lies.
     static bool Wav(bbwav::Sink sink, const SetInfo& s, const float* left, const float* right,
-                    uint8_t* staging, size_t stagingBytes, bbwav::Format fmt = bbwav::kPcm16)
+                    uint8_t* staging, size_t stagingBytes, bbwav::Format fmt = bbwav::kPcm16,
+                    const int* segFrom = nullptr, const int* segLen = nullptr, int nSeg = 0)
     {
         int cues[kSetMaxSlices];
         int nc = 0;
@@ -185,6 +188,7 @@ struct SetWriter
         w.fmt   = fmt;
         w.cues  = nc ? cues : nullptr;
         w.nCues = nc;
+        w.segFrom = segFrom; w.segLen = segLen; w.nSeg = nSeg;
         return bbwav::Write(sink, w, staging, stagingBytes);
     }
 
