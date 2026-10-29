@@ -689,6 +689,7 @@ static volatile uint8_t gSetReq        = 0;      /* 1 save · 2 load — service
 static volatile bool    gSetSnapReq    = false;  /* control → audio: copy engine.looper into *gSetLooper */
 static volatile bool    gSetPendLooper = false;  /* control → audio: adopt *gSetLooper at the apply */
 static bool             gSetPendCommit = false;  /* after the apply: CommitSetRecordings, the key table, the autosave baseline */
+static volatile bool    gPadsFollowReq = false;  /* BETA: the grammar became Pads: follow at the next idle main-loop turn (a load's commit drops it) */
 /* EDIT-PERSIST: the file's grid starts (gSetPlan.starts / gridFlags / nGrid)
  * go through Engine::SetGridBoundaries on the AUDIO thread right after
  * SetMaterial at the apply — never from the main loop while voices sound.
@@ -2833,6 +2834,7 @@ static void ServiceSets()
         bb::KeyParam kp[bb::Engine::kKeys];
         bb::KeyParamsFromSet(*gSet, kp);
         engine.SetKeyParams(kp);
+        gPadsFollowReq = false;   /* the file's key map is what it says: entering Pads with this load (a sampler boot, a set saved in Pads) does not re-map it to the markers */
     }
     if(gSetReq && !gLoadReq && !gApply && !gReapply && !gTakeActive && !gSetState && !PadBusy() /* PADS */)
     {
@@ -3247,11 +3249,12 @@ static uint8_t EditToStatus(bb::EditStatus s)
     }
 }
 /* Nothing may be edited while a take is in flight (the tail's recState ≠ 0), a set op runs or waits,
- * a material swap is pending, or a request is still in the slot. */
+ * a material swap is pending, a loaded set's commit (its markers, key map and settings) has not run yet, or a
+ * request is still in the slot. */
 static bool EditBusy()
 {
     const bool rec = gKeyTake || gTakeActive || gKeyArm || gRecord.sel == 1 || engine.recArmed || engine.recPending;
-    return rec || gSetState || gSetReq || gLoadReq || gApply || gReapply || gEditPend
+    return rec || gSetState || gSetReq || gLoadReq || gApply || gReapply || gSetPendCommit /* a load's key map and settings not yet in */ || gEditPend
         || gPadState >= bb::kPadCommitting || gPadReq;   /* PADS: a drop's commit posts its own edit; receiving is no bar */
 }
 /* Post one request and wait for the audio thread's answer — by the clock, not by iterations, yielding
@@ -3328,7 +3331,6 @@ static void PadsFollow(bool quiet)
     if(quiet) r.flags = bb::EditReq::kQuiet;
     PostEdit(r, nullptr);
 }
-static volatile bool gPadsFollowReq = false;   /* the grammar became Pads: follow at the next idle main-loop turn */
 /* AUTOSLICE: the grey markers become the first k onsets of a seeded draw
  * (bb::AutoSliceOrder: Efraimidis–Spirakis, weighted by OnsetStrength — the
  * FROM_ONSETS proxy, the salience of the grid slice the onset falls in), each
