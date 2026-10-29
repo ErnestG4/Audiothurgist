@@ -237,15 +237,14 @@ inline EditStatus Engine::EdRecord(const EditReq& r, int& idx)
     return EditStatus::Ok;
 }
 
-/* KEYP (docs/packages/keyp.md): key `key`'s settings — a = gain in ½ dB (−48 … +12), b = cents (±2400), i = plays
- * (KeyParam::kFollow … kRatchet), len = the ratchet's rate (kRatFull … kRat32nd). Nothing in the table moves; a voice already sounding keeps what it was called with
- * (the next call takes the new settings). */
+/* KEYP (docs/packages/keyp.md): key `key`'s settings, `kp` whole — gain in ½ dB (−48 … +12), cents (±2400), plays
+ * (KeyParam::kFollow … kRatchet), the ratchet's rate (kRatFull … kRat32nd); ENV: attack / decay / release in ms,
+ * sustain in dB below full, the choke group. Anything out of range refuses the lot. Nothing in the table moves; a voice
+ * already sounding keeps what it was called with (the next call takes the new settings). */
 inline EditStatus Engine::EdSetKeyParams(const EditReq& r)
 {
-    if(r.key < 0 || r.key >= kKeys) return EditStatus::BadArgs;
-    if(r.a < KeyParam::kGainMin || r.a > KeyParam::kGainMax || r.b < -KeyParam::kCentsMax || r.b > KeyParam::kCentsMax
-       || r.i < 0 || r.i > KeyParam::kRatchet || r.len < 0 || r.len > KeyParam::kRatMax) return EditStatus::BadArgs;
-    const KeyParam p = {(int8_t)r.a, (uint8_t)r.i, (int16_t)r.b, (uint8_t)r.len, 0};
+    if(r.key < 0 || r.key >= kKeys || !r.kp.Valid()) return EditStatus::BadArgs;
+    KeyParam p = r.kp; p.spare = 0;
     if(p.plays != KeyParam::kRatchet) keyRatOn &= ~(1u << r.key);   /* a running ratchet stops when its key leaves the mode */
     return PutKeyParam(r.key, p) ? EditStatus::Ok : EditStatus::BadArgs;
 }
@@ -644,8 +643,8 @@ inline EditStatus Engine::EdNudge(int delta, int which)
  *   SetKeyMap     keys[kKeys] (−1 = default)   —                BETA: every key at once; each a live entry
  *   Record        key, start, len              → the entry      PADS: key owns the span (its recording's slot reused,
  *                                                               else a free one); start ≤ freePos, end ≤ bufCap; freePos follows
- *   SetKeyParams  key, a = gain ½ dB, b = cents, —              KEYP: −48…+12, ±2400, 0..4, 0..6; the table untouched. kQuiet
- *                 i = plays, len = ratchet rate                 joins the previous record only when it is this key's
+ *   SetKeyParams  key, kp = the key's settings  —               KEYP: KeyParam::Valid() (ENV: the envelope, the group); the table untouched. kQuiet
+ *                 (gain, cents, plays, rate, ENV)               joins the previous record only when it is this key's
  *                                                               settings (a drag) — otherwise a step of its own
  *   SpreadKeys    key = the root, a = flags     —                CHROMA: the root's entry on every key, a semitone a key;
  *                 (b0 kSpreadKeepPads)                          one kKeyP record; *newIdx = the keys spread

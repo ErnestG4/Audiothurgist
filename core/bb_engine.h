@@ -68,6 +68,21 @@ struct Voice
      * everything else (Trigger resets it). One multiply per sample in the reader; exactly 1 leaves the bits as
      * they were. */
     float  gain = 1.f;
+    /* ENV (docs/packages/keyp.md "The amp envelope"): the key's envelope, on top of the click-safe fades below — a
+     * call through a key with one (FireSlice) copies its four coefficients in; everything else leaves envSt kEnvOff
+     * and the reader skips it (one byte compare). env is a gain, 0..1: Attack adds envA a sample (linear, 0 → 1),
+     * Decay eases toward envS (env = envS + (env − envS) × envD), Sustain holds, Release multiplies by envR (an
+     * exponential to −60 dB in the release time). Reaching −60 dB in Decay (sustain off) or Release ends the voice
+     * (kEnvEnd: the next sample is its natural end, the click bridge takes the last −60 dB). No transcendental per
+     * sample: the coefficients are worked out once per edit (Engine::keyEnv). */
+    static constexpr uint8_t kEnvOff = 0, kEnvAtk = 1, kEnvDec = 2, kEnvSus = 3, kEnvRel = 4, kEnvEnd = 5;
+    static constexpr float   kEnvFloor = 1e-3f;   // −60 dB: the envelope's end
+    uint8_t envSt = kEnvOff;
+    /* ENV: choke groups — the key that struck the voice and its group, kept through the release (a closed hat must
+     * cut an open hat's tail); −1 / 0 for everything else (and for a key in no group: nothing reads them then) */
+    int8_t  src = -1;
+    uint8_t grp = 0;
+    float   env = 1.f, envA = 0.f, envD = 1.f, envS = 1.f, envR = 0.f;
 
     /* PLAY: per-voice fade geometry (Options → Fades). Trigger resets these
      * to the fixed 1 ms attack / 5 ms release; Adaptive mode then rewrites
@@ -99,6 +114,9 @@ struct Voice
         key    = -1;
         scratch = false;   /* EDIT-AUDITION: a stolen scratch voice is an ordinary one again */
         gain   = 1.f;      /* KEYP: a step, an audition, a keyless call: unity */
+        envSt  = kEnvOff;  /* ENV: no envelope, no group (FireSlice sets a key's) */
+        src    = -1;
+        grp    = 0;
         start  = s.start;
         natEnd = s.start + s.len;
         int e  = s.start + (int)((float)s.len * ext);
@@ -128,7 +146,7 @@ struct Voice
     bool WouldChoke() const
     {
         if(scratch) return false;   /* EDIT-AUDITION: an audition sits beside the hits, never under them */
-        if(held && tail) return false;   /* KEYP: a Loop key's held loop belongs to its key until the release */
+        if((held || envSt == kEnvRel) && tail) return false;   /* KEYP: a Loop key's held loop belongs to its key until the release (ENV: and through its release) */
         return active && (tail != 0 || (rate >= 0.f && pos > (double)(natEnd - 480)));
     }
 
@@ -144,14 +162,37 @@ struct Voice
     /* SAMPLE: the key came up — a held voice fades out from here with the
      * normal choke geometry whatever its position (Choke only acts near a
      * boundary). A reversed held voice flips forward first, value-continuous,
-     * exactly as a ping-pong tail does when choked. */
-    void Release()
+     * exactly as a ping-pong tail does when choked. ENV: a key with a
+     * Release lets its envelope fall instead — the voice reads on (a Loop key
+     * keeps looping) until it is quiet; `useEnv` false (the ratchet's next
+     * hit) is always the choke geometry. */
+    void Release(bool useEnv = true)
     {
         if(!active || !held) return;
         held = false;
         key  = -1;
+        if(useEnv && envR > 0.f && envSt != kEnvOff) { if(envSt != kEnvEnd) envSt = kEnvRel; return; }
         if(!tail && rate < 0.f) rate = -rate;
         Fade(epShape);
+    }
+    /* ENV: a choke group's cut — whatever the voice is doing (held, looping, releasing, mid-slice), it fades out
+     * from here with the choke geometry; its envelope holds where it is meanwhile. A group's hit, not every hit:
+     * out of line. */
+    BB_COLD void Cut(bool ep)
+    {
+        held = false;
+        key  = -1;
+        if(envSt != kEnvOff && envSt != kEnvEnd) envSt = kEnvSus;
+        if(!tail && rate < 0.f) rate = -rate;
+        Fade(ep);
+    }
+    // ENV: one sample of the envelope; the gain it is now
+    float EnvStep()
+    {
+        if(envSt == kEnvAtk) { env += envA; if(env >= 1.f) { env = 1.f; envSt = envS < 1.f ? kEnvDec : kEnvSus; } }
+        else if(envSt == kEnvDec) { env = envS + (env - envS) * envD; if(env < kEnvFloor) envSt = kEnvEnd; }
+        else if(envSt == kEnvRel) { env *= envR; if(env < kEnvFloor) envSt = kEnvEnd; }
+        return env;
     }
 
     // The fade itself: a choke or a release, never past `bound`.
@@ -197,8 +238,9 @@ struct Voice
         // direction-aware end test: a reversed voice STARTS at the top of its
         // slice — pos >= end-1 is only "finished" when travelling forward
         // (the symmetric check killed every reverse at birth once ext hit 1.0)
-        bool ended = (rate < 0.f) ? (pos < (double)start)
-                                  : (pos >= (double)(end - 1));
+        bool ended = envSt == kEnvEnd   /* ENV: the envelope reached −60 dB */
+                  || ((rate < 0.f) ? (pos < (double)start)
+                                   : (pos >= (double)(end - 1)));
         if(ended)
         {
             if(active && lastOut != 0.f) clickComp += lastOut; // natural end
@@ -257,13 +299,15 @@ struct Voice
         if(epShape) { g = g * (2.f - g); h = h * (2.f - h); } // PLAY: ≈ equal power
         pos += (double)rate;
         age++;
-        const float o = s * g * h * relScale * gain;   /* KEYP: the key's gain (1 for steps, auditions, keyless calls) */
+        float k = gain;                    /* KEYP: the key's gain (1 for steps, auditions, keyless calls) */
+        if(envSt) k *= EnvStep();          /* ENV: × the key's envelope (no envelope: k is the gain, bit for bit) */
+        const float o = s * g * h * relScale * k;
         if(wrapped) clickComp += lastOut - o; // PLAY: bridge the seam
         lastOut = o;
         oL      = lastOut + clickComp;
         if constexpr(ST)
         {
-            const float o2 = sR * g * h * relScale * gain;
+            const float o2 = sR * g * h * relScale * k;
             if(wrapped) clickCompR += lastOutR - o2;
             lastOutR = o2;
             oR       = lastOutR + clickCompR;
@@ -311,11 +355,12 @@ enum class EditOp : uint8_t
     Redo,          // EDIT-UNDO: one step forward
     SetKeyMap,     // BETA: the whole key map from `keys` (−1 = the key's default) — KEYS_FROM_MARKERS, Pads
     Record,        // PADS: key `key` owns [start, start + len) — a recording (a drop onto a pad), CommitSlice through the journal
-    SetKeyParams,  // KEYP: key `key`'s settings — a = gain (½ dB), b = cents, i = plays, len = the ratchet's rate (KeyParam)
+    SetKeyParams,  // KEYP: key `key`'s settings — `kp` (gain, tune, Plays, the ratchet's rate; ENV: the envelope, the group)
     SpreadKeys     // CHROMA: key `key`'s entry on every key, tuned a semitone a key from it — a = flags (kSpreadKeepPads)
 };
 /* KEYP (docs/packages/keyp.md): one key's settings — how loud, how far tuned, how it plays. All zero is
- * neutral: unity, untuned, Plays as Options → Key Plays says. A POD (it lives in the journal's union). */
+ * neutral: unity, untuned, Plays as Options → Key Plays says. A POD (it lives in the journal's union). ENV: and its
+ * amp envelope and choke group — all zero is still neutral: no envelope (the click-safe fades alone), no group. */
 struct KeyParam
 {
     static constexpr int kGainMin = -48, kGainMax = 12;   // ½ dB steps: −24 … +6 dB
@@ -324,18 +369,31 @@ struct KeyParam
     /* the ratchet's rate: a fraction of the entry's own length (as it plays, after the tune) or a note value at the
      * tempo (the grid's 16th = 1/16) */
     static constexpr uint8_t kRatFull = 0, kRatHalf = 1, kRatQuarter = 2, kRatEighth = 3, kRat8th = 4, kRat16th = 5, kRat32nd = 6, kRatMax = 6;
-    int8_t  gain;    // ½ dB
-    uint8_t plays;   // kFollow (Options → Key Plays) · kOneShot · kHeld · kLoop (held, looping the entry) · kRatchet (held, retriggering)
-    int16_t cents;   // tune
-    uint8_t rat;     // kRatchet's rate (kRatFull … kRat32nd); kept, and ignored, in the other modes
-    uint8_t spare;   // 0
-    bool Neutral() const { return gain == 0 && plays == 0 && cents == 0 && rat == 0; }
-    bool Valid() const { return gain >= kGainMin && gain <= kGainMax && plays <= kRatchet && cents >= -kCentsMax && cents <= kCentsMax && rat <= kRatMax; }
+    /* ENV: Attack / Decay / Release in ms, Sustain in dB below full (kSusOff = silence), the choke group 1..4 */
+    static constexpr int kAtkMax = 2000, kDecMax = 4000, kRelMax = 4000, kSusOff = 60, kGrpMax = 4;
+    static constexpr int kEnvMinMs = 10;   // a Decay or Release shorter than this runs at it (a 60 dB fall faster is a click)
+    int8_t   gain;    // ½ dB
+    uint8_t  plays;   // kFollow (Options → Key Plays) · kOneShot · kHeld · kLoop (held, looping the entry) · kRatchet (held, retriggering)
+    int16_t  cents;   // tune
+    uint8_t  rat;     // kRatchet's rate (kRatFull … kRat32nd); kept, and ignored, in the other modes
+    uint8_t  grp;     // ENV: choke group, 0 none · 1..4
+    uint16_t atk;     // ENV: attack, ms (0 = the click-safe 1 ms ramp alone)
+    uint16_t dec;     // ENV: decay to the sustain level, ms (to −60 dB of the way; ignored at full sustain)
+    uint16_t rel;     // ENV: release, ms to −60 dB once the key comes up (0 = the choke geometry: 5 ms, or Adaptive's)
+    uint8_t  sus;     // ENV: sustain, dB below full (0 = full; kSusOff = none: the decay falls to silence)
+    uint8_t  spare;   // 0
+    bool Neutral() const { return gain == 0 && plays == 0 && cents == 0 && rat == 0 && grp == 0 && atk == 0 && dec == 0 && rel == 0 && sus == 0; }
+    bool Valid() const
+    {
+        return gain >= kGainMin && gain <= kGainMax && plays <= kRatchet && cents >= -kCentsMax && cents <= kCentsMax && rat <= kRatMax
+            && grp <= kGrpMax && atk <= kAtkMax && dec <= kDecMax && rel <= kRelMax && sus <= kSusOff;
+    }
+    bool EnvOn() const { return atk || sus || rel; }   // ENV: decay alone does nothing at full sustain
     // linear gain and rate; exactly 1 when neutral (no transcendental, no rounding)
     float GainLin() const { return gain == 0 ? 1.f : exp2f((float)gain * 0.0830482024f); }   // 10^(gain/40) = 2^(gain·log2(10)/40)
     float RateMul() const { return cents == 0 ? 1.f : exp2f((float)cents * (1.f / 1200.f)); }
 };
-static_assert(sizeof(KeyParam) == 6, "KeyParam packs to 6 bytes");
+static_assert(sizeof(KeyParam) == 14, "KeyParam packs to 14 bytes");
 enum class EditStatus : uint8_t
 {
     Ok = 0,
@@ -375,6 +433,7 @@ struct EditReq
     int       len   = 0;    // SetEntry / AddEntry
     EntryMeta meta  = {3, 0.f, 0.f, false};
     int8_t    keys[24] = {};   // BETA: SetKeyMap (Engine::kKeys entries; −1 = the key's default)
+    KeyParam  kp = {};         // KEYP: SetKeyParams — the key's whole settings (ENV: its envelope and group with them)
 };
 
 struct Engine
@@ -1137,13 +1196,33 @@ struct Engine
             if(!voices[i].active) { v = &voices[i]; break; }
             if(voices[i].age >= best) { best = voices[i].age; v = &voices[i]; }
         }
+        const bool keyed = key >= 0 && key < kKeys;
+        /* ENV: a key in a choke group cuts every other key's voice in the group (the open / closed hat rule) — held,
+         * looping or releasing, wherever it is — and stops that key's ratchet; its own voices go on as ever (a key
+         * never chokes itself beyond what any hit does). Steps, keyless calls and auditions carry no group. */
+        const int g = keyed ? keyp[key].grp : 0;
         for(int i = 0; i < kVoices; i++)
-            if(&voices[i] != v) voices[i].Choke(ep);
+        {
+            Voice& o = voices[i];
+            if(&o == v) continue;
+            if(g && o.active && o.grp == g && o.src != key) { if(o.src >= 0) keyRatOn &= ~(1u << o.src); o.Cut(ep); }
+            else o.Choke(ep);
+        }
         const int bound = ReadEnd(idx);
         v->Trigger(cell, rate, rev, bound, sliceExt);
         ApplyFades(*v, idx, ep); /* PLAY: calls play honestly — no tail loop */
-        const bool keyed = key >= 0 && key < kKeys;
-        if(keyed) v->gain = keyGain[key];   /* KEYP: the key's gain (1 when neutral) */
+        if(keyed)
+        {
+            v->gain = keyGain[key];   /* KEYP: the key's gain (1 when neutral) */
+            if(g) { v->src = (int8_t)key; v->grp = (uint8_t)g; }   /* ENV */
+            const KeyEnv& en = keyEnv[key];   /* ENV: the key's envelope from 0 (an attack) or from full */
+            if(en.on)
+            {
+                v->envA = en.a; v->envD = en.d; v->envS = en.s; v->envR = en.r;
+                v->env   = en.a > 0.f ? 0.f : 1.f;
+                v->envSt = en.a > 0.f ? Voice::kEnvAtk : en.s < 1.f ? Voice::kEnvDec : Voice::kEnvSus;
+            }
+        }
         if(held)   /* SAMPLE: the sampler rule — read on to the end, until the key comes up */
         {
             v->held = true;
@@ -1586,6 +1665,23 @@ struct Engine
         const uint8_t p = keyp[key].plays;
         return p == KeyParam::kFollow ? option : p != KeyParam::kOneShot;
     }
+    /* ENV: each key's envelope as the voice runs it — Attack's step a sample, Decay's and Release's per-sample
+     * factors (a 60 dB fall in the time: 2^(−log2(1000) / samples)), the sustain level — worked out with the
+     * settings (PutKeyParam), copied into a voice at the call. on = the key has an envelope at all. */
+    struct KeyEnv { float a, d, s, r; bool on; };
+    KeyEnv keyEnv[kKeys] = {};   /* all zero = off (the voice reads nothing else then): no start-up code */
+    BB_COLD KeyEnv EnvOf(const KeyParam& p) const
+    {
+        KeyEnv e = {0.f, 1.f, 1.f, 0.f, p.EnvOn()};
+        const float ms = sr * 0.001f;
+        float k[2];
+        const int t[2] = {p.dec, p.rel};
+        for(int i = 0; i < 2; i++) k[i] = exp2f(-9.96578428f / ((float)(t[i] < KeyParam::kEnvMinMs ? KeyParam::kEnvMinMs : t[i]) * ms));
+        if(p.atk) e.a = 1.f / ((float)p.atk * ms);
+        if(p.sus) { e.s = p.sus >= KeyParam::kSusOff ? 0.f : exp2f((float)p.sus * -0.166096405f); e.d = k[0]; }   /* 10^(−sus/20) */
+        if(p.rel) e.r = k[1];
+        return e;
+    }
     // One key's settings in, its gain and rate worked out. false = out of range (nothing written).
     BB_COLD bool PutKeyParam(int key, const KeyParam& p)   /* per edit, never per call: built for size */
     {
@@ -1593,6 +1689,7 @@ struct Engine
         keyp[key]    = p;
         keyGain[key] = p.GainLin();
         keyRate[key] = p.RateMul();
+        keyEnv[key]  = EnvOf(p);   /* ENV */
         return true;
     }
     BB_COLD void ResetKeyParams()
@@ -1614,6 +1711,11 @@ struct Engine
             if(q.cents > KeyParam::kCentsMax) q.cents = KeyParam::kCentsMax;
             if(q.plays > KeyParam::kRatchet) q.plays = KeyParam::kFollow;
             if(q.rat > KeyParam::kRatMax) q.rat = 0;
+            if(q.grp > KeyParam::kGrpMax) q.grp = 0;                       /* ENV */
+            if(q.atk > KeyParam::kAtkMax) q.atk = KeyParam::kAtkMax;
+            if(q.dec > KeyParam::kDecMax) q.dec = KeyParam::kDecMax;
+            if(q.rel > KeyParam::kRelMax) q.rel = KeyParam::kRelMax;
+            if(q.sus > KeyParam::kSusOff) q.sus = KeyParam::kSusOff;
             q.spare = 0;
             PutKeyParam(k, q);
         }
@@ -1659,7 +1761,7 @@ struct Engine
             r.countdown -= n;
             if(r.countdown >= 0) continue;
             for(int i = 0; i < kVoices; i++)   /* the previous hit fades as the next attacks */
-                if(voices[i].active && voices[i].held && voices[i].key == k) voices[i].Release();
+                if(voices[i].active && voices[i].held && voices[i].key == k) voices[i].Release(false);   /* ENV: never the key's Release — that is the last hit's */
             if(r.idx < nTable) FireSlice(r.idx, r.rate, r.rev, 1.f, true, k);
             r.countdown += r.period;
             if(r.countdown < 0) r.countdown = 0;
@@ -2066,6 +2168,7 @@ struct Engine
                    && !vv.held /* SAMPLE: a held voice belongs to its key */
                    && !vv.scratch /* EDIT-AUDITION: an audition is not a run */
                    && vv.gain == 1.f /* KEYP: a key's gain stays with its call, never with a step */
+                   && vv.envSt == Voice::kEnvOff && vv.grp == 0 /* ENV: so do its envelope and its group */
                    && fabsf(vv.rate - rate) < 0.02f * rate
                    && fabs(vv.pos - (double)cell.start) < 160.)
                 {

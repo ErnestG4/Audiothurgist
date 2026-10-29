@@ -19,13 +19,13 @@ const PROTO = 1;
 /* The version of the firmware's side of everything below (the commands, the ops, the state body), from its descriptor
  * ("audiothurgist": { "api": n }, StateExt::DescriptorRootJson). The page and the firmware ship together; on connect the
  * page refuses any other number with one message — flash the matching .bin. Bump both with any change to the wire. */
-const API = 1;
+const API = 2;   /* 2: ENV — KEY_PARAMS / GET_KEYS carry each key's amp envelope and choke group */
 const apiOf = desc => (desc && desc.audiothurgist && Number.isInteger(desc.audiothurgist.api)) ? desc.audiothurgist.api : null;
 const CMD = {
   hello: 0x01, getDescriptor: 0x02, blobBegin: 0x12, blobData: 0x13, blobCommit: 0x14,
   getLive: 0x20, reboot: 0x40,
   state: 0x60, env: 0x61, scope: 0x62, action: 0x63, wave: 0x64, table: 0x65, hits: 0x66, card: 0x67, pads: 0x68,
-  keys: 0x69,   /* KEYP: GET_KEYS — every key's gain / tune / plays */
+  keys: 0x69,   /* KEYP: GET_KEYS — every key's gain / tune / plays (ENV: envelope, choke group) */
 };
 const ACT = { dice: 0, reslice: 1, punch: 3, flow: 4, scrub: 5, load: 6, clearLocks: 7, page: 8,
   recArm: 9, recClear: 10, keyPlays: 11, looperUndo: 12, looperClear: 13, saveSet: 14, loadSet: 15,
@@ -512,23 +512,35 @@ const autoslice      = (link, k, reroll = false, gen = 0, join = false) => editO
  * the pads, Play's loop replaying a key (with the settings as they are now) — never the pattern's steps. KEY_PARAMS is
  * an edit (the journal: one undo step; `join` = every send of one slider drag after the first, folded into this key's
  * step) and answers like one: { ok, status, tableGen }. GET_KEYS reads all 24; the tableGen in the state tail moves with
- * every change (an edit, an undo, a load), which is when the page reads them again. */
+ * every change (an edit, an undo, a load), which is when the page reads them again.
+ * ENV: and its amp envelope — atk / dec / rel in ms (≤ 2000 / 4000 / 4000), sus in dB below full (0 … 60, 60 = none: the
+ * decay falls to silence) — and its choke group grp (0 none, 1..4: a key struck in a group cuts the other keys' voices in
+ * it, the open / closed hat rule). All zero is still neutral (the click-safe fades alone, no group). Release shapes a
+ * held key's (Held, Loop, Ratchet) up; a one-shot has none — its Decay to no sustain is how it is shortened. GET_KEYS
+ * is 13 bytes a key. */
 const KEYP = { gainMin: -48, gainMax: 12, centsMax: 2400, join: 1, ratchet: 4, ratMax: 6,
+  atkMax: 2000, decMax: 4000, relMax: 4000, susOff: 60, grpMax: 4, bytes: 13,
   PLAYS: ['follow', 'one-shot', 'held', 'loop', 'ratchet'],
   PLAYS_LONG: ['Follow Key Plays', 'One-shot', 'Held (while down)', 'Loop (while held)', 'Ratchet (while held)'],
   RATS: ['×1', '½', '¼', '⅛', '1/8', '1/16', '1/32'],
   RATS_LONG: ['every whole sample', 'every ½ sample', 'every ¼ sample', 'every ⅛ sample', 'every 8th (tempo)', 'every 16th (tempo)', 'every 32nd (tempo)'] };
-const keypNeutral = p => !p || (!p.gain && !p.cents && !p.plays && !p.rat);
+const keypNeutral = p => !p || (!p.gain && !p.cents && !p.plays && !p.rat && !p.atk && !p.dec && !p.sus && !p.rel && !p.grp);
+const keypZero = () => ({ gain: 0, cents: 0, plays: 0, rat: 0, atk: 0, dec: 0, sus: 0, rel: 0, grp: 0 });
+const clampI = (v, lo, hi) => Math.max(lo, Math.min(hi, Math.round(+v || 0)));
 function keyParams(link, key, p, join = false, gen = 0) {
-  const g = Math.max(KEYP.gainMin, Math.min(KEYP.gainMax, Math.round(p.gain || 0)));
-  const c = Math.max(-KEYP.centsMax, Math.min(KEYP.centsMax, Math.round(p.cents || 0)));
-  const pl = Math.max(0, Math.min(KEYP.ratchet, p.plays | 0)), rt = Math.max(0, Math.min(KEYP.ratMax, p.rat | 0));
-  return editOp(link, ACT.keyParams, [key & 0xff, g & 0xff, ...i16b(c), pl, rt, join ? KEYP.join : 0], gen);
+  const g = clampI(p.gain, KEYP.gainMin, KEYP.gainMax), c = clampI(p.cents, -KEYP.centsMax, KEYP.centsMax);
+  const pl = clampI(p.plays, 0, KEYP.ratchet), rt = clampI(p.rat, 0, KEYP.ratMax);
+  const env = [...u16b(clampI(p.atk, 0, KEYP.atkMax)), ...u16b(clampI(p.dec, 0, KEYP.decMax)), clampI(p.sus, 0, KEYP.susOff), ...u16b(clampI(p.rel, 0, KEYP.relMax)), clampI(p.grp, 0, KEYP.grpMax)];   /* ENV */
+  return editOp(link, ACT.keyParams, [key & 0xff, g & 0xff, ...i16b(c), pl, rt, ...env, join ? KEYP.join : 0], gen);
 }
-/* → [{ gain (½ dB), plays, cents, rat } × 24] — 5 bytes a key */
+/* → [{ gain (½ dB), plays, cents, rat, atk, dec, sus, rel, grp } × 24] — 13 bytes a key */
 function parseKeyParams(b) {
-  const n = Math.min(b[1] || 0, Math.floor((b.length - 2) / 5)), out = [];
-  for (let k = 0; k < n; k++) { const o = 2 + k * 5, g = b[o], c = u16(b, o + 2); out.push({ gain: g > 127 ? g - 256 : g, plays: b[o + 1], cents: c > 0x7fff ? c - 0x10000 : c, rat: b[o + 4] }); }
+  const W = KEYP.bytes, n = Math.min(b[1] || 0, Math.floor((b.length - 2) / W)), out = [];
+  for (let k = 0; k < n; k++) {
+    const o = 2 + k * W, g = b[o], c = u16(b, o + 2);
+    out.push({ gain: g > 127 ? g - 256 : g, plays: b[o + 1], cents: c > 0x7fff ? c - 0x10000 : c, rat: b[o + 4],
+      atk: u16(b, o + 5), dec: u16(b, o + 7), sus: b[o + 9], rel: u16(b, o + 10), grp: b[o + 12] });
+  }
   return out;
 }
 const fetchKeyParams = async (link, opts = {}) => parseKeyParams(await link.request(CMD.keys, new Uint8Array(0), opts));
@@ -536,7 +548,16 @@ const fetchKeyParams = async (link, opts = {}) => parseKeyParams(await link.requ
 const keypGainText = g => g ? `${g > 0 ? '+' : '−'}${Math.abs(g / 2)} dB` : '';
 const keypTuneText = c => { if (!c) return ''; const a = Math.abs(c); return `${c > 0 ? '+' : '−'}${a % 100 ? (a / 100).toFixed(2).replace(/0$/, '') : a / 100} st`; };
 const keypPlaysText = p => !p.plays ? '' : p.plays === KEYP.ratchet ? `ratchet ${KEYP.RATS[p.rat | 0] || ''}` : (KEYP.PLAYS[p.plays] || '');
-const keypText = p => keypNeutral(p) ? '' : [keypGainText(p.gain), keypTuneText(p.cents), keypPlaysText(p)].filter(Boolean).join(' · ');
+/* ENV: "A 20 ms · D 300 ms · S −12 dB · R 1.2 s", "choke 2" — each part only when it does something (Decay only with a
+ * sustain below full: at full it has nothing to fall to) */
+const keypMsText = ms => ms < 1000 ? `${ms} ms` : `${Math.round(ms / 10) / 100} s`;
+const keypSusText = s => s >= KEYP.susOff ? 'off' : s ? `−${s} dB` : '0 dB';
+const keypEnvText = p => [p.atk ? 'A ' + keypMsText(p.atk) : '', p.sus ? 'D ' + keypMsText(p.dec | 0) : '', p.sus ? 'S ' + keypSusText(p.sus) : '', p.rel ? 'R ' + keypMsText(p.rel) : ''].filter(Boolean).join(' · ');
+const keypText = p => keypNeutral(p) ? '' : [keypGainText(p.gain), keypTuneText(p.cents), keypPlaysText(p), keypEnvText(p), p.grp ? `choke ${p.grp}` : ''].filter(Boolean).join(' · ');
+/* ENV: the envelope sliders' curve — a position 0..100 to ms and back, cubic (fine at the short end: 10 → 2 ms of 2 s,
+ * 50 → 250 ms, 100 → the max) */
+const envMs = (pos, max) => Math.round(max * Math.pow(Math.max(0, Math.min(100, +pos || 0)) / 100, 3));
+const envPos = (ms, max) => Math.round(100 * Math.cbrt(Math.max(0, Math.min(max, ms | 0)) / max));
 /* CHROMA (ACTION 38 — docs/packages/chroma.md): "spread across keys". Every key j but the root
  * plays the root's entry, tuned (j − root) × 100 + the root's cents (clamped to ±24 st), with the root's gain and Plays
  * (and ratchet rate); keepPads (b0) leaves a key that plays a recording other than the root's as it is. One undo step
@@ -859,7 +880,7 @@ const api = { PROTO, API, apiOf, CMD, ACT, REC, NOTE_NAMES, keyName, STATUS, sta
   KEYS, playKey, keysFromMarkers, clearMarkers, setMute, autoslice,
   CARD, breakNameOk, breakName, uploadPlan, encodeWav, serial, uploadBreak, copyOldCard, cardRescan, cardList,
   PADS, padPlan, encodePcm16, padNormalize, uploadPad, newKit,
-  KEYP, keyParams, parseKeyParams, fetchKeyParams, keypNeutral, keypText, keypGainText, keypTuneText,
+  KEYP, keyParams, parseKeyParams, fetchKeyParams, keypNeutral, keypZero, keypText, keypGainText, keypTuneText, keypMsText, keypSusText, keypEnvText, envMs, envPos,
   CHROMA, spreadKeys, spreadPlan, spreadCents };
 if (typeof module === 'object' && module.exports) module.exports = api; else root.HL = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

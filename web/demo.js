@@ -106,11 +106,13 @@ const GRID_MIN = 64, MAX_TABLE = 96, F_ORANGE = 1, F_TOMB = 2, MS = 48, TAP_MAX 
 /* KEYS: a tap this close to a live marker's start selects that marker instead of stacking another (10 ms);
  * the autoslice count's ceiling. */
 const TAP_REUSE = 10 * MS, AUTO_MAX = 64;
-const EDIT_NEED = [5, 9, 10, 5, 1, 1, 2, 2, 3, 2, 3, 7, 0, 2, 0, 0, 2, 0, 0, 1, 2, 7, 2];   /* field bytes of ACTION 16..38 */
+const EDIT_NEED = [5, 9, 10, 5, 1, 1, 2, 2, 3, 2, 3, 7, 0, 2, 0, 0, 2, 0, 0, 1, 2, 15, 2];   /* field bytes of ACTION 16..38 (ENV: 37 is 15) */
 /* KEYP: one key's settings (core/bb_engine.h KeyParam) — gain in ½ dB −48..+12, cents ±2400, plays 0 follow Key Plays ·
- * 1 one-shot · 2 held · 3 loop (held, looping the entry) · 4 ratchet (held, retriggering at `rat` 0..6); all zero = neutral */
-const KEYP = { gainMin: -48, gainMax: 12, centsMax: 2400, playsMax: 4, ratMax: 6 };
-const keypNeutral = () => ({ gain: 0, plays: 0, cents: 0, rat: 0 });
+ * 1 one-shot · 2 held · 3 loop (held, looping the entry) · 4 ratchet (held, retriggering at `rat` 0..6); ENV: attack /
+ * decay / release ms (≤ 2000 / 4000 / 4000), sustain dB below full (≤ 60, 60 = none), choke group 0..4; all zero = neutral */
+const KEYP = { gainMin: -48, gainMax: 12, centsMax: 2400, playsMax: 4, ratMax: 6, atkMax: 2000, decMax: 4000, relMax: 4000, susOff: 60, grpMax: 4 };
+const keypNeutral = () => ({ gain: 0, plays: 0, cents: 0, rat: 0, atk: 0, dec: 0, sus: 0, rel: 0, grp: 0 });
+const keypSame = (a, b) => ['gain', 'plays', 'cents', 'rat', 'atk', 'dec', 'sus', 'rel', 'grp'].every(f => (a[f] | 0) === (b[f] | 0));
 const UNDO_DEPTH = 64;   /* EDIT-UNDO: the journal's ring */
 const EDIT_STATUS = { Ok: 0, BadOp: 2, BadArgs: 2, Full: 3, NotMarker: 2, NotGrid: 2, Tomb: 2, Stale: 3, NoMaterial: 3, Silent: 3 };
 /* SCOPE: the firmware's ring geometry (core/bb_scope.h) and its max_body (1024, the Makefile's). */
@@ -180,7 +182,7 @@ class FakeDevice {
      * down), the key-call flash and sequence, the play loop's events (Play: each write, for B2's undo), the autoslice
      * seed and count, the selection the panel publishes (tail 257), and the last position something sounded at
      * (srcPos holds still while nothing does — the Chop pad's guard). */
-    this.voice = null; this.keyFlash = 255; this.keySeq = 0; this.loopEvents = []; this.autoSeed = 1; this.autoK = 0; this.selSlice = 255; this.lastSrcPos = 0;
+    this.voice = null; this.ringing = []; this.keyFlash = 255; this.keySeq = 0;   /* ENV: ringing — every key call still sounding (its key, group, until when) */ this.loopEvents = []; this.autoSeed = 1; this.autoK = 0; this.selSlice = 255; this.lastSrcPos = 0;
     /* EDIT: the table generation (never 0), the audition voice's last request, its rate window and the request held
      * for it (ten a second; a later one replaces), and how many went out. */
     this.tableGen = 1; this.audition = null; this.auditionAt = -1e9; this.auditionHeld = null; this.auditionPosted = 0;
@@ -755,10 +757,11 @@ class FakeDevice {
       case 33: st = this.edKeysFromMarkers(); third = this.lastCount; if (!third) return [0, this.tableGen, 0]; break;
       case 34: st = this.edClearMarkers(); third = this.lastCount; if (!third) return [0, this.tableGen, 0]; break;
       case 36: st = b[1] > AUTO_MAX ? 'BadArgs' : this.edAutoslice(b[1], !!(b[2] & 1)); third = this.lastCount; join = !!(b[2] & 2) && this.autoGen === this.tableGen && this.journal.length > 0; break;
-      case 37: {   /* KEYP: KEY_PARAMS(key, i8 gain, i16 cents, plays, rat, flags b0 join) — the join folds into THIS key's previous step only */
-        const key = b[1], gain = b[2] > 127 ? b[2] - 256 : b[2], cents = I16(3), plays = b[5], rat = b[6], fl = b[7];
-        if (key >= KEYS || gain < KEYP.gainMin || gain > KEYP.gainMax || cents < -KEYP.centsMax || cents > KEYP.centsMax || plays > KEYP.playsMax || rat > KEYP.ratMax || (fl & ~1)) { st = 'BadArgs'; break; }
-        this.keyp[key] = { gain, plays, cents, rat }; st = 'Ok'; before.kpKey = key;
+      case 37: {   /* KEYP: KEY_PARAMS(key, i8 gain, i16 cents, plays, rat, ENV: u16 atk, u16 dec, u8 sus, u16 rel, u8 grp, flags b0 join) — the join folds into THIS key's previous step only */
+        const key = b[1], gain = b[2] > 127 ? b[2] - 256 : b[2], cents = I16(3), plays = b[5], rat = b[6], atk = U16(7), dec = U16(9), sus = b[11], rel = U16(12), grp = b[14], fl = b[15];
+        if (key >= KEYS || gain < KEYP.gainMin || gain > KEYP.gainMax || cents < -KEYP.centsMax || cents > KEYP.centsMax || plays > KEYP.playsMax || rat > KEYP.ratMax
+          || atk > KEYP.atkMax || dec > KEYP.decMax || sus > KEYP.susOff || rel > KEYP.relMax || grp > KEYP.grpMax || (fl & ~1)) { st = 'BadArgs'; break; }
+        this.keyp[key] = { gain, plays, cents, rat, atk, dec, sus, rel, grp }; st = 'Ok'; before.kpKey = key;
         const top = this.journal[this.journal.length - 1];
         join = !!(fl & 1) && !!top && top.kpKey === key && !this.redoStack.length && this.journalGen === this.tableGen;
         break; }
@@ -790,10 +793,18 @@ class FakeDevice {
     if (key >= KEYS) return 2;
     if (!this.bufLen) return 3;
     const now = Date.now();
-    if (!down) { if (this.voice && this.voice.key === key && this.voice.until === Infinity) this.voice.until = now; return 0; }
+    const kp = this.keyp[key] || keypNeutral();
+    /* ENV: a held key's up lets its Release run (none: the 5 ms fade, here at once) */
+    if (!down) { for (const v of [this.voice, ...this.ringing]) if (v && v.key === key && v.until === Infinity) { v.until = now + (kp.rel | 0); v.released = true; } return 0; }
     const t = this.keySlice[key], e = this.table[t]; if (!e || !e.len) return 3;
-    const held = this.keyHeld(key), loop = this.keyp[key].plays === 3;   /* KEYP: the key's own Plays, else the option */
-    this.voice = { key, t: now, start: e.start, len: held && !loop ? Math.max(e.len, this.freePos - e.start) : e.len, until: held ? Infinity : now + e.len / SR * 1000, loop };
+    const held = this.keyHeld(key), loop = kp.plays === 3;   /* KEYP: the key's own Plays, else the option */
+    /* ENV: a key in a choke group cuts every other key's sound in the group (5 ms), its own never */
+    this.ringing = this.ringing.filter(v => v.until > now);
+    if (kp.grp) for (const v of [this.voice, ...this.ringing]) if (v && v.grp === kp.grp && v.key !== key && v.until > now) { v.until = now + 5; v.choked = true; }
+    /* ENV: a one-shot's Decay to no sustain ends it there */
+    const natural = e.len / SR * 1000, decayed = kp.sus >= KEYP.susOff ? (kp.atk | 0) + Math.max(10, kp.dec | 0) : Infinity;
+    this.voice = { key, grp: kp.grp | 0, t: now, start: e.start, len: held && !loop ? Math.max(e.len, this.freePos - e.start) : e.len, until: held ? Infinity : now + Math.min(natural, decayed), loop };
+    this.ringing.push(this.voice);
     this.keyFlash = key; this.keySeq = (this.keySeq + 1) & 0xff; this.callFlash = t; this.callT = 6;
     if (this.grammar === GRAM.play && t < 128) { const s = this.curStep(); this.loopEvents.push({ s, prev: this.src[s] }); this.src[s] = t; this.looperEvents = Math.min(255, this.looperEvents + 1); }
     return 0;
@@ -806,8 +817,8 @@ class FakeDevice {
     for (let j = 0; j < KEYS; j++) {
       if (j === root) continue; const u = this.keySlice[j];
       if (keepPads && u !== t && u >= this.nSlices && u < this.nTable && !this.isTomb(u) && this.table[u].key >= 0) continue;
-      const p = { gain: base.gain, plays: base.plays, cents: Math.max(-KEYP.centsMax, Math.min(KEYP.centsMax, (j - root) * 100 + base.cents)), rat: base.rat | 0 };
-      if (keys[j] !== t || JSON.stringify(p) !== JSON.stringify({ gain: kp[j].gain, plays: kp[j].plays, cents: kp[j].cents, rat: kp[j].rat | 0 })) changes = true;
+      const p = Object.assign(keypNeutral(), base, { cents: Math.max(-KEYP.centsMax, Math.min(KEYP.centsMax, (j - root) * 100 + base.cents)) });   /* ENV: the envelope and group with the rest */
+      if (keys[j] !== t || !keypSame(p, kp[j])) changes = true;
       keys[j] = t; kp[j] = p; n++;
     }
     return { keys, kp, n, changes };
@@ -1113,9 +1124,9 @@ class FakeDevice {
         U8(ok ? 0 : 2); break; }
       case CMD.card: this.cardHandle(body, U8, U32); break;   /* CARD */
       case CMD.pads: this.padHandle(body, U8, U32); break;    /* PADS */
-      case CMD.keys:   /* KEYP: 0x69 GET_KEYS → status, 24, then i8 gain · u8 plays · i16 cents · u8 rat per key */
+      case CMD.keys:   /* KEYP: 0x69 GET_KEYS → status, 24, then i8 gain · u8 plays · i16 cents · u8 rat (ENV: · u16 atk · u16 dec · u8 sus · u16 rel · u8 grp) per key */
         U8(0); U8(KEYS);
-        for (const p of this.keyp) { U8(p.gain & 0xff); U8(p.plays); U8(p.cents & 0xff); U8((p.cents >> 8) & 0xff); U8(p.rat | 0); }
+        for (const p of this.keyp) { U8(p.gain & 0xff); U8(p.plays); U8(p.cents & 0xff); U8((p.cents >> 8) & 0xff); U8(p.rat | 0); U16(p.atk | 0); U16(p.dec | 0); U8(p.sus | 0); U16(p.rel | 0); U8(p.grp | 0); }
         break;
       default: U8(1);
     }
