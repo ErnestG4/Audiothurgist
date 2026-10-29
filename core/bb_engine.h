@@ -68,6 +68,10 @@ struct Voice
      * everything else (Trigger resets it). One multiply per sample in the reader; exactly 1 leaves the bits as
      * they were. */
     float  gain = 1.f;
+    /* KEYP: a held Loop's release — it keeps looping (wrapping as before) under a fade of chokeLen output samples
+     * counted down here, so a release next to the loop point still fades for its whole length. 0 = none, −1 = done. */
+    int    relLeft = 0;
+    float  relInv  = 0.f;
 
     /* PLAY: per-voice fade geometry (Options → Fades). Trigger resets these
      * to the fixed 1 ms attack / 5 ms release; Adaptive mode then rewrites
@@ -99,6 +103,7 @@ struct Voice
         key    = -1;
         scratch = false;   /* EDIT-AUDITION: a stolen scratch voice is an ordinary one again */
         gain   = 1.f;      /* KEYP: a step, an audition, a keyless call: unity */
+        relLeft = 0;       /* KEYP: no Loop release in progress */
         start  = s.start;
         natEnd = s.start + s.len;
         int e  = s.start + (int)((float)s.len * ext);
@@ -150,6 +155,7 @@ struct Voice
         if(!active || !held) return;
         held = false;
         key  = -1;
+        if(tail) { relLeft = chokeLen > 1 ? chokeLen : 1; relInv = 1.f / (float)relLeft; return; }   /* KEYP: a held Loop fades as it loops */
         if(!tail && rate < 0.f) rate = -rate;
         Fade(epShape);
     }
@@ -197,8 +203,8 @@ struct Voice
         // direction-aware end test: a reversed voice STARTS at the top of its
         // slice — pos >= end-1 is only "finished" when travelling forward
         // (the symmetric check killed every reverse at birth once ext hit 1.0)
-        bool ended = (rate < 0.f) ? (pos < (double)start)
-                                  : (pos >= (double)(end - 1));
+        bool ended = relLeft < 0 || ((rate < 0.f) ? (pos < (double)start)
+                                                  : (pos >= (double)(end - 1)));
         if(ended)
         {
             if(active && lastOut != 0.f) clickComp += lastOut; // natural end
@@ -255,6 +261,13 @@ struct Voice
         if(h > 1.f) h = 1.f;
         if(h < 0.f) h = 0.f;
         if(epShape) { g = g * (2.f - g); h = h * (2.f - h); } // PLAY: ≈ equal power
+        if(relLeft > 0)   /* KEYP: a Loop's release, by time (the position wraps) */
+        {
+            float hr = (float)relLeft * relInv;
+            if(epShape) hr = hr * (2.f - hr);
+            h *= hr;
+            if(--relLeft == 0) relLeft = -1;
+        }
         pos += (double)rate;
         age++;
         const float o = s * g * h * relScale * gain;   /* KEYP: the key's gain (1 for steps, auditions, keyless calls) */
@@ -1149,7 +1162,11 @@ struct Engine
             v->held = true;
             v->key  = (int8_t)key;
             if(keyed && keyp[key].plays == KeyParam::kRatchet) {}   /* KEYP: a ratchet's hit plays its entry, as a one-shot (the next hit or the release fades it) */
-            else if(keyed && keyp[key].plays == KeyParam::kLoop && LoopHeld(*v, cell, bound, rev)) {}   /* KEYP: Loop — the entry, until the release */
+            else if(keyed && keyp[key].plays == KeyParam::kLoop && LoopHeld(*v, cell, bound, rev))   /* KEYP: Loop — the entry, until the release */
+            {
+                for(int i = 0; i < kVoices; i++)   /* struck again while held: its own previous loop fades (never two loops of one key) */
+                    if(&voices[i] != v && voices[i].active && voices[i].held && voices[i].key == key && voices[i].tail) voices[i].Release();
+            }
             else if(!rev) { v->natEnd = bound; v->end = bound; }
             else v->start = idx >= nSlices ? cell.start : 0;   /* backwards to the material's start */
         }
@@ -1197,8 +1214,9 @@ struct Engine
          * slices and its markers varispeed with the tempo as ever (OwnRate) */
         float rate         = OwnRate(idx) ? pitch * rateMul : pitch * (nativeStep / gridStepSamp) * rateMul;
         if(key >= 0 && key < kKeys) rate *= keyRate[key];   /* KEYP: the key's tune multiplies whatever rate it gets (×1 neutral) */
-        FireSlice(idx, rate, rev, lenMul, held, key);
-        if(key >= 0 && key < kKeys && keyp[key].plays == KeyParam::kRatchet) RatchetStart(key, idx, rate, rev, held, gridStepSamp);   /* KEYP */
+        const bool ratKey = key >= 0 && key < kKeys && keyp[key].plays == KeyParam::kRatchet;   /* KEYP */
+        FireSlice(idx, rate, rev, lenMul, held || ratKey, key);   /* KEYP: a ratchet's first hit is tagged as its others are — the retrigger fades it */
+        if(ratKey) RatchetStart(key, idx, rate, rev, held, gridStepSamp);   /* KEYP */
         if(punch) PunchStep(curStep, idx, rev);
         if(ratchet)
         {
@@ -1586,6 +1604,18 @@ struct Engine
         const uint8_t p = keyp[key].plays;
         return p == KeyParam::kFollow ? option : p != KeyParam::kOneShot;
     }
+    // Does the key's up (the gate's fall, the pad's up) need a release? When a call through it would hold now, or
+    // something it started still holds: a held voice tagged with it or its ratchet — its Plays (or the option) may
+    // have changed since the press, and a Loop never ends on its own. CONTROL (bytes and bools read whole).
+    bool KeyNeedsRelease(int key, bool option) const
+    {
+        if(KeyHeld(key, option)) return true;
+        if(key < 0 || key >= kKeys) return false;
+        if(keyRatOn & (1u << key)) return true;
+        for(int i = 0; i < kVoices; i++)
+            if(voices[i].active && voices[i].held && voices[i].key == key) return true;
+        return false;
+    }
     // One key's settings in, its gain and rate worked out. false = out of range (nothing written).
     BB_COLD bool PutKeyParam(int key, const KeyParam& p)   /* per edit, never per call: built for size */
     {
@@ -1656,6 +1686,7 @@ struct Engine
         {
             const int k = __builtin_ctz(m);
             KeyRatchet& r = keyRat[k];
+            if(KeySlice(k) != r.idx) { keyRatOn &= ~(1u << k); continue; }   /* the key now plays something else (any re-point, from any thread): its ratchet stops */
             r.countdown -= n;
             if(r.countdown >= 0) continue;
             for(int i = 0; i < kVoices; i++)   /* the previous hit fades as the next attacks */

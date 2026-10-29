@@ -281,7 +281,10 @@ the last drum grammar — the boot preset's, or the one Pads was entered from
 (`TransportStart` / `gLastDrum`) — so on the panel alone B1 held after a
 sampler power-up plays the preset's beat. Start In = **As saved**: the boot
 preset's grammar, running. The preset itself is never rewritten: a preset load
-later brings its grammar back.
+later brings its grammar back, and a preset **saved** while the grammar is Pads
+only because Start In put it there (no grammar chosen since the power-up) keeps
+the beat it came with (`gLastDrum`, `PresetKeepsBeat`: the saved slot's grammar
+byte patched, one more flash write) — Pads chosen by the player saves as Pads.
 
 **Where it lives.** Options byte 24 (`start.in`, "Start In": *Sampler (Pads,
 stopped)* · *As saved (the preset's grammar, running)*), in the preset-managed

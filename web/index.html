@@ -903,7 +903,8 @@ function padDropTarget(el, k) {
 }
 padEls.forEach((p, k) => { padDropTarget(p.el, k); const f = document.createElement('i'); f.className = 'pf'; p.el.appendChild(f); p.fill = f; });
 const padSecs = n => (n / 48000).toFixed(2) + ' s';
-function padShow(job, text, kind, frac) { job.text = text; job.kind = kind || ''; if (frac != null) job.frac = frac; padJob[job.key] = job; setText('pd_msg', `${keyName(job.key)}: ${text}`); $('pd_msg').hidden = false; $('pd_msg').className = 'note' + (kind === 'bad' ? ' bad' : ''); invalidate(D.pads); }
+function padShow(job, text, kind, frac) { if (job.cancelled) return;   /* the old session's drop (a disconnect): nothing to say on this one */
+  job.text = text; job.kind = kind || ''; if (frac != null) job.frac = frac; padJob[job.key] = job; setText('pd_msg', `${keyName(job.key)}: ${text}`); $('pd_msg').hidden = false; $('pd_msg').className = 'note' + (kind === 'bad' ? ' bad' : ''); invalidate(D.pads); }
 function padAddFiles(files, k0) {
   if (!link) { say('connect to the module first', true); return; }
   const list = Array.from(files || []); let k = Math.max(0, Math.min(23, k0 | 0));
@@ -937,6 +938,7 @@ async function padUpload(job) {
   let ab;
   try { ab = await cardDecode(job.file); }
   catch (e) { job.state = 'failed'; padShow(job, `${job.file.name}: this browser cannot decode it (${e && e.message || e})`, 'bad', 0); return; }
+  if (job.cancelled) return;   /* the module went while it decoded: the link now may be another session's */
   let p0;
   try { p0 = await padState(); } catch (e) { job.state = 'failed'; padShow(job, 'the module did not answer: ' + e.message, 'bad', 0); return; }
   if (!p0) { job.state = 'failed'; padShow(job, 'the module\'s state did not read', 'bad', 0); return; }
@@ -1549,7 +1551,7 @@ $('ed_follow').onclick = () => {
   c.addEventListener('pointerdown', e => { if (!st) return; e.preventDefault(); down = true; try { c.setPointerCapture(e.pointerId); } catch {} at(e); });
   c.addEventListener('pointermove', e => { if (down) at(e); }); c.addEventListener('pointerup', () => { down = false; }); c.addEventListener('pointercancel', () => { down = false; }); }
 $('ed_onsets').onclick = () => ed.fromOnsets(edThresh);
-$('ed_undo').onclick = () => ed.undo(); $('ed_redo').onclick = () => ed.redo();
+$('ed_undo').onclick = () => { kpWant = null; ed.undo(); }; $('ed_redo').onclick = () => { kpWant = null; ed.redo(); };   /* KEYP: a drag's queued value never goes out after an Undo / Redo */
 /* the history list (the page's labels keyed by tableGen, the undone ones struck through), the journal's two depths,
  * the playhead for the Chop pad */
 let histSig = '';
@@ -1573,10 +1575,10 @@ $('l_undo').onclick = () => action(ACT.looperUndo); $('l_clear').onclick = () =>
  * last reply), every send after the drag's first with JOIN, so a whole drag is one undo step (the autoslice slider's
  * way). The module's answer is the truth: the row follows the settings read back, except while you hold a control. */
 let keyp = null, keypGen = -1;
-let kpBusy = false, kpWant = null, kpDrag = false, kpSent = 0, kpKey = -1, kpTouch = 0;
+let kpBusy = false, kpWant = null, kpDrag = false, kpSent = 0, kpKey = -1, kpTouch = 0, kpOwnGen = -1;   /* kpOwnGen: the tableGen our last KEY_PARAMS left */
 const keypOf = k => keyp && keyp[k] ? HL.keypText(keyp[k]) : '';
 const kpGainText = g => g ? HL.keypGainText(g) : '0 dB';
-const kpSemiText = c => { const s = Math.trunc(c / 100); return (s > 0 ? '+' : s < 0 ? '−' : '') + Math.abs(s) + ' st'; };
+const kpSemiText = c => HL.keypTuneText(c) || '0 st';   /* the whole tune, in the cell's words (+3 st −50 c reads +2.5 st) */
 /* what the row's controls say now, as a key's settings */
 function kpFromRow() {
   const semi = +$('kp_semi').value, fine = Math.max(-99, Math.min(99, Math.round(+$('kp_cents').value || 0)));
@@ -1590,7 +1592,7 @@ function drawKeyp() {
   $('kp_reset').disabled = busy || HL.keypNeutral(p);
   drawSpread(k, busy);   /* CHROMA */
   if (held && kpKey === k) return;   /* your hand is on it: the reply will come round */
-  const semi = Math.trunc(p.cents / 100), fine = p.cents - semi * 100;
+  const semi = Math.sign(p.cents) * Math.round(Math.abs(p.cents) / 100), fine = p.cents - semi * 100;   /* the nearest semitone and ±50 c from it: +3 st −50 c comes back as entered */
   if (document.activeElement !== $('kp_gain') && +$('kp_gain').value !== p.gain) $('kp_gain').value = String(p.gain);
   if (document.activeElement !== $('kp_semi') && +$('kp_semi').value !== semi) $('kp_semi').value = String(semi);
   if (document.activeElement !== $('kp_cents') && +$('kp_cents').value !== fine) $('kp_cents').value = String(fine);
@@ -1631,15 +1633,14 @@ async function spreadKey(cx, cy) {
 $('kp_spread').addEventListener('click', e => { spreadKey(e.clientX, e.clientY); });
 function kpLabels() { const p = kpFromRow(); setText('kp_gain_v', kpGainText(p.gain)); setText('kp_semi_v', kpSemiText(p.cents)); }
 /* one send at a time; `join` for every send of a drag after its first */
-function kpQueue(p, join) {
+function kpQueue(p, join, key = selKey) {
   if (!link) return;
-  const key = selKey;
   if (kpBusy) { kpWant = { p, join: true, key }; return; }
   kpBusy = true; kpKey = key; kpTouch = performance.now();
   const j = join && kpSent > 0; kpSent++;
-  Promise.resolve(ed.keyParams(key, p, j)).catch(() => {}).finally(() => {
+  Promise.resolve(ed.keyParams(key, p, j)).then(r => { if (r && r.ok) kpOwnGen = r.tableGen; }).catch(() => {}).finally(() => {
     kpBusy = false;
-    if (kpWant) { const w = kpWant; kpWant = null; if (w.key === key) { kpBusy = false; kpQueue(w.p, w.join); return; } }
+    if (kpWant) { const w = kpWant; kpWant = null; if (w.key !== key) kpSent = 0; kpQueue(w.p, w.join && w.key === key, w.key); return; }   /* another key's change: its own step */
     if (!kpDrag) kpSent = 0;
     invalidate(D.kit | D.pads);
   });
@@ -1648,6 +1649,10 @@ for (const id of ['kp_gain', 'kp_semi']) {
   $(id).addEventListener('input', () => { if (!kpDrag) { kpDrag = true; kpSent = 0; } kpTouch = performance.now(); kpLabels(); kpQueue(kpFromRow(), true); });
   $(id).addEventListener('change', () => { const was = kpDrag; kpDrag = false; kpTouch = performance.now(); kpLabels(); kpQueue(kpFromRow(), was); });
 }
+/* a drag that ends where it began fires no change: the pointer's up (or a cancel, or the focus leaving) ends it too — after
+ * the change, if one comes, so a real drag's last send keeps its JOIN */
+const kpDragEnd = () => setTimeout(() => { if (!kpDrag) return; kpDrag = false; kpTouch = performance.now(); if (!kpBusy && !kpWant) kpSent = 0; invalidate(D.kit); }, 0);
+for (const id of ['kp_gain', 'kp_semi']) for (const ev of ['pointerup', 'pointercancel', 'blur']) $(id).addEventListener(ev, kpDragEnd);
 $('kp_cents').addEventListener('change', () => { kpTouch = performance.now(); kpSent = 0; kpLabels(); kpQueue(kpFromRow(), false); });
 $('kp_plays').addEventListener('change', () => { kpTouch = performance.now(); kpSent = 0; $('kp_rat_l').hidden = +$('kp_plays').value !== HL.KEYP.ratchet; kpQueue(kpFromRow(), false); });
 $('kp_rat').addEventListener('change', () => { kpTouch = performance.now(); kpSent = 0; kpQueue(kpFromRow(), false); });
@@ -1672,7 +1677,7 @@ function syncKit(s) {
     }, e => warn('table', e)).finally(() => { poll.pTable = null; });
   }
   /* KEYP: the 24 keys' settings (0x69), read again whenever tableGen moves — every KEY_PARAMS, undo and load bumps it */
-  if (s.tableGen !== keypGen && !poll.pKeyp) { const g = s.tableGen; poll.pKeyp = HL.fetchKeyParams(link, { key: 'keyp' }).then(a => { keyp = a; keypGen = g; invalidate(D.kit | D.pads); }, e => warn('keys', e)).finally(() => { poll.pKeyp = null; }); }
+  if (s.tableGen !== keypGen && !poll.pKeyp) { const g = s.tableGen; poll.pKeyp = HL.fetchKeyParams(link, { key: 'keyp' }).then(a => { keyp = a; keypGen = g; if (kpOwnGen >= 0 && ((kpOwnGen - g) & 255) >= 128) kpTouch = -Infinity;   /* the settings moved past our last send (Undo, Redo, a spread, a load): the row lets go and shows them */ invalidate(D.kit | D.pads); }, e => warn('keys', e)).finally(() => { poll.pKeyp = null; }); }
   if (s.matGen !== hitsGen && !poll.pHits) { const gen = s.matGen; poll.pHits = fetchHits(link).then(hh => { hits = hh; hitsGen = gen; invalidate(D.kitwave | D.wave); }, e => warn('hits', e)).finally(() => { poll.pHits = null; }); }
 }
 
@@ -1698,6 +1703,8 @@ function asQueue(k) {
   Promise.resolve(ed.autoslice(k, false, join)).catch(() => {}).finally(() => { asBusy = false; if (asWant != null) { const w = asWant; asWant = null; asQueue(w); } else if (!asDrag) asSent = 0; });
 }
 $('as_k').addEventListener('input', e => { if (!asDrag) { asDrag = true; asSent = 0; asLast = -1; } asTouched = true; setText('as_n', e.target.value); asQueue(+e.target.value); });
+{ const asDragEnd = () => setTimeout(() => { if (!asDrag) return; asDrag = false; asTouched = false; if (!asBusy) asSent = 0; }, 0);   /* the same for the count: a drag with no change still ends */
+  for (const ev of ['pointerup', 'pointercancel', 'blur']) $('as_k').addEventListener(ev, asDragEnd); }
 $('as_k').addEventListener('change', e => { asTouched = false; if (!asDrag) { asSent = 0; asLast = -1; } asDrag = false; asQueue(+e.target.value); if (!asBusy) asSent = 0; });
 $('as_go').onclick = () => { if (link) ed.autoslice(+$('as_k').value, false); };
 $('as_reroll').onclick = () => { if (link) ed.autoslice(+$('as_k').value, true); };
@@ -2111,7 +2118,7 @@ function setDisconnected() {
   table = null; tableSig = ''; bufSig = ''; hits = null; hitsGen = -1; wave.cache.clear(); wave.queue.length = 0; wave.planSig = ''; keyCells.forEach(c => { c.sig = ''; });
   copyArm = -1; ed.selT = -1; ed.drag = null; ed.local = null; ed.history = new ED.History(); histSig = fieldSig = ''; closeMenu(); ghost(null); dropHi(-1); setConnectedUi(false);
   setSeqShown = -1; setAsked = null; setPill('s_status', '—', ''); $('s_save').disabled = $('s_load').disabled = true;
-  keyp = null; keypGen = -1; kpWant = null; kpBusy = false; kpDrag = false;   /* KEYP */
+  keyp = null; keypGen = -1; kpWant = null; kpBusy = false; kpDrag = false; kpOwnGen = -1;   /* KEYP */
   $('pd_sampler').hidden = true; $('mode_cue').hidden = true; lastText.delete('mode_cue'); for (const j of padJobs) j.cancelled = true; padJob.fill(null); $('pd_unsaved').hidden = true; $('pd_msg').hidden = true;
   for (const j of cardJobs) j.cancelled = true; $('cardnote').hidden = true;
   clearTimeout(sc.timer); sc.timer = null; sc.frames.length = 0; sc.fps = sc.rps = sc.bps = 0; sc.err = ''; invalidate(D.bigscope);
@@ -2142,6 +2149,10 @@ async function connectPort(port, isDemo) {
     setPill('modpill', `${info.name} ${info.fw}${isDemo ? ' (demo)' : transportName() === 'WebUSB' ? ' · WebUSB' : ''}`, 'ok');
     desc = await getDescriptor(l, info).catch(() => null);
     /* the page and the firmware ship together: anything but this page's api is the wrong build — one message, no partial mode */
+    if (!desc) {   /* a reply lost or garbled on the way: not a verdict on the firmware */
+      notice(`The module's descriptor did not come through (${info.name} ${info.fw}) — connect again.`);
+      say('descriptor unreadable — disconnected', true); setDisconnected(); await l.close(); return;
+    }
     const api = HL.apiOf(desc);
     if (api !== HL.API) {
       notice(`This page needs the Audiothurgist firmware it came with (page API ${HL.API}); the module runs ${info.name} ${info.fw}${api == null ? '' : ` (API ${api})`}. Flash the matching .bin, then connect again.`);
@@ -2208,7 +2219,12 @@ $('usbscan').onclick = scanUsb;
 document.addEventListener('serial-polyfill', () => { if (!navigator.serial) { $('usbscan').hidden = false; $('connect').disabled = false; } });
 async function connect() {
   notice('');
-  if (link) { const l = link; connectGen++; setDisconnected(); await l.close(); say('disconnected'); return; }
+  if (link) {
+    const l = link;
+    /* PADS: a drop still sending is called off on the module first — else it waits out its 5 s before it takes another */
+    if (padJobs.some(j => j.state === 'sending' && !j.cancelled)) await l.request(CMD.pads, Uint8Array.of(HL.PADS.abort), { urgent: true }).catch(() => {});
+    connectGen++; setDisconnected(); await l.close(); say('disconnected'); return;
+  }
   const api = serialApi();
   if (!api) { notice(describeNoSerial()); return; }
   try { const port = await api.requestPort({ filters: [{ usbVendorId: 0x0483 }] }); await connectPort(port, false); }

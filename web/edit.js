@@ -452,12 +452,12 @@ class Editor {
     if (this.busy) { this.cb.status('one edit at a time — ' + this.busy + ' is still going', 'warn'); return null; }
     const label = histLabel(op, args); this.busy = label; this.busyOp = op; this.cb.status(label + '…', '');
     try {
-      let r = await fn(gen), retried = false, why = '';
+      let sent = gen, r = await fn(sent), retried = false, why = '';   /* sent: the gen the answered request carried */
       if (!r.ok && r.status === 3) {
         await this.cb.refetch(); why = this.whyBadState(gen);
         if (why === 'stale' && (!stillValid || stillValid())) {
           this.cb.status('stale: the table changed under you — refetched, retrying', 'warn');
-          this.stats.retried++; retried = true; r = await fn(this.gen());
+          this.stats.retried++; retried = true; sent = this.gen(); r = await fn(sent);
           if (!r.ok && r.status === 3) why = this.whyBadState(this.gen());
         }
       }
@@ -467,7 +467,7 @@ class Editor {
         /* a tap within 10 ms of a live marker selects it — nothing changed, nothing to label (the gen is the same) */
         if (op === 'tap' && r.reused) { this.select(r.newIdx); this.cb.status(`tap: marker ${r.newIdx} is already there — selected it`, 'ok'); this.cb.redraw(); return r; }
         const full = op === 'split' || op === 'copy' || op === 'tap' ? histLabel(op, Object.assign({}, args, { newIdx: r.newIdx })) : op === 'onsets' || op === 'mkeys' || op === 'mclear' || op === 'auto' || op === 'spread' ? histLabel(op, Object.assign({}, args, { count: r.count })) : label;
-        if (op === 'spread' && gen && r.tableGen === gen) { this.cb.status(`${kn(args.root)} is already spread across the keys — nothing changed`, ''); this.cb.redraw(); return r; }   /* CHROMA: a spread in place moves nothing */
+        if (op === 'spread' && sent && r.tableGen === sent) { this.cb.status(`${kn(args.root)} is already spread across the keys — nothing changed`, ''); this.cb.redraw(); return r; }   /* CHROMA: a spread in place moves nothing */
         if ((op === 'mkeys' || op === 'mclear') && !r.count) { this.cb.status(op === 'mkeys' ? 'no markers to put on keys' : 'no markers to clear', ''); this.cb.redraw(); return r; }
         if (op === 'undo') this.history.undo(r.tableGen); else if (op === 'redo') this.history.redo(r.tableGen); else if (op === 'auto' && args.join && this.history.joinTop(r.tableGen, full, /^autoslice /)) { /* one line per drag */ }
         else if (op === 'keyp' && args.join && this.history.joinTop(r.tableGen, full, new RegExp('^' + kn(args.key) + ' settings: '))) { /* KEYP: one line per drag */ } else this.history.push(r.tableGen, full);

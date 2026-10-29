@@ -2117,6 +2117,110 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
   check('disconnect: the button hidden', G("$('kp_spread').hidden") === true);
 }
+/* ── 9i. Review of the beta's page (2026-10-29): races a player can hit on the bench ── */
+{
+  /* KEYP: the row holds what your hand set for 1.5 s; an Undo landing inside that window must still show in the row,
+   * or the next touch (the row is sent whole) writes the undone value straight back */
+  const { D, G } = await loadPage('?demo=keyp');
+  await until(() => G('!!(st && keyp && table && st.bufLen)'));
+  G("showTab('tab_kit')"); G('selectKey(1)'); G('invalidate(D.kit)'); await sleep(80);
+  const gain = G("$('kp_gain')");
+  G("$('kp_gain').value = '-12'"); fireEv(gain, 'input', {}); fireEv(gain, 'change', {});
+  await until(() => !G('kpBusy') && G('keyp[1].gain') === -12);
+  fireEv(G("$('ed_undo')"), 'click', {});
+  await until(() => G('keyp && keyp[1].gain') === 0); await sleep(60); G('invalidate(D.kit)'); await sleep(60);
+  check('review: an Undo inside the row\'s hold shows in the row (0 dB again)', G("$('kp_gain').value") === '0' && G("$('kp_gain_v').textContent") === '0 dB', G("$('kp_gain_v').textContent"));
+  G("$('kp_plays').value = '1'"); fireEv(G("$('kp_plays')"), 'change', {});
+  check('review: …and the next touch (Plays → One-shot) does not bring the undone −6 dB back', await until(() => G('demoDevice.keyp[1].plays') === 1 && !G('kpBusy')) && G('demoDevice.keyp[1].gain') === 0, 'module gain ' + G('demoDevice.keyp[1].gain'));
+  /* KEYP: a change for another key made while this key's send is in flight is sent too (it was dropped) */
+  await until(() => !G('kpBusy') && !G('kpWant'));
+  G('selectKey(1)'); G('invalidate(D.kit)'); await sleep(60);
+  G("$('kp_plays').value = '2'"); fireEv(G("$('kp_plays')"), 'change', {});
+  G('selectKey(2)'); G("$('kp_plays').value = '3'"); fireEv(G("$('kp_plays')"), 'change', {});
+  check('review: C♯1 → Held, then D1 → Loop before C♯1\'s reply: both reach the module', await until(() => G('demoDevice.keyp[2].plays') === 3) && G('demoDevice.keyp[1].plays') === 2, 'C♯1 ' + G('demoDevice.keyp[1].plays') + ', D1 ' + G('demoDevice.keyp[2].plays'));
+  /* KEYP: Undo pressed straight after a drag is released — the drag's queued last value must not go out after it */
+  await until(() => !G('kpBusy') && !G('kpWant') && !G('ed.busy'));
+  G('selectKey(4)'); G('invalidate(D.kit)'); await sleep(60);
+  { const gain = G("$('kp_gain')");
+    for (const v of [-2, -4, -6]) { G(`$('kp_gain').value = '${v}'`); fireEv(gain, 'input', {}); }
+    fireEv(gain, 'change', {}); G("$('ed_undo').onclick()"); }
+  await until(() => !G('kpBusy') && !G('kpWant') && !G('ed.busy')); await sleep(300);
+  check('review: Undo right after a gain drag — the drag is undone, nothing of it sent after the Undo', G('demoDevice.keyp[4].gain') === 0, 'E1 gain ' + G('demoDevice.keyp[4].gain'));
+  /* KEYP: a drag that ends where it began fires no change: the pointer's up still ends the drag, the row follows the module again */
+  await until(() => !G('kpBusy') && !G('kpWant') && !G('ed.busy'));
+  G('selectKey(5)'); G('invalidate(D.kit)'); await sleep(60);
+  { const gain = G("$('kp_gain')");
+    for (const v of ['-4', '0']) { G(`$('kp_gain').value = '${v}'`); fireEv(gain, 'input', {}); await sleep(20); }
+    fireEv(gain, 'pointerup', {}); }
+  await until(() => !G('kpBusy') && !G('kpWant')); await sleep(60);
+  check('review: a drag back to its start (no change event) ends on the pointer\'s up', G('kpDrag') === false);
+  { const k = G("$('as_k')"), v0 = k.value;
+    for (const v of ['2', v0]) { G(`$('as_k').value = '${v}'`); fireEv(k, 'input', {}); await sleep(20); }
+    fireEv(k, 'pointerup', {}); }
+  await until(() => !G('asBusy') && G('asWant') == null); await sleep(60);
+  check('review: …and so does the autoslice count\'s', G('asDrag') === false && G('asTouched') === false);
+  /* the tune readout: +3 st then −50 cents reads +2.5 st, as the cell does, and the row keeps 3 st and −50 c */
+  G("$('kp_semi').value = '3'"); fireEv(G("$('kp_semi')"), 'input', {}); fireEv(G("$('kp_semi')"), 'change', {});
+  await until(() => !G('kpBusy'));
+  G("$('kp_cents').value = '-50'"); fireEv(G("$('kp_cents')"), 'change', {});
+  await until(() => G('demoDevice.keyp[5].cents') === 250 && !G('kpBusy') && G('keyp[5].cents') === 250);
+  G('kpTouch = -Infinity'); G('invalidate(D.kit)'); await sleep(60);
+  check('review: +3 st −50 c reads "+2.5 st" beside the slider (the cell\'s words), the row 3 st and −50 c', G("$('kp_semi_v').textContent") === '+2.5 st' && G("$('kp_semi').value") === '3' && G("$('kp_cents').value") === '-50' && /\+2\.5 st/.test(G('keyCells[5].kp.textContent')),
+    G("$('kp_semi_v').textContent") + ' / ' + G("$('kp_semi').value") + ' / ' + G("$('kp_cents').value"));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+}
+{
+  /* connect: a descriptor that does not come through (one lost reply) is not "the wrong firmware — flash the .bin" */
+  const { G } = await loadPage('');
+  G(`(() => { const d = new DEMO.FakeDevice({ latencyMs: 6, startIn: 0 }), h = d.handle.bind(d); let n = 0;
+    d.handle = (t, b) => { if (t === 0x02 && n++ === 1) return null; return h(t, b); };
+    demoDevice = d; demoPort = new DEMO.FakePort(d); window.__p = connectPort(demoPort, true); })()`);
+  await G('__p').catch(() => {}); await sleep(50);
+  check('review: a lost descriptor reply says connect again, not flash the firmware', G('link') === null && /connect again/.test(G("$('notice').textContent")) && !/Flash/.test(G("$('notice').textContent")), G("$('notice').textContent"));
+}
+{
+  /* PADS: a drop in flight when the module goes belongs to the old session — after a reconnect it neither shows its
+   * failure on the new one's pads nor (still decoding) talks to the new module */
+  const { G } = await loadPage('?demo=sampler');
+  await until(() => G('!!(st && table)')); await sleep(100);
+  G(`window.__slow = 0; cardDecode = async f => { if (__slow) await new Promise(r => setTimeout(r, __slow)); const n = /long/.test(f.name) ? 240000 : 48000;
+    return { numberOfChannels: 1, sampleRate: 48000, length: n, getChannelData: () => new Float32Array(n).map((_, i) => 0.3 * Math.sin(i / 5)) }; }`);
+  const drop = name => fireEv(G('padEls[4].el'), 'drop', { dataTransfer: { files: [{ name, size: 10 }], types: ['Files'] } });
+  drop('long.wav');
+  await until(() => G("padJobs.length === 1 && padJobs[0].state === 'sending' && padJobs[0].frac > 0.2"), 15000);
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()'); await sleep(50);
+  G("connectDemo('sampler')"); await until(() => G('!!(st && table)')); await sleep(300);
+  check('review: a drop cut off by a disconnect leaves nothing on the next session\'s pads (no stale "✕", no message)', G('padJob[4]') === null && G("$('pd_msg').hidden") === true && !/not loaded/.test(G('padEls[4].sub.textContent')),
+    G('padJob[4] && padJob[4].text') + ' / ' + G("$('pd_msg').textContent") + ' / ' + G('padEls[4].sub.textContent'));
+  G('__slow = 1000'); drop('short.wav');
+  await sleep(100);
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+  G("connectDemo('sampler')"); await until(() => G('!!(st && table)'));
+  G(`demoDevice.padOps = []; (() => { const d = demoDevice, h = d.handle.bind(d); d.handle = (t, b) => { if (t === 0x68) d.padOps.push(b[0]); return h(t, b); }; })()`);
+  await sleep(1600);
+  check('review: …and a drop still decoding then sends nothing to the new module', G('demoDevice.padOps.length') === 0 && G('padJob[4]') === null, JSON.stringify(G('demoDevice.padOps')));
+  /* the Disconnect button while a drop uploads: the module is told (ABORT) before the port closes — it does not sit out its 5 s */
+  await until(() => !G('padJobs.some(j => j.state === "sending" || j.state === "decoding")'));
+  G('__slow = 0'); drop('long.wav');
+  await until(() => G("padJobs.some(j => j.state === 'sending' && j.frac > 0.2)"), 15000);
+  G(`window.__old = demoDevice; demoDevice.padOps = []; (() => { const d = demoDevice, h = d.handle.bind(d); d.handle = (t, b) => { if (t === 0x68) d.padOps.push(b[0]); return h(t, b); }; })()`);
+  await G('connect()');
+  check('review: Disconnect mid-drop sends the drop\'s ABORT first', G('link') === null && G('__old.padOps').includes(HL.PADS.abort), JSON.stringify(G('__old.padOps').slice(-4)));
+  G("connectDemo('sampler')"); await until(() => G('!!(st && table)'));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+}
+{
+  /* CHROMA: Spread pressed twice — the second (queued) finds the spread in place: one step on the module, one line */
+  const { G } = await loadPage('?demo=keyp');
+  await until(() => G('!!(st && keyp && table && st.bufLen)'));
+  G("showTab('tab_kit')"); G('selectKey(7)'); G('invalidate(D.kit)'); await sleep(80);
+  const d0 = G('st.undoDepth');
+  fireEv(G("$('kp_spread')"), 'click', { clientX: 10, clientY: 10 }); fireEv(G("$('kp_spread')"), 'click', { clientX: 10, clientY: 10 });
+  await sleep(100); await until(() => !G('ed.busy')); await sleep(400);
+  check('review: Spread pressed twice — one step on the module, one history line', G('st.undoDepth') === d0 + 1 && G("ed.history.list().filter(x => /spread chromatically/.test(x.label)).length") === 1,
+    'depth ' + d0 + ' → ' + G('st.undoDepth') + ' · ' + G("ed.history.list().map(x => x.label).join(' | ')"));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+}
 /* ── 9c. Contrast, measured: every text token against every surface it sits on, in both themes, ≥ 4.5:1; and no
  *        colour outside the token blocks — not in a CSS rule, not in an inline style, not in the script ── */
 {

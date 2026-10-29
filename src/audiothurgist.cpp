@@ -349,7 +349,13 @@ static volatile float gCallLen = 1.f;     /* staccato style: fraction of the sli
  * falling edge asks the audio thread to release it (Options → Key Plays). */
 static volatile bool  gCallHeld = false;
 static volatile int   gCallKey  = -1;
-static volatile int   gRelKey   = -1;     /* poll → audio: release this key (-1 none) */
+static volatile bool  gCallRelAfter = false;
+/* PLAY_KEY's holds: the keys the page holds down (main thread only). A page that goes silent — the cable out, the tab
+ * gone — sends no up; the page polls the state all the time, so a second with no HostLink frame releases them
+ * (ServicePadHolds). The jacks' keys are not in it. */
+static uint32_t       gPadHeld    = 0;
+static uint32_t       gHostSeenMs = 0;   /* the last StateExt frame (main thread) */   /* the call's own release, right after it in the same block (a trigger shorter than the settle) */
+static bb::keys::ReleaseSet gRel;          /* poll / HostLink → audio: the keys to release (a bit a key, none lost) */
 /* SAMPLE end */
 /* BETA: what the jacks read now and the last key called (state tail 268..273) */
 static volatile int16_t gJ4mV     = 0;      /* J4 in millivolts */
@@ -683,6 +689,7 @@ static volatile uint8_t gSetReq        = 0;      /* 1 save · 2 load — service
 static volatile bool    gSetSnapReq    = false;  /* control → audio: copy engine.looper into *gSetLooper */
 static volatile bool    gSetPendLooper = false;  /* control → audio: adopt *gSetLooper at the apply */
 static bool             gSetPendCommit = false;  /* after the apply: CommitSetRecordings, the key table, the autosave baseline */
+static volatile bool    gPadsFollowReq = false;  /* BETA: the grammar became Pads: follow at the next idle main-loop turn (a load's commit drops it) */
 /* EDIT-PERSIST: the file's grid starts (gSetPlan.starts / gridFlags / nGrid)
  * go through Engine::SetGridBoundaries on the AUDIO thread right after
  * SetMaterial at the apply — never from the main loop while voices sound.
@@ -764,6 +771,7 @@ static bool PadBusy() { return gPadState != bb::kPadIdle || gPadReq != 0u; }
  * made in Pads brings back the last drum grammar first: the boot preset's, or the one Pads was entered from
  * (Classic if neither). Stopping leaves the grammar where it is. */
 static uint8_t gLastDrum = 0u;
+static bool    gPadsByBoot = false;   /* the grammar is Pads only because Start In put it there (no grammar chosen since): a preset save keeps gLastDrum */
 static void TransportStart()
 {
     if(gGrammar.mode == 6u) { gGrammar.mode = gLastDrum; gGrammar.dirty = true; }
@@ -1081,8 +1089,8 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
                        engine.SyncRecordedMeta();   /* SAMPLE */
                        gReclass = false; }
     /* SAMPLE: a call carries its key and the held rule; a release follows the call it belongs to */
-    if(gRelKey >= 0) { engine.ReleaseKey(gRelKey); gRelKey = -1; }   /* the fall preceded the rise: release first */
-    if(gCallReq)     { engine.CallSlice(gCallIdx, gCallMul, gCallRev, gCallPunch, gCallRat, gCallLen, gCallHeld, gCallKey); gCallReq = false; }
+    for(uint32_t m = gRel.Take(); m; m &= m - 1u) engine.ReleaseKey(__builtin_ctz(m));   /* the fall preceded the rise: release first */
+    if(gCallReq)     { engine.CallSlice(gCallIdx, gCallMul, gCallRev, gCallPunch, gCallRat, gCallLen, gCallHeld, gCallKey); if(gCallRelAfter) engine.ReleaseKey(gCallKey); gCallReq = false; }   /* a release posted with its call comes after it */
     /* SAMPLE end */
     /* EDIT: one edit per block, before Process; clearing the flag is the ack */
     if(gEditPend)
@@ -1408,7 +1416,7 @@ static void ServicePanel();   /* the main loop: after the EDIT helpers */
  * the jacks write it straight away, PLAY_KEY waits for it to drain first. In
  * Edit the key's entry is selected. Every call sets keyFlash and bumps keySeq
  * (tail 272 / 273), whoever made it. ─────────────────────────────────── */
-static void CallKey(int key, int style)
+static void CallKey(int key, int style, bool releaseAfter = false)
 {
     if(engine.nSlices < 1) return;
     if(key < 0) key = 0;
@@ -1424,6 +1432,7 @@ static void CallKey(int key, int style)
     gCallPunch = c.punch;
     gCallHeld  = engine.KeyHeld(key, gKeyPlays.sel == 1);   /* SAMPLE: Options → Key Plays = Held; KEYP: unless the key's own Plays says otherwise */
     gCallKey   = key;
+    gCallRelAfter = releaseAfter;   /* before gCallReq: the audio thread reads both together */
     gCallFlash = idx; gCallFlashT = 6;
     gKeyFlash  = (uint8_t)key; gKeySeq = (uint8_t)(gKeySeq + 1u);
     gCallReq   = true;
@@ -1492,9 +1501,23 @@ static void OnFrame()
     gDiagPhase = 4;
 }
 
+/* The page's held keys when the page went silent: released after a second without a HostLink frame. A key the jacks
+ * hold now (gCvKey) is left to its gate. A main loop that stalled (a load) restarts the second rather than count it. */
+static void ServicePadHolds()
+{
+    static uint32_t s_last = 0;
+    const uint32_t now = daisy::System::GetNow();
+    if((uint32_t)(now - s_last) > 200u) gHostSeenMs = now;
+    s_last = now;
+    if(!gPadHeld || (uint32_t)(now - gHostSeenMs) < 1000u) return;
+    const bool cvHolds = gCvKey >= 0 && hw.cv[gJackMapCur == 1u ? 3u : kVoiceGateChan].Volts() > 2.5f;   /* the jacks' gate is up on gCvKey */
+    for(uint32_t m = gPadHeld; m; m &= m - 1u) { const int k = __builtin_ctz(m); if(!(cvHolds && k == gCvKey)) gRel.Post(k); }
+    gPadHeld = 0;
+}
 static void OnPoll(uint32_t /*t_ms*/)
 {
     gDiagPhase = 1;
+    ServicePadHolds();   /* PLAY_KEY's holds outlive a page that went away */
     ServiceAudition();   /* EDIT-AUDITION: a rate-limited audition waiting for its window */
     if(gNeedNativeTempo)
     {
@@ -1701,7 +1724,7 @@ static void OnPoll(uint32_t /*t_ms*/)
     gJ4mV = bb::keys::MilliVolts(j4v); gJ4Key = (uint8_t)j4key;
     /* a key held from the jacks when the map changes is released; the page's held pads are its own */
     static uint8_t s_prevMap = 0xFFu;
-    if(gJackMapCur != s_prevMap) { if(gCvKey >= 0) gRelKey = gCvKey; gCvKey = -1; s_prevMap = gJackMapCur; }
+    if(gJackMapCur != s_prevMap) { if(gCvKey >= 0) gRel.Post(gCvKey); gCvKey = -1; s_prevMap = gJackMapCur; }
     /* BETA (2026-10-23, "sometimes playing the last note"): the gate's sample-and-hold —
      * the key is read on the first poll from the edge on which J4 has stopped moving
      * (at once when it was already still, at most kSettleMax ms later). One for
@@ -1721,7 +1744,7 @@ static void OnPoll(uint32_t /*t_ms*/)
         const bool held = hw.cv[3].Volts() > 2.5f;
         /* SAMPLE: the gate's falling edge releases the held key (a no-op for one-shot voices);
          * BETA: a fall while the edge waits for J4 releases once the call is made, below */
-        if(gClkEdge.JustFell(3u) && gCvKey >= 0 && !s_settle.Waiting() && !fire) gRelKey = gCvKey;
+        if(gClkEdge.JustFell(3u) && gCvKey >= 0 && !s_settle.Waiting() && !fire) gRel.Post(gCvKey);
         const int st = bb::keys::StyleOf(hw.cv[kVoiceGateChan].Volts(), s_lastStyle);
         gJ5Style = bb::keys::StyleByte(st);
         /* RECORD: J5 style 7 = Record (armed: every key held records into
@@ -1754,8 +1777,8 @@ static void OnPoll(uint32_t /*t_ms*/)
             else if(engine.nSlices > 0)
             {
                 if(rose) gCvKey = j4key;
-                CallKey(gCvKey, st);   /* a re-strike calls the held key in the new style */
-                if(rose && s_settle.FellPending()) gRelKey = gCvKey;   /* BETA: a trigger shorter than the settle */
+                CallKey(gCvKey, st, rose && s_settle.FellPending());   /* a re-strike calls the held key in the new style; BETA: a trigger shorter
+                                                                         * than the settle releases with the call (after it, in the same block) */
             }
         }
     }
@@ -1763,11 +1786,10 @@ static void OnPoll(uint32_t /*t_ms*/)
     else
     {
         gJ5Style = 255u;
-        if(gClkEdge.JustFell(kVoiceGateChan) && gCvKey >= 0 && engine.KeyHeld(gCvKey, gKeyPlays.sel == 1) && !s_settle.Waiting() && !fire) gRelKey = gCvKey;   /* held only: no release events for one-shots in Play's loop (KEYP: the key's own Plays) */
+        if(gClkEdge.JustFell(kVoiceGateChan) && gCvKey >= 0 && engine.KeyNeedsRelease(gCvKey, gKeyPlays.sel == 1) && !s_settle.Waiting() && !fire) gRel.Post(gCvKey);   /* held only: no release events for one-shots in Play's loop (KEYP: the key's own Plays, or what it still holds) */
         if(fire && engine.nSlices > 0)   /* BETA: the settled edge */
         {
-            gCvKey = j4key; CallKey(j4key, 0);
-            if(s_settle.FellPending() && engine.KeyHeld(gCvKey, gKeyPlays.sel == 1)) gRelKey = gCvKey;
+            gCvKey = j4key; CallKey(j4key, 0, s_settle.FellPending() && engine.KeyHeld(j4key, gKeyPlays.sel == 1));   /* a short trigger: released after its call */
         }
     }
     /* Gate CV writes — control thread (I²C-safe), on CHANGE only so J6's
@@ -2653,11 +2675,33 @@ static bool WritePresetBackup(uint8_t slot)
     }
     return ok;
 }
+/* START: a preset saved while the grammar is Pads only because Start In = Sampler put it there at boot (no grammar
+ * chosen since) keeps the beat it came with — gLastDrum — not Pads: otherwise the first save in the sampler state
+ * turns the preset's beat into silent Pads for good (▶ in Pads would then bring back Classic, As saved would boot
+ * into Pads). Only a save of the live state is patched (its Options bytes are the live ones, the grammar byte
+ * Pads); an import of other bytes is left alone. One more flash write of the slot, the stored bytes with one byte
+ * changed. true = patched. */
+static BB_COLD bool PresetKeepsBeat(uint8_t slot)   /* once per preset save: built for size */
+{
+    if(!gPadsByBoot || gGrammar.mode != 6u) return false;
+    uint8_t stored[Options::kBytes], live[Options::kBytes];
+    if(!ReadSlotComponent(slot, &gOptions, stored, sizeof stored)) return false;
+    gOptions.Serialize(live);
+    if(stored[5] != 6u || memcmp(stored, live, sizeof live) != 0) return false;
+    uint32_t off = 0;
+    for(uint8_t i = 0; i < presets.NumManaged() && presets.ManagedAt(i) != &gOptions; i++) off += (uint32_t)presets.ManagedAt(i)->SerializedSize();
+    static_assert(sizeof gSetJson >= alchemy::kPresetBlobCapacity, "the whole slot fits the JSON scratch");
+    uint8_t* blob = reinterpret_cast<uint8_t*>(gSetJson);
+    uint32_t schema = 0; uint16_t total = 0;
+    if(presets.ReadSlotBytes(slot, 0, blob, (uint16_t)alchemy::kPresetBlobCapacity, &schema, &total) != (int32_t)total || off + 5u >= total) return false;
+    blob[off + 5u] = gLastDrum;
+    return presets.WriteSlotRaw(slot, schema, blob, total);
+}
 /* Every preset save — the Settings gesture, a host PRESET_SAVE, an import —
  * moves the slot's flash sequence; the poll (4 Hz, two header reads per
  * slot) sees it and writes the backup. A slot erased loses its backup too,
  * or the next boot would resurrect it. */
-static void ServicePresetBackup()
+static BB_COLD void ServicePresetBackup()   /* 4 Hz, out of line: built for size */
 {
     const uint32_t now = daisy::System::GetNow();
     if((uint32_t)(now - gPresetPollMs) < 250u) return;
@@ -2669,6 +2713,7 @@ static void ServicePresetBackup()
         if(seq == gPresetSeq[s]) continue;
         const bool wasValid = gPresetSeq[s] != 0u;
         gPresetSeq[s] = seq;
+        if(seq && in.schema_match && PresetKeepsBeat(s)) { const Presets::SlotInfo again = presets.InfoFor(s); gPresetSeq[s] = again.valid ? again.seq + 1u : 0u; }   /* START */
         if(seq) { if(in.schema_match) WritePresetBackup(s); }
         else if(wasValid)
         {
@@ -2813,6 +2858,7 @@ static void ServiceSets()
         bb::KeyParam kp[bb::Engine::kKeys];
         bb::KeyParamsFromSet(*gSet, kp);
         engine.SetKeyParams(kp);
+        gPadsFollowReq = false;   /* the file's key map is what it says: entering Pads with this load (a sampler boot, a set saved in Pads) does not re-map it to the markers */
     }
     if(gSetReq && !gLoadReq && !gApply && !gReapply && !gTakeActive && !gSetState && !PadBusy() /* PADS */)
     {
@@ -3227,11 +3273,12 @@ static uint8_t EditToStatus(bb::EditStatus s)
     }
 }
 /* Nothing may be edited while a take is in flight (the tail's recState ≠ 0), a set op runs or waits,
- * a material swap is pending, or a request is still in the slot. */
+ * a material swap is pending, a loaded set's commit (its markers, key map and settings) has not run yet, or a
+ * request is still in the slot. */
 static bool EditBusy()
 {
     const bool rec = gKeyTake || gTakeActive || gKeyArm || gRecord.sel == 1 || engine.recArmed || engine.recPending;
-    return rec || gSetState || gSetReq || gLoadReq || gApply || gReapply || gEditPend
+    return rec || gSetState || gSetReq || gLoadReq || gApply || gReapply || gSetPendCommit /* a load's key map and settings not yet in */ || gEditPend
         || gPadState >= bb::kPadCommitting || gPadReq;   /* PADS: a drop's commit posts its own edit; receiving is no bar */
 }
 /* Post one request and wait for the audio thread's answer — by the clock, not by iterations, yielding
@@ -3308,7 +3355,6 @@ static void PadsFollow(bool quiet)
     if(quiet) r.flags = bb::EditReq::kQuiet;
     PostEdit(r, nullptr);
 }
-static volatile bool gPadsFollowReq = false;   /* the grammar became Pads: follow at the next idle main-loop turn */
 /* AUTOSLICE: the grey markers become the first k onsets of a seeded draw
  * (bb::AutoSliceOrder: Efraimidis–Spirakis, weighted by OnsetStrength — the
  * FROM_ONSETS proxy, the salience of the grid slice the onset falls in), each
@@ -3932,6 +3978,7 @@ struct StateExt : hostlink::IHostlinkExtension
     }
     void Handle(const hostlink::ParsedFrame& f, hostlink::FrameWriter& w, uint32_t) override
     {
+        gHostSeenMs = daisy::System::GetNow();   /* the page is there (ServicePadHolds) */
         switch(f.type)
         {
             case 0x60u:
@@ -4163,8 +4210,8 @@ struct StateExt : hostlink::IHostlinkExtension
                     {
                         /* BETA: PLAY_KEY(u8 key 0..23, u8 down 1 / up 0) — the key as a CV note would play it
                          * (plain style, Options → Key Plays honoured), on any grammar and jack map; an up
-                         * releases a held key (a no-op for one-shot). The call / release slots are the jacks'
-                         * too: wait ≤ 2 ms (yielding to the clock) for a pending one to drain. */
+                         * releases a held key (a no-op for one-shot). The call slot is the jacks' too: a down waits
+                         * ≤ 2 ms (yielding to the clock) for a pending call to drain; an up joins the release set. */
                         if(f.len < 3 || f.body[1] >= bb::Engine::kKeys || f.body[2] > 1u) { w.U8(2u); return; }
                         if(!engine.buf || engine.nSlices < 1) { w.U8(3u); return; }
                         const uint32_t t0 = TickNow();
@@ -4172,11 +4219,16 @@ struct StateExt : hostlink::IHostlinkExtension
                         {
                             while(gCallReq && (TickNow() - t0) < 2000u * gTicksPerUs) bb::Yield();
                             CallKey(f.body[1], 0);
+                            gPadHeld |= 1u << f.body[1];   /* the page holds it until its up (or the watchdog) */
                         }
-                        else if(engine.KeyHeld(f.body[1], gKeyPlays.sel == 1))   /* KEYP: the key's own Plays */
+                        else
                         {
-                            while(gRelKey >= 0 && (TickNow() - t0) < 2000u * gTicksPerUs) bb::Yield();
-                            gRelKey = f.body[1];
+                            gPadHeld &= ~(1u << f.body[1]);
+                            if(engine.KeyNeedsRelease(f.body[1], gKeyPlays.sel == 1))   /* KEYP: the key's own Plays, or what it still holds */
+                            {
+                                while(gCallReq && gCallKey == f.body[1] && (TickNow() - t0) < 2000u * gTicksPerUs) bb::Yield();   /* its own call first: releases run before calls */
+                                gRel.Post(f.body[1]);   /* queued beside any other key's release: none is lost */
+                            }
                         }
                         break;
                     }
@@ -4469,7 +4521,7 @@ int main()
      * does. The preset itself is not touched: a preset load brings its grammar back; ▶ / B1 held starts the
      * preset's beat on the beat (the playhead ran on underneath). */
     if(gGrammar.mode != 6u) gLastDrum = gGrammar.mode;   /* START: the boot preset's beat, for ▶ in Pads */
-    if(gStartIn.sel == 0u) { gGrammar.mode = 6u; gGrammar.dirty = true; engine.muted = true; }
+    if(gStartIn.sel == 0u) { gPadsByBoot = gGrammar.mode != 6u; gGrammar.mode = 6u; gGrammar.dirty = true; engine.muted = true; }
 
     hw.StartAudio(AudioCb);
 
@@ -4572,7 +4624,7 @@ int main()
         if(gGrammar.dirty && !gPendReroll)
         {
             gGrammar.dirty     = false;
-            if(gGrammar.mode != 6u) gLastDrum = gGrammar.mode;   /* START: ▶ in Pads comes back to this */
+            if(gGrammar.mode != 6u) { gLastDrum = gGrammar.mode; gPadsByBoot = false; }   /* START: ▶ in Pads comes back to this; a grammar chosen since the boot */
             engine.patternMode = gGrammar.mode;
             engine.restSustain = (gGrammar.mode == 2 || gGrammar.mode == 3) && gRests.sel == 0;   /* Grids/Euclid rests continue the break */
             gPendReroll        = true;

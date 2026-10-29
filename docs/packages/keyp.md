@@ -74,14 +74,18 @@ same planes keeps them; a set brings its own back.
   the Brain map's gate fall and PLAY_KEY's up.
 - **Loop** — held, the key's own entry looping (the tail mechanism: loop
   forward over `[start, end − 2 − (rate + 2))`, the wrap bridged by the
-  click compensator) until the release, which fades it with the normal
-  choke geometry, forward from wherever it is, never past the entry's end.
+  click compensator) until the release, which fades it over the release's
+  full length (the choke's, counted in output samples) while it goes on
+  looping — a release next to the loop point is never cut short by the entry's
+  end.
   **Reversed** (J5's reverse style, or a looper event recorded reversed) it
   loops **backward**: from the entry's top down to `start + (rate + 2)`, then
   back up to the top (`Voice::kTailBack`, the same click bridge — the test's
   worst sample-to-sample step at the seam is 0.022, the tone's own slope); the
-  release turns it forward and fades it the same way. Another key's hit or a
-  step never chokes it (`WouldChoke` is false for a held loop). An entry too
+  release fades it the same way, still looping backward. Another key's hit or a
+  step never chokes it (`WouldChoke` is false for a held loop); the same key
+  struck again while it loops (J5's restrike, a looper replay) fades its own
+  previous loop under the new one — one loop per key, never two stacked. An entry too
   short for its rate's loop (a grid slice under ~100 samples at 16×) plays as
   plain Held.
 - **Ratchet** — held, the entry starting again from its start every period:
@@ -96,7 +100,8 @@ same planes keeps them; a set brings its own back.
   block-accurate: the countdown carries the remainder, so the period is exact
   on average and each hit lands at most one 24-sample block (0.5 ms) late.
   It stops on the release (the gate's fall, the pad's up, the looper's
-  release event) or when the key leaves the mode (an edit or its undo). Each
+  release event), when the key leaves the mode (an edit or its undo), or when the key
+  plays something else (any re-point — SET_KEY, a swap, a key map, a spread, a drop into its pad). Each
   hit counts as a call (J7's hit trigger, the gates).
   - **With no gate to go by** — a looper replay of an event that was recorded
     without a hold (e.g. played while the key was One-shot, the key set to
