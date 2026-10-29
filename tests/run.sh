@@ -31,7 +31,10 @@
 #                     untouched; a looper replay follows the key), Follow /
 #                     One-shot / Held / Loop, the edit op and its journal (a
 #                     drag = one step), the set JSON (written only when set,
-#                     old / odd files) and a round trip (ASan/UBSan).
+#                     old / odd files) and a round trip; ENV: the amp
+#                     envelope (times, shape, no click, one-shots, Loop,
+#                     Ratchet, the steps untouched) and choke groups (the cut
+#                     within the choke time, never the key itself) (ASan/UBSan).
 # 7. scope_check    — SCOPE package: request parsing and clamps, the trigger
 #                     (crossing, hysteresis, ring age), channel alignment,
 #                     plain / peak decimation, at-pos frames, the old-mode

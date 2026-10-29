@@ -70,15 +70,21 @@ struct SetSlice
 /* KEYP: one key's settings as the file holds them — "keyp":[{"key":3,"gain":-6.5,"cents":700,"plays":2}, …]:
  * gain in dB (½ dB steps, −24 … +6), cents ±2400, plays 0 follow the option · 1 one-shot · 2 held · 3 loop ·
  * 4 ratchet, and "rat" (only when not 0) the ratchet's rate: 0 the whole entry · 1 ½ · 2 ¼ · 3 ⅛ of it · 4 an 8th ·
- * 5 a 16th · 6 a 32nd at the tempo. A key absent from the list is neutral. */
+ * 5 a 16th · 6 a 32nd at the tempo. ENV, each only when not 0: "atk" / "dec" / "rel" ms (≤ 2000 / 4000 / 4000),
+ * "sus" the sustain in dB (−60 … 0; −60 = none, the decay falls to silence), "grp" the choke group 1..4. A key
+ * absent from the list is neutral. */
 constexpr int kSetGainMin = -48, kSetGainMax = 12, kSetCentsMax = 2400, kSetPlaysMax = 4, kSetRatMax = 6;   // = bb::KeyParam's
+constexpr int kSetAtkMax = 2000, kSetDecMax = 4000, kSetRelMax = 4000, kSetSusOff = 60, kSetGrpMax = 4;     // ENV: = bb::KeyParam's
 struct SetKeyParam          // all zero = neutral (SetInfo value-initialises the array: one clear, no per-field code)
 {
-    int8_t  gain;           // ½ dB
-    uint8_t plays;
-    int16_t cents;
-    uint8_t rat;            // the ratchet's rate
-    bool Neutral() const { return gain == 0 && plays == 0 && cents == 0 && rat == 0; }
+    int8_t   gain;          // ½ dB
+    uint8_t  plays;
+    int16_t  cents;
+    uint8_t  rat;           // the ratchet's rate
+    uint8_t  grp;           // ENV: the choke group
+    uint16_t atk, dec, rel; // ENV: ms
+    uint8_t  sus;           // ENV: dB below full (60 = none)
+    bool Neutral() const { return gain == 0 && plays == 0 && cents == 0 && rat == 0 && grp == 0 && atk == 0 && dec == 0 && rel == 0 && sus == 0; }
 };
 
 struct SetLoopEvent
@@ -262,6 +268,11 @@ struct SetWriter
             o.KeyInt("cents", p.cents);
             o.KeyInt("plays", p.plays);
             if(p.rat) o.KeyInt("rat", p.rat);
+            if(p.atk) o.KeyInt("atk", p.atk);   /* ENV */
+            if(p.dec) o.KeyInt("dec", p.dec);
+            if(p.sus) o.KeyInt("sus", -(int)p.sus);
+            if(p.rel) o.KeyInt("rel", p.rel);
+            if(p.grp) o.KeyInt("grp", p.grp);
             o.EndObject();
         }
         o.EndArray();
@@ -319,7 +330,7 @@ struct SetReader
     }
 
   private:
-    /* KEYP: "keyp":[{"key","gain","cents","plays"}, …] — a key outside 0..23 (or none) is skipped, values outside the
+    /* KEYP: "keyp":[{"key","gain","cents","plays"[,"rat"]}, …] (ENV: "atk","dec","sus","rel","grp") — a key outside 0..23 (or none) is skipped, values outside the
      * ranges clamped (an unknown plays → follow), unknown fields skipped, a later entry for the same key wins. */
     static BB_COLD bool KeyParams(JsonIn& in, SetInfo& out)
     {
@@ -327,27 +338,36 @@ struct SetReader
         while(in.ArrayMore())
         {
             if(!in.BeginObject()) return false;
-            int k = -1; float g = 0.f; int c = 0, pl = 0, rt = 0;
+            /* the integer fields by name (ENV: the envelope's and the group with them), the gain apart */
+            static const char* const kName[] = {"key", "cents", "plays", "rat", "atk", "dec", "sus", "rel", "grp"};
+            enum { K, C, PL, RT, AT, DC, SU, RL, GP, N };
+            int v[N] = {-1}; float g = 0.f;
             char key[16];
             while(in.NextKey(key, sizeof key))
             {
-                if(!strcmp(key, "key"))        { if(!in.Int(k)) return false; }
-                else if(!strcmp(key, "gain"))  { if(!in.Float(g)) return false; }
-                else if(!strcmp(key, "cents")) { if(!in.Int(c)) return false; }
-                else if(!strcmp(key, "plays")) { if(!in.Int(pl)) return false; }
-                else if(!strcmp(key, "rat"))   { if(!in.Int(rt)) return false; }
+                int i = 0;
+                while(i < N && strcmp(key, kName[i])) i++;
+                if(i < N) { if(!in.Int(v[i])) return false; }
+                else if(!strcmp(key, "gain")) { if(!in.Float(g)) return false; }
                 else if(!in.Skip()) return false;
             }
             if(!in.ok) return false;
-            if(k < 0 || k >= kSetKeys) continue;
+            if(v[K] < 0 || v[K] >= kSetKeys) continue;
             if(!(g == g)) g = 0.f;
             if(g < -1000.f) g = -1000.f; else if(g > 1000.f) g = 1000.f;   // before the cast (no float → int overflow)
             const int h = (int)(g * 2.f + (g < 0.f ? -0.5f : 0.5f));        // dB → ½ dB, rounded half away from zero
-            SetKeyParam& p = out.keyp[k];
-            p.gain  = (int8_t)(h < kSetGainMin ? kSetGainMin : h > kSetGainMax ? kSetGainMax : h);
-            p.cents = (int16_t)(c < -kSetCentsMax ? -kSetCentsMax : c > kSetCentsMax ? kSetCentsMax : c);
-            p.plays = (uint8_t)(pl < 0 || pl > kSetPlaysMax ? 0 : pl);
-            p.rat   = (uint8_t)(rt < 0 || rt > kSetRatMax ? 0 : rt);
+            const auto cl = [](int x, int lo, int hi) { return x < lo ? lo : x > hi ? hi : x; };   // clamped
+            const auto or0 = [](int x, int hi) { return x < 0 || x > hi ? 0 : x; };                // unknown → 0
+            SetKeyParam& p = out.keyp[v[K]];
+            p.gain  = (int8_t)cl(h, kSetGainMin, kSetGainMax);
+            p.cents = (int16_t)cl(v[C], -kSetCentsMax, kSetCentsMax);
+            p.plays = (uint8_t)or0(v[PL], kSetPlaysMax);
+            p.rat   = (uint8_t)or0(v[RT], kSetRatMax);
+            p.atk   = (uint16_t)cl(v[AT], 0, kSetAtkMax);   /* ENV: times and sustain clamped; an unknown group → none */
+            p.dec   = (uint16_t)cl(v[DC], 0, kSetDecMax);
+            p.rel   = (uint16_t)cl(v[RL], 0, kSetRelMax);
+            p.sus   = (uint8_t)-cl(v[SU], -kSetSusOff, 0);
+            p.grp   = (uint8_t)or0(v[GP], kSetGrpMax);
         }
         return in.ok;
     }

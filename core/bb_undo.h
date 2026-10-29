@@ -56,7 +56,7 @@ struct UndoRec
     {
         UndoEntry e[Engine::kMaxTable];   // kEntries: [0, 2) · BETA kSnap: [0, n)
         struct { uint32_t orange[3], hit[3]; int32_t start[Engine::kMaxTable]; } nudge;
-        KeyParam kp[Engine::kKeys];       // KEYP: kKeyP (144 B — inside the union, the record does not grow)
+        KeyParam kp[Engine::kKeys];       // KEYP: kKeyP (ENV: 24 × 14 = 336 B — inside the union, the record does not grow)
     } u;
     // the bytes a record uses: the header, the keys, then what its kind fills
     size_t Bytes() const

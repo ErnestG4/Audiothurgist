@@ -394,6 +394,54 @@ into J6; a tuner on the output if you have one; the page on the Kit tab.
 9. [ ] The ends: spread from C1 (B2 = +23 st) and from B2 (C1 = −23 st) —
        note how the extremes sound (aliasing high up, grain low down) ____.
 
+## 10g. Each key's envelope and choke group (10 min)
+
+`docs/packages/keyp.md` "The amp envelope and choke groups". Nothing of this
+has run on hardware; it needs the **beta-env** firmware (api 2) and its page.
+An open hat on **A♯1** and a closed hat on **B1** (dropped pads, or two hat
+slices of the Amen), a long pad or vocal on **D1**, the page on the Play tab.
+
+1. [ ] Untouched: every key sounds exactly as before (the break, J4, the pads,
+       Play's loop); no new words on the pads. Every pad has a small **⋯** in
+       its bottom-right corner; pressing ⋯ plays **nothing**.
+2. [ ] ⋯ on D1: a sheet opens with D1's settings (on the phone: above the
+       transport, nothing off the side). Plays → **Held**, **Attack** to
+       ~250 ms: hold the D1 pad — it swells in over a quarter second, no
+       click at the start. The pads play while the sheet is open.
+3. [ ] **Release** to ~1 s: let go of D1 — it fades over about a second
+       instead of 5 ms, smoothly (*listen for*: a click when you let go, or
+       a step at the end of the tail). Then from J4 / J6: the same tail when
+       the gate falls.
+4. [ ] **Decay** ~300 ms, **Sustain** −12 dB: hold D1 — the swell, then it
+       settles a clear notch quieter while held; the release from there is
+       shorter (the release is a rate: 60 dB in its time, from full).
+5. [ ] D1 Plays → **Loop**, Release ~2 s: hold, let go — it **keeps looping**
+       while it fades; play other keys and run the pattern meanwhile: the
+       tail is not cut. Plays → **Ratchet** ⅛ with the same release: while
+       held the hits stay crisp (no smear building up); the last hit rings
+       out for the release when you let go.
+6. [ ] ⋯ on A♯1, **One-shot**, Release 1 s: it plays exactly as before
+       (Release dims on the row — a one-shot has no "up"). Then **Decay**
+       150 ms, **Sustain** all the way down (off): A♯1 becomes a short, tight
+       hat — the drum sampler's decay. Set it back to a long open hat.
+7. [ ] **Choke**: A♯1 and B1 both in **group 1** (A♯1 back to a long open
+       hat). Hit A♯1, then B1 while it rings: the open hat stops at once
+       (*listen for*: a clean cut, no click). Hit A♯1 twice fast: both ring
+       (a key never chokes itself). Put B1 in group 2: no more cut.
+8. [ ] Choke against a held / looping / releasing key: D1 Held with a long
+       release in group 1 — B1 cuts it held, and cuts its tail after you let
+       go. The pattern's steps (Classic, running) never cut a grouped key and
+       are never cut by one.
+9. [ ] **Spread** a key with an envelope and a group (Kit tab): every key
+       takes both — the melody on J4 now plays **monophonic** (each note cuts
+       the last) with the root's attack and release. One Undo puts it back.
+10. [ ] Esc / ✕ / the Kit tab close the sheet; the Kit's row shows the same
+        values for the selected key. Save the set, change everything, load it
+        back: every envelope and group returns. A loose break: all neutral.
+11. [ ] CPU meter: eight held keys with envelopes (attack and release set)
+        against the same eight neutral, loadAvg / loadMax ____ / ____
+        (expected: within a few ‰).
+
 ## 11. Scope (3 min)
 
 - [ ] Scope tab: Out L/R trace the beat (this tab was hidden by a duplicate
@@ -429,6 +477,16 @@ into J6; a tuner on the output if you have one; the page on the Kit tab.
 10. **Spread in Pads with markers**: like a hand-made key map, it stands until
     the markers next change — then the keys follow the markers again (their
     tunes stay). Wanted?
+11. **A one-shot's Release** (§10g.6) shapes nothing — a one-shot has no up;
+    shorten it with Decay + Sustain off. Or should Release fade a one-shot's
+    natural end instead?
+12. **Release is a rate** (60 dB in its time, from full): from a −12 dB
+    sustain a 500 ms release is quiet at 400 ms. Or a time from wherever it
+    starts?
+13. **The ⋯ corner** (28 px, bottom right of each pad) — big enough on the
+    phone? No long-press (on a pad it is a held note).
+14. **Choke groups and the steps**: steps neither cut nor get cut. Should a
+    step of a hat slice choke a grouped open hat on the pads?
 
 ## Known and not to be reported
 
