@@ -422,7 +422,8 @@ fake's table not moved 14, the page never asking 3, a save not packed 2.
 journal walk, the swap and the voice pass, the map, `PadReclaim` /
 `ServiceRoom`; all of `bb_reclaim.h` `BB_COLD`, one `SetFromEngine` body, one
 journal walk and one voice pass shared by both modes), DTCM +8 B, SDRAM
-+6 240 B (two plans and two maps, NOLOAD PODs; `sdramcheck` clean).
++6 240 B (two plans and two maps, NOLOAD PODs; `sdramcheck` clean). Merged onto beta 9e82e0e (the review fixes, beta-env): SRAM 473 184 →
+476 544 B (+3 360, 96.27 → 96.95 %), DTCM +8 B, SDRAM +6 240 B.
 
 ## Start In — the module powers up as a sampler (2026-10-25, branch `beta-sampler`; an Option since `beta-clean`)
 
