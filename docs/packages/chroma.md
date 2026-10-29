@@ -22,7 +22,8 @@ settings row, acting on the selected key, the *root* k:
 
 - every key j ≠ k plays **k's entry** (the same sample, the same span);
 - j's tune = **(j − k) × 100 cents + k's own cents**;
-- j takes **k's gain and Plays** (and, in Ratchet, its rate);
+- j takes **k's gain and Plays** (and, in Ratchet, its rate; since ENV, its
+  envelope and choke group too — a grouped root makes a monophonic spread);
 - **k itself is untouched** — it stays the reference.
 
 So with a sample on G1, C1 plays it 7 semitones down and B2 16 up, and J4's

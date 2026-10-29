@@ -241,6 +241,11 @@ BB_COLD inline bool SetFromEngine(const Engine& e, const Looper& lp, SetInfo& s,
         s.keyp[k].plays = e.keyp[k].plays;
         s.keyp[k].cents = e.keyp[k].cents;
         s.keyp[k].rat   = e.keyp[k].rat;
+        s.keyp[k].grp   = e.keyp[k].grp;   /* ENV */
+        s.keyp[k].atk   = e.keyp[k].atk;
+        s.keyp[k].dec   = e.keyp[k].dec;
+        s.keyp[k].rel   = e.keyp[k].rel;
+        s.keyp[k].sus   = e.keyp[k].sus;
     }
     s.nLooper = 0;
     for(int i = 0; i < lp.n && s.nLooper < kSetMaxLooper; i++)
@@ -404,12 +409,14 @@ inline void KeyParamsFromSet(const SetInfo& s, KeyParam* out)
 {
     for(int k = 0; k < Engine::kKeys; k++)
     {
-        const SetKeyParam p = k < kSetKeys ? s.keyp[k] : SetKeyParam{0, 0, 0, 0};
-        out[k] = {p.gain, p.plays, p.cents, p.rat, 0};
+        const SetKeyParam p = k < kSetKeys ? s.keyp[k] : SetKeyParam{};
+        out[k] = {p.gain, p.plays, p.cents, p.rat, p.grp, p.atk, p.dec, p.rel, p.sus, 0};   /* ENV: the envelope and group with them */
     }
 }
 static_assert(kSetGainMin == KeyParam::kGainMin && kSetGainMax == KeyParam::kGainMax && kSetCentsMax == KeyParam::kCentsMax
-              && kSetPlaysMax == KeyParam::kRatchet && kSetRatMax == KeyParam::kRatMax && kSetKeys == Engine::kKeys, "the set's key settings are the engine's");
+              && kSetPlaysMax == KeyParam::kRatchet && kSetRatMax == KeyParam::kRatMax && kSetKeys == Engine::kKeys
+              && kSetAtkMax == KeyParam::kAtkMax && kSetDecMax == KeyParam::kDecMax && kSetRelMax == KeyParam::kRelMax
+              && kSetSusOff == KeyParam::kSusOff && kSetGrpMax == KeyParam::kGrpMax, "the set's key settings are the engine's");
 
 // The set's events into a (cleared) looper: Add, then Seal, so the first
 // live overdub after the load is its own undo unit. Returns the count added

@@ -1042,17 +1042,18 @@ await link.start();
   const keys = () => HL.fetchKeyParams(l);
   const err = async f => { try { await f(); return 'ok'; } catch (e) { return e.message; } };
   let k = await keys();
-  check('keyp: GET_KEYS: 24 keys, 5 bytes each, every one neutral', k.length === 24 && k.every(HL.keypNeutral) && (await l.request(HL.CMD.keys, new Uint8Array(0))).length === 2 + 24 * 5);
+  check('keyp: GET_KEYS: 24 keys, 13 bytes each (ENV), every one neutral', k.length === 24 && k.every(HL.keypNeutral) && (await l.request(HL.CMD.keys, new Uint8Array(0))).length === 2 + 24 * 13);
   let s0 = await state();
   let r = await HL.keyParams(l, 3, { gain: -12, cents: 700, plays: 2 });
   k = await keys(); let s = await state();
   check('KEY_PARAMS: OK with the new tableGen, read back exactly, one undo step', r.ok && r.tableGen === s.tableGen && r.tableGen !== s0.tableGen && k[3].gain === -12 && k[3].cents === 700 && k[3].plays === 2 && s.undoDepth === s0.undoDepth + 1);
   check('the words: "−6 dB · +7 st · held"; a ratchet says its rate', HL.keypText(k[3]) === '−6 dB · +7 st · held' && HL.keypText({ gain: 0, cents: 0, plays: 4, rat: 5 }) === 'ratchet 1/16' && HL.keypText(k[4]) === '');
   const raw = async b => (await HL.editOp(l, HL.ACT.keyParams, b)).status;
-  const bad = [[24, 0, 0, 0, 0, 0, 0], [3, 13, 0, 0, 0, 0, 0], [3, 0xCF, 0, 0, 0, 0, 0], [3, 0, 0x61, 0x09, 0, 0, 0], [3, 0, 0, 0, 5, 0, 0], [3, 0, 0, 0, 4, 7, 0], [3, 0, 0, 0, 0, 0, 2]];
+  const E8 = [0, 0, 0, 0, 0, 0, 0, 0];   /* ENV: the envelope and group, neutral */
+  const bad = [[24, 0, 0, 0, 0, 0, ...E8, 0], [3, 13, 0, 0, 0, 0, ...E8, 0], [3, 0xCF, 0, 0, 0, 0, ...E8, 0], [3, 0, 0x61, 0x09, 0, 0, ...E8, 0], [3, 0, 0, 0, 5, 0, ...E8, 0], [3, 0, 0, 0, 4, 7, ...E8, 0], [3, 0, 0, 0, 0, 0, ...E8, 2]];
   const st2 = []; for (const b of bad) st2.push(await raw(b));
   check('KEY_PARAMS: key 24, gain +6.5 / −24.5 dB, 24.01 st, plays 5, ratchet rate 7, unknown flags → BAD_ARGS, nothing written', st2.every(x => x === 2) && (await keys())[3].gain === -12, JSON.stringify(st2));
-  check('KEY_PARAMS short (no flags byte) → BAD_ARGS', await raw([3, 0, 0, 0, 0, 0]) === 2);
+  check('KEY_PARAMS short (no flags byte) → BAD_ARGS', await raw([3, 0, 0, 0, 0, 0, ...E8]) === 2);
   check('a stale gen → BAD_STATE', (await HL.keyParams(l, 3, { gain: -2 }, false, ((await state()).tableGen % 255) + 1)).status === 3);
   r = await HL.editUndo(l); k = await keys();
   check('Undo: key 3 neutral again', r.ok && HL.keypNeutral(k[3]));
@@ -1131,7 +1132,68 @@ await link.start();
   await l.close();
 }
 
-/* ── 7g. RECLAIM (0x68 op 4): the tail's bytes from 315 and padReclaimFor, then over the fake module — pads dropped (one
+/* ── 7g. ENV (ACTION 37 + 0x69, api 2): each key's amp envelope and choke group — KEY_PARAMS carrying them, read back
+ *        13 bytes a key, the refusals, the words, one undo step per edit and one per drag, a spread copying them, a set
+ *        carrying them; the fake's sound: a held key's Release after its up, a one-shot's Decay to no sustain, a key in a
+ *        group cutting the others in it (never itself) ── */
+{
+  const d = new DEMO.FakeDevice({ latencyMs: 1, kit: true });
+  const l = new HL.Link(new DEMO.FakePort(d)); await l.start();
+  const info = await HL.hello(l), desc = await HL.getDescriptor(l, info);
+  const state = async () => HL.parseState(await l.request(HL.CMD.state));
+  const keys = () => HL.fetchKeyParams(l);
+  check('env: api 2 on both sides; GET_KEYS 13 bytes a key, every key neutral (no envelope, no group)', HL.API === 2 && HL.apiOf(desc) === 2 && (await l.request(HL.CMD.keys, new Uint8Array(0))).length === 2 + 24 * 13 && (await keys()).every(p => HL.keypNeutral(p) && p.atk === 0 && p.grp === 0));
+  let s0 = await state();
+  let r = await HL.keyParams(l, 3, { gain: -4, plays: 2, atk: 20, dec: 300, sus: 12, rel: 1200, grp: 2 });
+  let k = await keys(), s = await state();
+  check('KEY_PARAMS with A 20 ms · D 300 ms · S −12 dB · R 1.2 s · choke 2: read back exactly, one undo step', r.ok && k[3].atk === 20 && k[3].dec === 300 && k[3].sus === 12 && k[3].rel === 1200 && k[3].grp === 2 && k[3].gain === -4 && s.undoDepth === s0.undoDepth + 1, JSON.stringify(k[3]));
+  check('the words: "−2 dB · held · A 20 ms · D 300 ms · S −12 dB · R 1.2 s · choke 2"; no sustain says off; Decay alone (full sustain) says nothing',
+    HL.keypText(k[3]) === '−2 dB · held · A 20 ms · D 300 ms · S −12 dB · R 1.2 s · choke 2' && HL.keypText({ plays: 1, dec: 250, sus: 60 }) === 'one-shot · D 250 ms · S off' && HL.keypText({ dec: 250 }) === '' && !HL.keypNeutral({ dec: 250 }), HL.keypText(k[3]));
+  check('the sliders\' curve: 0 → 0, 50 → ⅛ of the max, 100 → the max; and back', HL.envMs(0, 2000) === 0 && HL.envMs(50, 4000) === 500 && HL.envMs(100, 2000) === 2000 && HL.envPos(500, 4000) === 50 && HL.envPos(4000, 4000) === 100 && HL.envPos(0, 2000) === 0);
+  const raw = async b => (await HL.editOp(l, HL.ACT.keyParams, b)).status;
+  const body = (f = {}) => { const v = Object.assign({ key: 3, atk: 0, dec: 0, sus: 0, rel: 0, grp: 0 }, f); return [v.key, 0, 0, 0, 0, 0, v.atk & 0xff, v.atk >> 8, v.dec & 0xff, v.dec >> 8, v.sus, v.rel & 0xff, v.rel >> 8, v.grp, 0]; };
+  const bad = [];
+  for (const f of [{ atk: 2001 }, { dec: 4001 }, { sus: 61 }, { rel: 4001 }, { grp: 5 }]) bad.push(await raw(body(f)));
+  check('KEY_PARAMS: attack 2001 ms, decay 4001 ms, sustain 61 dB down, release 4001 ms, group 5 → BAD_ARGS, nothing written', bad.every(x => x === 2) && (await keys())[3].rel === 1200, JSON.stringify(bad));
+  check('…the far ends (2 s, 4 s, none, 4 s, group 4) → OK', await raw(body({ atk: 2000, dec: 4000, sus: 60, rel: 4000, grp: 4 })) === 0 && (await keys())[3].grp === 4);
+  check('…the old 7-byte body (no envelope) → BAD_ARGS', await raw([3, 0, 0, 0, 0, 0, 0]) === 2);
+  await HL.editUndo(l);
+  check('Undo: the step before (A 20 ms … choke 2) back', (await keys())[3].atk === 20 && (await keys())[3].grp === 2);
+  /* a release drag: one step */
+  s0 = await state();
+  for (let i = 0; i < 10; i++) await HL.keyParams(l, 3, Object.assign({}, k[3], { rel: 100 * (i + 1) }), i > 0);
+  s = await state();
+  check('a release slider drag (10 sends, JOIN after the first): one undo step, the last value', s.undoDepth === s0.undoDepth + 1 && (await keys())[3].rel === 1000);
+  /* the fake's sound: Release after the up, a one-shot's decay, the choke group */
+  await HL.keyParams(l, 3, { plays: 2, rel: 400, grp: 1 });
+  await HL.playKey(l, 3, true); const v3 = d.voice;
+  await HL.playKey(l, 3, false);
+  check('a held key\'s up: it rings on for its 400 ms release', v3 && v3.key === 3 && v3.released && v3.until > Date.now() + 250);
+  await HL.keyParams(l, 7, { plays: 1, grp: 1 });
+  await HL.playKey(l, 7, true);
+  check('…a key of the same group (7) cuts it (5 ms)', v3.choked && v3.until <= Date.now() + 5 && d.voice.key === 7);
+  await HL.keyParams(l, 14, { plays: 1, grp: 2 }); await HL.playKey(l, 14, true); const v14 = d.voice;
+  await HL.playKey(l, 7, true); const v7 = d.voice;
+  await HL.playKey(l, 7, true);
+  check('…another group\'s key rings on; the same key struck again never cuts itself', !v14.choked && v14.until > Date.now() + 100 && !v7.choked);
+  await HL.keyParams(l, 14, { plays: 1, dec: 120, sus: 60 }); await HL.playKey(l, 14, true);
+  check('a one-shot with D 120 ms and no sustain: done at 120 ms, not at its sample\'s end', d.voice.key === 14 && d.voice.until - d.voice.t === 120);
+  /* a spread carries the envelope and the group */
+  await HL.keyParams(l, 3, { gain: 0, plays: 2, atk: 5, dec: 200, sus: 6, rel: 700, grp: 3 });
+  r = await HL.spreadKeys(l, 3); k = await keys();
+  check('SPREAD_KEYS: every key takes the root\'s envelope and group (one monophonic, chromatic instrument)', r.ok && k.every(p => p.atk === 5 && p.dec === 200 && p.sus === 6 && p.rel === 700 && p.grp === 3), JSON.stringify(k[0]));
+  const s1 = await state(); await HL.editUndo(l);
+  check('…one undo step takes it back', (await state()).undoDepth === s1.undoDepth - 1 && (await keys())[0].grp === 0);
+  /* a set carries them */
+  const setOp = async (fn, name) => { const q = (await state()).setSeq; await fn(l, name); for (let i = 0; i < 100; i++) { d.set.t -= 1000; const x = await state(); if (x.setSeq !== q && !x.setState) return x; } return null; };
+  const want = JSON.stringify(await keys());
+  check('Save set', !!(await setOp(HL.saveSet, 'env_kit')));
+  await HL.keyParams(l, 3, {}); await HL.keyParams(l, 7, {});
+  check('Load set: every envelope and group back', !!(await setOp(HL.loadSet, 'env_kit')) && JSON.stringify(await keys()) === want);
+  await l.close();
+}
+
+/* ── 7h. RECLAIM (0x68 op 4): the tail's bytes from 315 and padReclaimFor, then over the fake module — pads dropped (one
  *        stereo), one replaced, one deleted: held, and the part only Undo needs; FREE leaves that part (the history whole),
  *        ALL takes everything and forgets those steps; every key the same samples after, both planes; the steps left
  *        undo; a stale history counts for nothing; a set saved with held memory holds only what plays, and loads back the
@@ -1216,6 +1278,7 @@ await link.start();
   check('…then done: nothing was held, nothing moved', s.pads.result === 0 && s.pads.reclaimed === 0 && keyPrints().split('|')[7] !== '-');
   await l.close();
 }
+
 /* ── 8. EDIT-UI: the pure editor (edit.js) — magnets, clamps, handles, positions, labels, the drop rule, the onset
  *       preview, the audition window, the gesture recogniser — then the Editor driven against the fake module ── */
 const ED = require('./edit.js');
@@ -2133,7 +2196,7 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
   for (const v of [-2, -4, -6, -8, -10, -12]) { G(`$('kp_gain').value = '${v}'`); fireEv(gain, 'input', {}); await sleep(5); }
   fireEv(gain, 'change', {});
   check('the gain dragged to −6 dB: the module has it, sent live (KEY_PARAMS more than once, the later ones with JOIN)',
-    await until(() => G('demoDevice.keyp[1].gain') === -12 && !G('kpBusy')) && G('demoDevice.acts.filter(a => a[0] === 37).length') >= 2 && G('demoDevice.acts.filter(a => a[0] === 37).slice(1).every(a => (a[7] & 1) === 1)'), JSON.stringify(G('demoDevice.acts.filter(a => a[0] === 37)')));
+    await until(() => G('demoDevice.keyp[1].gain') === -12 && !G('kpBusy')) && G('demoDevice.acts.filter(a => a[0] === 37).length') >= 2 && G('demoDevice.acts.filter(a => a[0] === 37).slice(1).every(a => (a[15] & 1) === 1)'), JSON.stringify(G('demoDevice.acts.filter(a => a[0] === 37)')));
   check('…one undo step on the module, one history line ("C♯1 settings: −6 dB"), the cell says it', await until(() => G('st.undoDepth') === d0 + 1) && G("ed.history.list().filter(x => /^C♯1 settings/.test(x.label)).length") === 1
     && G("ed.history.list()[0].label") === 'C♯1 settings: −6 dB' && await until(() => G('keyCells[1].kp.textContent') === '−6 dB'), G("ed.history.list().map(x => x.label).join(' | ')"));
   /* Plays → Ratchet, then its rate */
@@ -2202,7 +2265,174 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
   check('disconnect: the button hidden', G("$('kp_spread').hidden") === true);
 }
-/* ── 9i. RECLAIM, the page: pads dropped and one dropped again — the room line says what is held and a Reclaim button
+/* ── 9i. Review of the beta's page (2026-10-29): races a player can hit on the bench ── */
+{
+  /* KEYP: the row holds what your hand set for 1.5 s; an Undo landing inside that window must still show in the row,
+   * or the next touch (the row is sent whole) writes the undone value straight back */
+  const { D, G } = await loadPage('?demo=keyp');
+  await until(() => G('!!(st && keyp && table && st.bufLen)'));
+  G("showTab('tab_kit')"); G('selectKey(1)'); G('invalidate(D.kit)'); await sleep(80);
+  const gain = G("$('kp_gain')");
+  G("$('kp_gain').value = '-12'"); fireEv(gain, 'input', {}); fireEv(gain, 'change', {});
+  await until(() => !G('kpBusy') && G('keyp[1].gain') === -12);
+  fireEv(G("$('ed_undo')"), 'click', {});
+  await until(() => G('keyp && keyp[1].gain') === 0); await sleep(60); G('invalidate(D.kit)'); await sleep(60);
+  check('review: an Undo inside the row\'s hold shows in the row (0 dB again)', G("$('kp_gain').value") === '0' && G("$('kp_gain_v').textContent") === '0 dB', G("$('kp_gain_v').textContent"));
+  G("$('kp_plays').value = '1'"); fireEv(G("$('kp_plays')"), 'change', {});
+  check('review: …and the next touch (Plays → One-shot) does not bring the undone −6 dB back', await until(() => G('demoDevice.keyp[1].plays') === 1 && !G('kpBusy')) && G('demoDevice.keyp[1].gain') === 0, 'module gain ' + G('demoDevice.keyp[1].gain'));
+  /* KEYP: a change for another key made while this key's send is in flight is sent too (it was dropped) */
+  await until(() => !G('kpBusy') && !G('kpWant'));
+  G('selectKey(1)'); G('invalidate(D.kit)'); await sleep(60);
+  G("$('kp_plays').value = '2'"); fireEv(G("$('kp_plays')"), 'change', {});
+  G('selectKey(2)'); G("$('kp_plays').value = '3'"); fireEv(G("$('kp_plays')"), 'change', {});
+  check('review: C♯1 → Held, then D1 → Loop before C♯1\'s reply: both reach the module', await until(() => G('demoDevice.keyp[2].plays') === 3) && G('demoDevice.keyp[1].plays') === 2, 'C♯1 ' + G('demoDevice.keyp[1].plays') + ', D1 ' + G('demoDevice.keyp[2].plays'));
+  /* KEYP: Undo pressed straight after a drag is released — the drag's queued last value must not go out after it */
+  await until(() => !G('kpBusy') && !G('kpWant') && !G('ed.busy'));
+  G('selectKey(4)'); G('invalidate(D.kit)'); await sleep(60);
+  { const gain = G("$('kp_gain')");
+    for (const v of [-2, -4, -6]) { G(`$('kp_gain').value = '${v}'`); fireEv(gain, 'input', {}); }
+    fireEv(gain, 'change', {}); G("$('ed_undo').onclick()"); }
+  await until(() => !G('kpBusy') && !G('kpWant') && !G('ed.busy')); await sleep(300);
+  check('review: Undo right after a gain drag — the drag is undone, nothing of it sent after the Undo', G('demoDevice.keyp[4].gain') === 0, 'E1 gain ' + G('demoDevice.keyp[4].gain'));
+  /* KEYP: a drag that ends where it began fires no change: the pointer's up still ends the drag, the row follows the module again */
+  await until(() => !G('kpBusy') && !G('kpWant') && !G('ed.busy'));
+  G('selectKey(5)'); G('invalidate(D.kit)'); await sleep(60);
+  { const gain = G("$('kp_gain')");
+    for (const v of ['-4', '0']) { G(`$('kp_gain').value = '${v}'`); fireEv(gain, 'input', {}); await sleep(20); }
+    fireEv(gain, 'pointerup', {}); }
+  await until(() => !G('kpBusy') && !G('kpWant')); await sleep(60);
+  check('review: a drag back to its start (no change event) ends on the pointer\'s up', G('kpDrag') === false);
+  { const k = G("$('as_k')"), v0 = k.value;
+    for (const v of ['2', v0]) { G(`$('as_k').value = '${v}'`); fireEv(k, 'input', {}); await sleep(20); }
+    fireEv(k, 'pointerup', {}); }
+  await until(() => !G('asBusy') && G('asWant') == null); await sleep(60);
+  check('review: …and so does the autoslice count\'s', G('asDrag') === false && G('asTouched') === false);
+  /* the tune readout: +3 st then −50 cents reads +2.5 st, as the cell does, and the row keeps 3 st and −50 c */
+  G("$('kp_semi').value = '3'"); fireEv(G("$('kp_semi')"), 'input', {}); fireEv(G("$('kp_semi')"), 'change', {});
+  await until(() => !G('kpBusy'));
+  G("$('kp_cents').value = '-50'"); fireEv(G("$('kp_cents')"), 'change', {});
+  await until(() => G('demoDevice.keyp[5].cents') === 250 && !G('kpBusy') && G('keyp[5].cents') === 250);
+  G('kpTouch = -Infinity'); G('invalidate(D.kit)'); await sleep(60);
+  check('review: +3 st −50 c reads "+2.5 st" beside the slider (the cell\'s words), the row 3 st and −50 c', G("$('kp_semi_v').textContent") === '+2.5 st' && G("$('kp_semi').value") === '3' && G("$('kp_cents').value") === '-50' && /\+2\.5 st/.test(G('keyCells[5].kp.textContent')),
+    G("$('kp_semi_v').textContent") + ' / ' + G("$('kp_semi').value") + ' / ' + G("$('kp_cents').value"));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+}
+{
+  /* connect: a descriptor that does not come through (one lost reply) is not "the wrong firmware — flash the .bin" */
+  const { G } = await loadPage('');
+  G(`(() => { const d = new DEMO.FakeDevice({ latencyMs: 6, startIn: 0 }), h = d.handle.bind(d); let n = 0;
+    d.handle = (t, b) => { if (t === 0x02 && n++ === 1) return null; return h(t, b); };
+    demoDevice = d; demoPort = new DEMO.FakePort(d); window.__p = connectPort(demoPort, true); })()`);
+  await G('__p').catch(() => {}); await sleep(50);
+  check('review: a lost descriptor reply says connect again, not flash the firmware', G('link') === null && /connect again/.test(G("$('notice').textContent")) && !/Flash/.test(G("$('notice').textContent")), G("$('notice').textContent"));
+}
+{
+  /* PADS: a drop in flight when the module goes belongs to the old session — after a reconnect it neither shows its
+   * failure on the new one's pads nor (still decoding) talks to the new module */
+  const { G } = await loadPage('?demo=sampler');
+  await until(() => G('!!(st && table)')); await sleep(100);
+  G(`window.__slow = 0; cardDecode = async f => { if (__slow) await new Promise(r => setTimeout(r, __slow)); const n = /long/.test(f.name) ? 240000 : 48000;
+    return { numberOfChannels: 1, sampleRate: 48000, length: n, getChannelData: () => new Float32Array(n).map((_, i) => 0.3 * Math.sin(i / 5)) }; }`);
+  const drop = name => fireEv(G('padEls[4].el'), 'drop', { dataTransfer: { files: [{ name, size: 10 }], types: ['Files'] } });
+  drop('long.wav');
+  await until(() => G("padJobs.length === 1 && padJobs[0].state === 'sending' && padJobs[0].frac > 0.2"), 15000);
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()'); await sleep(50);
+  G("connectDemo('sampler')"); await until(() => G('!!(st && table)')); await sleep(300);
+  check('review: a drop cut off by a disconnect leaves nothing on the next session\'s pads (no stale "✕", no message)', G('padJob[4]') === null && G("$('pd_msg').hidden") === true && !/not loaded/.test(G('padEls[4].sub.textContent')),
+    G('padJob[4] && padJob[4].text') + ' / ' + G("$('pd_msg').textContent") + ' / ' + G('padEls[4].sub.textContent'));
+  G('__slow = 1000'); drop('short.wav');
+  await sleep(100);
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+  G("connectDemo('sampler')"); await until(() => G('!!(st && table)'));
+  G(`demoDevice.padOps = []; (() => { const d = demoDevice, h = d.handle.bind(d); d.handle = (t, b) => { if (t === 0x68) d.padOps.push(b[0]); return h(t, b); }; })()`);
+  await sleep(1600);
+  check('review: …and a drop still decoding then sends nothing to the new module', G('demoDevice.padOps.length') === 0 && G('padJob[4]') === null, JSON.stringify(G('demoDevice.padOps')));
+  /* the Disconnect button while a drop uploads: the module is told (ABORT) before the port closes — it does not sit out its 5 s */
+  await until(() => !G('padJobs.some(j => j.state === "sending" || j.state === "decoding")'));
+  G('__slow = 0'); drop('long.wav');
+  await until(() => G("padJobs.some(j => j.state === 'sending' && j.frac > 0.2)"), 15000);
+  G(`window.__old = demoDevice; demoDevice.padOps = []; (() => { const d = demoDevice, h = d.handle.bind(d); d.handle = (t, b) => { if (t === 0x68) d.padOps.push(b[0]); return h(t, b); }; })()`);
+  await G('connect()');
+  check('review: Disconnect mid-drop sends the drop\'s ABORT first', G('link') === null && G('__old.padOps').includes(HL.PADS.abort), JSON.stringify(G('__old.padOps').slice(-4)));
+  G("connectDemo('sampler')"); await until(() => G('!!(st && table)'));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+}
+{
+  /* CHROMA: Spread pressed twice — the second (queued) finds the spread in place: one step on the module, one line */
+  const { G } = await loadPage('?demo=keyp');
+  await until(() => G('!!(st && keyp && table && st.bufLen)'));
+  G("showTab('tab_kit')"); G('selectKey(7)'); G('invalidate(D.kit)'); await sleep(80);
+  const d0 = G('st.undoDepth');
+  fireEv(G("$('kp_spread')"), 'click', { clientX: 10, clientY: 10 }); fireEv(G("$('kp_spread')"), 'click', { clientX: 10, clientY: 10 });
+  await sleep(100); await until(() => !G('ed.busy')); await sleep(400);
+  check('review: Spread pressed twice — one step on the module, one history line', G('st.undoDepth') === d0 + 1 && G("ed.history.list().filter(x => /spread chromatically/.test(x.label)).length") === 1,
+    'depth ' + d0 + ' → ' + G('st.undoDepth') + ' · ' + G("ed.history.list().map(x => x.label).join(' | ')"));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+}
+/* ── 9j. ENV, the page: the settings row's envelope line in the Kit (a release drag sent live, one undo step and one
+ *        history line; sustain, decay, the choke group; a gain edit leaving an odd release exactly as it was; the dims),
+ *        then the same row from a Play pad's ⋯ — the sheet for that key (the row moved, not copied), an attack set there,
+ *        the pads still playing under it, ⋯ on another pad retargeting it, Esc / ✕ / another tab putting the row back ── */
+{
+  const { D, G } = await loadPage('?demo=keyp');
+  check('env page: connected, the row with its envelope line under the keys', await until(() => G('!!(st && keyp && table)')) && G("$('kp_row').hidden") === false && G("$('kp_env').hidden") === false, D.errors.join(' | ').slice(0, 300));
+  G('selectKey(1)'); G('invalidate(D.kit)'); await sleep(80);
+  check('C♯1: no envelope — every time 0 ms, sustain 0 dB, no group; Decay dims (nothing to fall to), so does Release (Follow = one-shot here)',
+    +G("$('kp_atk').value") === 0 && G("$('kp_rel_v').textContent") === '0 ms' && G("$('kp_sus_v').textContent") === '0 dB' && +G("$('kp_grp').value") === 0 && G("$('kp_dec_l').className").includes('dim') && G("$('kp_rel_l').className").includes('dim'),
+    [G("$('kp_atk').value"), G("$('kp_rel_v').textContent"), G("$('kp_sus_v').textContent"), G("$('kp_dec_l').className"), G("$('kp_rel_l').className"), G('st.keyPlays')].join(' | '));
+  spyActs(G);
+  /* Plays → Held, then a release drag */
+  G("$('kp_plays').value = '2'"); fireEv(G("$('kp_plays')"), 'change', {});
+  await until(() => G('demoDevice.keyp[1].plays') === 2 && !G('kpBusy'));
+  check('Held: Release no longer dims', !G("$('kp_rel_l').className").includes('dim'));
+  const d0 = G('st.undoDepth'), rel = G("$('kp_rel')"); G('demoDevice.acts = []');
+  for (const v of [20, 30, 40, 50]) { G(`$('kp_rel').value = '${v}'`); fireEv(rel, 'input', {}); await sleep(5); }
+  fireEv(rel, 'change', {});
+  check('the release dragged to 50 (500 ms on the curve): the module has it, sent live, JOIN after the first send', await until(() => G('demoDevice.keyp[1].rel') === 500 && !G('kpBusy'))
+    && G('demoDevice.acts.filter(a => a[0] === 37).length') >= 2 && G('demoDevice.acts.filter(a => a[0] === 37).slice(1).every(a => (a[15] & 1) === 1)') && G("$('kp_rel_v').textContent") === '500 ms', JSON.stringify(G('demoDevice.acts.filter(a => a[0] === 37).map(a => a[15])')));
+  check('…one undo step, one history line ("C♯1 settings: held · R 500 ms"), the cell says it', await until(() => G('st.undoDepth') === d0 + 1) && await until(() => G('ed.history.list()[0].label') === 'C♯1 settings: held · R 500 ms') && await until(() => G('keyCells[1].kp.textContent') === 'held · R 500 ms'), G("ed.history.list().map(x => x.label).slice(0, 3).join(' | ')"));
+  /* sustain off, a decay, the group */
+  G("$('kp_sus').value = '-60'"); fireEv(G("$('kp_sus')"), 'input', {}); fireEv(G("$('kp_sus')"), 'change', {});
+  check('sustain to the bottom: "off" on the module (60) and in the row; Decay no longer dims', await until(() => G('demoDevice.keyp[1].sus') === 60 && !G('kpBusy')) && G("$('kp_sus_v').textContent") === 'off' && !G("$('kp_dec_l').className").includes('dim'));
+  G("$('kp_dec').value = '40'"); fireEv(G("$('kp_dec')"), 'input', {}); fireEv(G("$('kp_dec')"), 'change', {});
+  check('decay to 40 (256 ms)', await until(() => G('demoDevice.keyp[1].dec') === 256 && !G('kpBusy')));
+  G("$('kp_grp').value = '2'"); fireEv(G("$('kp_grp')"), 'change', {});
+  check('choke group 2: sent, the cell says "choke 2"', await until(() => G('demoDevice.keyp[1].grp') === 2) && await until(() => /choke 2$/.test(G('keyCells[1].kp.textContent'))), G('keyCells[1].kp.textContent'));
+  await until(() => !G('kpBusy'));
+  /* an odd release (a set's 1 234 ms, off the curve) survives a gain edit */
+  G('demoDevice.keyp[1].rel = 1234; demoDevice.bumpGen()'); await until(() => G('keyp[1].rel') === 1234); G('kpTouch = 0; invalidate(D.kit)'); await sleep(60);   /* (the row's 1.5 s hands-on guard waived: a new edit) */
+  G("$('kp_gain').value = '-4'"); fireEv(G("$('kp_gain')"), 'input', {}); fireEv(G("$('kp_gain')"), 'change', {});
+  check('a gain edit on a key with a 1 234 ms release: the gain sent, the release exactly as it was (not the curve\'s nearest)', await until(() => G('demoDevice.keyp[1].gain') === -4 && !G('kpBusy')) && G('demoDevice.keyp[1].rel') === 1234 && G('demoDevice.keyp[1].dec') === 256);
+  /* the Play tab: ⋯ on a pad */
+  G("showTab('tab_play')"); await sleep(40); G('demoDevice.acts = []');
+  const set5 = G('padEls[5].set');
+  fireEv(set5, 'pointerdown', {});
+  check('⋯ is not a note: its press plays nothing', !G('demoDevice.acts.some(a => a[0] === 32)'));
+  fireEv(set5, 'click', {}); await sleep(40);
+  check('⋯ on F1: the sheet opens on F1 — the Kit\'s row moved into it (one set of controls), F1\'s values, the pad ringed', G("$('kp_sheet').hidden") === false && G("$('kp_row')._parent === $('kp_slot')") && G("$('kp_key').textContent") === 'F1' && G("$('kp_gain').value") === '0' && G("$('kp_sheet_t').textContent").startsWith('F1 — settings') && G('padEls[5].el.className').includes('kpon') && G("padEls[5].set.getAttribute('aria-expanded')") === 'true');
+  const atk = G("$('kp_atk')");
+  for (const v of [10, 20, 30]) { G(`$('kp_atk').value = '${v}'`); fireEv(atk, 'input', {}); await sleep(5); }
+  fireEv(atk, 'change', {});
+  check('an attack set in the sheet (30 → 54 ms) lands on F1, not on the Kit\'s selected C♯1', await until(() => G('demoDevice.keyp[5].atk') === 54 && !G('kpBusy')) && G('demoDevice.keyp[1].atk') === 0);
+  check('…the pad and the sheet\'s title say it', await until(() => G('padEls[5].kp.textContent') === 'A 54 ms') && /F1 — settings: A 54 ms/.test(G("$('kp_sheet_t').textContent")), G('padEls[5].kp.textContent'));
+  fireEv(G('padEls[5].el'), 'pointerdown', { pointerId: 7 }); fireEv(G('padEls[5].el'), 'pointerup', { pointerId: 7 });
+  check('the pads still play under the sheet (PLAY_KEY for F1), and it stays open', await until(() => G('demoDevice.acts.some(a => a[0] === 32 && a[1] === 5)')) && G("$('kp_sheet').hidden") === false);
+  fireEv(G('padEls[7].set'), 'click', {}); await sleep(60);
+  check('⋯ on G1: the same sheet, now G1\'s (+2 dB, −12 st, Ratchet ½)', G("$('kp_key').textContent") === 'G1' && G("$('kp_gain').value") === '4' && G("$('kp_plays').value") === '4' && !G('padEls[5].el.className').includes('kpon') && G('padEls[7].el.className').includes('kpon'));
+  fireEv(G("$('kp_sheet')"), 'keydown', { key: 'Escape' }); await sleep(60);
+  check('Esc: the sheet closes, the row back under the Kit\'s keys on the selected key (C♯1)', G("$('kp_sheet').hidden") === true && G("$('kp_row')._parent === $('kp_home')") && G("$('kp_key').textContent") === 'C♯1' && !G('padEls[7].el.className').includes('kpon'));
+  fireEv(G('padEls[3].set'), 'click', {}); await sleep(30);
+  fireEv(G("$('kp_sheet_x')"), 'click', {});
+  check('✕ closes it too', G("$('kp_sheet').hidden") === true && G("$('kp_row')._parent === $('kp_home')"));
+  fireEv(G('padEls[3].set'), 'click', {}); await sleep(30);
+  G("showTab('tab_kit')");
+  check('…and so does another tab', G("$('kp_sheet').hidden") === true && G("$('kp_row')._parent === $('kp_home')") && G("$('kp_row').hidden") === false);
+  check('env page: no errors, no unknown ids', D.unknownIds.size === 0 && D.errors.length === 0, D.errors.join(' | ').slice(0, 300) + [...D.unknownIds].join(','));
+  G("showTab('tab_play')"); fireEv(G('padEls[3].set'), 'click', {}); await sleep(30);
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+  check('disconnect: the sheet closed, the row home and hidden', G("$('kp_sheet').hidden") === true && G("$('kp_row')._parent === $('kp_home')") && G("$('kp_row').hidden") === true);
+}
+/* ── 9k. RECLAIM, the page: pads dropped and one dropped again — the room line says what is held and a Reclaim button
  *        its size, in Play and in the Kit's Buffer; a click asks first when Undo would lose steps (a "no" sends
  *        nothing), a "yes" sends op 4 ALL — nothing held after, every pad the same samples, one history line that is no
  *        undo step (the forgotten ones greyed); a drop that does not fit reclaims on its own and lands whole — ALL when

@@ -87,7 +87,10 @@ rest of this pass boots as written.
 - [ ] **A sequencer that changes pitch with its gate** (the last-note fix,
       23 Oct): a fast run of different notes into J4 with gates on J6 —
       *listen for* every hit playing **its own** key, never the previous
-      one. Then very short triggers (1–2 ms): each still plays.
+      one. Then very short triggers (1–2 ms): each still plays — and with
+      the key on **Held**, **Loop** or **Ratchet** (Kit → the key's Plays, or
+      Key Plays = Held) each short trigger still **releases**: a short note,
+      never a key left sounding.
 - [ ] J5 at 1/12 V: reverse. J5 style 7 (7/12 V): record into the key held;
       style 8: clear it.
 - [ ] Brain map (Classic, Jacks = Follow grammar): gate on **J5**, the same
@@ -256,15 +259,17 @@ file) on the computer.
    flashing: Start In takes its default, Sampler, even for a slot restored
    from its backup.)
 2. **The preset is untouched**: Settings (B2 + B3 2 s) → load a slot with a
-   grammar other than Classic. *See*: its grammar, running. Power-cycle
+   grammar other than Classic. *See*: its grammar, **stopped** (B1 still
+   breathes); ▶ (or B1 held 600 ms) starts it on the beat. Power-cycle
    again: Pads, stopped — Start In overrides the boot preset's grammar, not
-   the preset.
+   the preset. (A preset **saved** in this sampler state keeps the beat it
+   came with, not Pads; one you put on Pads yourself saves as Pads.)
 3. **Connect the page.** *See*: the Play tab opens on the pads, a line over
    them "Sampler — the pads play samples…" with **Classic** / **Grids**
    buttons, the transport "**sampler** · Pads", the Pads chip lit, the Jacks
    card "Voice map" with J4 live.
-4. **Keys play while stopped**: a page pad, J4 + a J6 gate, and the panel.
-   Each sounds its key; the transport stays stopped.
+4. **Keys play while stopped**: a page pad, and J4 + a J6 gate. Each sounds
+   its key; the transport stays stopped. (The panel has no way to play a key.)
 5. **Drop the mono one-shot on C1, the stereo sample on C♯1.** *See*: "✓",
    the line "mono, …" then "stereo, … — the kit is stereo now"; Options →
    Sampling reads Stereo. Play both from the page and from J4 (C1 = 0 V,
@@ -309,8 +314,8 @@ vocal on D1), the page on the Kit tab, the clock on J3.
 1. [ ] Untouched: everything sounds exactly as before this firmware — the
        break in Classic, a key from J4, Play's loop. No key cell or pad shows
        any orange words.
-2. [ ] C1 selected, Gain to −12 dB: C1 is clearly quieter from the page, from
-       J4 and from the panel's Pads; the break's own kick (the pattern's
+2. [ ] C1 selected, Gain to −12 dB: C1 is clearly quieter from the page's
+       pads and from J4; the break's own kick (the pattern's
        steps) is **not** quieter. Gain to +6 dB: louder, no distortion on a
        normalised take beyond the output's own clip (report if it clips).
 3. [ ] Drag the Gain slider through its range and back: it follows live, and
@@ -328,7 +333,11 @@ vocal on D1), the page on the Kit tab, the clock on J3.
        (*listen for*: a click at the wrap; report how bad), and it fades on
        the release. While it loops, play other keys and run the pattern:
        the loop keeps going. **Reversed** (Voice map, J5 at style 1): it
-       loops D1 **backward** from its end, the same seam, the same release
+       loops D1 **backward** from its end, the same seam, the same release.
+       Turn J5 between 0 and style 1 while the gate stays up: each change
+       re-strikes D1 and the new loop **replaces** the old one (a short fade
+       under it) — one loop at a time, never two stacked. Release right as
+       it wraps: the fade is as long as anywhere else (no click).
 7. [ ] C1 Plays → **Ratchet**, every ½ sample: hold C1 — the kick retriggers
        from its start twice per kick length, *no click at the seams*, until
        you let go; J7 sends a trigger per hit. Try ¼ and ⅛ (faster), and the
@@ -384,6 +393,54 @@ into J6; a tuner on the output if you have one; the page on the Kit tab.
        once after a power-cycle): the melody comes back on J4.
 9. [ ] The ends: spread from C1 (B2 = +23 st) and from B2 (C1 = −23 st) —
        note how the extremes sound (aliasing high up, grain low down) ____.
+
+## 10g. Each key's envelope and choke group (10 min)
+
+`docs/packages/keyp.md` "The amp envelope and choke groups". Nothing of this
+has run on hardware; it needs the **beta-env** firmware (api 2) and its page.
+An open hat on **A♯1** and a closed hat on **B1** (dropped pads, or two hat
+slices of the Amen), a long pad or vocal on **D1**, the page on the Play tab.
+
+1. [ ] Untouched: every key sounds exactly as before (the break, J4, the pads,
+       Play's loop); no new words on the pads. Every pad has a small **⋯** in
+       its bottom-right corner; pressing ⋯ plays **nothing**.
+2. [ ] ⋯ on D1: a sheet opens with D1's settings (on the phone: above the
+       transport, nothing off the side). Plays → **Held**, **Attack** to
+       ~250 ms: hold the D1 pad — it swells in over a quarter second, no
+       click at the start. The pads play while the sheet is open.
+3. [ ] **Release** to ~1 s: let go of D1 — it fades over about a second
+       instead of 5 ms, smoothly (*listen for*: a click when you let go, or
+       a step at the end of the tail). Then from J4 / J6: the same tail when
+       the gate falls.
+4. [ ] **Decay** ~300 ms, **Sustain** −12 dB: hold D1 — the swell, then it
+       settles a clear notch quieter while held; the release from there is
+       shorter (the release is a rate: 60 dB in its time, from full).
+5. [ ] D1 Plays → **Loop**, Release ~2 s: hold, let go — it **keeps looping**
+       while it fades; play other keys and run the pattern meanwhile: the
+       tail is not cut. Plays → **Ratchet** ⅛ with the same release: while
+       held the hits stay crisp (no smear building up); the last hit rings
+       out for the release when you let go.
+6. [ ] ⋯ on A♯1, **One-shot**, Release 1 s: it plays exactly as before
+       (Release dims on the row — a one-shot has no "up"). Then **Decay**
+       150 ms, **Sustain** all the way down (off): A♯1 becomes a short, tight
+       hat — the drum sampler's decay. Set it back to a long open hat.
+7. [ ] **Choke**: A♯1 and B1 both in **group 1** (A♯1 back to a long open
+       hat). Hit A♯1, then B1 while it rings: the open hat stops at once
+       (*listen for*: a clean cut, no click). Hit A♯1 twice fast: both ring
+       (a key never chokes itself). Put B1 in group 2: no more cut.
+8. [ ] Choke against a held / looping / releasing key: D1 Held with a long
+       release in group 1 — B1 cuts it held, and cuts its tail after you let
+       go. The pattern's steps (Classic, running) never cut a grouped key and
+       are never cut by one.
+9. [ ] **Spread** a key with an envelope and a group (Kit tab): every key
+       takes both — the melody on J4 now plays **monophonic** (each note cuts
+       the last) with the root's attack and release. One Undo puts it back.
+10. [ ] Esc / ✕ / the Kit tab close the sheet; the Kit's row shows the same
+        values for the selected key. Save the set, change everything, load it
+        back: every envelope and group returns. A loose break: all neutral.
+11. [ ] CPU meter: eight held keys with envelopes (attack and release set)
+        against the same eight neutral, loadAvg / loadMax ____ / ____
+        (expected: within a few ‰).
 
 ## 10h. Held memory comes back — Reclaim (8 min)
 
@@ -463,11 +520,21 @@ a second or more) and one long file (10 s or more).
 10. **Spread in Pads with markers**: like a hand-made key map, it stands until
     the markers next change — then the keys follow the markers again (their
     tunes stay). Wanted?
-11. **Reclaim and Undo** (§10h.3, .8): the button reclaims everything held and
+11. **A one-shot's Release** (§10g.6) shapes nothing — a one-shot has no up;
+    shorten it with Decay + Sustain off. Or should Release fade a one-shot's
+    natural end instead?
+12. **Release is a rate** (60 dB in its time, from full): from a −12 dB
+    sustain a 500 ms release is quiet at 400 ms. Or a time from wherever it
+    starts?
+13. **The ⋯ corner** (28 px, bottom right of each pad) — big enough on the
+    phone? No long-press (on a pad it is a held note).
+14. **Choke groups and the steps**: steps neither cut nor get cut. Should a
+    step of a hat slice choke a grouped open hat on the pads?
+15. **Reclaim and Undo** (§10h.3, .8): the button reclaims everything held and
     asks when Undo would lose steps; a drop that does not fit reclaims on its
     own without asking (FREE when that is enough, else ALL). Ask before a drop
     forgets undo steps too? Or never ask, even on the button?
-12. **Takes into keys** (J5 style 7) never reclaim on their own (arming is
+16. **Takes into keys** (J5 style 7) never reclaim on their own (arming is
     gate-latency work). Reclaim automatically after a take stops when the
     room runs low?
 

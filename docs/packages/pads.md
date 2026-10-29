@@ -275,7 +275,7 @@ Owns `core/bb_reclaim.h` (new), `tests/reclaim_check.cpp` (new), the
 `/* RECLAIM */` lines of `src/audiothurgist.cpp`, the gathered write in
 `core/bb_wavwrite.h` / `bb_set.h`, `SetFromEngine` through a map in
 `core/bb_sets.h`, and the reclaim parts of the page, `hostlink.js`, `demo.js`
-and the selftest (§7g, §9i). **Nothing here has run on hardware**; the bench
+and the selftest (§7h, §9k). **Nothing here has run on hardware**; the bench
 steps are `docs/hardware-pass-beta.md` §10h.
 
 **What is held.** Memory in `[bufLen, freePos)` no live entry covers: a
@@ -408,7 +408,7 @@ no cut, the map not followed, R not swapped, the gather ignored) fail 1–13
 checks each — and the first run found the redo half's head walk reading one
 record past the ring's count. `pads_check` now saves as
 the firmware does (a replaced pad left out of the set). `web/selftest.mjs`
-§7g / §9i (733 → **765**): the tail's bytes, `padReclaimFor`, then over the
+§7h / §9k (733 → **765**): the tail's bytes, `padReclaimFor`, then over the
 fake: FREE leaving what Undo needs, ALL taking all of it and forgetting those
 steps, every key the same samples on both planes, a stale history counting for
 nothing, a packed save loading back the same on a fresh module, still saved
@@ -444,7 +444,10 @@ the last drum grammar — the boot preset's, or the one Pads was entered from
 (`TransportStart` / `gLastDrum`) — so on the panel alone B1 held after a
 sampler power-up plays the preset's beat. Start In = **As saved**: the boot
 preset's grammar, running. The preset itself is never rewritten: a preset load
-later brings its grammar back.
+later brings its grammar back, and a preset **saved** while the grammar is Pads
+only because Start In put it there (no grammar chosen since the power-up) keeps
+the beat it came with (`gLastDrum`, `PresetKeepsBeat`: the saved slot's grammar
+byte patched, one more flash write) — Pads chosen by the player saves as Pads.
 
 **Where it lives.** Options byte 24 (`start.in`, "Start In": *Sampler (Pads,
 stopped)* · *As saved (the preset's grammar, running)*), in the preset-managed

@@ -24,6 +24,16 @@
 // 5. The set JSON: written only when a key is not neutral, read back exactly,
 //    an old file (none) neutral, out-of-range values clamped, unknown fields
 //    skipped; an engine → set → engine round trip renders the same bits.
+// 6. CHROMA: spread across keys.
+// 7. ENV: the amp envelope — Attack / Decay / Sustain / Release at the times
+//    asked (the coefficients, the voice's envelope, the output's level), no
+//    click; a key without a Release fades as ever; a one-shot's Decay to no
+//    sustain ends it, its Release shapes nothing; Loop loops on through its
+//    release; Ratchet's retrigger still crossfades; the steps never take it;
+//    the edit op's refusals, a drag one step, undo.
+// 8. ENV: choke groups — the other keys' voices of the group cut within the
+//    choke time (one-shot, held, looping, releasing, ratcheting), never the
+//    key's own, never a step's; the spread copies the group.
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -145,8 +155,8 @@ static void TestNeutral()
     bb::Engine z;
     Setup(z, L.data(), R.data());
     const uint64_t hz = Session(z, [](bb::Engine& x, int b) {
-        if(b == 10) for(int k = 0; k < 24; k++) { bb::EditReq q; q.op = bb::EditOp::SetKeyParams; q.key = k; q.a = -7; q.b = 333; q.i = 3; x.ApplyEdit(q); }
-        if(b == 20) for(int k = 0; k < 24; k++) { bb::EditReq q; q.op = bb::EditOp::SetKeyParams; q.key = k; q.a = 0; q.b = 0; q.i = 0; x.ApplyEdit(q); }
+        if(b == 10) for(int k = 0; k < 24; k++) { bb::EditReq q; q.op = bb::EditOp::SetKeyParams; q.key = k; q.kp = {-7, 3, 333, 0, 2, 300, 200, 900, 12, 0}; x.ApplyEdit(q); }   /* ENV: an envelope and a group too */
+        if(b == 20) for(int k = 0; k < 24; k++) { bb::EditReq q; q.op = bb::EditOp::SetKeyParams; q.key = k; x.ApplyEdit(q); }
     });
     CHECK(hz == hs && z.KeysNeutral(), "the same bits (%016llx vs %016llx)", (unsigned long long)hz, (unsigned long long)hs);
 }
@@ -154,9 +164,21 @@ static void TestNeutral()
 /* ── helpers ──────────────────────────────────────────────────────────── */
 static bb::EditStatus SetKp(bb::Engine& e, int key, int gain, int cents, int plays, bool join = false, int rat = 0)
 {
-    bb::EditReq q; q.op = bb::EditOp::SetKeyParams; q.key = key; q.a = gain; q.b = cents; q.i = plays; q.len = rat;
+    bb::EditReq q; q.op = bb::EditOp::SetKeyParams; q.key = key; q.kp = {(int8_t)gain, (uint8_t)plays, (int16_t)cents, (uint8_t)rat, 0, 0, 0, 0, 0, 0};
     if(join) q.flags = bb::EditReq::kQuiet;
     return e.ApplyEdit(q);
+}
+// key `key`'s whole settings (ENV: with the envelope and group)
+static bb::EditStatus SetP(bb::Engine& e, int key, const bb::KeyParam& p, bool join = false)
+{
+    bb::EditReq q; q.op = bb::EditOp::SetKeyParams; q.key = key; q.kp = p;
+    if(join) q.flags = bb::EditReq::kQuiet;
+    return e.ApplyEdit(q);
+}
+// plays, attack / decay ms, sustain dB below full, release ms, group — gain and tune neutral
+static bb::KeyParam Env(int plays, int atk, int dec, int sus, int rel, int grp = 0)
+{
+    return {0, (uint8_t)plays, 0, 0, (uint8_t)grp, (uint16_t)atk, (uint16_t)dec, (uint16_t)rel, (uint8_t)sus, 0};
 }
 static bb::EditStatus Undo(bb::Engine& e, bool redo = false) { bb::EditReq q; q.op = redo ? bb::EditOp::Redo : bb::EditOp::Undo; return e.ApplyEdit(q); }
 static void Silence(bb::Engine& e) { for(int v = 0; v < bb::Engine::kVoices; v++) { e.voices[v].active = false; e.voices[v].held = false; e.voices[v].key = -1; } }
@@ -316,7 +338,7 @@ static void TestPlays()
     CHECK(v->active && v->held && v->tail == 1, "another key's hit and the pattern's steps do not choke it");
     e.muted = true;
     e.ReleaseKey(2);
-    CHECK(!v->held && v->tail == 0, "the release: no longer held, the loop off");
+    CHECK(!v->held && v->relLeft > 0, "the release: no longer held, fading (the loop wraps on under the fade)");
     int n = 0; while(v->active && n < 100) { e.Process(l, r, 24); n++; }
     CHECK(!v->active && n * 24 <= v->chokeLen + 48, "…and it fades out within its release (%d samples)", n * 24);
     // fast: P4 up an octave, double, +24 semitones — rate 16, still never past the entry
@@ -354,7 +376,7 @@ static void TestPlays()
         CHECK(worst < 0.06f, "the backward seam is bridged: worst sample-to-sample step %g", worst);
     }
     e.ReleaseKey(2);
-    CHECK(v && !v->held && v->tail == 0 && v->rate > 0.f, "the release: the loop off, turned forward to fade");
+    CHECK(v && !v->held && v->relLeft > 0 && v->rate < 0.f, "the release: fading as it goes on looping backward");
     n = 0; while(v && v->active && n < 100) { e.Process(l, r, 24); n++; }
     CHECK(v && !v->active && n * 24 <= v->chokeLen + 48, "…and gone within its release (%d samples)", n * 24);
     // the forward seam, measured the same way
@@ -365,6 +387,42 @@ static void TestPlays()
         CHECK(worst < 0.06f, "the forward seam is bridged too: worst step %g", worst);
     }
     e.ReleaseKey(2);
+    // the gate's fall / the pad's up asks whether the key needs a release: what sounds decides, not the Plays now —
+    // a Loop key set to One-shot (or Follow on One-shot) while it loops must still take its release, or it loops on
+    Silence(e); e.CallSlice(t, 1.f, false, false, false, 1.f, false, 2);
+    v = Fresh(e);
+    SetKp(e, 2, 0, 0, 1);
+    CHECK(v && v->held && v->tail == 1 && !e.KeyHeld(2, false) && e.KeyNeedsRelease(2, false), "a looping key set to One-shot mid-loop still needs its release");
+    e.ReleaseKey(2);
+    CHECK(v && !v->held && v->relLeft > 0 && !e.KeyNeedsRelease(2, false), "…which fades the loop out; then nothing is left to release");
+    CHECK(!e.KeyNeedsRelease(9, false) && e.KeyNeedsRelease(9, true), "a one-shot key with nothing held: no release (no release events in Play's loop); Follow on Held: one");
+    SetKp(e, 2, 0, 0, 3);
+    // a release just before the loop point keeps its whole fade: the loop goes on wrapping under it (it was cut to the
+    // few samples left before the entry's end — a click)
+    for(int rev = 0; rev < 2; rev++)
+    {
+        Silence(e); e.CallSlice(t, 1.f, rev != 0, false, false, 1.f, false, 2);
+        v = Fresh(e);
+        int k = 0;
+        while(v && k < 200000 && !(rev ? (v->pos - v->loopA < 30. && v->looping) : (v->loopB - v->pos < 30. && v->looping))) { e.Process(l, r, 24); k++; }
+        const int choke = v ? v->chokeLen : 0;
+        e.ReleaseKey(2);
+        float last = l[23], worst = 0.f; int m = 0;
+        while(v && v->active && m < 400) { e.Process(l, r, 24); m++; for(int i = 0; i < 24; i++) { worst = fmaxf(worst, fabsf(l[i] - last)); last = l[i]; } }
+        printf("  release at the loop point (%s): %d samples of fade (chokeLen %d), worst step %g\n", rev ? "backward" : "forward", m * 24, choke, worst);
+        CHECK(v && !v->active && m * 24 >= choke - 24 && m * 24 <= choke + 48 && worst < 0.06f, "a Loop released at its loop point (%s) fades for its whole release, no click (%d samples, worst step %g)", rev ? "backward" : "forward", m * 24, worst);
+    }
+    // a held Loop struck again (J5's restrike, the looper replaying the key while it is held) replaces its own loop
+    // with the release's fade instead of stacking a second one
+    {
+        Silence(e); e.CallSlice(t, 1.f, false, false, false, 1.f, false, 2);
+        bb::Voice* first = Fresh(e);
+        for(int k = 0; k < 100; k++) e.Process(l, r, 24);
+        e.CallSlice(t, 1.f, true, false, false, 1.f, false, 2);   // re-struck reversed
+        int loops = 0; for(int i = 0; i < bb::Engine::kVoices; i++) loops += e.voices[i].active && e.voices[i].held && e.voices[i].key == 2;
+        CHECK(first && loops == 1 && !first->held && first->relLeft > 0, "a held Loop re-struck: one loop sounds, the old one fading (%d held loops)", loops);
+        e.ReleaseKey(2);
+    }
     // too short for the rate: a 100-sample grid slice at rate 16 → plain held
     {
         bb::EditReq q; q.op = bb::EditOp::SetBoundary; q.i = 5; q.start = e.slices[4].start + 100;
@@ -453,6 +511,33 @@ static void TestRatchet()
     Undo(e);
     CHECK(e.keyp[2].plays == 2 && !(e.keyRatOn & (1u << 2)), "…and an undo back out of Ratchet stops it too");
     e.ReleaseKey(2);
+    // anything that changes what the key plays stops its ratchet (it was retriggering the old entry): SET_KEY, a swap,
+    // a key map, a tombstone under it, a drop into its pad, a direct write from the control thread
+    {
+        float o[24], o2[24];
+        auto start = [&]() { SetKp(e, 2, 0, 0, 4, false, 1); Silence(e); e.CallSlice(e.KeySlice(2), 1.f, false, false, false, 1.f, false, 2); return (e.keyRatOn & (1u << 2)) != 0; };
+        auto stopped = [&]() { e.Process(o, o2, 24); return !(e.keyRatOn & (1u << 2)); };
+        const int pad2 = e.KeySlice(2);
+        bool ok = start();
+        { bb::EditReq q; q.op = bb::EditOp::SetKey; q.key = 2; q.t = 5; ok = ok && e.ApplyEdit(q) == bb::EditStatus::Ok; }
+        CHECK(ok && stopped(), "SET_KEY re-pointing a ratcheting key stops its ratchet");
+        { bb::EditReq q; q.op = bb::EditOp::SetKey; q.key = 2; q.t = pad2; e.ApplyEdit(q); }
+        ok = start();
+        { bb::EditReq q; q.op = bb::EditOp::SwapKeys; q.a = 2; q.b = 9; ok = ok && e.ApplyEdit(q) == bb::EditStatus::Ok; }
+        CHECK(ok && stopped(), "…so does a swap");
+        { bb::EditReq q; q.op = bb::EditOp::SwapKeys; q.a = 2; q.b = 9; e.ApplyEdit(q); }
+        ok = start();
+        e.SetKeySlice(2, 6);             // the control thread's direct write
+        CHECK(ok && stopped(), "…so does a key re-pointed from the control thread");
+        e.SetKeySlice(2, pad2);
+        ok = start() && e.KeySlice(2) == pad2;
+        const bb::Slice was = e.slices[pad2];
+        Pad(e, 2, 12000, 700.f, 0.5f);   // a new sample dropped on the pad: the same slot, new sound
+        CHECK(ok && e.KeySlice(2) == pad2 && stopped(), "…so does a drop into its pad (the same slot, another sound)");
+        Undo(e);
+        CHECK(e.slices[pad2].start == was.start && e.slices[pad2].len == was.len, "(the drop undone: the 30 000-sample pad back)");
+        e.ReleaseKey(2); Silence(e);
+    }
     // no gate to go by: a looper replay of an event recorded without a hold — it fills the step
     SetKp(e, 2, 0, 0, 4, false, 6);   // 1/32: two to a step
     Silence(e); e.callHits = 0;
@@ -463,6 +548,17 @@ static void TestRatchet()
     Silence(e); e.CallSliceRaw(t, 1.f, false, false, false, 1.f, false, 2);
     h = Hits(e, 4000);
     CHECK(h.size() == 1, "…a period longer than the step: at least two hits (%zu more)", h.size());
+    // …and its first hit is a ratchet's hit like the rest: the retrigger fades it (it must not ring on under the next)
+    SetKp(e, 2, 0, 0, 4, false, 6);
+    Silence(e); e.CallSliceRaw(t, 1.f, false, false, false, 1.f, false, 2);
+    {
+        bb::Voice* first = Fresh(e);
+        float o[24], o2[24]; int b = 0; const uint8_t h0 = e.callHits;
+        while(e.callHits == h0 && b < 4000) { e.Process(o, o2, 24); b++; }
+        for(int k = 0; k < first->chokeLen / 24 + 4; k++) e.Process(o, o2, 24);
+        int sounding = 0; for(int i = 0; i < bb::Engine::kVoices; i++) sounding += e.voices[i].active;
+        CHECK(first && !first->active && sounding == 1, "an un-held call's first hit fades at the retrigger: %d voice(s) sound after it", sounding);
+    }
     // a held one gives up after eight bars with no release
     SetKp(e, 2, 0, 0, 4, false, 5);
     Silence(e); e.CallSlice(t, 1.f, false, false, false, 1.f, false, 2);
@@ -618,17 +714,27 @@ static void TestJson()
     CHECK(rest && t.keyp[0].Neutral(), "key 30 and a key-less entry skipped; the others neutral");
     { const char* h = "{\"audiothurgist\":1,\"len\":1,\"keyp\":[{\"key\":5,\"gain\":0.25}]}"; CHECK(bb::SetReader::Json(h, strlen(h), t) && t.keyp[5].gain == 1, "0.25 dB rounds to ½ dB"); }
     { const char* h = "{\"audiothurgist\":1,\"len\":1,\"keyp\":[{\"key\":5,\"gain\":-0.25}]}"; CHECK(bb::SetReader::Json(h, strlen(h), t) && t.keyp[5].gain == -1, "−0.25 dB to −½ dB"); }
+    {   /* ENV: odd envelope values clamped, an unknown group none */
+        const char* h = "{\"audiothurgist\":1,\"len\":1,\"keyp\":[{\"key\":5,\"atk\":99999,\"dec\":-5,\"sus\":-12,\"rel\":4000,\"grp\":2},{\"key\":6,\"sus\":-200,\"grp\":9,\"rel\":4001},{\"key\":7,\"sus\":6,\"dec\":4000}]}";
+        CHECK(bb::SetReader::Json(h, strlen(h), t) && t.keyp[5].atk == 2000 && t.keyp[5].dec == 0 && t.keyp[5].sus == 12 && t.keyp[5].rel == 4000 && t.keyp[5].grp == 2
+              && t.keyp[6].sus == 60 && t.keyp[6].grp == 0 && t.keyp[6].rel == 4000 && t.keyp[7].sus == 0 && t.keyp[7].dec == 4000,
+              "ENV: attack past 2 s → 2 s, a negative decay → 0, sustain −12 dB kept, under −60 → none, above 0 → full, release past 4 s → 4 s, group 9 → none");
+    }
 
     // the round trip: engine → set → engine (the same material and recordings), every key renders the same bits
     {
         static std::vector<float> L2(kCap), R2(kCap);
         bb::Engine a; Setup(a, L.data(), R.data());
         SetKp(a, 2, -9, 1200, 3); SetKp(a, 7, 4, -300, 2); SetKp(a, 5, -30, 50, 1); SetKp(a, 9, 0, 0, 2); SetKp(a, 11, -3, 200, 4, false, 2); SetKp(a, 13, 0, 0, 4, false, 5);
+        SetP(a, 2, {-9, 3, 1200, 0, 1, 20, 0, 300, 0, 0}); SetP(a, 7, {4, 2, -300, 0, 1, 0, 150, 600, 6, 0});   /* ENV: envelopes, a choke group */
+        SetP(a, 9, {0, 2, 0, 0, 0, 40, 100, 800, 20, 0}); SetP(a, 14, {0, 1, 0, 0, 1, 0, 250, 0, 60, 0});
         new(&s) bb::SetInfo(); bb::SetFromEngine(a, none, s, true, kSr);
         s.bars = 1; s.bpm = a.NativeBpm();
         const std::string j = Emit(s);
         static bb::SetPlan p;
         CHECK(bb::SetReader::Json(j.data(), j.size(), t) && bb::PlanSet(t, p), "saved and planned");
+        CHECK(j.find("{\"key\":2,\"gain\":-4.5,\"cents\":1200,\"plays\":3,\"atk\":20,\"rel\":300,\"grp\":1}") != std::string::npos
+              && j.find("{\"key\":14,\"gain\":0,\"cents\":0,\"plays\":1,\"dec\":250,\"sus\":-60,\"grp\":1}") != std::string::npos, "ENV: the envelope's fields and the group written only when set (sustain in dB)");
         memcpy(L2.data(), L.data(), (size_t)a.freePos * sizeof(float)); memcpy(R2.data(), R.data(), (size_t)a.freePos * sizeof(float));
         bb::Engine b; b.Init(31); b.SetUndoJournal(&gJ2);
         for(int i = 0; i < p.nGrid; i++) b.sliceSal[i] = p.sal[i];
@@ -642,7 +748,7 @@ static void TestJson()
         if(p.hasKeys) b.SetKeyTable(live);
         bb::KeyParam kp[24]; bb::KeyParamsFromSet(t, kp); b.SetKeyParams(kp);
         bool kps = true; for(int k = 0; k < 24; k++) kps = kps && memcmp(&a.keyp[k], &b.keyp[k], sizeof(bb::KeyParam)) == 0 && a.keyGain[k] == b.keyGain[k] && a.keyRate[k] == b.keyRate[k];
-        CHECK(kps, "every key's settings, gain and rate identical after the load (two Ratchet keys among them)");
+        CHECK(kps, "every key's settings, gain and rate identical after the load (two Ratchet keys among them; ENV: four envelopes, three keys in a group)");
         float al[24], ar[24], bl[24], br[24];
         a.muted = b.muted = true;
         bool bits = true;
@@ -653,7 +759,224 @@ static void TestJson()
             a.Process(al, ar, 24); b.Process(bl, br, 24);
             bits = !memcmp(al, bl, sizeof al) && !memcmp(ar, br, sizeof ar);
         }
-        CHECK(bits, "every key called (Held, Loop and Ratchet released) renders the same bits, both planes");
+        CHECK(bits, "every key called (Held, Loop and Ratchet released; ENV: enveloped, choking) renders the same bits, both planes");
+    }
+}
+
+/* ── 7. ENV: the amp envelope ─────────────────────────────────────────── */
+// a pad of constant amplitude (the envelope is then the output's): a sine of `len` samples, both planes
+static int Tone(bb::Engine& e, int key, int len, float f, float g)
+{
+    const int start = e.freePos;
+    for(int i = 0; i < len; i++) { e.buf[start + i] = g * sinf(6.2831853f * f * (float)i / (float)kSr); if(e.bufR) e.bufR[start + i] = e.buf[start + i]; }
+    bb::EditReq q; q.op = bb::EditOp::Record; q.key = key; q.start = start; q.len = len;
+    q.flags = bb::EditReq::kMeta; q.meta = {3, 0.5f, 0.02f, true};
+    int t = -1;
+    return e.ApplyEdit(q, &t) == bb::EditStatus::Ok ? t : -1;
+}
+// render n samples (whole blocks); the peak |L| over them; the worst sample-to-sample step of L into *worst (running)
+static float Run(bb::Engine& e, int n, float* worst = nullptr, float* last = nullptr)
+{
+    float l[24], r[24], p = 0.f;
+    for(int k = 0; k < n / 24; k++)
+    {
+        e.Process(l, r, 24);
+        for(int i = 0; i < 24; i++) { p = fmaxf(p, fabsf(l[i])); if(worst && last) { *worst = fmaxf(*worst, fabsf(l[i] - *last)); *last = l[i]; } }
+    }
+    return p;
+}
+// blocks until the voice falls silent (cap: `cap` blocks)
+static int UntilQuiet(bb::Engine& e, const bb::Voice* v, int cap, float* worst = nullptr, float* last = nullptr)
+{
+    int n = 0;
+    while(v->active && n < cap) { Run(e, 24, worst, last); n++; }
+    return n;
+}
+static int Sounding(const bb::Engine& e, int key)   // voices of `key` (held or not: src for a grouped key, else key)
+{
+    int n = 0;
+    for(int v = 0; v < bb::Engine::kVoices; v++) if(e.voices[v].active && (e.voices[v].src == key || e.voices[v].key == key)) n++;
+    return n;
+}
+static void TestEnv()
+{
+    SECTION("ENV: the amp envelope — Attack, Decay, Sustain and Release on top of the click-safe fades, at the times asked, no click");
+    static std::vector<float> L(kCap), R(kCap);
+    bb::Engine e; Setup(e, L.data(), R.data()); e.muted = true; e.fadeMode = 0;
+    const float amp = 0.5f, f = 441.f, slope = 6.2831853f * f / (float)kSr * amp, kOut = 0.8f;   // the tone's own steepest step; the engine's output gain
+    const int t = Tone(e, 10, 96000, f, amp);
+    CHECK(t >= 0 && e.KeySlice(10) == t, "a 2 s constant tone on key 10");
+    // A 100 ms, D 200 ms to −12 dB, R 500 ms, held
+    CHECK(SetP(e, 10, Env(2, 100, 200, 12, 500)) == bb::EditStatus::Ok && e.keyEnv[10].on, "key 10: Held, A 100 ms · D 200 ms · S −12 dB · R 500 ms");
+    CHECK(Near(e.keyEnv[10].a, 1.f / 4800.f) && Near(e.keyEnv[10].s, powf(10.f, -12.f / 20.f), 1e-5f) && Near(powf(e.keyEnv[10].d, 9600.f), 1e-3f, 2e-3f) && Near(powf(e.keyEnv[10].r, 24000.f), 1e-3f, 2e-3f),
+          "the coefficients: 1/4800 a sample, sustain 10^(−12/20), decay and release 60 dB in 9 600 / 24 000 samples");
+    Silence(e); e.CallSlice(t, 1.f, false, false, false, 1.f, false, 10);
+    bb::Voice* v = Fresh(e);
+    CHECK(v && v->held && v->envSt == bb::Voice::kEnvAtk && v->env == 0.f, "the call: held, the envelope in its attack from 0");
+    float worst = 0.f, last = 0.f;
+    Run(e, 2400, &worst, &last);
+    CHECK(v && Near(v->env, 0.5f, 2e-3f) && v->envSt == bb::Voice::kEnvAtk, "50 ms in: half way (%g)", v ? v->env : -1.f);
+    const float pk1 = Run(e, 2400 - 24, &worst, &last);
+    CHECK(v && v->envSt == bb::Voice::kEnvAtk && pk1 < amp, "…still rising just before 100 ms (peak %g)", pk1);
+    Run(e, 48, &worst, &last);
+    CHECK(v && v->envSt == bb::Voice::kEnvDec, "at 100 ms (± a block) the attack is done: decaying");
+    Run(e, 9600, &worst, &last);
+    const float S = e.keyEnv[10].s, rest = v ? (v->env - S) / (1.f - S) : -1.f;
+    CHECK(rest > 4e-4f && rest < 2.5e-3f, "200 ms of decay later the way left to the sustain is −60 dB (%g of it)", rest);
+    const float pkS = Run(e, 4800, &worst, &last);
+    CHECK(Near(pkS, kOut * amp * S, 0.02f), "sustaining at −12 dB: the tone's peak %g ≈ %g (× the engine's 0.8 out)", pkS, kOut * amp * S);
+    e.ReleaseKey(10);
+    CHECK(v && v->active && !v->held && v->envSt == bb::Voice::kEnvRel, "the key comes up: the release runs (the voice reads on)");
+    const float e0 = v ? v->env : 0.f;
+    Run(e, 12000, &worst, &last);
+    CHECK(v && Near(v->env / e0, 0.0316228f, 0.03f), "250 ms into the 500 ms release: −30 dB (%g)", v ? v->env / e0 : -1.f);
+    const int n = UntilQuiet(e, v, 2000, &worst, &last);
+    CHECK(v && !v->active && n * 24 >= 7200 - 48 && n * 24 <= 7200 + 48, "…and silent once 60 dB below full: the release is a rate (60 dB in 500 ms), so from −12 dB it takes 400 ms (%d more samples)", n * 24);
+    CHECK(worst < slope * 1.1f, "no click anywhere — attack, decay, release: worst step %g (the tone's own %g)", worst, slope);
+    // a release on a key with none: the choke geometry, as ever (attack only)
+    SetP(e, 10, Env(2, 50, 0, 0, 0));
+    Silence(e); e.CallSlice(t, 1.f, false, false, false, 1.f, false, 10);
+    v = Fresh(e);
+    Run(e, 480);
+    e.ReleaseKey(10);
+    int m = UntilQuiet(e, v, 100);
+    CHECK(v && !v->active && m * 24 <= v->chokeLen + 48, "attack only: the key's up fades with the choke geometry (%d samples)", m * 24);
+    // a one-shot: Decay to no sustain ends it (the drum sampler's decay); the release has nothing to shape
+    SetP(e, 10, Env(1, 0, 300, bb::KeyParam::kSusOff, 2000));
+    Silence(e); e.CallSlice(t, 1.f, false, false, false, 1.f, true, 10);
+    v = Fresh(e);
+    CHECK(v && !v->held && v->envSt == bb::Voice::kEnvDec && v->env == 1.f && e.keyEnv[10].s == 0.f, "One-shot, D 300 ms, no sustain: from full, decaying to silence");
+    m = UntilQuiet(e, v, 4000);
+    CHECK(v && !v->active && m * 24 >= 14400 - 48 && m * 24 <= 14400 + 48, "…the voice ends when the decay reaches −60 dB: 300 ms (%d samples) of a 2 s tone", m * 24);
+    SetP(e, 10, Env(1, 0, 0, 0, 2000));
+    Silence(e); e.CallSlice(t, 1.f, false, false, false, 1.f, false, 10);
+    v = Fresh(e);
+    Run(e, 4800); e.ReleaseKey(10);
+    CHECK(v && v->active && v->envSt == bb::Voice::kEnvSus, "a one-shot with a Release: its key's up changes nothing");
+    m = UntilQuiet(e, v, 5000);
+    CHECK(v && !v->active && 4800 + m * 24 >= 96000 - 48 && 4800 + m * 24 <= 96000 + 300, "…it plays to its own end, the edge guard as ever (%d samples)", 4800 + m * 24);
+    // Loop with a release: looping on through it, untouched by other hits and the steps, then quiet
+    SetP(e, 10, Env(3, 0, 0, 0, 400));
+    Silence(e); e.CallSlice(t, 1.f, false, false, false, 1.f, false, 10);
+    v = Fresh(e);
+    CHECK(v && v->held && v->tail == 1, "Loop: held, looping");
+    Run(e, 96000 + 4800);
+    CHECK(v && v->active && v->looping, "…past its length");
+    e.ReleaseKey(10);
+    e.CallSlice(e.KeySlice(9), 1.f, false, false, false, 1.f, false, 9);   // another key
+    e.muted = false; Run(e, 4800); e.muted = true;                         // and the steps
+    CHECK(v && v->active && v->tail == 1 && v->envSt == bb::Voice::kEnvRel, "released: it loops on through the release; another hit and the steps leave it be");
+    m = UntilQuiet(e, v, 2000);
+    CHECK(v && !v->active && 4800 + m * 24 >= 19200 - 48 && 4800 + m * 24 <= 19200 + 48, "…quiet at 400 ms (%d samples)", 4800 + m * 24);
+    // Ratchet with a release: each hit's predecessor still takes the choke fade (no pile-up); the last hit releases
+    SetP(e, 10, {0, bb::KeyParam::kRatchet, 0, bb::KeyParam::kRatEighth, 0, 0, 0, 1500, 0, 0});
+    Silence(e); e.CallSlice(t, 1.f, false, false, false, 1.f, false, 10);
+    int most = 0;
+    for(int k = 0; k < 96000 / 24; k++) { Run(e, 24); int s = 0; for(int q = 0; q < bb::Engine::kVoices; q++) s += e.voices[q].active; most = s > most ? s : most; }
+    CHECK(most <= 2, "Ratchet ⅛ with a 1.5 s release: at most two voices at once while it runs (%d) — the retrigger fades the last hit as ever", most);
+    e.ReleaseKey(10);
+    int rel = 0; for(int q = 0; q < bb::Engine::kVoices; q++) if(e.voices[q].active && e.voices[q].envSt == bb::Voice::kEnvRel) rel++;
+    CHECK(rel == 1 && !(e.keyRatOn & (1u << 10)), "the key's up: the ratchet stops, its last hit releases");
+    Run(e, 96000);
+    // steps never take a key's envelope or group: every key enveloped and grouped, a pattern-only session is the neutral one
+    {
+        static std::vector<float> L2(kCap), R2(kCap);
+        bb::Engine a, b; Setup(a, L2.data(), R2.data()); Setup(b, L2.data(), R2.data());
+        for(int k = 0; k < 24; k++) SetP(b, k, Env(k % 5, 30 * k, 100, k % 20, 500, 1 + k % 4));
+        a.patternMode = b.patternMode = 0; a.patternKnob = b.patternKnob = 0.45f; a.RegenPattern(); b.RegenPattern();
+        float al[24], ar[24], bl[24], br[24]; bool same = true;
+        for(int blk = 0; blk < 2000 && same; blk++) { a.Process(al, ar, 24); b.Process(bl, br, 24); same = !memcmp(al, bl, sizeof al) && !memcmp(ar, br, sizeof ar); }
+        CHECK(same, "every key with an envelope and a group: the pattern's steps render the neutral bits");
+    }
+    // the edit op: refusals, one step, a drag one step, undo works the coefficients out again
+    {
+        const int d0 = e.UndoDepth();
+        const bb::KeyParam bad[] = {Env(0, 2001, 0, 0, 0), Env(0, 0, 4001, 0, 0), Env(0, 0, 0, 61, 0), Env(0, 0, 0, 0, 4001), Env(0, 0, 0, 0, 0, 5)};
+        bool refused = true; const bb::KeyParam was = e.keyp[4];
+        for(const bb::KeyParam& p : bad) refused = refused && SetP(e, 4, p) == bb::EditStatus::BadArgs;
+        CHECK(refused && !memcmp(&e.keyp[4], &was, sizeof was) && e.UndoDepth() == d0, "attack > 2 s, decay > 4 s, sustain under −60 dB, release > 4 s, group 5: BadArgs, nothing written");
+        CHECK(SetP(e, 4, Env(2, 2000, 4000, 60, 4000, 4)) == bb::EditStatus::Ok && e.UndoDepth() == d0 + 1, "the far ends: Ok, one step");
+        SetP(e, 4, Env(2, 2000, 4000, 60, 10, 4)); for(int r2 = 20; r2 <= 400; r2 += 10) SetP(e, 4, Env(2, 2000, 4000, 60, r2, 4), true);
+        CHECK(e.UndoDepth() == d0 + 2 && e.keyp[4].rel == 400, "a release slider dragged through 40 values: one more step");
+        Undo(e);
+        const bb::Engine::KeyEnv x = e.keyEnv[4], y = e.EnvOf(e.keyp[4]);
+        CHECK(e.keyp[4].rel == 4000 && x.r == y.r && x.a == y.a && x.on, "Undo: the release back at 4 s, its coefficient worked out again");
+        Undo(e);
+        CHECK(e.keyp[4].Neutral() && !e.keyEnv[4].on && e.keyEnv[4].r == 0.f, "Undo: neutral, no envelope");
+    }
+}
+
+/* ── 8. ENV: choke groups ─────────────────────────────────────────────── */
+static void TestChoke()
+{
+    SECTION("ENV: choke groups — a key in a group cuts the other keys' voices in it within the choke time; never its own, never a step's");
+    static std::vector<float> L(kCap), R(kCap);
+    bb::Engine e; Setup(e, L.data(), R.data()); e.muted = true; e.fadeMode = 0;
+    const int open = Tone(e, 10, 96000, 441.f, 0.5f), closed = Tone(e, 11, 24000, 660.f, 0.f), other = Tone(e, 12, 24000, 330.f, 0.5f);
+    CHECK(open >= 0 && closed >= 0 && other >= 0, "an open hat (10, a 2 s tone), a closed hat (11, silent: what is heard is the cut), something else (12)");
+    SetP(e, 10, Env(1, 0, 0, 0, 0, 1)); SetP(e, 11, Env(1, 0, 0, 0, 0, 1)); SetP(e, 12, Env(1, 0, 0, 0, 0, 2));
+    Silence(e); e.CallSlice(open, 1.f, false, false, false, 1.f, false, 10);
+    bb::Voice* a = Fresh(e);
+    CHECK(a && a->grp == 1 && a->src == 10, "the open hat sounds, tagged group 1 / key 10");
+    Run(e, 2400);
+    e.CallSlice(other, 1.f, false, false, false, 1.f, false, 12);
+    Run(e, 2400);
+    CHECK(a && a->active, "a key of group 2 leaves it be");
+    e.CallSlice(open, 1.f, false, false, false, 1.f, false, 10);
+    bb::Voice* a2 = Fresh(e);
+    Run(e, 2400);
+    CHECK(a && a->active && a2 && a2->active && Sounding(e, 10) == 2, "struck again: both open hats sound — a key never chokes itself mid-slice (as today)");
+    float worst = 0.f, last = 0.f;
+    Run(e, 24, &worst, &last); worst = 0.f;   /* primed: the step from 0 into the running tones is not one */
+    e.CallSlice(closed, 1.f, false, false, false, 1.f, false, 11);
+    bb::Voice* c = Fresh(e);
+    int n = 0; while((a->active || a2->active) && n < 100) { Run(e, 24, &worst, &last); n++; }
+    CHECK(!a->active && !a2->active && n * 24 <= a->chokeLen + 24, "the closed hat: both open hats gone within the choke time (%d ≤ %d samples)", n * 24, a->chokeLen + 24);
+    CHECK(c && c->active && c->src == 11, "…the closed hat sounds");
+    CHECK(worst < 2.f * 6.2831853f * 441.f / (float)kSr * 0.5f * 1.1f, "…a fade, not a cut: worst step %g (the two tones' own slopes: %g)", worst, 2.f * 6.2831853f * 441.f / (float)kSr * 0.5f);
+    // a held key, a looping key, a releasing key, a ratchet — all cut
+    const char* what[] = {"held", "looping", "releasing (2 s release)", "ratcheting"};
+    const bb::KeyParam how[] = {Env(2, 0, 0, 0, 0, 1), Env(3, 0, 0, 0, 0, 1), Env(2, 0, 0, 0, 2000, 1), {0, bb::KeyParam::kRatchet, 0, bb::KeyParam::kRatEighth, 1, 0, 0, 0, 0, 0}};
+    for(int w = 0; w < 4; w++)
+    {
+        SetP(e, 10, how[w]);
+        Silence(e); e.CallSlice(open, 1.f, false, false, false, 1.f, false, 10);
+        Run(e, 9600);
+        if(w == 2) e.ReleaseKey(10);
+        Run(e, 480);
+        const bool before = Sounding(e, 10) >= 1;
+        e.CallSlice(closed, 1.f, false, false, false, 1.f, false, 11);
+        int q = 0; while(Sounding(e, 10) && q < 100) { Run(e, 24); q++; }
+        Run(e, 48000);   // a ratchet would have struck again by now
+        CHECK(before && Sounding(e, 10) == 0 && q * 24 <= 240 + 24 && !(e.keyRatOn & (1u << 10)), "a %s open hat: cut within the choke time (%d samples), nothing after", what[w], q * 24);
+        e.ReleaseKey(10);
+    }
+    // the steps: their voices carry no group, so a group key never cuts them, and a step never cuts a group's voice
+    {
+        e.muted = false; Run(e, 48000);
+        bool none = true; for(int q = 0; q < bb::Engine::kVoices; q++) if(e.voices[q].active && e.voices[q].src < 0) none = none && e.voices[q].grp == 0;
+        CHECK(none, "the pattern's voices: no group");
+        SetP(e, 10, Env(3, 0, 0, 0, 0, 1));
+        e.CallSlice(open, 1.f, false, false, false, 1.f, false, 10);
+        bb::Voice* h = Fresh(e);
+        Run(e, 48000);
+        CHECK(h && h->active && h->src == 10, "a grouped Loop key under a running pattern: still sounding after a second of steps");
+        e.ReleaseKey(10); e.muted = true;
+    }
+    // the spread copies the envelope and the group
+    {
+        SetP(e, 10, Env(2, 120, 300, 9, 800, 3));
+        bb::EditReq q; q.op = bb::EditOp::SpreadKeys; q.key = 10; int cnt = 0;
+        CHECK(e.ApplyEdit(q, &cnt) == bb::EditStatus::Ok && cnt > 0, "key 10 spread");
+        bool same = true;
+        for(int k = 0; k < 24; k++) { const bb::KeyParam& p = e.keyp[k]; if(e.KeySlice(k) != open) continue; same = same && p.atk == 120 && p.dec == 300 && p.sus == 9 && p.rel == 800 && p.grp == 3 && e.keyEnv[k].on; }
+        CHECK(same, "…every key on its tone has its envelope and group (a chromatic, monophonic instrument: each key chokes the last)");
+        Silence(e); e.CallSlice(open, 1.f, false, false, false, 1.f, false, 0);
+        bb::Voice* p0 = Fresh(e); Run(e, 2400);
+        e.CallSlice(open, 1.f, false, false, false, 1.f, false, 7);
+        int q2 = 0; while(p0 && p0->active && q2 < 100) { Run(e, 24); q2++; }
+        CHECK(p0 && !p0->active && q2 * 24 <= (int)(240.f / fabsf(p0->rate)) + 24, "C1 then G1 of the spread: C1 cut within the choke time (%d samples: 240 source samples at C1's rate %g)", q2 * 24, p0 ? fabsf(p0->rate) : 0.f);
+        e.ReleaseKey(7);
     }
 }
 
@@ -838,6 +1161,8 @@ int main(int argc, char** argv)
     TestJournal();
     TestJson();
     TestSpread();
+    TestEnv();     /* ENV */
+    TestChoke();   /* ENV */
     printf("\nkeyp_check: %d passed, %d failed\n", gPass, gFail);
     return gFail ? 1 : 0;
 }
