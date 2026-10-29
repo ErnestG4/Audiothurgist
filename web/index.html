@@ -903,7 +903,8 @@ function padDropTarget(el, k) {
 }
 padEls.forEach((p, k) => { padDropTarget(p.el, k); const f = document.createElement('i'); f.className = 'pf'; p.el.appendChild(f); p.fill = f; });
 const padSecs = n => (n / 48000).toFixed(2) + ' s';
-function padShow(job, text, kind, frac) { job.text = text; job.kind = kind || ''; if (frac != null) job.frac = frac; padJob[job.key] = job; setText('pd_msg', `${keyName(job.key)}: ${text}`); $('pd_msg').hidden = false; $('pd_msg').className = 'note' + (kind === 'bad' ? ' bad' : ''); invalidate(D.pads); }
+function padShow(job, text, kind, frac) { if (job.cancelled) return;   /* the old session's drop (a disconnect): nothing to say on this one */
+  job.text = text; job.kind = kind || ''; if (frac != null) job.frac = frac; padJob[job.key] = job; setText('pd_msg', `${keyName(job.key)}: ${text}`); $('pd_msg').hidden = false; $('pd_msg').className = 'note' + (kind === 'bad' ? ' bad' : ''); invalidate(D.pads); }
 function padAddFiles(files, k0) {
   if (!link) { say('connect to the module first', true); return; }
   const list = Array.from(files || []); let k = Math.max(0, Math.min(23, k0 | 0));
@@ -937,6 +938,7 @@ async function padUpload(job) {
   let ab;
   try { ab = await cardDecode(job.file); }
   catch (e) { job.state = 'failed'; padShow(job, `${job.file.name}: this browser cannot decode it (${e && e.message || e})`, 'bad', 0); return; }
+  if (job.cancelled) return;   /* the module went while it decoded: the link now may be another session's */
   let p0;
   try { p0 = await padState(); } catch (e) { job.state = 'failed'; padShow(job, 'the module did not answer: ' + e.message, 'bad', 0); return; }
   if (!p0) { job.state = 'failed'; padShow(job, 'the module\'s state did not read', 'bad', 0); return; }
