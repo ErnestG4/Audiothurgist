@@ -473,6 +473,17 @@ static void TestRatchet()
     Silence(e); e.CallSliceRaw(t, 1.f, false, false, false, 1.f, false, 2);
     h = Hits(e, 4000);
     CHECK(h.size() == 1, "…a period longer than the step: at least two hits (%zu more)", h.size());
+    // …and its first hit is a ratchet's hit like the rest: the retrigger fades it (it must not ring on under the next)
+    SetKp(e, 2, 0, 0, 4, false, 6);
+    Silence(e); e.CallSliceRaw(t, 1.f, false, false, false, 1.f, false, 2);
+    {
+        bb::Voice* first = Fresh(e);
+        float o[24], o2[24]; int b = 0; const uint8_t h0 = e.callHits;
+        while(e.callHits == h0 && b < 4000) { e.Process(o, o2, 24); b++; }
+        for(int k = 0; k < first->chokeLen / 24 + 4; k++) e.Process(o, o2, 24);
+        int sounding = 0; for(int i = 0; i < bb::Engine::kVoices; i++) sounding += e.voices[i].active;
+        CHECK(first && !first->active && sounding == 1, "an un-held call's first hit fades at the retrigger: %d voice(s) sound after it", sounding);
+    }
     // a held one gives up after eight bars with no release
     SetKp(e, 2, 0, 0, 4, false, 5);
     Silence(e); e.CallSlice(t, 1.f, false, false, false, 1.f, false, 2);

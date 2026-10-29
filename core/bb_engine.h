@@ -1197,8 +1197,9 @@ struct Engine
          * slices and its markers varispeed with the tempo as ever (OwnRate) */
         float rate         = OwnRate(idx) ? pitch * rateMul : pitch * (nativeStep / gridStepSamp) * rateMul;
         if(key >= 0 && key < kKeys) rate *= keyRate[key];   /* KEYP: the key's tune multiplies whatever rate it gets (×1 neutral) */
-        FireSlice(idx, rate, rev, lenMul, held, key);
-        if(key >= 0 && key < kKeys && keyp[key].plays == KeyParam::kRatchet) RatchetStart(key, idx, rate, rev, held, gridStepSamp);   /* KEYP */
+        const bool ratKey = key >= 0 && key < kKeys && keyp[key].plays == KeyParam::kRatchet;   /* KEYP */
+        FireSlice(idx, rate, rev, lenMul, held || ratKey, key);   /* KEYP: a ratchet's first hit is tagged as its others are — the retrigger fades it */
+        if(ratKey) RatchetStart(key, idx, rate, rev, held, gridStepSamp);   /* KEYP */
         if(punch) PunchStep(curStep, idx, rev);
         if(ratchet)
         {
