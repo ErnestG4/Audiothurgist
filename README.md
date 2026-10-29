@@ -72,6 +72,25 @@ tempo). They ride every call through the key — CV, the pads, Play's loop —
 never the pattern's steps; they are saved with the set, and an untouched key
 plays exactly as before. Details: `docs/packages/keyp.md`.
 
+**Each key has an amp envelope and a choke group** too, on the same row:
+
+- **Attack** (to 2 s) fades the key in; **Decay** eases it down to the
+  **Sustain** level (0 dB down to off); **Release** (to 4 s) is how a held key
+  (Held, Loop, Ratchet) fades once its gate falls or the pad comes up — a
+  Loop key keeps looping through it. All at zero is the key as it always
+  was: the short click-safe fades and nothing else.
+- A **one-shot** has no "up", so Release does nothing for it; shorten one with
+  **Decay** and **Sustain off** instead (the drum sampler's decay knob).
+- **Choke group** 1–4: a key struck in a group cuts every *other* key's sound
+  in the same group within 5 ms — put an open and a closed hat in group 1 and
+  the closed one chokes the open one. A key never chokes itself, and the
+  pattern's steps take no part.
+
+**From the Play tab**, the **⋯** in a pad's corner opens the same settings for
+that pad in a sheet (a press on the pad itself is still a note). The pads keep
+playing under it, so you can tweak a release and hit the pad; **Esc** or ✕
+closes it.
+
 **Play one sample chromatically** — the mono sampler's way: put a sound on a
 key, select it in the Kit and press **Spread [key] chromatically (C1 … B2)**.
 Every key then plays that sample, each a semitone from the next (the key you
