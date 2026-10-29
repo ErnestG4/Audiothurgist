@@ -2149,6 +2149,29 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
   await G('__p').catch(() => {}); await sleep(50);
   check('review: a lost descriptor reply says connect again, not flash the firmware', G('link') === null && /connect again/.test(G("$('notice').textContent")) && !/Flash/.test(G("$('notice').textContent")), G("$('notice').textContent"));
 }
+{
+  /* PADS: a drop in flight when the module goes belongs to the old session — after a reconnect it neither shows its
+   * failure on the new one's pads nor (still decoding) talks to the new module */
+  const { G } = await loadPage('?demo=sampler');
+  await until(() => G('!!(st && table)')); await sleep(100);
+  G(`window.__slow = 0; cardDecode = async f => { if (__slow) await new Promise(r => setTimeout(r, __slow)); const n = /long/.test(f.name) ? 240000 : 48000;
+    return { numberOfChannels: 1, sampleRate: 48000, length: n, getChannelData: () => new Float32Array(n).map((_, i) => 0.3 * Math.sin(i / 5)) }; }`);
+  const drop = name => fireEv(G('padEls[4].el'), 'drop', { dataTransfer: { files: [{ name, size: 10 }], types: ['Files'] } });
+  drop('long.wav');
+  await until(() => G("padJobs.length === 1 && padJobs[0].state === 'sending' && padJobs[0].frac > 0.2"), 15000);
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()'); await sleep(50);
+  G("connectDemo('sampler')"); await until(() => G('!!(st && table)')); await sleep(300);
+  check('review: a drop cut off by a disconnect leaves nothing on the next session\'s pads (no stale "✕", no message)', G('padJob[4]') === null && G("$('pd_msg').hidden") === true && !/not loaded/.test(G('padEls[4].sub.textContent')),
+    G('padJob[4] && padJob[4].text') + ' / ' + G("$('pd_msg').textContent") + ' / ' + G('padEls[4].sub.textContent'));
+  G('__slow = 1000'); drop('short.wav');
+  await sleep(100);
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+  G("connectDemo('sampler')"); await until(() => G('!!(st && table)'));
+  G(`demoDevice.padOps = []; (() => { const d = demoDevice, h = d.handle.bind(d); d.handle = (t, b) => { if (t === 0x68) d.padOps.push(b[0]); return h(t, b); }; })()`);
+  await sleep(1600);
+  check('review: …and a drop still decoding then sends nothing to the new module', G('demoDevice.padOps.length') === 0 && G('padJob[4]') === null, JSON.stringify(G('demoDevice.padOps')));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+}
 /* ── 9c. Contrast, measured: every text token against every surface it sits on, in both themes, ≥ 4.5:1; and no
  *        colour outside the token blocks — not in a CSS rule, not in an inline style, not in the script ── */
 {
