@@ -74,7 +74,7 @@ function stateBody(len = HL.STATE_LEN) {
   return b;
 }
 {
-  check('state too short → null (not this firmware\'s body)', HL.parseState(stateBody(100)) === null && HL.parseState(stateBody(HL.STATE_LEN - 1)) === null && HL.STATE_LEN === 315);
+  check('state too short → null (not this firmware\'s body)', HL.parseState(stateBody(100)) === null && HL.parseState(stateBody(HL.STATE_LEN - 1)) === null && HL.STATE_LEN === 324);
   const s0 = HL.parseState(stateBody());
   check('state fixed part', s0 && s0.nSlices === 32 && s0.cur === 7 && s0.ext && s0.locked && !s0.muted && !s0.flowing && s0.brain && s0.grammar === 2 && s0.cls === 1 && s0.file === 3 && s0.chop === 200 && s0.histN === 5 && s0.histDepth === 2 && s0.callFlash === 255);
   check('state floats', Math.abs(s0.bpm - 174.5) < 1e-4 && s0.mult === 0.5);
@@ -1193,6 +1193,92 @@ await link.start();
   await l.close();
 }
 
+/* ── 7h. RECLAIM (0x68 op 4): the tail's bytes from 315 and padReclaimFor, then over the fake module — pads dropped (one
+ *        stereo), one replaced, one deleted: held, and the part only Undo needs; FREE leaves that part (the history whole),
+ *        ALL takes everything and forgets those steps; every key the same samples after, both planes; the steps left
+ *        undo; a stale history counts for nothing; a set saved with held memory holds only what plays, and loads back the
+ *        same; the card map through a reclaim (still saved), a drop after (unsaved); the refusals both ways ── */
+{
+  const b = stateBody(); const dvb = new DataView(b.buffer);
+  b[293] = 4; dvb.setUint32(307, 30000, true); dvb.setUint32(315, 12000, true); dvb.setUint32(319, 48000, true); b[323] = 3;
+  const sp = HL.parseState(b).pads;
+  check('state: RECLAIM — 315 undoHeld, 319 reclaimed, 323 undoForgot; state 4 "reclaiming"; api 2', sp.held === 30000 && sp.undoHeld === 12000 && sp.reclaimed === 48000 && sp.undoForgot === 3
+    && HL.PADS.STATE[sp.state] === 'reclaiming' && HL.PADS.reclaim === 4 && HL.API === 2, JSON.stringify(sp));
+  const P = (free, held, undoHeld) => ({ free, held, undoHeld }), J = x => JSON.stringify(x);
+  check('padReclaimFor: a drop that fits, or nothing held → nothing; FREE when what no undo step needs is enough; else ALL (forgets when Undo needs some); longer than all of it → ALL, cut after',
+    HL.padReclaimFor(P(1000, 500, 0), 900) === null && HL.padReclaimFor(P(1000, 0, 0), 5000) === null && HL.padReclaimFor(null, 10) === null
+    && J(HL.padReclaimFor(P(1000, 500, 200), 1200)) === J({ mode: 0, frees: 300, forgets: false }) && J(HL.padReclaimFor(P(1000, 500, 200), 1400)) === J({ mode: 1, frees: 500, forgets: true })
+    && J(HL.padReclaimFor(P(1000, 500, 500), 1100)) === J({ mode: 1, frees: 500, forgets: true }) && J(HL.padReclaimFor(P(1000, 500, 0), 99999)) === J({ mode: 1, frees: 500, forgets: false }));
+
+  const d = new DEMO.FakeDevice({ latencyMs: 1 }), l = new HL.Link(new DEMO.FakePort(d)); await l.start(); await HL.hello(l);
+  const state = async () => HL.parseState(await l.request(HL.CMD.state));
+  const settle = async q0 => { for (let i = 0; i < 200; i++) { const s = await state(); if (s.pads.seq !== q0 && s.pads.state === 0) return s; d.padOp.t -= 500; await new Promise(r => setTimeout(r, 5)); } return null; };
+  const err = async f => { try { await f(); return 'ok'; } catch (e) { return e.message; } };
+  const drop = async (k, planes) => { const q0 = (await state()).pads.seq; await HL.uploadPad(l, k, planes.length, HL.encodePcm16(planes)); return settle(q0); };
+  const tone = (n, f, g) => new Float32Array(n).map((_, i) => Math.sin(i * f) * g * Math.exp(-i / (n / 3)));
+  /* what each key plays, both planes, as a hash of its samples */
+  const hash = (pl, a, n) => { let h = 7; for (let i = 0; i < n; i++) h = (h * 31 + Math.round(pl[a + i] * 32768)) | 0; return h; };
+  const keyPrints = () => Array.from({ length: 24 }, (_, k) => { const e = d.table[d.keySlice[k]]; return e ? [e.len, hash(d.buf, e.start, e.len), d.bufR ? hash(d.bufR, e.start, e.len) : 0].join(':') : '-'; }).join('|');
+  let s = await drop(0, [tone(9600, 0.02, 0.8)]);
+  s = await drop(1, [tone(7200, 0.3, 0.5), tone(7200, 0.31, 0.4)]);   /* a stereo pad: the kit stereo */
+  s = await drop(2, [tone(24000, 0.05, 0.6)]);
+  s = await drop(3, [tone(12000, 0.11, 0.5)]);
+  s = await drop(4, [tone(4800, 0.7, 0.4)]);
+  s = await drop(2, [tone(6000, 0.06, 0.6)]);                          /* key 2 replaced: 24000 held */
+  await HL.editTombstone(l, s.keySlice[3]); s = await state();          /* key 3's pad deleted: 12000 held */
+  check('five pads (one stereo), one replaced, one deleted: 36000 held — all of it what Undo could bring back', s.stereo && s.pads.held === 36000 && s.pads.undoHeld === 36000 && s.undoDepth === 7, JSON.stringify(s.pads));
+  const prints = keyPrints(), f0 = s.freePos, ud0 = s.undoDepth;
+  /* FREE: nothing no undo step needs — nothing moves, the history whole */
+  await HL.reclaimPads(l, HL.PADS.MODE.free); s = await settle(s.pads.seq);
+  check('RECLAIM FREE: everything held is Undo\'s here — nothing reclaimed, the history whole', s && s.pads.result === 0 && s.pads.reclaimed === 0 && s.freePos === f0 && s.undoDepth === ud0 && s.pads.held === 36000);
+  /* ALL: everything held back, the steps that need it forgotten */
+  await HL.reclaimPads(l, HL.PADS.MODE.all); s = await settle(s.pads.seq);
+  check('RECLAIM ALL: the 36000 back — freePos down by it, nothing held, the room up, the tail says what it freed and forgot', s && s.pads.result === 0 && s.pads.reclaimed === 36000 && s.freePos === f0 - 36000 && s.pads.held === 0 && s.pads.undoHeld === 0 && s.pads.free === 45 * 48000 - s.freePos && s.pads.undoForgot > 0, JSON.stringify(s && s.pads));
+  check('…every key plays the same samples (both planes), the same keys hold pads', keyPrints() === prints && s.pads.mask === 0b10111);
+  check('…the undo steps that needed a reclaimed sound forgotten (the deletion\'s, and everything before it): none left here', s.undoDepth === 0 && s.pads.undoForgot === ud0, `${s.undoDepth} / ${s.pads.undoForgot}`);
+  /* a history after it, across the next reclaim: a replacement Undo still needs stays (FREE), the rest remaps */
+  s = await drop(0, [tone(3000, 0.4, 0.7)]);                            /* key 0 replaced: 9600 held, Undo's */
+  await HL.editSplit(l, s.keySlice[2], d.table[s.keySlice[2]].start + 3000); s = await state();
+  const pr2 = keyPrints();
+  s = await drop(4, [tone(2400, 0.9, 0.3)]); await HL.editUndo(l); s = await state();   /* a drop undone: its 2400 held, the redo half's */
+  check('a replacement, a split, a drop undone: 12000 held, all of it Undo\'s (9600 back, 2400 forward)', s.pads.held === 12000 && s.pads.undoHeld === 12000 && s.undoDepth === 2 && s.redoDepth === 1, JSON.stringify(s.pads));
+  d.bumpGen();   /* something went past the journal (a take's commit, a Clear): its spans count for nothing */
+  s = await state();
+  check('a history the module went past: nothing held is Undo\'s any more', s.pads.undoHeld === 0 && s.pads.held === 12000);
+  await HL.reclaimPads(l, HL.PADS.MODE.free); s = await settle(s.pads.seq);
+  check('…so FREE takes all 12000, and the stale history is gone', s.pads.reclaimed === 12000 && s.pads.held === 0 && s.undoDepth === 0 && s.redoDepth === 0 && keyPrints() === pr2);
+  /* a set with held memory holds only what plays; loads back the same */
+  s = await drop(1, [tone(4000, 0.2, 0.5), tone(4000, 0.21, 0.5)]);       /* key 1 replaced: 7200 held */
+  const pr3 = keyPrints(), live = s.freePos - s.pads.held;
+  await HL.saveSet(l, 'packed'); for (let i = 0; i < 60 && ((s = await state()).setSeq === 0 || s.setState); i++) { d.set.t -= 300; await new Promise(r => setTimeout(r, 2)); }
+  check('Save set with 7200 held: saved, nothing unsaved — the live spans only (the set\'s planes as long as what plays)', s.setResult === 0 && !s.pads.unsaved && s.pads.held === 7200 && d.sets.get('packed').freePos === live && d.sets.get('packed').buf.length === live);
+  await HL.reclaimPads(l, HL.PADS.MODE.all); s = await settle(s.pads.seq);
+  check('a reclaim after the save: the planes moved, the card\'s copy still holds every pad — still saved', s.pads.reclaimed === 7200 && !s.pads.unsaved && keyPrints() === pr3);
+  s = await drop(7, [tone(2000, 0.5, 0.5)]);
+  check('…a drop after it: unsaved (that pad is not on the card)', s.pads.unsaved);
+  const d2 = new DEMO.FakeDevice({ latencyMs: 1 }); d2.sets = d.sets; d2.cardFs = d.cardFs; d2.files = d.files.slice(); d2.options[DEMO.O.sampling] = 1;
+  const l2 = new HL.Link(new DEMO.FakePort(d2)); await l2.start(); await HL.hello(l2);
+  const st2 = async () => HL.parseState(await l2.request(HL.CMD.state));
+  await HL.loadSet(l2, 'packed'); let y; for (let i = 0; i < 60 && ((y = await st2()).setSeq === 0 || y.setState); i++) { d2.set.t -= 300; await new Promise(r => setTimeout(r, 2)); }
+  const pr4 = Array.from({ length: 24 }, (_, k) => { const e = d2.table[d2.keySlice[k]]; return e ? [e.len, hash(d2.buf, e.start, e.len), d2.bufR ? hash(d2.bufR, e.start, e.len) : 0].join(':') : '-'; }).join('|');
+  check('Load set "packed" on a fresh module: every key the same samples as when it was saved, nothing held, nothing unsaved', y.setResult === 0 && pr4 === pr3 && y.pads.held === 0 && !y.pads.unsaved && y.freePos === live, `${y.freePos} / ${live}`);
+  await l2.close();
+  /* the refusals, both ways */
+  const q1 = (await state()).pads.seq;
+  await l.request(HL.CMD.pads, Uint8Array.of(HL.PADS.begin, 9, 1, 0x60, 0x09, 0, 0));   /* BEGIN, 2400 frames */
+  check('RECLAIM while a drop arrives: BAD_STATE', await err(() => HL.reclaimPads(l)) === 'BAD_STATE');
+  await l.request(HL.CMD.pads, Uint8Array.of(HL.PADS.abort)); await settle(q1);
+  d.set.pending = { op: 14, name: 'x' };
+  check('RECLAIM while a set op waits: BAD_STATE', await err(() => HL.reclaimPads(l)) === 'BAD_STATE');
+  d.set.pending = null; d.set.state = 0;
+  await HL.reclaimPads(l, 1); s = await state();
+  { const e1 = await err(() => HL.uploadPad(l, 9, 1, HL.encodePcm16([new Float32Array(600)]))), e2 = (await HL.editUndo(l)).status === 3 ? 'BAD_STATE' : 'ok', e3 = await err(() => HL.newKit(l));
+    check('…and while one runs: a drop, an edit, New empty kit refused', s.pads.state === 4 && e1 === 'BAD_STATE' && e2 === 'BAD_STATE' && e3 === 'BAD_STATE', [s.pads.state, e1, e2, e3].join()); }
+  s = await settle(s.pads.seq);
+  check('…then done: nothing was held, nothing moved', s.pads.result === 0 && s.pads.reclaimed === 0 && keyPrints().split('|')[7] !== '-');
+  await l.close();
+}
+
 /* ── 8. EDIT-UI: the pure editor (edit.js) — magnets, clamps, handles, positions, labels, the drop rule, the onset
  *       preview, the audition window, the gesture recogniser — then the Editor driven against the fake module ── */
 const ED = require('./edit.js');
@@ -1922,8 +2008,8 @@ const sentAct = (G, ...pre) => G('demoDevice.acts').some(a => pre.every((v, i) =
   fireEv(pad(18), 'drop', files('notes.txt'));
   check('an undecodable file: said, nothing sent', await until(() => G("padJobs.length === 12 && padJobs[11].state === 'failed'")) && /cannot decode/.test(G("$('pd_msg').textContent")));
   G('cardDecode = window.__dec');
-  /* too long for the room: cut to it, and said */
-  G('demoDevice.freePos = DEMO.BUF_CAP - 48000');
+  /* too long for the room: cut to it, and said (the room filled by a live keyless take, so nothing is held to reclaim) */
+  G("demoDevice.table.push({ start: demoDevice.freePos, len: DEMO.BUF_CAP - 48000 - demoDevice.freePos, key: -1, cls: 3, sal: 0, hit: false, dens: 0, flags: 0 }); demoDevice.freePos = DEMO.BUF_CAP - 48000; demoDevice.bumpGen()");
   fireEv(pad(15), 'drop', files('long 3s.wav'));
   check('a file longer than the room: the first second placed (all the room left), and said', await until(() => G("padJobs.length === 13 && padJobs[12].state === 'done'"), 15000) && /the first 1\.00 s of 3\.0 s, all the room left/.test(G("$('pd_msg').textContent")) && G('demoDevice.table[demoDevice.keySlice[15]].len') === 48000, G("$('pd_msg').textContent"));
   fireEv(pad(16), 'drop', files('more 0.1s.wav'));
@@ -2345,6 +2431,53 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
   G("showTab('tab_play')"); fireEv(G('padEls[3].set'), 'click', {}); await sleep(30);
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
   check('disconnect: the sheet closed, the row home and hidden', G("$('kp_sheet').hidden") === true && G("$('kp_row')._parent === $('kp_home')") && G("$('kp_row').hidden") === true);
+}
+/* ── 9k. RECLAIM, the page: pads dropped and one dropped again — the room line says what is held and a Reclaim button
+ *        its size, in Play and in the Kit's Buffer; a click asks first when Undo would lose steps (a "no" sends
+ *        nothing), a "yes" sends op 4 ALL — nothing held after, every pad the same samples, one history line that is no
+ *        undo step (the forgotten ones greyed); a drop that does not fit reclaims on its own and lands whole — ALL when
+ *        Undo needs the memory (the line says what it forgot), FREE when nothing does ── */
+{
+  const { D, G } = await loadPage('?demo=sampler');
+  check('reclaim page: connected, nothing held — no Reclaim button', await until(() => G('!!(st && st.pads && table)')) && await until(() => G("$('pd_bar').hidden") === false) && G("$('pd_reclaim').hidden") === true, D.errors.join(' | ').slice(0, 300));
+  G(`cardDecode = async f => { const secs = (/(\\d+(?:\\.\\d+)?)s/.exec(f.name) || [0, 1])[1] * 1, sr = /48k/.test(f.name) ? 48000 : 44100, n = Math.round(sr * secs), ch = /stereo/.test(f.name) ? 2 : 1;
+    return { numberOfChannels: ch, sampleRate: sr, length: n, getChannelData: c => new Float32Array(n).map((_, i) => (c ? -0.3 : 0.3) * Math.sin(i / (5 + secs))) }; }`);
+  G('demoDevice.padOps = []; demoDevice.padModes = []'); G(`(() => { const d = demoDevice, h = d.handle.bind(d); d.handle = (t, b) => { if (t === 0x68) { d.padOps.push(b[0]); if (b[0] === 4) d.padModes.push(b[1]); } return h(t, b); }; })()`);
+  const pad = k => G(`padEls[${k}].el`), files = (...names) => ({ dataTransfer: { files: names.map(name => ({ name, size: 10 })), types: ['Files'] } });
+  const prints = () => G(`Array.from({ length: 24 }, (_, k) => { const d = demoDevice, e = d.table[d.keySlice[k]]; if (!e) return '-'; let h = 7; for (let i = 0; i < e.len; i++) h = (h * 31 + Math.round(d.buf[e.start + i] * 32768)) | 0; return e.len + ':' + h; }).join('|')`);
+  let n = 0; const dropped = async (k, name) => { fireEv(pad(k), 'drop', files(name)); n++; return until(() => G(`padJobs.length === ${n} && padJobs[${n - 1}].state === 'done'`), 15000); };
+  check('three drops — A on C1, B on C♯1, then C on C1 again', await dropped(0, 'a 0.5s 48k.wav') && await dropped(1, 'b 0.3s 48k.wav') && await dropped(0, 'c 0.2s 48k.wav'), G("padJobs.map(j => j.state + ':' + j.text).join(' | ')"));
+  check('…C1\'s first sample held: the room line says "0.50 s held", the button "Reclaim 0.50 s", its title that Undo would lose it',
+    await until(() => G('st.pads.held') === 24000 && G('st.pads.undoHeld') === 24000) && await until(() => / · 0\.50 s held$/.test(G("$('pd_room').textContent")))
+    && G("$('pd_reclaim').hidden") === false && G("$('pd_reclaim').textContent") === 'Reclaim 0.50 s' && /Undo can still bring back/.test(G("$('pd_reclaim').title")) && /Undo can still bring back/.test(G("$('pd_room').title")), G("$('pd_room').textContent") + ' / ' + G("$('pd_reclaim').textContent"));
+  G("showTab('tab_kit')"); G('invalidate(D.kit)'); await sleep(80);
+  check('the Kit\'s Buffer says it too: held 0.50 s (all of it Undo\'s), its own Reclaim button', G("$('u_held').hidden") === false && /0\.500 s of it Undo can still bring back/.test(G("$('u_held').textContent")) && G("$('u_reclaim').hidden") === false && G("$('u_reclaim').textContent") === 'Reclaim 0.50 s', G("$('u_held').textContent"));
+  G("showTab('tab_play')");
+  const p0 = prints(), d0 = G('st.undoDepth');
+  G('confirmAnswer = false'); const c0 = G('confirms'); fireEv(G("$('pd_reclaim')"), 'click', {}); await sleep(120);
+  check('Reclaim asks first (Undo would lose steps) — a "no" sends nothing', G('confirms') === c0 + 1 && !G('demoDevice.padOps').includes(HL.PADS.reclaim) && G('st.pads.held') === 24000);
+  G('confirmAnswer = true'); fireEv(G("$('pd_reclaim')"), 'click', {});
+  check('…a "yes": op 4 ALL, nothing held, the button gone, the line says what came back and what Undo forgot',
+    await until(() => G('demoDevice.padModes').join() === '1') && await until(() => G('st.pads.held') === 0 && G("$('pd_reclaim').hidden") === true) && await until(() => /^reclaimed 0\.50 s — .* free for pads · Undo forgot \d+ steps?$/.test(G("$('msg').textContent"))), G("$('msg').textContent"));
+  check('…every pad plays the same samples', prints() === p0);
+  check('…the history: one line that is no undo step ("reclaimed 0.50 s held — Undo forgot …"), the forgotten steps greyed, Undo off',
+    await until(() => /^reclaimed 0\.50 s held — Undo forgot \d+ steps?$/.test(G('ed.history.list()[0].label')) && G('ed.history.list()[0].info') === true) && G('ed.history.list().slice(1).every(x => x.gone)') && d0 > 0 && await until(() => G('st.undoDepth') === 0) && G("$('ed_undo').disabled") === true,
+    G("ed.history.list().map(x => x.label + (x.gone ? '(gone)' : '')).join(' | ')"));
+  /* a drop that does not fit: the room filled by a live keyless take to 40000 frames, then a pad and its replacement */
+  G("demoDevice.table.push({ start: demoDevice.freePos, len: DEMO.BUF_CAP - 40000 - demoDevice.freePos, key: -1, cls: 3, sal: 0, hit: false, dens: 0, flags: 0 }); demoDevice.freePos = DEMO.BUF_CAP - 40000; demoDevice.bumpGen()");
+  check('a pad on D1 and its replacement: 0.08 s free, 0.50 s held — all Undo\'s', await dropped(2, 'd 0.5s 48k.wav') && await dropped(2, 'e 0.25s 48k.wav') && await until(() => G('st.pads.free') === 4000 && G('st.pads.held') === 24000 && G('st.pads.undoHeld') === 24000));
+  const p1 = prints();
+  check('a 0.40 s drop on D♯1: reclaims ALL first on its own (no question), lands whole, the line says so',
+    await dropped(3, 'f 0.4s 48k.wav') && G('demoDevice.padModes').join() === '1,1' && G(`padJobs[${n - 1}].plan.frames`) === 19200 && !G(`padJobs[${n - 1}].plan.cut`)
+    && /^D♯1: f 0\.4s 48k\.wav — mono, 0\.40 s · reclaimed 0\.50 s first \(Undo forgot \d+ steps?\)$/.test(G("$('pd_msg').textContent")) && G('confirms') === c0 + 2, G("$('pd_msg').textContent"));
+  check('…D1 and the rest still the same samples', prints().split('|').filter((x, k) => k !== 3).join('|') === p1.split('|').filter((x, k) => k !== 3).join('|'));
+  /* nothing Undo needs: FREE */
+  await until(() => G('padJob[3]') === null, 6000);
+  check('E1 and its replacement (0.18 s free → 0.03 s), then the module goes past its history (a take\'s commit): 0.10 s held, none of it Undo\'s', G('st.pads.free') === 8800 && await dropped(4, 'g 0.1s 48k.wav') && await dropped(4, 'h 0.05s 48k.wav')
+    && (G('demoDevice.bumpGen()'), await until(() => G('st.pads.free') === 1600 && G('st.pads.held') === 4800 && G('st.pads.undoHeld') === 0)), G('JSON.stringify(st.pads)'));
+  check('a 0.10 s drop on F1: FREE first (Undo loses nothing), lands whole, the line says what came back only', await dropped(5, 'i 0.1s 48k.wav') && G('demoDevice.padModes').join() === '1,1,0' && G(`padJobs[${n - 1}].plan.frames`) === 4800
+    && /· reclaimed 0\.10 s first$/.test(G("$('pd_msg').textContent")), G("$('pd_msg').textContent") + ' ' + G('demoDevice.padModes').join());
+  check('reclaim page: no unknown ids, no runtime errors', D.unknownIds.size === 0 && D.errors.length === 0, [...D.unknownIds].join(',') + ' ' + D.errors.join(' | ').slice(0, 300));
 }
 /* ── 9c. Contrast, measured: every text token against every surface it sits on, in both themes, ≥ 4.5:1; and no
  *        colour outside the token blocks — not in a CSS rule, not in an inline style, not in the script ── */

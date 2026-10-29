@@ -19,7 +19,7 @@ const PROTO = 1;
 /* The version of the firmware's side of everything below (the commands, the ops, the state body), from its descriptor
  * ("audiothurgist": { "api": n }, StateExt::DescriptorRootJson). The page and the firmware ship together; on connect the
  * page refuses any other number with one message — flash the matching .bin. Bump both with any change to the wire. */
-const API = 2;   /* 2: ENV — KEY_PARAMS / GET_KEYS carry each key's amp envelope and choke group */
+const API = 2;   /* 2: ENV — KEY_PARAMS / GET_KEYS carry each key's amp envelope and choke group; RECLAIM — 0x68 op 4, the state body to 324, sets saved packed */
 const apiOf = desc => (desc && desc.audiothurgist && Number.isInteger(desc.audiothurgist.api)) ? desc.audiothurgist.api : null;
 const CMD = {
   hello: 0x01, getDescriptor: 0x02, blobBegin: 0x12, blobData: 0x13, blobCommit: 0x14,
@@ -326,7 +326,7 @@ function concat(parts) { const all = new Uint8Array(parts.reduce((s, p) => s + p
 /* ───────────── StateExt (0x60–0x63) ─────────────
  * GET_STATE body (after status), STATE_LEN bytes, every field always there: anything else is not this firmware's
  * (null). */
-const STATE_LEN = 315;
+const STATE_LEN = 324;
 const ZONE_MULT = [0.25, 0.5, 1, 2, 4];   /* P2 zones 0..4 while following: ÷4 ÷2 ×1 ×2 ×4 */
 function parseState(b) {
   if (!b || b.length < STATE_LEN) return null;
@@ -387,12 +387,15 @@ function parseState(b) {
   /* 293 PADS: state (PADS.STATE), progress 0..255, the last op's result (PADS.RESULT), seq (bumps per finished op), 297
    * key (the drop's, -1 none), 298 flags (PADS.F: the kit holds audio the card does not · an empty kit, no break · the
    * last drop made the kit stereo), 299 free (frames past freePos), 303 total (the pads' share: bufCap − bufLen), 307
-   * held (frames below freePos that replaced or undone recordings still hold — not reclaimed until new material), 311
-   * the pads (bit k = key k holds a recording) */
+   * held (frames below freePos that replaced, deleted or undone recordings and trimmed edges still hold — op 4 gives
+   * them back), 311 the pads (bit k = key k holds a recording); RECLAIM: 315 undoHeld (of held, what only the undo
+   * history keeps: a Free reclaim leaves it, an All one forgets those steps), 319 reclaimed (the last reclaim's frames),
+   * 323 undoForgot (the undo steps it dropped) */
   { const f = b[298];
     st.pads = { state: b[293], progress: b[294], result: b[295], seq: b[296], key: b[297] === 255 ? -1 : b[297], flags: f,
       unsaved: !!(f & PADS.F.unsaved), noBreak: !!(f & PADS.F.noBreak), madeStereo: !!(f & PADS.F.madeStereo),
-      free: u32(b, 299), total: u32(b, 303), held: u32(b, 307), mask: u32(b, 311) }; }
+      free: u32(b, 299), total: u32(b, 303), held: u32(b, 307), mask: u32(b, 311),
+      undoHeld: u32(b, 315), reclaimed: u32(b, 319), undoForgot: b[323] }; }
   return st;
 }
 /* GET_WAVE: one window of the material buffer — n ≤ 480 output bytes, each
@@ -676,9 +679,14 @@ async function cardList(link) {
  * DATA(total, offset, bytes) until the last byte. The module holds the bytes in its sample memory past freePos, then its
  * main loop converts them in place and publishes the pad as key `key`'s recording — one undo step (the tail's pads seq
  * says when). Nothing is written to the card: a set save keeps the kit, a power-off loses it (pads.unsaved).
- * NEW_KIT clears the break (a silent ¼ s stub), every pad and marker, and puts the module in Pads. */
-const PADS = { begin: 0, data: 1, abort: 2, newKit: 3, sr: 48000, minFrames: 480, stubFrames: 12000,
-  STATE: ['idle', 'receiving', 'committing', 'clearing'],
+ * NEW_KIT clears the break (a silent ¼ s stub), every pad and marker, and puts the module in Pads.
+ * RECLAIM (op 4, u8 mode) gives held memory back: the module moves every live recording down over the gaps that
+ * replaced, deleted and undone ones left (into its other buffer, swapped in at a block's start — what sounds goes on
+ * sounding), and freePos comes down. Mode FREE (0) takes only what no undo step needs; ALL (1) everything held, and the
+ * undo steps that would need it are forgotten (the tail's undoForgot says how many, reclaimed how much). */
+const PADS = { begin: 0, data: 1, abort: 2, newKit: 3, reclaim: 4, sr: 48000, minFrames: 480, stubFrames: 12000,
+  MODE: { free: 0, all: 1 },
+  STATE: ['idle', 'receiving', 'committing', 'clearing', 'reclaiming'],
   RESULT: ['ok', 'no room', 'busy', 'bad args', 'the table is full', 'timed out', 'cancelled', 'the module moved under it'],
   F: { unsaved: 1, noBreak: 2, madeStereo: 4 } };
 /* What a pad gets from a decoded buffer: ≤ 2 channels (more: the first two), at 48 kHz, cut to `room` frames (the
@@ -736,6 +744,17 @@ async function uploadPad(link, key, ch, bytes, opts = {}) {
   return { bytes: total, ms, kbps: total / ms, room };
 }
 const newKit = link => link.request(CMD.pads, Uint8Array.of(PADS.newKit), { urgent: true });
+/* RECLAIM: ask for held memory back (the module's main loop does it; the tail's pads seq says when). */
+const reclaimPads = (link, mode = PADS.MODE.all) => link.request(CMD.pads, Uint8Array.of(PADS.reclaim, mode ? 1 : 0), { urgent: true });
+/* What a drop of `frames` needs reclaimed first, from the tail's pads: null when it fits (or nothing is held); else the
+ * mode — FREE when what no undo step needs is enough, ALL otherwise (then `forgets`: Undo loses the steps that need the
+ * rest) — and how much it frees. A drop longer than free + held still takes ALL: it is cut to the room after. */
+function padReclaimFor(p, frames) {
+  if (!p || frames <= p.free || !p.held) return null;
+  const spare = Math.max(0, p.held - (p.undoHeld || 0));
+  if (spare > 0 && frames <= p.free + spare) return { mode: PADS.MODE.free, frees: spare, forgets: false };
+  return { mode: PADS.MODE.all, frees: p.held, forgets: (p.undoHeld || 0) > 0 };
+}
 
 /* GET_ENV: fetch nSlices × 16 envelope bytes in ≤30-slice chunks. */
 async function fetchEnv(link, n) {
@@ -879,7 +898,7 @@ const api = { PROTO, API, apiOf, CMD, ACT, REC, NOTE_NAMES, keyName, STATUS, sta
   EDIT, editOp, editBoundary, editEntry, editAdd, editSplit, editMerge, editTombstone, editSetKey, editSwapKeys, editNudgeAll, editPromote, editFromOnsets, audition, release, tapMark, editUndo, editRedo,
   KEYS, playKey, keysFromMarkers, clearMarkers, setMute, autoslice,
   CARD, breakNameOk, breakName, uploadPlan, encodeWav, serial, uploadBreak, copyOldCard, cardRescan, cardList,
-  PADS, padPlan, encodePcm16, padNormalize, uploadPad, newKit,
+  PADS, padPlan, encodePcm16, padNormalize, uploadPad, newKit, reclaimPads, padReclaimFor,
   KEYP, keyParams, parseKeyParams, fetchKeyParams, keypNeutral, keypZero, keypText, keypGainText, keypTuneText, keypMsText, keypSusText, keypEnvText, envMs, envPos,
   CHROMA, spreadKeys, spreadPlan, spreadCents };
 if (typeof module === 'object' && module.exports) module.exports = api; else root.HL = api;

@@ -65,7 +65,7 @@
 #include "bb_keys.h"      /* BETA: the one CV keymap — J4 key, J5 style, the call plan (pure, host-tested) */
 #include "bb_sample.h"   /* SAMPLE: TrimRegion, AnalyseRegion (a key take, control thread) */
 #include "bb_record.h"   /* RECORD: record input, kit map, take length, markers → cues, TakeRecorder */
-#include "bb_sets.h"     /* SETS: set naming, engine ↔ SetInfo, the load plan (docs/packages/sample-sets.md) */
+#include "bb_sets.h"     /* SETS: set naming, engine ↔ SetInfo, the load plan (docs/packages/sample-sets.md); RECLAIM: bb_reclaim.h with it */
 /* CARD: none of the card code is time-critical (it waits on the card and yields), and SRAM is the module's
  * tightest budget — built for size, not speed. */
 #pragma GCC push_options
@@ -695,8 +695,7 @@ static volatile bool    gPadsFollowReq = false;  /* BETA: the grammar became Pad
  * SetMaterial at the apply — never from the main loop while voices sound.
  * An old file carries the computed grid: a no-op there. */
 static volatile bool    gSetPendGrid   = false;  /* control → audio, consumed at the apply */
-static int              gSetWavLen     = 0;      /* the current set's WAV: frames per plane (what its JSON may describe) */
-static bool             gSetWavStereo  = false;  /*   … and its plane count */
+static bool             gSetWavStereo  = false;  /* the current set's WAV: its plane count (what it holds: gCardMap) */
 /* EDIT-PERSIST: autosave — Options byte 23. The table's generation is the
  * trigger: 2 s after it last moved (and only while nothing else touches the
  * card or the planes) the JSON half of a save goes to the card. `gAutoClean`
@@ -763,8 +762,32 @@ static uint32_t         gPadLastMs  = 0;              /* the last chunk: 5 s of 
 static bool             gPadTicking = false;          /* the main loop is inside a drop's commit: KeepClock runs the loop at 1 kHz */
 static bool             gPadStereo  = false;          /* the last drop made the kit stereo (and Sampling → Stereo) */
 static bool             gNoBreak    = false;          /* the material is an empty kit's silent stub (no native tempo) */
-static int              gKitOnCard  = 0;              /* frames per plane the card holds of this kit (the unsaved note) */
 static bool PadBusy() { return gPadState != bb::kPadIdle || gPadReq != 0u; }
+/* RECLAIM (docs/packages/pads.md, "Held memory"; the rules are core/bb_reclaim.h): 0x68 op 4 gives held memory back.
+ * The main loop plans (the kept runs), copies them into the other buffer (gLoad: free while no load, loop take or
+ * drop is in flight — all refused meanwhile) and asks the audio thread to swap them in at a block's start with every
+ * position (ReclaimSwap); voices on what goes fade first (ReclaimFade, each block while gReclaimFade stands). Then the
+ * journal is cut and remapped and the card map follows. Edits, takes, loads, card jobs and drops wait (PadBusy).
+ * gCardMap is where the live spans lie in the card's copy of the kit (a set's WAV, a loose break): the unsaved note,
+ * the autosave and a set save read it. SDRAM, NOLOAD: plain structs (BB_SDRAM_POD). */
+static bb::ReclaimPlan ALCHEMY_SDRAM_BSS gPlan;       /* the reclaim's (read by the audio thread at the swap); a save's packing */
+static bb::ReclaimPlan ALCHEMY_SDRAM_BSS gRoomPlan;   /* the room's undo figure, worked out when the table moves */
+static bb::CardMap     ALCHEMY_SDRAM_BSS gCardMap;    /* what the card holds of this kit, and where */
+static bb::CardMap     ALCHEMY_SDRAM_BSS gCardNext;   /* a save's (or a reclaim's) map before it is the card's */
+BB_SDRAM_POD(gPlan);
+BB_SDRAM_POD(gRoomPlan);
+BB_SDRAM_POD(gCardMap);
+BB_SDRAM_POD(gCardNext);
+static volatile bool    gReclaimFade = false;         /* main → audio: fade what the plan does not keep, each block */
+static volatile uint8_t gReclaimOut  = 0;             /* audio → main: voices still sounding outside the kept runs */
+static volatile bool    gReclaimSwap = false;         /* main → audio: swap the compacted planes in; cleared = the ack */
+static volatile bool    gReclaimOk   = false;         /*   … and whether it took (the table moved since the plan: no) */
+static uint8_t          gReclaimMode = 0;             /* bb::kReclaimFree · kReclaimAll (op 4's byte) */
+static uint32_t         gUndoHeld    = 0;             /* held frames only Undo still needs (tail 315) */
+static uint32_t         gReclaimed   = 0;             /* the last reclaim's frames (319) */
+static uint8_t          gUndoForgot  = 0;             /* undo steps the last reclaim dropped (323) */
+static uint8_t          gRoomGen     = 0;             /* the table generation gUndoHeld is for */
+static int              gRoomFree    = -1;            /*   … and freePos */
 /* ── end PADS ──────────────────────────────────────────────────────────── */
 /* ── START ── ▶ in Pads plays a beat. Pads writes nothing, so starting the transport there was silent — and after a
  * sampler power-up the panel had no way to a drum grammar but a preset load. Any start (B1 held, ▶, ACTION 2 / 35)
@@ -1063,6 +1086,17 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
         gNeedNativeTempo = true;
         gLastLp = -1.;   /* new nSlices → new phase geometry; do not hold */
         gApply = false; gReapply = false;
+    }
+    /* RECLAIM: while one runs, voices on what goes fade; then the compacted planes come in at this block's start,
+     * every position with them, and the buffers trade places as at a load */
+    if(gReclaimFade) gReclaimOut = (uint8_t)bb::ReclaimFade(engine, gPlan);
+    if(gReclaimSwap)
+    {
+        gReclaimOk = bb::ReclaimSwap(engine, gPlan, gLoad, gLoadR);
+        if(gReclaimOk) { float* t = gPlay; gPlay = gLoad; gLoad = t; t = gPlayR; gPlayR = gLoadR; gLoadR = t; }
+        gReclaimFade = false;   /* the plan's positions are the old planes': never read against the new ones */
+        __asm__ volatile("dmb" ::: "memory");
+        gReclaimSwap = false;
     }
     engine.gateOnsetsOnly = gGateMode.sel == 1;
     /* GRAM */ engine.swapsMode = gSwaps.sel; engine.dejaVu = gDejaVu.sel; /* GRAM end */
@@ -2310,7 +2344,7 @@ static void PrepareMaterial(int len, int* cues, int nCues, bool stereo, int know
     gLoadFlash  = 1.f;
     gSetCurName[0] = 0;     /* SETS: a loose file or a take, not a set */
     gNoBreak   = false;                       /* PADS: a break again */
-    gKitOnCard = gCurFile >= 0 ? len : 0;     /* PADS: a card file is on the card; a take is not */
+    if(gCurFile >= 0) gCardMap.Identity(len); else gCardMap.Clear();   /* PADS: a card file is on the card; a take is not */
     gPadStereo = false;
     if(sidecar) StageSidecar(len);   /* EDIT-PERSIST: a loose file's saved table, before the apply */
     gAutoArm    = true;              /* EDIT-PERSIST: the post-apply generation is the card's */
@@ -2496,7 +2530,10 @@ static void SaveSet(const char* name)
     if(!SnapshotLooper()) { SetFinish(6); return; }
     bb::SetInfo& s = *gSet;
     new(&s) bb::SetInfo();
-    bb::SetFromEngine(engine, *gSetLooper, s, engine.bufR != nullptr, (int)kSr);   /* EDIT-PERSIST: compacted, with flags, grid and keys */
+    /* RECLAIM: only what is live goes — the break and the live spans, packed (gCardNext says where each lies in the
+     * file); the planes stay as they are, held memory and all, so nothing sounding moves and Undo keeps its history */
+    if(!bb::PackForCard(engine, gPlan, gCardNext) || !bb::SetFromEngine(engine, *gSetLooper, s, engine.bufR != nullptr, (int)kSr, gCardNext))
+    { SetFinish(6); return; }   /* EDIT-PERSIST: compacted, with flags, grid and keys */
     CopyName(s.name, sizeof s.name, name);
     s.bars     = gGridBars;
     s.bpm      = engine.NativeBpm();
@@ -2520,7 +2557,8 @@ static void SaveSet(const char* name)
     bool wavOk = f_open(&gSetFil, wav, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK;
     if(wavOk)
     {
-        wavOk = bb::SetWriter::Wav(bbwav::Sink{&SdSink, &gSetFil}, s, engine.buf, engine.bufR, gSetStage, sizeof gSetStage);
+        wavOk = bb::SetWriter::Wav(bbwav::Sink{&SdSink, &gSetFil}, s, engine.buf, engine.bufR, gSetStage, sizeof gSetStage,
+                                   bbwav::kPcm16, gCardNext.live, gCardNext.seg, gCardNext.n);   /* RECLAIM: gathered from the live spans */
         wavOk = (f_close(&gSetFil) == FR_OK) && wavOk;
         if(!wavOk) f_unlink(wav);
     }
@@ -2540,8 +2578,8 @@ static void SaveSet(const char* name)
     if(!wavOk || !jsonOk) { SetFinish(gSetFull ? 2 : 3); return; }
     gCurFile = AddSetEntry(name);
     strncpy(gSetCurName, name, sizeof gSetCurName - 1); gSetCurName[sizeof gSetCurName - 1] = 0;
-    gSetWavLen = s.len; gSetWavStereo = s.stereo;   /* EDIT-PERSIST: what an autosave may describe */
-    gKitOnCard = s.len;                              /* PADS: the kit is on the card now */
+    gSetWavStereo = s.stereo;   /* EDIT-PERSIST: what an autosave may describe … */
+    gCardMap = gCardNext;       /* … RECLAIM: and where — PADS: the kit is on the card now */
     gAutoClean = engine.tableGen; gAutoSeen = gAutoClean;
     SetFinish(0);
 }
@@ -2589,7 +2627,7 @@ static int LoadSet(const char* name, int fileIdx)
     if(!bb::PlanSet(*gSet, gSetPlan)) { SetFinish(7); return -1; }
     const bb::SetPlan& p = gSetPlan;
     gNoBreak   = bb::IsEmptyKit(gLoad, p.material);   /* PADS: a pads-only kit's set — its silent stub is no tempo */
-    gKitOnCard = gSet->len;
+    gCardMap.Identity(gSet->len);                      /* RECLAIM: the planes are the file, sample for sample */
     gPadStereo = false;
     /* stage what PrepareMaterial stages, minus the conditioning */
     const int nsl = p.nGrid;
@@ -2614,7 +2652,7 @@ static int LoadSet(const char* name, int fileIdx)
     gSetPendGrid   = true;             /* EDIT-PERSIST: the file's grid starts at the apply (an old file: a no-op) */
     gSetPendCommit = true;             /* the markers (CommitEntry needs the new planes), the key table, the autosave baseline: after the swap */
     gAutoArm       = true;
-    gSetWavLen = gSet->len; gSetWavStereo = gSet->stereo;   /* EDIT-PERSIST: what an autosave may describe */
+    gSetWavStereo = gSet->stereo;   /* EDIT-PERSIST: what an autosave may describe */
     gCurFile = fileIdx;
     strncpy(gSetCurName, name, sizeof gSetCurName - 1); gSetCurName[sizeof gSetCurName - 1] = 0;
     gLoadFlash = 1.f;
@@ -2799,7 +2837,9 @@ static bool AutosaveNow()
     if(gSetCurName[0])
     {
         if(!SnapshotLooper()) return false;
-        bb::SetFromEngine(engine, *gSetLooper, s, gSetWavStereo, (int)kSr, gSetWavLen);
+        /* RECLAIM: through the card map — the positions the WAV on the card has, whatever the memory did since (a
+         * reclaim moved the live side); a map a reclaim split past its size describes nothing (the note says unsaved) */
+        if(!bb::SetFromEngine(engine, *gSetLooper, s, gSetWavStereo, (int)kSr, gCardMap)) return true;
         CopyName(s.name, sizeof s.name, gSetCurName);
         s.bars     = gGridBars;
         s.bpm      = engine.NativeBpm();
@@ -2811,7 +2851,8 @@ static bool AutosaveNow()
     else if(gCurFile >= 0 && gCurFile < gNumFiles)
     {
         gSetLooper->Clear();   /* the sidecar carries no looper */
-        bb::SetFromEngine(engine, *gSetLooper, s, false, (int)kSr, engine.bufLen);
+        gCardNext.Identity(engine.bufLen);   /* the break alone, as it lies (RECLAIM: one SetFromEngine body, through a map) */
+        bb::SetFromEngine(engine, *gSetLooper, s, false, (int)kSr, gCardNext);
         CopyName(s.name, sizeof s.name, gFiles[gCurFile]);
         s.bars = gGridBars;
         s.bpm  = engine.NativeBpm();
@@ -3224,8 +3265,9 @@ static void ServiceLoad()
  *   CARD (docs/packages/card.md): 0x67 CARD — upload a break, copy an old card in, rescan,
  *                   the list (HandleCard has the ops); state tail 276..292 (StateExt's 0x60 has the bytes) — ends at 293
  *   PADS (docs/packages/pads.md): 0x68 PADS — a PCM16 sample dropped onto a pad (BEGIN / DATA /
- *                   ABORT, committed as EditOp::Record: one undo step), NEW_KIT (no break, Pads); state tail 293..314
- *                   (state, progress, result, seq, key, flags, free, total, held, the pads' key mask) — ends at 315
+ *                   ABORT, committed as EditOp::Record: one undo step), NEW_KIT (no break, Pads), RECLAIM (held
+ *                   memory back); state tail 293..323 (state, progress, result, seq, key, flags, free, total, held,
+ *                   the pads' key mask; RECLAIM: undoHeld, the last reclaim's frames and forgotten steps) — ends at 324
  *   KEYP (docs/packages/keyp.md): per-key gain / tune / plays, ENV: the amp envelope and the choke group —
  *   0x63 ACTION     37 KEY_PARAMS(u8 key 0..23, i8 gain ½ dB −48..+12, i16 cents ±2400, u8 plays 0 follow Key
  *                   Plays · 1 one-shot · 2 held · 3 loop · 4 ratchet, u8 rate 0 the entry · 1 ½ · 2 ¼ · 3 ⅛ · 4 an 8th
@@ -3817,7 +3859,7 @@ static bool PadRefused()
 {
     const bool take = gKeyTake || gKeyTakeDone || gTakeActive || gKeyArm || gRecord.sel == 1 || engine.recArmed || engine.recPending;
     return take || gSetState || gSetReq || gLoadReq || gApply || gReapply || gCardReq || gCardState != bb::kCardIdle
-        || gPadState >= bb::kPadCommitting || gPadReq || !engine.buf || engine.nSlices < 1;
+        || gPadState >= bb::kPadCommitting || gPadReq || gSetPendCommit || !engine.buf || engine.nSlices < 1;
 }
 /* The commit: the bytes the drop left in the L plane past freePos → floats in place, the R plane, the analysis of
  * the head, then EditOp::Record through the edit mailbox (one undo step; the audio thread publishes the entry
@@ -3856,6 +3898,65 @@ static void PadCommit()
     gPadTicking = false;
     PadFinish(st == bb::EditStatus::Ok ? bb::kPadOk : st == bb::EditStatus::Full ? bb::kPadFull : bb::kPadMoved);
 }
+/* RECLAIM: op 4 — held memory back. Plan (Free: what no undo step needs; All: everything held, the steps that need it
+ * forgotten), fade what goes, copy the kept runs into the other buffer, swap at a block's start, then the journal and
+ * the card map. One more try if the table moved under it (a Clear from J5 style 8); KeepClock runs the loop at 1 kHz. */
+static void PadReclaim()
+{
+    gPadTicking = true;
+    uint8_t res = bb::kPadMoved;
+    for(int attempt = 0; attempt < 2 && res == bb::kPadMoved; attempt++)
+    {
+        if(!bb::BuildReclaimPlan(engine, gReclaimMode, gPlan)) { res = bb::kPadOk; gReclaimed = 0; gUndoForgot = 0; break; }
+        if(gPlan.Reclaimed() <= 0) { res = bb::kPadOk; gReclaimed = 0; gUndoForgot = 0; break; }
+        bb::ReclaimPlanJournal(engine, gPlan);
+        const uint8_t gen0 = engine.tableGen, clean0 = gAutoClean;
+        gReclaimOut = 255u;
+        __asm__ volatile("dmb" ::: "memory");
+        gReclaimFade = true;
+        gPadProg = 16;
+        bb::ReclaimCopy(gPlan, engine.buf, gLoad);
+        gPadProg = engine.bufR ? 96 : 176;
+        if(engine.bufR) { bb::ReclaimCopy(gPlan, engine.bufR, gLoadR); gPadProg = 176; }
+        {   /* what goes has faded (the choke geometry: ≤ 10 ms at pitch, longer pitched down) — a while at most */
+            const uint32_t t0 = TickNow();
+            while(gReclaimOut != 0u && (TickNow() - t0) < 100000u * gTicksPerUs) bb::Yield();
+        }
+        gReclaimOk = false;
+        __asm__ volatile("dmb" ::: "memory");
+        gReclaimSwap = true;
+        {
+            const uint32_t t0 = TickNow();
+            while(gReclaimSwap && (TickNow() - t0) < 4000u * gTicksPerUs) bb::Yield();
+        }
+        gReclaimFade = false;
+        if(gReclaimSwap) { gReclaimSwap = false; res = bb::kPadBusy; break; }   /* the audio thread never ran */
+        __asm__ volatile("dmb" ::: "memory");
+        if(!gReclaimOk) continue;   /* the table moved since the plan: plan again (the fade went off with the refusal) */
+        bb::ReclaimJournal(engine, gPlan);
+        gCardNext.Follow(gCardMap, gPlan);
+        gCardMap = gCardNext;
+        if(clean0 == gen0) { gAutoClean = engine.tableGen; gAutoSeen = gAutoClean; }   /* the card's JSON still holds: nothing to autosave */
+        gReclaimed = (uint32_t)gPlan.Reclaimed(); gUndoForgot = (uint8_t)(gPlan.dropSteps > 255 ? 255 : gPlan.dropSteps);
+        res = bb::kPadOk;
+    }
+    gPadTicking = false;
+    PadFinish(res);
+}
+/* The room's undo figure: of what is held, how much only the undo history keeps (a Free reclaim leaves it, an All one
+ * forgets those steps). Worked out when the table or freePos moves, while nothing else runs; a table that moved under
+ * the plan (an edit on the audio thread) is worked out again next pass. */
+static void ServiceRoom()
+{
+    if(PadBusy() || gSetState || gApply || gReapply || !engine.buf || (engine.tableGen == gRoomGen && engine.freePos == gRoomFree)) return;
+    const uint8_t gen = engine.tableGen; const int fp = engine.freePos;
+    const bb::PadRoom r = bb::PadRoomOf(engine);
+    uint32_t u = 0;
+    if(r.held && bb::BuildReclaimPlan(engine, bb::kReclaimFree, gRoomPlan))
+    { const uint32_t f = (uint32_t)gRoomPlan.Reclaimed(); u = r.held > f ? r.held - f : 0u; }
+    if(engine.tableGen != gen || engine.freePos != fp) return;
+    gUndoHeld = u; gRoomGen = gen; gRoomFree = fp;
+}
 /* New empty kit: kPadStubLen samples of silence as the material (16 grid slices, class "other", no salience — so
  * no gate ever fires from it), staged like a load into the other buffer and swapped by the audio thread (the
  * table, the looper and the undo history start over, exactly as a load), the grammar → Pads (the keys are the
@@ -3870,8 +3971,8 @@ static void PadNewKit()
     memset(&gSetPlan, 0, sizeof gSetPlan);
     gSetPendGrid = false; gSetPendCommit = false; gSetPendLooper = false;
     gPendLen = bb::kPadStubLen; gPendStereo = stereo;
-    gCurFile = -1; gSetCurName[0] = 0; gSetWavLen = 0; gSetWavStereo = false;
-    gNoBreak = true; gKitOnCard = 0; gPadStereo = false;
+    gCurFile = -1; gSetCurName[0] = 0; gSetWavStereo = false;
+    gNoBreak = true; gCardMap.Clear(); gPadStereo = false;
     gLoadFlash = 1.f;
     gAutoArm   = true;
     if(gGrammar.mode != 6u) { gGrammar.mode = 6u; gGrammar.dirty = true; }
@@ -3883,12 +3984,13 @@ static void ServicePads()
 {
     if(gPadState == bb::kPadReceiving && (uint32_t)(daisy::System::GetNow() - gPadLastMs) > 5000u)
     { gPadRx.Reset(); PadFinish(bb::kPadTimeout); }
-    if(!gPadReq) return;
+    if(!gPadReq) { ServiceRoom(); return; }   /* RECLAIM: the room's undo figure, while idle */
     if(gPadReq == 3u) { if(!gApply) PadFinish(bb::kPadOk); return; }
     if(gApply || gReapply || gEditPend) return;
     const uint8_t req = gPadReq;
     if(req == 1u) PadCommit();
     else if(req == 2u) PadNewKit();
+    else if(req == 4u) PadReclaim();   /* RECLAIM */
 }
 /* 0x68 PADS — every op answers u8 status first:
  *   0 BEGIN    ← u8 key (0..23), u8 ch (1 | 2), u32 frames (48 kHz) → status, u32 room (frames free past freePos
@@ -3902,6 +4004,10 @@ static void ServicePads()
  *   2 ABORT    → status (the drop forgotten; nothing published)
  *   3 NEW_KIT  → status: the break cleared (a silent ¼ s stub), every pad and marker gone, the grammar → Pads;
  *              the undo history ends as at a load. BAD_STATE as a begin, or while a drop arrives.
+ *   4 RECLAIM  ← u8 mode (0 Free: what no undo step needs · 1 All: everything held — the undo steps that need it
+ *              go) → status: the held memory back, every pad where it was in sound (the kept spans move down, the
+ *              voices with them; one ringing on what goes fades). BAD_STATE as a begin, or while a drop arrives. The
+ *              tail's seq says when; 319 / 323 what it freed and what Undo forgot.
  * The state tail from 293 reports state, progress, result, the key, the kit's flags and the room. */
 static void PadsTail(hostlink::FrameWriter& w)   /* the state tail's 293..314 (the 0x60 comment has the bytes) */
 {
@@ -3909,9 +4015,10 @@ static void PadsTail(hostlink::FrameWriter& w)   /* the state tail's 293..314 (t
     uint32_t prog = gPadProg;
     if(gPadState == bb::kPadReceiving) prog = gPadRx.Progress();
     w.U8(gPadState); w.U8((uint8_t)prog); w.U8(gPadResult); w.U8(gPadSeq); w.U8(gPadKey);   /* 293..297 */
-    w.U8((uint8_t)((bb::KitUnsaved(engine, gKitOnCard, gNoBreak) ? 1u : 0u) | (gNoBreak ? 2u : 0u) | (gPadStereo ? 4u : 0u)));   /* 298 */
+    w.U8((uint8_t)((bb::KitUnsaved(engine, gCardMap, gNoBreak) ? 1u : 0u) | (gNoBreak ? 2u : 0u) | (gPadStereo ? 4u : 0u)));   /* 298 */
     w.U32(room.free); w.U32(room.total); w.U32(room.held);                                     /* 299, 303, 307 */
-    w.U32(bb::PadMask(engine));                                                                /* 311 — ends at 315 */
+    w.U32(bb::PadMask(engine));                                                                /* 311 */
+    w.U32(gUndoHeld < room.held ? gUndoHeld : room.held); w.U32(gReclaimed); w.U8(gUndoForgot); /* RECLAIM 315, 319, 323 — ends at 324 */
 }
 static void HandlePads(const hostlink::ParsedFrame& f, hostlink::FrameWriter& w)
 {
@@ -3958,6 +4065,12 @@ static void HandlePads(const hostlink::ParsedFrame& f, hostlink::FrameWriter& w)
             gPadState = bb::kPadClearing; gPadKey = 255u; gPadReq = 2u;
             w.U8(bb::kStOk);
             return;
+        case 4:   /* RECLAIM */
+            if(PadRefused() || gPadState != bb::kPadIdle) { w.U8(bb::kStBadState); return; }
+            gReclaimMode = f.len > 1 && f.body[1] ? bb::kReclaimAll : bb::kReclaimFree;
+            gPadState = bb::kPadReclaiming; gPadKey = 255u; gPadProg = 0; gPadReq = 4u;
+            w.U8(bb::kStOk);
+            return;
         default: w.U8(bb::kStBadArgs); return;
     }
 }
@@ -3974,7 +4087,7 @@ struct StateExt : hostlink::IHostlinkExtension
          * everything below (the commands, the ops, the state body). It refuses any other with one message —
          * flash the matching .bin — so there is no partial mode to keep working. Bump it with any change to the
          * wire, and HL.API in web/hostlink.js with it (the selftest's descriptor parity holds them equal). */
-        return "\"audiothurgist\":{\"api\":2}";   /* 2: ENV — KEY_PARAMS / GET_KEYS carry the envelope and the choke group */
+        return "\"audiothurgist\":{\"api\":2}";   /* 2: ENV — KEY_PARAMS / GET_KEYS carry the envelope and the choke group; RECLAIM — 0x68 op 4, the tail to 324, sets saved packed */
     }
     /* WEB: one float → i8 (±127), saturating. */
     static int8_t ToI8(float v)
@@ -4069,13 +4182,15 @@ struct StateExt : hostlink::IHostlinkExtension
                  * upload's list index, 255 none) · u16 copied · u16 skipped (the last copy) · u8 nFiles — ends at 293. */
                 CardTail(w);
                 /* PADS tail (293..314, docs/packages/pads.md): u8 padState (0 idle · 1 receiving · 2 committing ·
-                 * 3 clearing: New empty kit) · u8 progress 0..255 · u8 result of the last op (0 ok · 1 no room ·
+                 * 3 clearing: New empty kit · 4 reclaiming) · u8 progress 0..255 · u8 result of the last op (0 ok · 1 no room ·
                  * 2 busy · 3 bad args · 4 table full · 5 timed out · 6 aborted · 7 the planes moved under it) · u8 seq
                  * (bumps per finished op) · u8 key (255 none) · u8 flags (b0 the kit holds audio the card does not:
                  * a power-off loses it · b1 an empty kit: no break · b2 the last drop made the kit stereo, Sampling →
                  * Stereo) · u32 free (frames past freePos) · u32 total (the pads' share: bufCap − bufLen) · u32 held
-                 * (below freePos, held by replaced / undone recordings: not reclaimed until new material) · u32 pads
-                 * (bit k = key k holds a recording) — ends at 315. */
+                 * (below freePos, held by replaced / deleted / undone recordings and trimmed edges: op 4 gives it
+                 * back) · u32 pads (bit k = key k holds a recording) · RECLAIM: u32 undoHeld (of held, what only the
+                 * undo history keeps: a Free reclaim leaves it) · u32 reclaimed (the last reclaim's frames) · u8
+                 * undoForgot (undo steps it dropped) — ends at 324. State 4: reclaiming. */
                 PadsTail(w);
                 return;
             }
@@ -4481,7 +4596,7 @@ int main()
         ComputeEnvelope(gPlay, len, gEnv);
     }
 
-    gKitOnCard = len > 0 ? len : engine.bufLen;   /* PADS: a card file, or the synth break (made again at every boot) */
+    gCardMap.Identity(len > 0 ? len : engine.bufLen);   /* PADS: a card file, or the synth break (made again at every boot) */
     gClock.SetBpm(engine.NativeBpm());
     gClock.Start();
     bb::gYield = KeepClock;   /* a load yields to the clock: the playhead keeps time through it */

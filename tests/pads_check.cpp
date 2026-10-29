@@ -25,8 +25,10 @@
 // 7. The loader's same-rate path: a 48 kHz file longer than the staging loads
 //    whole; 44.1 kHz still resamples through the staging.
 // 8. Set round trips at the 45 s planes: a pads-only kit (one stereo pad →
-//    the kit stereo) and a 17 s break plus pads filling the plane — saved
-//    (SetFromEngine → WAV + JSON on the shim's disk), loaded back through the
+//    the kit stereo; a replaced pad left out of the set) and a 17 s break plus
+//    pads filling the plane — saved as the firmware does (the live spans
+//    packed: PackForCard, SetFromEngine through the map → WAV + JSON on the
+//    shim's disk), loaded back through the
 //    firmware's own loader, re-planned, re-committed: table, keys and every
 //    rendered sample identical.
 #include <cstdio>
@@ -43,6 +45,7 @@
 #include "bb_engine.h"
 #include "bb_card.h"
 #include "bb_pads.h"
+#include "bb_reclaim.h"
 #include "bb_sample.h"
 #include "bb_set.h"
 #include "bb_sets.h"
@@ -344,6 +347,8 @@ static void TestRateAndPlanes()
 }
 
 /* ── 6. the unsaved note, the stub ──────────────────────────────────── */
+// RECLAIM: KitUnsaved reads the card map; a card copy of the planes' first `onCard` frames as they lie is Identity.
+static bool Unsaved(const bb::Engine& e, int onCard, bool stub) { static bb::CardMap m; m.Identity(onCard); return bb::KitUnsaved(e, m, stub); }
 static void TestUnsaved()
 {
     SECTION("KitUnsaved and the empty kit's stub");
@@ -352,17 +357,17 @@ static void TestUnsaved()
     EmptyKit(e, L.data(), R.data());
     CHECK(e.bufLen == bb::kPadStubLen && e.nSlices == 16 && e.bufR == R.data() && e.freePos == bb::kPadStubLen, "the stub: ¼ s, 16 slices");
     CHECK(bb::IsEmptyKit(L.data(), e.bufLen) && !bb::IsEmptyKit(L.data(), e.bufLen - 1), "IsEmptyKit: exactly the stub's length of silence");
-    CHECK(!bb::KitUnsaved(e, 0, true), "an empty kit with no pads: nothing to lose");
+    CHECK(!Unsaved(e, 0, true), "an empty kit with no pads: nothing to lose");
     Drop(e, R.data(), 0, Wave(4800, 300.f, 0.5f), nullptr);
-    CHECK(bb::KitUnsaved(e, 0, true), "a pad: unsaved");
-    CHECK(!bb::KitUnsaved(e, e.freePos, true), "saved (the set's WAV holds it)");
+    CHECK(Unsaved(e, 0, true), "a pad: unsaved");
+    CHECK(!Unsaved(e, e.freePos, true), "saved (the set's WAV holds it)");
     Drop(e, R.data(), 1, Wave(4800, 300.f, 0.5f), nullptr);
-    CHECK(bb::KitUnsaved(e, e.freePos - 4800, true), "a pad since the save: unsaved");
+    CHECK(Unsaved(e, e.freePos - 4800, true), "a pad since the save: unsaved");
     L[100] = 0.001f;
     CHECK(!bb::IsEmptyKit(L.data(), bb::kPadStubLen), "a stub with a sound in it is a break");
     bb::Engine b; b.Init(1);
     b.SetMaterial(L.data(), 48000, (float)kSr, nullptr, 0, nullptr, 16, nullptr, kCap);
-    CHECK(!bb::KitUnsaved(b, 48000, false) && bb::KitUnsaved(b, 0, false), "a card break: saved; a take (nothing on the card): unsaved");
+    CHECK(!Unsaved(b, 48000, false) && Unsaved(b, 0, false), "a card break: saved; a take (nothing on the card): unsaved");
 }
 
 /* ── 7. the loader's same-rate path ──────────────────────────────────── */
@@ -416,12 +421,13 @@ static int SaveKit(const bb::Engine& e, const char* name, bb::SetInfo& s)
 {
     bb::Looper none;
     new(&s) bb::SetInfo();
-    bb::SetFromEngine(e, none, s, e.bufR != nullptr, kSr);
+    static bb::ReclaimPlan pk; static bb::CardMap m;   /* RECLAIM: the firmware's save — the live spans, packed */
+    if(!bb::PackForCard(e, pk, m) || !bb::SetFromEngine(e, none, s, e.bufR != nullptr, kSr, m)) return -4;
     strcpy(s.name, name); s.bars = 1; s.bpm = e.NativeBpm(); s.nOptions = 0;
     std::vector<uint8_t> wav, js;
     static uint8_t staging[16384];
     static char json[bb::kSetJsonMax];
-    if(!bb::SetWriter::Wav({MemSink, &wav}, s, e.buf, e.bufR, staging, sizeof staging)) return -1;
+    if(!bb::SetWriter::Wav({MemSink, &wav}, s, e.buf, e.bufR, staging, sizeof staging, bbwav::kPcm16, m.live, m.seg, m.n)) return -1;
     if(!bb::SetWriter::Json({MemSink, &js}, s, json, sizeof json)) return -2;
     if(!WriteFile(gOut + "/" + name + ".wav", wav) || !WriteFile(gOut + "/" + name + ".json", js)) return -3;
     return s.len;
@@ -491,16 +497,15 @@ static void TestRoundTrips()
         CHECK(Drop(e, R.data(), 23, Wave(48000 * 10, 110.f, 0.3f), nullptr) == 0, "pad 23: ten seconds");
         CHECK(Drop(e, R.data(), 5, Wave(4800, 990.f, 0.3f), nullptr) == 0, "pad 5 replaced (the stereo one held)");
         const int frames = SaveKit(e, "pads_only", s);
-        CHECK(frames == e.freePos && s.stereo && s.material == bb::kPadStubLen && s.nGrid == 16, "saved: %d frames, stereo, the stub as the material", frames);
+        CHECK(frames == e.freePos - 24000 && s.stereo && s.material == bb::kPadStubLen && s.nGrid == 16, "saved: %d frames (the replaced pad's 24000 left out), stereo, the stub as the material", frames);
         bb::Engine e2; e2.Init(23);
         bool stub = false;
         CHECK(LoadKit(e2, L2.data(), R2.data(), "pads_only", &stub), "loaded back");
-        CHECK(stub && e2.bufLen == bb::kPadStubLen && e2.bufR == R2.data() && e2.freePos == e.freePos, "an empty kit again: the stub, stereo, freePos %d", e2.freePos);
+        CHECK(stub && e2.bufLen == bb::kPadStubLen && e2.bufR == R2.data() && e2.freePos == e.freePos - 24000, "an empty kit again: the stub, stereo, freePos %d", e2.freePos);
         bool keys = true;
-        for(int k = 0; k < 24; k++) keys = keys && (e2.RecordedEntry(k) >= 0) == (e.RecordedEntry(k) >= 0)
-                                       && e2.slices[e2.KeySlice(k)].start == e.slices[e.KeySlice(k)].start && e2.slices[e2.KeySlice(k)].len == e.slices[e.KeySlice(k)].len;
+        for(int k = 0; k < 24; k++) keys = keys && (e2.RecordedEntry(k) >= 0) == (e.RecordedEntry(k) >= 0) && e2.slices[e2.KeySlice(k)].len == e.slices[e.KeySlice(k)].len;
         CHECK(keys && bb::PadMask(e2) == ((1u << 0) | (1u << 5) | (1u << 23)), "the same pads on the same keys");
-        CHECK(bb::PadRoomOf(e2).held == bb::PadRoomOf(e).held && bb::PadRoomOf(e2).held == 24000, "the held region came along (the set is [0, freePos) whole): not reclaimed");
+        CHECK(bb::PadRoomOf(e).held == 24000 && bb::PadRoomOf(e2).held == 0, "the held region stayed behind (RECLAIM: a set holds the live spans only)");
         CHECK(SameKeys(e, e2, 24 * 20), "every key renders the same bits, both planes");
     }
     {

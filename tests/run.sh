@@ -26,6 +26,12 @@
 #                     rate, AdoptR, the unsaved note, the loader's same-rate
 #                     path, set round trips of a pads-only kit and of a 17 s
 #                     break plus pads at the 45 s planes (ASan/UBSan).
+# 6e. reclaim_check — RECLAIM: held memory back — the plan, the copy into
+#                     the other buffer, the swap (every live key the same
+#                     bits, both planes, voices sounding across it), undo
+#                     across it (Free: whole, remapped; All: the steps that
+#                     need a reclaimed sound forgotten), the packed set save,
+#                     the card map through a reclaim (ASan/UBSan).
 # 6d. keyp_check   — KEYP package: per-key gain / tune / plays — gain and
 #                     tune at the call (steps, keyless calls, auditions
 #                     untouched; a looper replay follows the key), Follow /
@@ -90,6 +96,9 @@ $CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $I
 echo; echo "== pads_check (ASan/UBSan) =="
 $CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/pads_check.cpp -o "$OUT/padschk" || fail=1
 "$OUT/padschk" "$OUT" || fail=1
+echo; echo "== reclaim_check (ASan/UBSan) =="
+$CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/reclaim_check.cpp -o "$OUT/reclaimchk" || fail=1
+"$OUT/reclaimchk" "$OUT" || fail=1
 echo; echo "== keyp_check (ASan/UBSan) =="
 $CXX -std=gnu++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $INC tests/keyp_check.cpp -o "$OUT/keypchk" || fail=1
 "$OUT/keypchk" "$OUT" || fail=1

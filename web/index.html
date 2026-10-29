@@ -220,7 +220,7 @@
   .edfield b{color:var(--ink);font-weight:600} .edfield label{display:inline-flex;align-items:center;gap:4px;min-height:36px} .edfield .by{color:var(--call-ink)}
   .chop{min-height:88px;min-width:150px;font-size:20px;font-weight:700;background:var(--warn-bg);border-color:var(--warn-line);color:var(--warn-ink);touch-action:none;user-select:none;-webkit-user-select:none} .chop:active,.chop.hit{background:var(--accent);color:var(--on-accent)}
   .why{font-size:12px;color:var(--warn-ink);margin:6px 0 0}
-  .hist{list-style:none;margin:6px 0 0;padding:0;font-size:12px;max-height:150px;overflow:auto;font-variant-numeric:tabular-nums} .hist li{display:flex;gap:8px;padding:3px 0;border-bottom:1px solid var(--sep);color:var(--ink2)} .hist li:first-child{color:var(--ink)} .hist li i{font-style:normal;color:var(--ink3);min-width:40px} .hist li.undone{text-decoration:line-through;opacity:.6}
+  .hist{list-style:none;margin:6px 0 0;padding:0;font-size:12px;max-height:150px;overflow:auto;font-variant-numeric:tabular-nums} .hist li{display:flex;gap:8px;padding:3px 0;border-bottom:1px solid var(--sep);color:var(--ink2)} .hist li:first-child{color:var(--ink)} .hist li i{font-style:normal;color:var(--ink3);min-width:40px} .hist li.undone{text-decoration:line-through;opacity:.6} .hist li.gone{color:var(--ink3)} .hist li.gone::after{content:'forgotten';margin-left:auto;font-size:11px}
   .edpanel{display:grid;gap:14px} @media(min-width:900px){.edpanel{grid-template-columns:repeat(4,minmax(0,1fr))}}
   .edpanel h3{font-size:12px;color:var(--ink2);margin:0 0 6px;text-transform:uppercase;letter-spacing:.1em}
   .edpanel input[type=number]{width:72px}
@@ -286,7 +286,7 @@
     <h2>Pads — the 24 keys <span class="wvbtns"><span id="pads_follow" class="pill" hidden>keys follow markers</span><span id="pads_plays" class="pill">one-shot</span></span></h2>
     <div id="pd_sampler" class="samp" role="status" hidden><span id="pd_sampler_text"><b>Sampler</b> — the pads play samples (so do J4 and the Kit); no pattern runs.</span><span class="sampgo">For a beat: <button id="pd_go_classic" class="chip" title="Grammar → Classic (the transport stays stopped until ▶)">Classic</button> <button id="pd_go_grids" class="chip" title="Grammar → Grids (the transport stays stopped until ▶)">Grids</button> then ▶ — or ▶ alone for the last beat</span></div>
     <div id="pd_bar" class="row pdrow" hidden>
-      <div class="pdroom"><div class="bar usage" id="pd_meter" title="the pads' share of the sample memory (what the break leaves): used · held by replaced pads · free"><i class="rec" id="pd_used"></i><i class="held" id="pd_held"></i></div><span id="pd_room" class="note num">pads —</span></div>
+      <div class="pdroom"><div class="bar usage" id="pd_meter" title="the pads' share of the sample memory (what the break leaves): used · held by replaced, deleted or undone pads (Reclaim gives it back) · free"><i class="rec" id="pd_used"></i><i class="held" id="pd_held"></i></div><span id="pd_room" class="note num">pads —</span><button id="pd_reclaim" class="mini" hidden>Reclaim</button></div>
       <label class="ctl inl">into<select id="pd_key" class="inline" title="the pad a chosen file goes to — several files fill that pad and the ones after it"></select></label>
       <button id="pd_pick" class="mini primary" title="choose audio files for a pad (on a phone: the way to drop a sample)">Choose samples…</button><input id="pd_file" type="file" accept="audio/*,.wav,.wave,.aif,.aiff,.mp3,.flac,.ogg,.m4a" multiple hidden>
       <label class="ctl inl" title="peak-normalise each dropped file to −1 dBFS in the browser before it is sent (one gain for both channels; this browser remembers it). Off: the file goes as it is"><input type="checkbox" id="pd_norm"> normalise drops</label>
@@ -459,7 +459,7 @@
     <div class="kv" style="margin-top:8px">
       <span>break</span><b id="u_break">—</b><span>recordings</span><b id="u_recs">—</b><span>free</span><b id="u_free">—</b><span id="u_held_l" hidden>held</span><b id="u_held" hidden>—</b><span>planes</span><b id="u_planes">—</b><span>table</span><b id="u_table">—</b>
     </div>
-    <p id="u_held_help" class="note" hidden>“Held” is memory a replaced, cleared or undone recording still takes: it comes back only with new material (a break loaded, a loop take, New empty kit) — saving the set and loading it back keeps it.</p>
+    <p id="u_held_help" class="note" hidden><span id="u_held_text">“Held” is memory a replaced, deleted or undone recording (or a trimmed edge) still takes. Reclaim moves the recordings down over it — nothing that plays changes — and a drop that needs the room reclaims on its own. A saved set holds only what plays.</span> <button id="u_reclaim" class="mini">Reclaim</button></p>
   </section>
   <section>
     <h2>Looper</h2>
@@ -971,8 +971,17 @@ async function padUpload(job) {
   let p0;
   try { p0 = await padState(); } catch (e) { job.state = 'failed'; padShow(job, 'the module did not answer: ' + e.message, 'bad', 0); return; }
   if (!p0) { job.state = 'failed'; padShow(job, 'the module\'s state did not read', 'bad', 0); return; }
+  /* RECLAIM: a drop that does not fit takes the held memory back first — only what no undo step needs when that is
+   * enough, else everything held (Undo forgets the steps that need it; the line says so) */
+  const rc = HL.padReclaimFor(p0, HL.padPlan(ab.numberOfChannels, ab.sampleRate, ab.length).frames);
+  let rcTxt = '';
+  if (rc) {
+    padShow(job, `making room — reclaiming ${padSecs(rc.frees)} held…`, 'busy', 0);
+    try { const q = await padReclaim(rc.mode); if (!q.result) { p0 = q; rcTxt = ` · reclaimed ${padSecs(q.reclaimed)} first${q.undoForgot ? ` (Undo forgot ${q.undoForgot} step${q.undoForgot === 1 ? '' : 's'})` : ''}`; job.reclaimed = q.reclaimed; job.forgot = q.undoForgot; } }
+    catch (e) { /* busy or gone: the drop goes on with the room there is */ }
+  }
   const plan = HL.padPlan(ab.numberOfChannels, ab.sampleRate, ab.length, p0.free); job.plan = plan;
-  if (p0.free < HL.PADS.minFrames) { job.state = 'failed'; padShow(job, `no room left for pads (${padSecs(p0.free)} free${p0.held ? `, ${padSecs(p0.held)} held by replaced pads` : ''}) — save the kit, or start a New empty kit`, 'bad', 0); return; }
+  if (p0.free < HL.PADS.minFrames) { job.state = 'failed'; padShow(job, `no room left for pads (${padSecs(p0.free)} free${p0.held ? `, ${padSecs(p0.held)} held` : ''}) — save the kit, or start a New empty kit`, 'bad', 0); return; }
   if (plan.tooShort) { job.state = 'failed'; padShow(job, `${job.file.name}: too short (${(plan.seconds * 1000).toFixed(0)} ms; a pad needs 10 ms)`, 'bad', 0); return; }
   let planes = []; for (let c = 0; c < plan.channels; c++) planes.push(ab.getChannelData(c).subarray(0, plan.frames));
   const nz = padNorm ? HL.padNormalize(planes, plan.frames, -1) : null; if (nz) { planes = nz.planes; job.norm = nz; }   /* beta-sampler */
@@ -986,7 +995,7 @@ async function padUpload(job) {
     const p = await padSettle(p0.seq);
     if (p.result) { job.state = 'failed'; padShow(job, `not placed: ${HL.PADS.RESULT[p.result] || 'error ' + p.result}${p.result === 1 ? ` (${padSecs(p.free)} free)` : ''}`, 'bad', 0); return; }
     job.state = 'done';
-    padShow(job, `${job.file.name} — ${what}${p.madeStereo && plan.channels === 2 ? ' — the kit is stereo now (Options → Sampling: Stereo)' : ''}`, 'ok', 1);
+    padShow(job, `${job.file.name} — ${what}${p.madeStereo && plan.channels === 2 ? ' — the kit is stereo now (Options → Sampling: Stereo)' : ''}${rcTxt}`, 'ok', 1);
     if (p.madeStereo) refreshLive();
     setTimeout(() => { if (padJob[job.key] === job) { padJob[job.key] = null; invalidate(D.pads); } }, 4000);
     refetchKit();
@@ -997,6 +1006,30 @@ async function padUpload(job) {
     else if (m === 'cancelled') padShow(job, 'cancelled — nothing placed', 'bad', 0);
     else padShow(job, 'failed: ' + m, 'bad', 0);
   }
+}
+/* RECLAIM (0x68 op 4): held memory back. The module moves the live recordings down over what replaced, deleted and
+ * undone ones left (in its other buffer, swapped in at a block's start: what sounds goes on sounding); `mode` ALL takes
+ * everything held and forgets the undo steps that need it, FREE only what no undo step needs. The history gets one
+ * line that is no undo step (the forgotten steps greyed). Resolves the settled pads state. */
+async function padReclaim(mode) {
+  const p0 = await padState(); if (!p0) throw new Error('the module\'s state did not read');
+  await HL.reclaimPads(link, mode);
+  const q = await padSettle(p0.seq);
+  if (!q.result && q.reclaimed) { ed.history.info(st ? st.tableGen : null, ED.histLabel('reclaim', { frames: q.reclaimed, forgot: q.undoForgot }), st ? st.undoDepth : 0, st ? st.redoDepth : 0); invalidate(D.kit); refetchKit(); }
+  return q;
+}
+function reclaimButton(b, p, busy) {
+  b.hidden = !p.held; if (!p.held) return;
+  setText(b.id, `Reclaim ${padSecs(p.held)}`); b.disabled = busy || !link;
+  b.title = `0x68 RECLAIM: give the ${padSecs(p.held)} held back — the pads move down over it, everything plays as before` + (p.undoHeld ? `; ${padSecs(p.undoHeld)} of it is what Undo can still bring back, and those undo steps are forgotten (asks first)` : '');
+}
+function reclaimClick() {
+  const p = st && st.pads; if (!link || !p || !p.held) return;
+  if (p.undoHeld && !confirm(`Reclaim ${padSecs(p.held)}: ${padSecs(p.undoHeld)} of it is what Undo can still bring back (replaced, deleted or trimmed sounds). Reclaiming forgets those undo steps. Go on?`)) return;
+  cardRun(async () => {
+    try { const q = await padReclaim(HL.PADS.MODE.all); say(q.result ? 'Reclaim: ' + (HL.PADS.RESULT[q.result] || q.result) : `reclaimed ${padSecs(q.reclaimed)} — ${padSecs(q.free)} free for pads${q.undoForgot ? ` · Undo forgot ${q.undoForgot} step${q.undoForgot === 1 ? '' : 's'}` : ''}`, !!q.result); }
+    catch (e) { say(e.message === 'BAD_STATE' ? 'Reclaim: the module is busy (a set op, a load, a take, a card upload or a drop) — try again in a moment' : 'Reclaim: ' + e.message, true); }
+  }).catch(e => warn('reclaim', e));
 }
 async function padNewKit() {
   if (!link) return;
@@ -1036,12 +1069,14 @@ function drawPadsBar() {
   if (!p) return;
   const total = Math.max(1, p.total), used = Math.max(0, p.total - p.free - p.held);
   $('pd_used').style.width = (used / total * 100).toFixed(2) + '%'; $('pd_held').style.left = (used / total * 100).toFixed(2) + '%'; $('pd_held').style.width = (p.held / total * 100).toFixed(2) + '%';
-  setText('pd_room', `pads: ${padSecs(p.free)} of ${padSecs(p.total)} free${p.held ? ` · ${padSecs(p.held)} held by replaced pads` : ''}${p.noBreak ? ' · no break' : ''}`);
-  $('pd_room').title = p.held ? 'Held: memory that replaced, cleared or undone recordings still take. It comes back with new material (a break loaded, a loop take, New empty kit) — a set save and load keep it.' : '';
+  setText('pd_room', p.state === 4 ? 'pads: reclaiming held memory…' : `pads: ${padSecs(p.free)} of ${padSecs(p.total)} free${p.held ? ` · ${padSecs(p.held)} held` : ''}${p.noBreak ? ' · no break' : ''}`);
+  $('pd_room').title = p.held ? `Held: memory that replaced, deleted or undone pads (and trimmed edges) still take${p.undoHeld ? ` — ${padSecs(p.undoHeld)} of it is what Undo can still bring back` : ''}. Reclaim gives it back; a drop that needs the room reclaims on its own. A saved set holds only what plays.` : '';
   const busy = p.state !== 0; $('pd_new').disabled = busy; $('pd_pick').disabled = !link;
+  reclaimButton($('pd_reclaim'), p, busy); reclaimButton($('u_reclaim'), p, busy);
   const sel = $('pd_key'); if (!sel.children.length || sel.children.length !== 24) { sel.innerHTML = Array.from({ length: 24 }, (_, k) => `<option value="${k}">${keyName(k)}</option>`).join(''); }
 }
 $('pd_new').onclick = () => padNewKit();
+$('pd_reclaim').onclick = $('u_reclaim').onclick = () => reclaimClick();
 $('pd_pick').onclick = () => { padPickKey = Math.max(0, Math.min(23, +$('pd_key').value || 0)); const i = $('pd_file'); if (i.click) i.click(); };
 $('k_load').onclick = () => { padPickKey = selKey; const i = $('pd_file'); if (i.click) i.click(); };
 let padPickKey = 0;
@@ -1358,7 +1393,7 @@ function drawKit() {
     setText('u_break', secs(st.bufLen)); setText('u_recs', recs ? `${secs(recs)} (${table ? table.nTable - table.nSlices : '?'} key${table && table.nTable - table.nSlices === 1 ? '' : 's'})` : 'none');
     const pp = st.pads;   /* PADS: the free room is the pads' (and the takes'): what the break leaves */
     setText('u_free', `${secs(pp.free)} of ${secs(pp.total)} for pads (the buffer: ${secs(st.bufCap)})`); setText('u_planes', st.stereo ? 'stereo (L · R)' : 'mono');
-    const held = pp.held; $('u_held_l').hidden = $('u_held').hidden = $('u_held_help').hidden = !held; if (held) setText('u_held', secs(held));
+    const held = pp.held; $('u_held_l').hidden = $('u_held').hidden = $('u_held_help').hidden = !held; if (held) setText('u_held', secs(held) + (pp.undoHeld ? ` (${secs(pp.undoHeld)} of it Undo can still bring back)` : ''));
     if (pp.noBreak) setText('u_break', 'none — an empty kit (¼ s of silence holds the grid)');
     setText('u_table', table ? tableLine() : `${st.nTable} entries`);
   }
@@ -1594,7 +1629,7 @@ function drawEditor() {
   /* the module refuses a tap while nothing sounds (state byte 263 b0) — say so on the pad instead of after the tap */
   const silent = !st.srcValid; $('chop').disabled = !link || !st.bufLen || silent; $('chop_why').hidden = !silent;
   drawMarkers();
-  const list = ed.history.list(), sig = list.map(x => x.gen + x.label + (x.undone ? '~' : '')).join('|'); if (sig !== histSig) { histSig = sig; $('ed_hist').innerHTML = list.map(x => `<li${x.undone ? ' class="undone"' : ''}><i>gen ${x.gen}</i>${esc(x.label)}</li>`).join('') || '<li>nothing yet</li>'; }
+  const list = ed.history.list(), sig = list.map(x => x.gen + x.label + (x.undone ? '~' : '') + (x.gone ? '-' : '')).join('|'); if (sig !== histSig) { histSig = sig; $('ed_hist').innerHTML = list.map(x => `<li${x.undone ? ' class="undone"' : x.gone ? ' class="gone"' : ''}><i>gen ${x.gen}</i>${esc(x.label)}</li>`).join('') || '<li>nothing yet</li>'; }
 }
 $('k_rec').onclick = () => action(ACT.recArm, selKey); $('k_clr').onclick = () => action(ACT.recClear, selKey);
 $('k_plays').onchange = async e => { await action(ACT.keyPlays, +e.target.value); refreshLive(); };
