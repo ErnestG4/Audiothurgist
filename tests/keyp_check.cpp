@@ -390,6 +390,17 @@ static void TestPlays()
         printf("  release at the loop point (%s): %d samples of fade (chokeLen %d), worst step %g\n", rev ? "backward" : "forward", m * 24, choke, worst);
         CHECK(v && !v->active && m * 24 >= choke - 24 && m * 24 <= choke + 48 && worst < 0.06f, "a Loop released at its loop point (%s) fades for its whole release, no click (%d samples, worst step %g)", rev ? "backward" : "forward", m * 24, worst);
     }
+    // a held Loop struck again (J5's restrike, the looper replaying the key while it is held) replaces its own loop
+    // with the release's fade instead of stacking a second one
+    {
+        Silence(e); e.CallSlice(t, 1.f, false, false, false, 1.f, false, 2);
+        bb::Voice* first = Fresh(e);
+        for(int k = 0; k < 100; k++) e.Process(l, r, 24);
+        e.CallSlice(t, 1.f, true, false, false, 1.f, false, 2);   // re-struck reversed
+        int loops = 0; for(int i = 0; i < bb::Engine::kVoices; i++) loops += e.voices[i].active && e.voices[i].held && e.voices[i].key == 2;
+        CHECK(first && loops == 1 && !first->held && first->relLeft > 0, "a held Loop re-struck: one loop sounds, the old one fading (%d held loops)", loops);
+        e.ReleaseKey(2);
+    }
     // too short for the rate: a 100-sample grid slice at rate 16 → plain held
     {
         bb::EditReq q; q.op = bb::EditOp::SetBoundary; q.i = 5; q.start = e.slices[4].start + 100;

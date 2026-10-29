@@ -1162,7 +1162,11 @@ struct Engine
             v->held = true;
             v->key  = (int8_t)key;
             if(keyed && keyp[key].plays == KeyParam::kRatchet) {}   /* KEYP: a ratchet's hit plays its entry, as a one-shot (the next hit or the release fades it) */
-            else if(keyed && keyp[key].plays == KeyParam::kLoop && LoopHeld(*v, cell, bound, rev)) {}   /* KEYP: Loop — the entry, until the release */
+            else if(keyed && keyp[key].plays == KeyParam::kLoop && LoopHeld(*v, cell, bound, rev))   /* KEYP: Loop — the entry, until the release */
+            {
+                for(int i = 0; i < kVoices; i++)   /* struck again while held: its own previous loop fades (never two loops of one key) */
+                    if(&voices[i] != v && voices[i].active && voices[i].held && voices[i].key == key && voices[i].tail) voices[i].Release();
+            }
             else if(!rev) { v->natEnd = bound; v->end = bound; }
             else v->start = idx >= nSlices ? cell.start : 0;   /* backwards to the material's start */
         }

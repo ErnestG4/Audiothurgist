@@ -83,7 +83,9 @@ same planes keeps them; a set brings its own back.
   back up to the top (`Voice::kTailBack`, the same click bridge — the test's
   worst sample-to-sample step at the seam is 0.022, the tone's own slope); the
   release fades it the same way, still looping backward. Another key's hit or a
-  step never chokes it (`WouldChoke` is false for a held loop). An entry too
+  step never chokes it (`WouldChoke` is false for a held loop); the same key
+  struck again while it loops (J5's restrike, a looper replay) fades its own
+  previous loop under the new one — one loop per key, never two stacked. An entry too
   short for its rate's loop (a grid slice under ~100 samples at 16×) plays as
   plain Held.
 - **Ratchet** — held, the entry starting again from its start every period:
