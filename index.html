@@ -1578,7 +1578,7 @@ let keyp = null, keypGen = -1;
 let kpBusy = false, kpWant = null, kpDrag = false, kpSent = 0, kpKey = -1, kpTouch = 0, kpOwnGen = -1;   /* kpOwnGen: the tableGen our last KEY_PARAMS left */
 const keypOf = k => keyp && keyp[k] ? HL.keypText(keyp[k]) : '';
 const kpGainText = g => g ? HL.keypGainText(g) : '0 dB';
-const kpSemiText = c => { const s = Math.trunc(c / 100); return (s > 0 ? '+' : s < 0 ? '−' : '') + Math.abs(s) + ' st'; };
+const kpSemiText = c => HL.keypTuneText(c) || '0 st';   /* the whole tune, in the cell's words (+3 st −50 c reads +2.5 st) */
 /* what the row's controls say now, as a key's settings */
 function kpFromRow() {
   const semi = +$('kp_semi').value, fine = Math.max(-99, Math.min(99, Math.round(+$('kp_cents').value || 0)));
@@ -1592,7 +1592,7 @@ function drawKeyp() {
   $('kp_reset').disabled = busy || HL.keypNeutral(p);
   drawSpread(k, busy);   /* CHROMA */
   if (held && kpKey === k) return;   /* your hand is on it: the reply will come round */
-  const semi = Math.trunc(p.cents / 100), fine = p.cents - semi * 100;
+  const semi = Math.sign(p.cents) * Math.round(Math.abs(p.cents) / 100), fine = p.cents - semi * 100;   /* the nearest semitone and ±50 c from it: +3 st −50 c comes back as entered */
   if (document.activeElement !== $('kp_gain') && +$('kp_gain').value !== p.gain) $('kp_gain').value = String(p.gain);
   if (document.activeElement !== $('kp_semi') && +$('kp_semi').value !== semi) $('kp_semi').value = String(semi);
   if (document.activeElement !== $('kp_cents') && +$('kp_cents').value !== fine) $('kp_cents').value = String(fine);
