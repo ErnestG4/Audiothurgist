@@ -2199,6 +2199,14 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
   G(`demoDevice.padOps = []; (() => { const d = demoDevice, h = d.handle.bind(d); d.handle = (t, b) => { if (t === 0x68) d.padOps.push(b[0]); return h(t, b); }; })()`);
   await sleep(1600);
   check('review: …and a drop still decoding then sends nothing to the new module', G('demoDevice.padOps.length') === 0 && G('padJob[4]') === null, JSON.stringify(G('demoDevice.padOps')));
+  /* the Disconnect button while a drop uploads: the module is told (ABORT) before the port closes — it does not sit out its 5 s */
+  await until(() => !G('padJobs.some(j => j.state === "sending" || j.state === "decoding")'));
+  G('__slow = 0'); drop('long.wav');
+  await until(() => G("padJobs.some(j => j.state === 'sending' && j.frac > 0.2)"), 15000);
+  G(`window.__old = demoDevice; demoDevice.padOps = []; (() => { const d = demoDevice, h = d.handle.bind(d); d.handle = (t, b) => { if (t === 0x68) d.padOps.push(b[0]); return h(t, b); }; })()`);
+  await G('connect()');
+  check('review: Disconnect mid-drop sends the drop\'s ABORT first', G('link') === null && G('__old.padOps').includes(HL.PADS.abort), JSON.stringify(G('__old.padOps').slice(-4)));
+  G("connectDemo('sampler')"); await until(() => G('!!(st && table)'));
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
 }
 {
