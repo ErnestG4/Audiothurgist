@@ -2172,6 +2172,18 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
   check('review: …and a drop still decoding then sends nothing to the new module', G('demoDevice.padOps.length') === 0 && G('padJob[4]') === null, JSON.stringify(G('demoDevice.padOps')));
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
 }
+{
+  /* CHROMA: Spread pressed twice — the second (queued) finds the spread in place: one step on the module, one line */
+  const { G } = await loadPage('?demo=keyp');
+  await until(() => G('!!(st && keyp && table && st.bufLen)'));
+  G("showTab('tab_kit')"); G('selectKey(7)'); G('invalidate(D.kit)'); await sleep(80);
+  const d0 = G('st.undoDepth');
+  fireEv(G("$('kp_spread')"), 'click', { clientX: 10, clientY: 10 }); fireEv(G("$('kp_spread')"), 'click', { clientX: 10, clientY: 10 });
+  await sleep(100); await until(() => !G('ed.busy')); await sleep(400);
+  check('review: Spread pressed twice — one step on the module, one history line', G('st.undoDepth') === d0 + 1 && G("ed.history.list().filter(x => /spread chromatically/.test(x.label)).length") === 1,
+    'depth ' + d0 + ' → ' + G('st.undoDepth') + ' · ' + G("ed.history.list().map(x => x.label).join(' | ')"));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+}
 /* ── 9c. Contrast, measured: every text token against every surface it sits on, in both themes, ≥ 4.5:1; and no
  *        colour outside the token blocks — not in a CSS rule, not in an inline style, not in the script ── */
 {
