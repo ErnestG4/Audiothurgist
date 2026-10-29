@@ -385,6 +385,49 @@ into J6; a tuner on the output if you have one; the page on the Kit tab.
 9. [ ] The ends: spread from C1 (B2 = +23 st) and from B2 (C1 = −23 st) —
        note how the extremes sound (aliasing high up, grain low down) ____.
 
+## 10h. Held memory comes back — Reclaim (8 min)
+
+See `docs/packages/pads.md`, "Held memory comes back". Nothing of this has
+run on hardware. The page on Play (Pads), a fresh **New empty kit**, four
+short samples you know by ear (a kick, a snare, a hat, a vocal or a pluck of
+a second or more) and one long file (10 s or more).
+
+1. [ ] Drop the four on C1 … D♯1, then the long file on E1. The room line
+       reads "… free" with no "held", no Reclaim button.
+2. [ ] Drop a different sample on **C♯1** and again on **D1**, then delete
+       E1's long file (Kit → select E1 → its entry on the waveform →
+       delete). The room line now says "… · N s held" (the old
+       C♯1, D1 and E1), and **Reclaim N s** appears beside it and in the Kit's
+       Buffer ("held … (… of it Undo can still bring back)").
+3. [ ] Hold C1 down on the page (a held pad) — or run a ratchet on it — and
+       press **Reclaim**: it asks (Undo would lose steps) — say **no**:
+       nothing changes. Press again, **yes**. *Listen for*: the held C1 goes
+       on without a click or a gap through the reclaim; the line says
+       "reclaimed N s — … free for pads · Undo forgot … steps"; held is gone,
+       free is up by N s; the history has the "reclaimed …" line, older lines
+       greyed "forgotten"; Undo is off.
+4. [ ] Play every pad (page, J4): **each sounds exactly as before** — same
+       sample, same start, same length, same stereo image if any was stereo.
+       Clocked beat running underneath (Classic + ▶) through the whole
+       reclaim: no stumble.
+5. [ ] Drop on C1 again (now 1 held step Undo needs), then fill the room:
+       drop the long file on F1, G1… until a drop says it was cut. Drop a
+       short sample on G♯1: the pad shows "making room — reclaiming …", then
+       lands **whole**; the line ends "· reclaimed … first (Undo forgot …)".
+6. [ ] **Save set** `reclaim_1` with something held (replace a pad first).
+       On the card the WAV is about the length of what plays (no held
+       seconds). Power-cycle, **Load set** `reclaim_1`: every pad the same,
+       nothing held, nothing unsaved.
+7. [ ] With that set loaded, replace a pad and press Reclaim, then nudge a
+       marker (Kit → Edit) and wait 3 s (Autosave on). Power-cycle and load
+       `reclaim_1` again: the nudge is there and every pad that was saved
+       plays (the new pad is not — it was never saved), i.e. the autosave
+       still described the WAV on the card after the memory moved.
+8. [ ] The undo-safe path: replace a pad, then record a take into another key
+       (J5 style 7) — the take ends Undo's history — and drop a file that does
+       not fit: it reclaims without "Undo forgot". *Call*: should the Reclaim
+       button also do this gentler reclaim first and ask only for the rest? ____
+
 ## 11. Scope (3 min)
 
 - [ ] Scope tab: Out L/R trace the beat (this tab was hidden by a duplicate
@@ -420,10 +463,17 @@ into J6; a tuner on the output if you have one; the page on the Kit tab.
 10. **Spread in Pads with markers**: like a hand-made key map, it stands until
     the markers next change — then the keys follow the markers again (their
     tunes stay). Wanted?
+11. **Reclaim and Undo** (§10h.3, .8): the button reclaims everything held and
+    asks when Undo would lose steps; a drop that does not fit reclaims on its
+    own without asking (FREE when that is enough, else ALL). Ask before a drop
+    forgets undo steps too? Or never ask, even on the button?
+12. **Takes into keys** (J5 style 7) never reclaim on their own (arming is
+    gate-latency work). Reclaim automatically after a take stops when the
+    room runs low?
 
 ## Known and not to be reported
 
-SRAM ~93 %, DTCM ~85 %, SDRAM ~64 % (the undo journal grew to 152 KB; the
+SRAM ~96 %, DTCM ~86 %, SDRAM ~78 % (the undo journal grew to 152 KB; the
 card's upload buffer is 3.3 MB); the
 Play tab's small scope uses the old request on purpose; a preset save costs
 one 10–50 ms poll gap; iOS has no browser USB.

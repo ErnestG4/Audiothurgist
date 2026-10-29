@@ -280,6 +280,16 @@ static void TestUndo()
         CHECK(Reclaim(*b, LD.data(), RD.data(), bb::kReclaimAll) && b->UndoDepth() == 0 && bb::PadRoomOf(*b).held == 0, "a trimmed pad's edges come back with All; the trim's undo (and everything before it) goes");
         CHECK(Reclaim(*c, LD.data(), RD.data(), bb::kReclaimFree) && c->UndoDepth() == d0 && Undo(*c) == bb::EditStatus::Ok && c->slices[c->RecordedEntry(5)].len == a.slices[a.RecordedEntry(5)].len, "with Free the trim undoes: the edges were kept");
     }
+    {   /* a drop undone: its take is held and only the redo half needs it — All drops that redo step, Free keeps it */
+        static std::vector<float> LD(kCap), RD(kCap);
+        Silence(a);
+        auto b = Twin(a, gJB), c = Twin(a, gJC);
+        for(bb::Engine* x : {b.get(), c.get()}) { Drop(*x, 20, Wave(6000, 640.f, 0.5f)); Undo(*x); }
+        const int back = b->UndoDepth();
+        CHECK(b->RedoDepth() == 1 && bb::PadRoomOf(*b).held == bb::PadRoomOf(a).held + 6000, "a drop undone: 6000 more held, one step to redo");
+        CHECK(Reclaim(*b, LD.data(), RD.data(), bb::kReclaimAll) && b->RedoDepth() == 0 && Undo(*b, true) == bb::EditStatus::BadArgs && b->RecordedEntry(20) < 0, "All: that redo step forgotten (Redo has nothing), key 20 stays empty");
+        CHECK(Reclaim(*c, LD.data(), RD.data(), bb::kReclaimFree) && c->RedoDepth() == 1 && c->UndoDepth() == back && Undo(*c, true) == bb::EditStatus::Ok && c->RecordedEntry(20) >= 0, "Free: the redo kept — Redo brings the drop back");
+    }
     {   /* Free with memory no record holds (a history begun after the replacements): that comes back, the rest of the
          * history — a NUDGE_ALL of the pads among it — is remapped and undoes bit for bit */
         static std::vector<float> LE(kCap), RE(kCap), LF(kCap), RF(kCap);

@@ -86,10 +86,16 @@ tempo; a slice of the break spread this way still follows the tempo. Details:
 Recordings and dropped samples play at their own pitch (P4 transposes them);
 the break's slices follow the tempo. The sample memory is 45 s per channel: a
 break takes at most 17 s and the pads get the rest — or press **New empty
-kit** (Play → Pads) for no break at all and 44.75 s of pads, in Pads mode. A
-dropped sample lives in the module's memory; the page shows **Unsaved kit**
-until you **Save set** (the break, every pad, the table and the options, in
-`Audiothurgist/sets/`), and a power-off before that loses it. To play a
+kit** (Play → Pads) for no break at all and 44.75 s of pads, in Pads mode.
+Replacing, deleting or undoing a pad leaves its memory **held** (the room line
+says how much); **Reclaim** beside it gives it back — the pads move down in
+memory, everything plays exactly as before (sounding pads included), and if
+Undo could still have brought one of those sounds back it asks first, since
+those undo steps go. A drop that does not fit reclaims on its own, then lands
+whole. A dropped sample lives in the module's memory; the page shows
+**Unsaved kit** until you **Save set** (the break, every pad, the table and
+the options, in `Audiothurgist/sets/` — only what plays: held memory is never
+written), and a power-off before that loses it. To play a
 beat with your kit, pick Classic or Grids (the line over the pads has both)
 and press ▶ — it comes in on the beat. Details: `docs/packages/pads.md`.
 

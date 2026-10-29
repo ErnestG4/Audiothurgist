@@ -76,6 +76,8 @@ op 1 DATA     ← u32 total (frames × ch × 2 bytes), u32 offset, PCM16 LE byte
               → status, u32 have, u8 done (0 more · 1 complete: the commit is queued)
 op 2 ABORT    → status (the drop forgotten; nothing published)
 op 3 NEW_KIT  → status (the main loop does it; the tail's pads seq says when)
+op 4 RECLAIM  ← u8 mode (0 FREE: what no undo step needs · 1 ALL: everything held, the undo steps that need it forgotten)
+              → status (the main loop does it; the tail's pads seq says when — "Held memory comes back", below)
 ```
 
 - **The bytes** are raw PCM16, no header: the page decodes (a 48 kHz
@@ -99,10 +101,10 @@ op 3 NEW_KIT  → status (the main loop does it; the tail's pads seq says when)
   the begin; a wrong offset, a changed total or bytes past the end is
   BAD_ARGS and drops the drop.
 
-### State bytes 293..314 (the end of the 315-byte body)
+### State bytes 293..323 (the end of the 324-byte body)
 
 ```
-293 u8 padState (0 idle · 1 receiving · 2 committing · 3 clearing: New empty kit)   294 u8 progress 0..255
+293 u8 padState (0 idle · 1 receiving · 2 committing · 3 clearing: New empty kit · 4 reclaiming)   294 u8 progress
 295 u8 result (0 ok · 1 no room · 2 busy · 3 bad args · 4 the table is full · 5 timed out · 6 aborted
               · 7 the planes moved under it)
 296 u8 seq (bumps per finished op)   297 u8 key (the drop's; 255 none)
@@ -110,8 +112,11 @@ op 3 NEW_KIT  → status (the main loop does it; the tail's pads seq says when)
               · b2 the last drop made the kit stereo, Sampling → Stereo)
 299 u32 free   (frames past freePos)
 303 u32 total  (the pads' share: bufCap − bufLen)
-307 u32 held   (frames in [bufLen, freePos) no live entry covers: replaced, cleared, undone recordings)
-311 u32 pads   (bit k = key k holds a recording)                                         — ends at 315
+307 u32 held   (frames in [bufLen, freePos) no live entry covers: replaced, deleted, undone recordings, trimmed edges)
+311 u32 pads   (bit k = key k holds a recording)
+315 u32 undoHeld   (of held, what some undo step could still bring back: FREE leaves it)
+319 u32 reclaimed  (the last reclaim's frames)
+323 u8  undoForgot (the undo steps the last reclaim dropped)                              — ends at 324
 ```
 
 ## Where the bytes go, and the thread rules
@@ -167,13 +172,11 @@ op 3 NEW_KIT  → status (the main loop does it; the tail's pads seq says when)
   Undo puts the key's previous recording (or its grid slice) back, Redo the
   drop. freePos never moves back, so the region a redo needs is still there.
 - **Replacing a pad** reuses the key's recording slot in place (CommitSlice's
-  rule). The old region is **not reclaimed** — not by a set save (the set's
-  WAV is `[0, freePos)` whole, held regions and all) and not by loading it
-  back; only new material starts the planes over (a break loaded, a loop
-  take, New empty kit). The room readout is honest about it: the tail's
-  `held` is that memory and the page shows "pads: 12.30 s of 28.00 s free ·
-  2.10 s held by replaced pads", with the reason in its title and the Kit's
-  Buffer section.
+  rule). The old region is **held** until a reclaim gives it back — the
+  Reclaim button, or a drop that needs the room (below, "Held memory comes
+  back"); a set save never writes it. The tail's `held` is that memory and the
+  page shows "pads: 12.30 s of 28.00 s free · 2.10 s held" beside "Reclaim
+  2.10 s".
 - **New empty kit** is a load of a silent ¼ s stub (`kPadStubLen`, 16 grid
   slices of class "other" — no gate ever fires from it — the shortest
   material the loader takes back, so a pads-only set reloads): the table,
@@ -252,14 +255,174 @@ the card code), DTCM 111 488 → 111 544 B, SDRAM 42 837 064 → 52 053 064 B
 
 ## Known / deferred
 
-- No reclamation of held regions (above). A compacting set save is possible
-  — write only the live spans and remap the JSON — but the autosave writes
-  JSON-only against the WAV on the card, so the live positions would have to
-  follow the compaction (a reload, or a remap kept beside the set); left for
-  Combust.
+- ~~No reclamation of held regions~~ — reclaimed now: the Reclaim button, a
+  drop that needs the room, and a set that holds only what plays, with the
+  autosave following through a card map kept beside the set (below, "Held
+  memory comes back").
+- A take into a key (J5 style 7) does not reclaim on its own (arming is
+  gate-latency work); Reclaim first when the room line shows held memory.
 - ~~No per-drop normalise option~~ — the page has one now (*normalise
   drops*, beta-sampler, below); the module still never normalises a drop.
 - A 192 kHz break loads 8.5 s (above).
+
+## Held memory comes back — reclaim (2026-10-29, branch `beta-reclaim`)
+
+*Combust: "This is software in development accountable to nobody … focus on
+creating a great final product." The gap was the first "Known / deferred" line
+below: a replaced, deleted or undone pad kept its memory until new material
+arrived. It now comes back without the player having to think about it.*
+Owns `core/bb_reclaim.h` (new), `tests/reclaim_check.cpp` (new), the
+`/* RECLAIM */` lines of `src/audiothurgist.cpp`, the gathered write in
+`core/bb_wavwrite.h` / `bb_set.h`, `SetFromEngine` through a map in
+`core/bb_sets.h`, and the reclaim parts of the page, `hostlink.js`, `demo.js`
+and the selftest (§7g, §9i). **Nothing here has run on hardware**; the bench
+steps are `docs/hardware-pass-beta.md` §10h.
+
+**What is held.** Memory in `[bufLen, freePos)` no live entry covers: a
+replaced pad's old take, a deleted pad, a drop or take that was undone, the
+edges a trim cut off. The tail's `held` is all of it; `undoHeld` (new) is the
+part some undo step could still bring back.
+
+**When it comes back.**
+
+| | what | Undo |
+|---|---|---|
+| **Reclaim** (the button in Play's pads row and the Kit's Buffer: "Reclaim 2.10 s") | everything held (mode ALL) | the steps that need a reclaimed sound are forgotten — the page asks first, only when there are any |
+| **A drop that does not fit** | first what no undo step needs (FREE) if that is enough, else everything (ALL); then the drop lands whole | FREE loses nothing; ALL forgets as above — no question, the line says so ("· reclaimed 0.50 s first (Undo forgot 2 steps)") |
+| **Save set** | nothing moves in memory: the set **holds only what plays** (the break and the live spans, packed) | untouched |
+| a load, a loop take, New empty kit | as ever: the planes start over | as ever |
+
+Why a drop reclaims by itself rather than asking: the alternative is a drop
+cut short or refused while seconds sit unused, and the only cost — undo steps
+for sounds you already replaced — is said in the line and in the history. Why
+the save does not compact the memory: it does not need to (the card map,
+below, lets the file be packed while the planes stay put), so a save never
+moves anything that sounds and never costs an undo step. Takes into keys
+(J5 style 7) do not reclaim on their own: arming a take is gate-latency work,
+and a take records into whatever is free; press Reclaim first if the room line
+says something is held.
+
+**How — the planes.** `BuildReclaimPlan` lists the kept runs over
+`[0, freePos)`: the break, every live entry's span and (FREE) every span the
+live undo journal holds, merged where they touch; each run moves down to
+`dst`. `Map(p)` is the move as one monotone function (the identity over the
+break, a run's offset inside it, the next kept position inside a gap, past
+freePos by the total), so every position anywhere — a table entry, a voice, a
+journal record, a card-map segment — moves the same way. The copy is never in
+place: the main loop copies the runs into the **other** buffer (the load
+buffer, `gLoad` / `gLoadR`, free whenever no load, loop take or drop is in
+flight — all refused meanwhile), so the planes the voices read stay whole
+throughout; then the audio thread swaps the buffers at a block's start
+(`ReclaimSwap`, as a load does) and moves every position with them in the
+same block: the entries past the grid and their cached loop points, freePos,
+each sounding voice (`pos`, its start, ends, bound and loop points). A voice
+playing a live pad goes on sounding sample for sample — a held pad, a Loop
+key, a ratchet all run straight through it. A voice still reading something
+that goes (a replaced pad's old take still ringing, an audition across a gap)
+is faded first (`ReclaimFade`, the choke geometry, each block until it is
+silent — the swap waits up to 100 ms) and cut at the swap if anything is left
+(its last sample carried as the steal's bridge). The swap refuses if the table
+moved since the plan (a J5 style-8 Clear landing mid-copy); the main loop then
+plans and copies once more. Cost: the kept runs copied once, both planes —
+the break plus the pads, at most 2 × 8.6 MB, a few hundred ms of main-loop
+time at SDRAM speed; `KeepClock` runs the whole control loop at 1 kHz through
+it (`gPadTicking`), and everything long yields every 16 Ki samples. The two
+buffers trade places, so `gPlay` / `gLoad` simply swap as at a load.
+
+**How — undo.** Every journal record holds spans (`UndoEntry` starts and
+lengths; a NUDGE_ALL record holds starts only, read beside the length its slot
+will have when the record is restored — the walk follows the slot lengths
+back from the cursor through the undo half and forward through the redo
+half). FREE keeps every span any record holds, so the whole history survives
+and is only remapped through `Map`. ALL keeps only what is live, so the
+records that need a reclaimed span go: in the undo half the newest such step
+and everything older, in the redo half the first such step and everything
+after (cut at step heads, so a joined step goes whole); what is left is
+remapped and undoes and redoes exactly as before. This runs on the main loop
+after the swap — nothing edits in between (every edit, Undo included, is
+refused while a reclaim runs) — and the journal is bound to the new
+generation. A journal the module had already gone past (a take's commit, a
+Clear) counts for nothing and is cleared. `undoHeld` in the tail is worked out
+from a FREE plan whenever the table moves (`ServiceRoom`, main loop, idle).
+
+**How — the set and the card map.** `CardMap` says where each live span lies
+in the card's copy of the kit: segments live ↔ card. A loaded set or break is
+the identity; **Save set** packs (`PackForCard`: the ALL plan's runs, without
+touching memory), writes the JSON through the map (`SetFromEngine(…,
+CardMap)`) and the WAV gathered from the map's segments (`WriteSpec`
+`segFrom` / `segLen`), so the file holds exactly what plays and its positions
+are the file's; a reclaim moves the live side of the map (`Follow`). The
+autosave writes the JSON through the map too — the WAV on the card never
+changes, and whatever the memory did since, the JSON describes that WAV (an
+entry the map cannot place — a pad dropped since — is left out, as a take past
+the WAV always was). The unsaved note reads the map: a pad is saved when the
+card's copy holds it, wherever it sits in memory now. **The set format** is
+unchanged in shape (schema 1, the same keys): only what the positions mean
+changed — the WAV is the break plus the live spans packed, `len` its length,
+every `start` a position in it — so a set loads with nothing held. An older
+set with held memory in its WAV loads as before; the held part then reclaims
+like any other.
+
+**Protocol (api 2).** `0x68 op 4 RECLAIM ← u8 mode (0 FREE · 1 ALL) →
+status` (BAD_STATE as a BEGIN: a set op, a load, a take, a card job, a drop,
+a set's recordings still to commit); `padState` 4 = reclaiming; the tail grows
+to 324 bytes: `315 u32 undoHeld · 319 u32 reclaimed · 323 u8 undoForgot` (the
+last reclaim's frames and dropped steps). The descriptor's `"api"` is 2 and
+`HL.API` with it; a page and a firmware of different api refuse each other as
+before.
+
+**The page.** The room line reads "pads: 12.30 s of 28.00 s free · 2.10 s
+held" (its title says how much Undo could still bring back); **Reclaim 2.10 s**
+sits beside it and in the Kit's Buffer ("held 2.100 s (1.200 s of it Undo can
+still bring back)"). The click asks only when Undo would lose steps; the
+answer is one line ("reclaimed 2.10 s — 14.40 s free for pads · Undo forgot 3
+steps") and one history line that is no undo step, the forgotten steps greyed
+"forgotten" (`History.info`; Undo and Redo never mark them). A drop that does
+not fit says "making room — reclaiming 2.10 s held…" on its pad and what it
+did in its line. Colours: the meter's held segment and the buttons keep the
+existing tokens (`--ink3`, `.mini`) — no new hue.
+
+**Tests.** `tests/reclaim_check.cpp` (**99**, ASan/UBSan): the plan (runs,
+`Map`, `Inside`, the cap's conservative merge); a compaction keeps **every
+live key sounding the same bits** against a twin engine that never reclaimed
+— one-shot, held and reversed calls, a Loop key and a Ratchet key, mono and
+stereo, every entry's samples where it now starts on **both planes**, cached
+loop points moved; **undo across it** — FREE with the whole history undone
+and redone bit for bit (and with orphans reclaimed under a history of two
+NUDGE_ALLs, a split and a replacement), ALL forgetting exactly the steps that
+need a reclaimed sound (a trim's edges included) and the rest undoing and
+redoing bit for bit (a bulk kSnap step and a grid nudge in the redo half), an
+undone drop's redo forgotten by ALL and kept by FREE, a stale journal cleared; **voices across the swap** — a held pad, a ratcheting
+key, a held Loop key and a marker sounding through it, identical block for
+block; a replaced pad still ringing faded by ReclaimFade within a few blocks,
+a voice the fade did not finish cut, nothing reading past the new freePos; a
+refused swap touching nothing; **sets** — a packed save (the held span left
+out, every entry where the map says), loaded back bit for bit; save → load
+after a compaction; the card map through a reclaim: the autosave's JSON over
+the old WAV loads back the same bits for every pad the card holds, and the
+unsaved note exact before and after; the gathered WAV writer sample for
+sample. Checked to bite: thirteen mutations (voices not moved, the journal
+or the nudge starts not remapped, a nudge's span one sample long, FREE keeping
+no undo spans, no truncation in either half, loop points not moved, no fade,
+no cut, the map not followed, R not swapped, the gather ignored) fail 1–13
+checks each — and the first run found the redo half's head walk reading one
+record past the ring's count. `pads_check` now saves as
+the firmware does (a replaced pad left out of the set). `web/selftest.mjs`
+§7g / §9i (733 → **765**): the tail's bytes, `padReclaimFor`, then over the
+fake: FREE leaving what Undo needs, ALL taking all of it and forgetting those
+steps, every key the same samples on both planes, a stale history counting for
+nothing, a packed save loading back the same on a fresh module, still saved
+after a reclaim and unsaved after a drop, the refusals both ways; then the page
+through real drops and clicks — the room line, both buttons, the question and
+its no / yes, the history line, a drop reclaiming ALL on its own and landing
+whole, one reclaiming FREE. Checked to bite: no auto-reclaim fails 4, the
+fake's table not moved 14, the page never asking 3, a save not packed 2.
+
+**Sizes.** SRAM 469 184 → 472 608 B (+3 424, 95.46 → 96.15 %: the plan, the
+journal walk, the swap and the voice pass, the map, `PadReclaim` /
+`ServiceRoom`; all of `bb_reclaim.h` `BB_COLD`, one `SetFromEngine` body, one
+journal walk and one voice pass shared by both modes), DTCM +8 B, SDRAM
++6 240 B (two plans and two maps, NOLOAD PODs; `sdramcheck` clean).
 
 ## Start In — the module powers up as a sampler (2026-10-25, branch `beta-sampler`; an Option since `beta-clean`)
 
