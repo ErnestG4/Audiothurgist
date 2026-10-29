@@ -463,6 +463,33 @@ static void TestRatchet()
     Undo(e);
     CHECK(e.keyp[2].plays == 2 && !(e.keyRatOn & (1u << 2)), "…and an undo back out of Ratchet stops it too");
     e.ReleaseKey(2);
+    // anything that changes what the key plays stops its ratchet (it was retriggering the old entry): SET_KEY, a swap,
+    // a key map, a tombstone under it, a drop into its pad, a direct write from the control thread
+    {
+        float o[24], o2[24];
+        auto start = [&]() { SetKp(e, 2, 0, 0, 4, false, 1); Silence(e); e.CallSlice(e.KeySlice(2), 1.f, false, false, false, 1.f, false, 2); return (e.keyRatOn & (1u << 2)) != 0; };
+        auto stopped = [&]() { e.Process(o, o2, 24); return !(e.keyRatOn & (1u << 2)); };
+        const int pad2 = e.KeySlice(2);
+        bool ok = start();
+        { bb::EditReq q; q.op = bb::EditOp::SetKey; q.key = 2; q.t = 5; ok = ok && e.ApplyEdit(q) == bb::EditStatus::Ok; }
+        CHECK(ok && stopped(), "SET_KEY re-pointing a ratcheting key stops its ratchet");
+        { bb::EditReq q; q.op = bb::EditOp::SetKey; q.key = 2; q.t = pad2; e.ApplyEdit(q); }
+        ok = start();
+        { bb::EditReq q; q.op = bb::EditOp::SwapKeys; q.a = 2; q.b = 9; ok = ok && e.ApplyEdit(q) == bb::EditStatus::Ok; }
+        CHECK(ok && stopped(), "…so does a swap");
+        { bb::EditReq q; q.op = bb::EditOp::SwapKeys; q.a = 2; q.b = 9; e.ApplyEdit(q); }
+        ok = start();
+        e.SetKeySlice(2, 6);             // the control thread's direct write
+        CHECK(ok && stopped(), "…so does a key re-pointed from the control thread");
+        e.SetKeySlice(2, pad2);
+        ok = start() && e.KeySlice(2) == pad2;
+        const bb::Slice was = e.slices[pad2];
+        Pad(e, 2, 12000, 700.f, 0.5f);   // a new sample dropped on the pad: the same slot, new sound
+        CHECK(ok && e.KeySlice(2) == pad2 && stopped(), "…so does a drop into its pad (the same slot, another sound)");
+        Undo(e);
+        CHECK(e.slices[pad2].start == was.start && e.slices[pad2].len == was.len, "(the drop undone: the 30 000-sample pad back)");
+        e.ReleaseKey(2); Silence(e);
+    }
     // no gate to go by: a looper replay of an event recorded without a hold — it fills the step
     SetKp(e, 2, 0, 0, 4, false, 6);   // 1/32: two to a step
     Silence(e); e.callHits = 0;

@@ -1669,6 +1669,7 @@ struct Engine
         {
             const int k = __builtin_ctz(m);
             KeyRatchet& r = keyRat[k];
+            if(KeySlice(k) != r.idx) { keyRatOn &= ~(1u << k); continue; }   /* the key now plays something else (any re-point, from any thread): its ratchet stops */
             r.countdown -= n;
             if(r.countdown >= 0) continue;
             for(int i = 0; i < kVoices; i++)   /* the previous hit fades as the next attacks */

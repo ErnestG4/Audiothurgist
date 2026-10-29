@@ -694,6 +694,7 @@ inline EditStatus Engine::ApplyEdit(const EditReq& r, int* newIdx)
         default: break;
     }
     if(st != EditStatus::Ok) return st;
+    if(r.op == EditOp::Record && r.key >= 0 && r.key < kKeys) keyRatOn &= ~(1u << r.key);   /* KEYP: a new sound in the key's own slot stops its ratchet too */
     if(who >= 0 && who < nTable)
     {
         if(!(r.op == EditOp::SetEntry && (r.flags & EditReq::kKeep))) tableFlags[who] |= kFlagOrange;   /* BETA: kKeep = a machine re-span keeps its colour */

@@ -96,7 +96,8 @@ same planes keeps them; a set brings its own back.
   block-accurate: the countdown carries the remainder, so the period is exact
   on average and each hit lands at most one 24-sample block (0.5 ms) late.
   It stops on the release (the gate's fall, the pad's up, the looper's
-  release event) or when the key leaves the mode (an edit or its undo). Each
+  release event), when the key leaves the mode (an edit or its undo), or when the key
+  plays something else (any re-point — SET_KEY, a swap, a key map, a spread, a drop into its pad). Each
   hit counts as a call (J7's hit trigger, the gates).
   - **With no gate to go by** — a looper replay of an event that was recorded
     without a hold (e.g. played while the key was One-shot, the key set to
