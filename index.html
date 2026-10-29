@@ -199,6 +199,19 @@
   .kprow .kpk{min-width:3.2em} .kprow input[type=range]{width:120px;vertical-align:middle} .kprow .kpv{display:inline-block;min-width:4.6em;text-align:right;color:var(--ink)}
   .kprow .kpc{width:4.2em} .kprow.set{border-color:var(--accent)} @media(max-width:640px){.kprow input[type=range]{width:96px}}
   .kprow .kpspread{white-space:normal;text-align:left;max-width:100%}   /* CHROMA */
+  /* ENV: the envelope's line of the row (its own line, wrapping); a stage that does nothing for this key (Decay at full
+   * sustain, Release on a one-shot) dims — its title says why */
+  .kpenv{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center;flex:1 1 100%;min-width:0}
+  .kpenv .ctl.dim,.kpenv .ctl.dim .kpv{color:var(--ink3)}
+  /* ENV: a pad's settings — ⋯ in the pad's corner (a press on the pad is a note), the row in a sheet over the Play tab
+   * (fixed: under the header at the bottom of a wide screen, above the transport on a phone); the pad being edited ringed */
+  .padw{position:relative;min-width:0;display:flex} .padw>.padk{flex:1 1 auto;min-width:0} .padk small{padding-right:22px}
+  .padset{position:absolute;right:3px;bottom:5px;width:28px;height:28px;min-width:0;min-height:0;padding:0;border-radius:7px;font-size:17px;font-weight:700;line-height:1;background:transparent;border:1px solid transparent;color:var(--ink2)}
+  .padset:hover,.padset:focus-visible,.padset.on{background:var(--btn-hi);border-color:var(--line-hi);color:var(--ink)} .padk.kpon{box-shadow:inset 0 0 0 2px var(--accent)}
+  .kpsheet{position:fixed;left:50%;bottom:12px;transform:translateX(-50%);z-index:30;width:min(780px,calc(100% - 24px));max-height:min(72vh,560px);overflow:auto;background:var(--panel);border:1px solid var(--line-hi);border-radius:12px;box-shadow:0 8px 32px var(--shadow);padding:8px 10px 10px}
+  .kpsheet[hidden]{display:none} .kpsh{display:flex;align-items:center;gap:8px;margin-bottom:2px} .kpsh b{flex:1 1 auto;font-size:14px} .kpsh .note{margin:0}
+  .kpsheet .kprow{margin-top:0;border:0;padding:0;background:none} .kpsheet .kpspread,.kpsheet .kpk{display:none}
+  @media(max-width:640px){.kpsheet{left:0;right:0;transform:none;width:auto;bottom:calc(76px + env(safe-area-inset-bottom,0px));border-radius:12px 12px 0 0;max-height:62vh;padding:8px} .kpsh .note{display:none}}
   #kitwave,#onsethist{touch-action:none}
   .edmenu{position:absolute;z-index:5;background:var(--btn);border:1px solid var(--line-hi);border-radius:10px;padding:6px;display:flex;flex-direction:column;gap:4px;min-width:200px;box-shadow:0 6px 24px var(--shadow)}
   .edmenu .t{font-size:12px;color:var(--ink2);padding:2px 6px;max-width:260px} .edmenu.red .t{color:var(--bad-ink)} .edmenu button{text-align:left;min-height:44px}
@@ -282,8 +295,12 @@
     <div id="pd_unsaved" class="pdnote" role="status" hidden><span id="pd_unsaved_text">Unsaved kit: these sounds live in the module's memory only — a power-off loses them. Save the kit as a set to keep it.</span><button id="pd_save" class="mini primary" title="the Kit tab's Set: name it and save (ACTION 14) — the break, every pad, the table and the options">Save set…</button></div>
     <div id="pads" class="pads"></div>
     <p id="pd_msg" class="note" role="status" hidden></p>
-    <p id="pads_help" class="note">Press to play a key as a CV note would (several fingers at once). In <b>Play</b> what you play is written into the loop; in <b>Pads</b> nothing is written. A pad lights whenever its key is called — from here, the CV jacks or the panel. <span id="pads_drop_help" hidden><b>Drop audio files on a pad</b> to load them into it (several files fill that pad and the next ones): mono or stereo, as the file is — no trim, and no normalise unless <i>normalise drops</i> is ticked (peak to −1 dBFS).</span></p>
+    <p id="pads_help" class="note">Press to play a key as a CV note would (several fingers at once); <b>⋯</b> in a pad's corner opens its settings (gain, tune, how it plays, its envelope and choke group) without playing it. In <b>Play</b> what you play is written into the loop; in <b>Pads</b> nothing is written. A pad lights whenever its key is called — from here, the CV jacks or the panel. <span id="pads_drop_help" hidden><b>Drop audio files on a pad</b> to load them into it (several files fill that pad and the next ones): mono or stereo, as the file is — no trim, and no normalise unless <i>normalise drops</i> is ticked (peak to −1 dBFS).</span></p>
   </section>
+  <div id="kp_sheet" class="kpsheet" role="dialog" aria-labelledby="kp_sheet_t" hidden>
+    <div class="kpsh"><b id="kp_sheet_t">—</b><span class="note">play the pads to hear it · Esc closes</span><button id="kp_sheet_x" class="mini" aria-label="close the settings" title="close (Esc)">✕</button></div>
+    <div id="kp_slot"></div>
+  </div>
   <section class="wide">
     <h2>The bar</h2>
     <div class="row" style="align-items:flex-start;gap:14px">
@@ -363,7 +380,7 @@
       <span id="k_recstate" class="pill">record —</span>
       <div class="bar meterbar idle" id="k_meterbox" title="input peak, last audio block"><i id="k_meter"></i></div>
     </div>
-    <div id="kp_row" class="row kprow" hidden>
+    <div id="kp_home"><div id="kp_row" class="row kprow" hidden>
       <b id="kp_key" class="kpk" title="the selected key — tap a key above to pick another">—</b>
       <label class="ctl inl" title="this key's gain, −24 … +6 dB in ½ dB steps (KEY_PARAMS, ACTION 37) — a drag is one undo step">Gain <input id="kp_gain" type="range" min="-48" max="12" step="1" value="0"><span id="kp_gain_v" class="num kpv">0 dB</span></label>
       <label class="ctl inl" title="this key's tune in semitones, ±24 — on top of whatever it plays at (P4, a recording's own rate, the tempo's varispeed, the style)">Tune <input id="kp_semi" type="range" min="-24" max="24" step="1" value="0"><span id="kp_semi_v" class="num kpv">0 st</span></label>
@@ -371,9 +388,16 @@
       <label class="ctl inl" title="how this key plays: as Options → Key Plays says, or its own — one-shot, held while down, or held with its sample looping">Plays <select id="kp_plays" class="inline"><option value="0">Follow Key Plays</option><option value="1">One-shot</option><option value="2">Held (while down)</option><option value="3">Loop (while held)</option><option value="4">Ratchet (while held)</option></select></label>
       <label id="kp_rat_l" class="ctl inl" hidden title="the ratchet's rate: the sample again from its start every whole, ½, ¼ or ⅛ of its own length (as it plays), or every 8th / 16th / 32nd at the tempo">every <select id="kp_rat" class="inline"><option value="0">whole sample</option><option value="1">½ sample</option><option value="2">¼ sample</option><option value="3">⅛ sample</option><option value="4">8th (tempo)</option><option value="5">16th (tempo)</option><option value="6">32nd (tempo)</option></select></label>
       <button id="kp_hear" class="mini" title="play the key as a pad does (hold for a held or looping key)">▶ hear</button>
-      <button id="kp_reset" class="mini" title="this key back to neutral: 0 dB, no tune, Follow Key Plays (one undo step)">reset</button>
+      <button id="kp_reset" class="mini" title="this key back to neutral: 0 dB, no tune, Follow Key Plays, no envelope, no choke group (one undo step)">reset</button>
       <button id="kp_spread" class="mini kpspread" hidden title="SPREAD_KEYS (ACTION 38): this key's sample on every key, a semitone a key — J4's V/oct plays it as a melody. Every other key takes its tune (its distance from this key, in semitones, plus this key's cents), this key's gain and Plays; this key stays as it is. Asks first when it would replace pads with their own samples. One undo step puts every key back.">Spread — chromatically (C1 … B2)</button>
-    </div>
+      <div id="kp_env" class="kpenv">
+        <label id="kp_atk_l" class="ctl inl" title="Attack: the key fades in over this long (0 … 2 s), on top of the 1 ms click-safe ramp every hit has">Attack <input id="kp_atk" type="range" min="0" max="100" step="1" value="0"><span id="kp_atk_v" class="num kpv">0 ms</span></label>
+        <label id="kp_dec_l" class="ctl inl" title="Decay: after the attack the level eases down to the sustain over this long (0 … 4 s) — with the sustain at 0 dB there is nothing to fall to">Decay <input id="kp_dec" type="range" min="0" max="100" step="1" value="0"><span id="kp_dec_v" class="num kpv">0 ms</span></label>
+        <label id="kp_sus_l" class="ctl inl" title="Sustain: the level the decay settles at while the key sounds, 0 dB (full) down to −∞ (the decay falls to silence and the sound ends there — a one-shot's way to be shortened)">Sustain <input id="kp_sus" type="range" min="-60" max="0" step="1" value="0"><span id="kp_sus_v" class="num kpv">0 dB</span></label>
+        <label id="kp_rel_l" class="ctl inl" title="Release: when a held key comes up (Held, Loop, Ratchet's last hit) the sound falls away over this long (to −60 dB from full, 0 … 4 s) — a looping key loops on meanwhile. 0: the usual 5 ms fade">Release <input id="kp_rel" type="range" min="0" max="100" step="1" value="0"><span id="kp_rel_v" class="num kpv">0 ms</span></label>
+        <label class="ctl inl" title="Choke group: a key struck in a group cuts every other key's sound in the same group (open and closed hat) — never its own; the pattern's steps take no part">Choke <select id="kp_grp" class="inline"><option value="0">none</option><option value="1">group 1</option><option value="2">group 2</option><option value="3">group 3</option><option value="4">group 4</option></select></label>
+      </div>
+    </div></div>
     <p id="kit_help" class="note">Click a key to see its material below (on a phone, ● and ✕ act on the selected key). An empty key plays its span of the break; a recorded key plays its take. ● arms a take into that key (the next gate on J6 / the panel gesture starts it); ✕ clears a recording.</p>
     <p id="kit_help_edit" class="note" hidden><b>Keys:</b> tap one to hear it and see it below · drag a key onto another to <b>swap</b> (a prompt when the target is taken; <span class="bad">magenta</span> when a recording would lose its only key) · long-press a key, then drop or tap another, to <b>copy</b> it there · drag a slice up from the waveform onto a key to assign it.</p>
   </section>
@@ -586,7 +610,8 @@ function say(s, bad) {
 }
 $('status').onclick = () => $('status').classList.toggle('open');
 const TABS = { tab_play: 'play', tab_kit: 'kit', tab_scope: 'scope', tab_opts: 'opts', tab_man: 'man' };
-function showTab(t) { for (const k in TABS) { $(k).classList.toggle('on', k === t); $(TABS[k]).classList.toggle('show', k === t); } kitShown = t === 'tab_kit'; scopeShown = t === 'tab_scope'; if (scopeShown) scopeKick(); }
+function showTab(t) { if (t !== 'tab_play') try { kpClose(); } catch {}   /* ENV: the pad sheet belongs to the Play tab (try: a call before the script has got that far) */
+  for (const k in TABS) { $(k).classList.toggle('on', k === t); $(TABS[k]).classList.toggle('show', k === t); } kitShown = t === 'tab_kit'; scopeShown = t === 'tab_scope'; if (scopeShown) scopeKick(); }
 for (const t in TABS) $(t).onclick = () => { showTab(t); history.replaceState(null, '', '#' + TABS[t]); if (kitShown) invalidate(D.kit | D.kitwave); if (scopeShown) invalidate(D.bigscope); };
 { const t = Object.keys(TABS).find(k => '#' + TABS[k] === location.hash); if (t) showTab(t); }
 
@@ -873,6 +898,7 @@ const padEls = [], padDown = new Map();
 (function buildPads() {
   const host = $('pads');
   for (let k = 0; k < 24; k++) {
+    const w = document.createElement('div'); w.className = 'padw';
     const el = document.createElement('button'); el.className = 'padk' + ([1, 3, 6, 8, 10].includes(k % 12) ? ' sh' : ''); el.dataset.k = k;
     el.innerHTML = `<span>${keyName(k)}</span><em hidden></em><small>—</small>`; el.title = `key ${k} (${keyName(k)}) — PLAY_KEY`;
     const up = e => { if (padDown.get(e.pointerId) !== k) return; padDown.delete(e.pointerId); el.classList.remove('down'); if (link) playKey(link, k, false).catch(() => {}); };
@@ -882,7 +908,10 @@ const padEls = [], padDown = new Map();
       playKey(link, k, true).then(r => { if (r && !r.ok) say(`${keyName(k)}: ${r.status === 3 ? 'nothing loaded to play' : HL.statusName(r.status)}`, true); }, () => {});
     });
     el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up); el.addEventListener('lostpointercapture', up);
-    host.appendChild(el); padEls.push({ el, sub: el.querySelector('small'), kp: el.querySelector('em'), sig: '' });
+    /* ENV: ⋯ — the key's settings in the sheet (the pad itself is a note: a press plays it, a long press holds it) */
+    const g = document.createElement('button'); g.type = 'button'; g.className = 'padset'; g.textContent = '⋯'; g.title = `${keyName(k)}'s settings — gain, tune, how it plays, envelope, choke group`; g.setAttribute('aria-label', `${keyName(k)} settings`);
+    g.addEventListener('pointerdown', e => e.stopPropagation()); g.addEventListener('click', e => { e.stopPropagation(); kpOpen(k, g); });
+    w.appendChild(el); w.appendChild(g); host.appendChild(w); padEls.push({ el, set: g, sub: el.querySelector('small'), kp: el.querySelector('em'), sig: '' });
   }
 })();
 /* ───────────── PADS (0x68): a sample dropped onto a pad ─────────────
@@ -903,7 +932,8 @@ function padDropTarget(el, k) {
 }
 padEls.forEach((p, k) => { padDropTarget(p.el, k); const f = document.createElement('i'); f.className = 'pf'; p.el.appendChild(f); p.fill = f; });
 const padSecs = n => (n / 48000).toFixed(2) + ' s';
-function padShow(job, text, kind, frac) { job.text = text; job.kind = kind || ''; if (frac != null) job.frac = frac; padJob[job.key] = job; setText('pd_msg', `${keyName(job.key)}: ${text}`); $('pd_msg').hidden = false; $('pd_msg').className = 'note' + (kind === 'bad' ? ' bad' : ''); invalidate(D.pads); }
+function padShow(job, text, kind, frac) { if (job.cancelled) return;   /* the old session's drop (a disconnect): nothing to say on this one */
+  job.text = text; job.kind = kind || ''; if (frac != null) job.frac = frac; padJob[job.key] = job; setText('pd_msg', `${keyName(job.key)}: ${text}`); $('pd_msg').hidden = false; $('pd_msg').className = 'note' + (kind === 'bad' ? ' bad' : ''); invalidate(D.pads); }
 function padAddFiles(files, k0) {
   if (!link) { say('connect to the module first', true); return; }
   const list = Array.from(files || []); let k = Math.max(0, Math.min(23, k0 | 0));
@@ -937,6 +967,7 @@ async function padUpload(job) {
   let ab;
   try { ab = await cardDecode(job.file); }
   catch (e) { job.state = 'failed'; padShow(job, `${job.file.name}: this browser cannot decode it (${e && e.message || e})`, 'bad', 0); return; }
+  if (job.cancelled) return;   /* the module went while it decoded: the link now may be another session's */
   let p0;
   try { p0 = await padState(); } catch (e) { job.state = 'failed'; padShow(job, 'the module did not answer: ' + e.message, 'bad', 0); return; }
   if (!p0) { job.state = 'failed'; padShow(job, 'the module\'s state did not read', 'bad', 0); return; }
@@ -1069,8 +1100,9 @@ function drawPads() {
     const empty = !j && noBreak && e && t < table.nSlices;   /* beta-sampler: an empty kit's pad says it takes a drop */
     p.sub.textContent = what; p.kp.textContent = kpt; p.kp.hidden = !kpt; p.el.className = p.el.className.replace(/\s*(c\d|busy|bad|empty)\b/g, '') + (cls >= 0 ? ' c' + cls : '') + (j && j.kind === 'busy' ? ' busy' : j && j.kind === 'bad' ? ' bad' : '') + (empty ? ' empty' : '');
     if (p.fill) { p.fill.style.width = j ? Math.round((j.kind === 'bad' ? 1 : j.frac) * 100) + '%' : '0'; p.fill.className = 'pf' + (j && j.kind === 'ok' ? ' ok' : j && j.kind === 'bad' ? ' bad' : ''); }
-    p.el.title = j && j.text ? `${keyName(k)} — ${j.text}` : `key ${k} (${keyName(k)}) — PLAY_KEY${kpt ? ' · ' + kpt + ' (its own settings: Kit tab)' : ''} · drop an audio file here to load it`;
+    p.el.title = j && j.text ? `${keyName(k)} — ${j.text}` : `key ${k} (${keyName(k)}) — PLAY_KEY${kpt ? ' · ' + kpt : ''} · ⋯ for its settings · drop an audio file here to load it`;
   }
+  for (let k = 0; k < 24; k++) { const on = k === kpSheetKey; padEls[k].el.classList.toggle('kpon', on); padEls[k].set.classList.toggle('on', on); padEls[k].set.setAttribute('aria-expanded', on ? 'true' : 'false'); }   /* ENV */
   drawPadsBar(); drawSampler();
   $('pads_follow').hidden = !st.keysFollow;
   setPill('pads_plays', st.keyPlays === 1 ? 'held until you let go' : 'one-shot', '');
@@ -1584,7 +1616,7 @@ $('ed_follow').onclick = () => {
   c.addEventListener('pointerdown', e => { if (!st) return; e.preventDefault(); down = true; try { c.setPointerCapture(e.pointerId); } catch {} at(e); });
   c.addEventListener('pointermove', e => { if (down) at(e); }); c.addEventListener('pointerup', () => { down = false; }); c.addEventListener('pointercancel', () => { down = false; }); }
 $('ed_onsets').onclick = () => ed.fromOnsets(edThresh);
-$('ed_undo').onclick = () => ed.undo(); $('ed_redo').onclick = () => ed.redo();
+$('ed_undo').onclick = () => { kpWant = null; ed.undo(); }; $('ed_redo').onclick = () => { kpWant = null; ed.redo(); };   /* KEYP: a drag's queued value never goes out after an Undo / Redo */
 /* the history list (the page's labels keyed by tableGen, the undone ones struck through), the journal's two depths,
  * the playhead for the Chop pad */
 let histSig = '';
@@ -1606,34 +1638,75 @@ $('l_undo').onclick = () => action(ACT.looperUndo); $('l_clear').onclick = () =>
  * The selected key's settings in the row under the keys; the cells (and the Play pads) show a key's settings in words
  * when it has any. The sliders play live: each value goes out while you drag (one at a time — the newest waits for the
  * last reply), every send after the drag's first with JOIN, so a whole drag is one undo step (the autoslice slider's
- * way). The module's answer is the truth: the row follows the settings read back, except while you hold a control. */
-let keyp = null, keypGen = -1;
-let kpBusy = false, kpWant = null, kpDrag = false, kpSent = 0, kpKey = -1, kpTouch = 0;
+ * way). The module's answer is the truth: the row follows the settings read back, except while you hold a control.
+ * ENV: the row's second line is the key's amp envelope (Attack, Decay, Sustain, Release — the time sliders on a cubic
+ * curve, HL.envMs) and its choke group. The same row is the Play tab's: ⋯ on a pad moves it into a sheet for that key
+ * (kpOpen) and back under the keys when it closes — one set of controls, whichever key it is pointed at (kpK). */
+let keyp = null, keypGen = -1, kpSheetKey = -1, kpOpener = null;
+const kpK = () => kpSheetKey >= 0 ? kpSheetKey : selKey;   /* the key the row edits: the sheet's, else the Kit's selection */
+let kpBusy = false, kpWant = null, kpDrag = false, kpSent = 0, kpKey = -1, kpTouch = 0, kpOwnGen = -1;   /* kpOwnGen: the tableGen our last KEY_PARAMS left */
 const keypOf = k => keyp && keyp[k] ? HL.keypText(keyp[k]) : '';
 const kpGainText = g => g ? HL.keypGainText(g) : '0 dB';
-const kpSemiText = c => { const s = Math.trunc(c / 100); return (s > 0 ? '+' : s < 0 ? '−' : '') + Math.abs(s) + ' st'; };
-/* what the row's controls say now, as a key's settings */
+const kpSemiText = c => HL.keypTuneText(c) || '0 st';   /* the whole tune, in the cell's words (+3 st −50 c reads +2.5 st) */
+/* ENV: the time sliders (id, the field, its ceiling) */
+const KP_T = [['kp_atk', 'atk', HL.KEYP.atkMax], ['kp_dec', 'dec', HL.KEYP.decMax], ['kp_rel', 'rel', HL.KEYP.relMax]];
+const kpCur = () => (keyp && keyp[kpK()]) || HL.keypZero();
+/* what the row's controls say now, as a key's settings. ENV: a time slider still where the key's value puts it keeps
+ * that value exactly (the curve rounds: a set's 1 234 ms is not moved by a gain edit) */
 function kpFromRow() {
-  const semi = +$('kp_semi').value, fine = Math.max(-99, Math.min(99, Math.round(+$('kp_cents').value || 0)));
-  return { gain: +$('kp_gain').value, cents: Math.max(-HL.KEYP.centsMax, Math.min(HL.KEYP.centsMax, semi * 100 + fine)), plays: +$('kp_plays').value, rat: +$('kp_rat').value };
+  const semi = +$('kp_semi').value, fine = Math.max(-99, Math.min(99, Math.round(+$('kp_cents').value || 0))), cur = kpCur();
+  const p = { gain: +$('kp_gain').value, cents: Math.max(-HL.KEYP.centsMax, Math.min(HL.KEYP.centsMax, semi * 100 + fine)), plays: +$('kp_plays').value, rat: +$('kp_rat').value,
+    sus: -(+$('kp_sus').value), grp: +$('kp_grp').value };
+  for (const [id, f, max] of KP_T) { const pos = +$(id).value; p[f] = pos === HL.envPos(cur[f] | 0, max) ? cur[f] | 0 : HL.envMs(pos, max); }
+  return p;
+}
+/* ENV: a stage that does nothing for this key dims, its title says why: Decay at full sustain, Release on a one-shot */
+function kpDims(p) {
+  const oneShot = p.plays === 1 || (p.plays === 0 && !(st && st.keyPlays === 1));
+  $('kp_dec_l').classList.toggle('dim', !p.sus); $('kp_rel_l').classList.toggle('dim', oneShot);
 }
 function drawKeyp() {
-  const row = $('kp_row'), k = selKey, p = keyp && keyp[k] ? keyp[k] : { gain: 0, cents: 0, plays: 0, rat: 0 }, held = kpDrag || performance.now() - kpTouch < 1500 || kpBusy || kpWant;
+  const row = $('kp_row'), k = kpK(), p = keyp && keyp[k] ? keyp[k] : HL.keypZero(), held = kpDrag || performance.now() - kpTouch < 1500 || kpBusy || kpWant;
   setText('kp_key', keyName(k)); row.classList.toggle('set', !HL.keypNeutral(p));
-  const busy = !link || !st || !st.bufLen; for (const id of ['kp_gain', 'kp_semi', 'kp_cents', 'kp_plays', 'kp_rat', 'kp_hear', 'kp_reset']) $(id).disabled = busy;
+  if (kpSheetKey >= 0) setText('kp_sheet_t', `${keyName(k)} — settings${HL.keypNeutral(p) ? '' : ': ' + HL.keypText(p)}`);
+  const busy = !link || !st || !st.bufLen; for (const id of ['kp_gain', 'kp_semi', 'kp_cents', 'kp_plays', 'kp_rat', 'kp_hear', 'kp_reset', 'kp_atk', 'kp_dec', 'kp_sus', 'kp_rel', 'kp_grp']) $(id).disabled = busy;
   $('kp_rat_l').hidden = +$('kp_plays').value !== HL.KEYP.ratchet;
   $('kp_reset').disabled = busy || HL.keypNeutral(p);
   drawSpread(k, busy);   /* CHROMA */
+  kpDims(kpFromRow());   /* ENV: what the row says now (your hand may be on it) */
   if (held && kpKey === k) return;   /* your hand is on it: the reply will come round */
-  const semi = Math.trunc(p.cents / 100), fine = p.cents - semi * 100;
+  const semi = Math.sign(p.cents) * Math.round(Math.abs(p.cents) / 100), fine = p.cents - semi * 100;   /* the nearest semitone and ±50 c from it: +3 st −50 c comes back as entered */
   if (document.activeElement !== $('kp_gain') && +$('kp_gain').value !== p.gain) $('kp_gain').value = String(p.gain);
   if (document.activeElement !== $('kp_semi') && +$('kp_semi').value !== semi) $('kp_semi').value = String(semi);
   if (document.activeElement !== $('kp_cents') && +$('kp_cents').value !== fine) $('kp_cents').value = String(fine);
   if (document.activeElement !== $('kp_plays') && +$('kp_plays').value !== p.plays) $('kp_plays').value = String(p.plays);
   if (document.activeElement !== $('kp_rat') && +$('kp_rat').value !== (p.rat | 0)) $('kp_rat').value = String(p.rat | 0);
+  for (const [id, f, max] of KP_T) { const pos = HL.envPos(p[f] | 0, max); if (document.activeElement !== $(id) && +$(id).value !== pos) $(id).value = String(pos); }   /* ENV */
+  if (document.activeElement !== $('kp_sus') && +$('kp_sus').value !== -(p.sus | 0)) $('kp_sus').value = String(-(p.sus | 0));
+  if (document.activeElement !== $('kp_grp') && +$('kp_grp').value !== (p.grp | 0)) $('kp_grp').value = String(p.grp | 0);
   $('kp_rat_l').hidden = +$('kp_plays').value !== HL.KEYP.ratchet;
-  setText('kp_gain_v', kpGainText(p.gain)); setText('kp_semi_v', kpSemiText(p.cents));
+  setText('kp_gain_v', kpGainText(p.gain)); setText('kp_semi_v', kpSemiText(p.cents)); kpEnvLabels(p); kpDims(p);
 }
+function kpEnvLabels(p) { setText('kp_atk_v', HL.keypMsText(p.atk | 0)); setText('kp_dec_v', HL.keypMsText(p.dec | 0)); setText('kp_sus_v', HL.keypSusText(p.sus | 0)); setText('kp_rel_v', HL.keypMsText(p.rel | 0)); }
+/* ENV: the sheet — ⋯ on a pad points the row at that key and moves it in; ✕, Esc or another tab puts it back under the
+ * keys. Not modal: the pads still play under it (hear what you set), a press on another pad's ⋯ moves it there. */
+function kpOpen(k, opener) {
+  if (!link) return;
+  if (kpSheetKey !== k) { kpDrag = false; kpSent = 0; kpTouch = 0; }
+  kpSheetKey = k; kpOpener = opener || null;
+  $('kp_slot').appendChild($('kp_row')); $('kp_row').hidden = false; $('kp_sheet').hidden = false;
+  drawKeyp(); invalidate(D.pads);
+  try { $('kp_gain').focus(); } catch {}
+}
+function kpClose() {
+  if (kpSheetKey < 0) return;
+  const o = kpOpener; kpSheetKey = -1; kpOpener = null; kpDrag = false; kpSent = 0;
+  $('kp_sheet').hidden = true; $('kp_home').appendChild($('kp_row')); $('kp_row').hidden = !link;
+  drawKeyp(); invalidate(D.kit | D.pads);
+  if (o) try { o.focus(); } catch {}
+}
+$('kp_sheet_x').onclick = () => kpClose();
+{ const esc = e => { if (e.key === 'Escape' && kpSheetKey >= 0) { e.preventDefault(); kpClose(); } }; $('kp_sheet').addEventListener('keydown', esc); document.addEventListener('keydown', esc); }   /* Esc from inside the sheet or anywhere */
 /* ───────────── CHROMA (ACTION 38): one sample, played chromatically ─────────────
  * "Spread G1 chromatically (C1 … B2)": the selected key's sample on all 24 keys, key j tuned (j − G1) semitones plus
  * G1's own cents, with G1's gain and Plays; G1 stays as it is. J4's V/oct then plays a melody from one sample. Keys that
@@ -1664,32 +1737,36 @@ async function spreadKey(cx, cy) {
   invalidate(D.kit | D.pads);
 }
 $('kp_spread').addEventListener('click', e => { spreadKey(e.clientX, e.clientY); });
-function kpLabels() { const p = kpFromRow(); setText('kp_gain_v', kpGainText(p.gain)); setText('kp_semi_v', kpSemiText(p.cents)); }
+function kpLabels() { const p = kpFromRow(); setText('kp_gain_v', kpGainText(p.gain)); setText('kp_semi_v', kpSemiText(p.cents)); kpEnvLabels(p); kpDims(p); }
 /* one send at a time; `join` for every send of a drag after its first */
-function kpQueue(p, join) {
+function kpQueue(p, join, key = kpK()) {
   if (!link) return;
-  const key = selKey;
   if (kpBusy) { kpWant = { p, join: true, key }; return; }
   kpBusy = true; kpKey = key; kpTouch = performance.now();
   const j = join && kpSent > 0; kpSent++;
-  Promise.resolve(ed.keyParams(key, p, j)).catch(() => {}).finally(() => {
+  Promise.resolve(ed.keyParams(key, p, j)).then(r => { if (r && r.ok) kpOwnGen = r.tableGen; }).catch(() => {}).finally(() => {
     kpBusy = false;
-    if (kpWant) { const w = kpWant; kpWant = null; if (w.key === key) { kpBusy = false; kpQueue(w.p, w.join); return; } }
+    if (kpWant) { const w = kpWant; kpWant = null; if (w.key !== key) kpSent = 0; kpQueue(w.p, w.join && w.key === key, w.key); return; }   /* another key's change: its own step */
     if (!kpDrag) kpSent = 0;
     invalidate(D.kit | D.pads);
   });
 }
-for (const id of ['kp_gain', 'kp_semi']) {
+for (const id of ['kp_gain', 'kp_semi', 'kp_atk', 'kp_dec', 'kp_sus', 'kp_rel']) {   /* ENV: the envelope's sliders drag the same way */
   $(id).addEventListener('input', () => { if (!kpDrag) { kpDrag = true; kpSent = 0; } kpTouch = performance.now(); kpLabels(); kpQueue(kpFromRow(), true); });
   $(id).addEventListener('change', () => { const was = kpDrag; kpDrag = false; kpTouch = performance.now(); kpLabels(); kpQueue(kpFromRow(), was); });
 }
+/* a drag that ends where it began fires no change: the pointer's up (or a cancel, or the focus leaving) ends it too — after
+ * the change, if one comes, so a real drag's last send keeps its JOIN */
+const kpDragEnd = () => setTimeout(() => { if (!kpDrag) return; kpDrag = false; kpTouch = performance.now(); if (!kpBusy && !kpWant) kpSent = 0; invalidate(D.kit); }, 0);
+for (const id of ['kp_gain', 'kp_semi']) for (const ev of ['pointerup', 'pointercancel', 'blur']) $(id).addEventListener(ev, kpDragEnd);
 $('kp_cents').addEventListener('change', () => { kpTouch = performance.now(); kpSent = 0; kpLabels(); kpQueue(kpFromRow(), false); });
 $('kp_plays').addEventListener('change', () => { kpTouch = performance.now(); kpSent = 0; $('kp_rat_l').hidden = +$('kp_plays').value !== HL.KEYP.ratchet; kpQueue(kpFromRow(), false); });
 $('kp_rat').addEventListener('change', () => { kpTouch = performance.now(); kpSent = 0; kpQueue(kpFromRow(), false); });
-$('kp_reset').onclick = () => { kpSent = 0; $('kp_gain').value = '0'; $('kp_semi').value = '0'; $('kp_cents').value = '0'; $('kp_plays').value = '0'; $('kp_rat').value = '0'; $('kp_rat_l').hidden = true; kpLabels(); kpTouch = 0; kpQueue({ gain: 0, cents: 0, plays: 0, rat: 0 }, false); };
+$('kp_grp').addEventListener('change', () => { kpTouch = performance.now(); kpSent = 0; kpQueue(kpFromRow(), false); });   /* ENV */
+$('kp_reset').onclick = () => { kpSent = 0; for (const id of ['kp_gain', 'kp_semi', 'kp_cents', 'kp_plays', 'kp_rat', 'kp_atk', 'kp_dec', 'kp_sus', 'kp_rel', 'kp_grp']) $(id).value = '0'; $('kp_rat_l').hidden = true; kpTouch = 0; kpQueue(HL.keypZero(), false); kpLabels(); };
 { const b = $('kp_hear'); let down = -1;
   const up = () => { if (down < 0) return; const k = down; down = -1; if (link) playKey(link, k, false).catch(() => {}); };
-  b.addEventListener('pointerdown', e => { e.preventDefault(); if (!link) return; try { b.setPointerCapture(e.pointerId); } catch {} down = selKey; flashKey(down); playKey(link, down, true).catch(() => {}); });
+  b.addEventListener('pointerdown', e => { e.preventDefault(); if (!link) return; try { b.setPointerCapture(e.pointerId); } catch {} down = kpK(); flashKey(down); playKey(link, down, true).catch(() => {}); });
   b.addEventListener('pointerup', up); b.addEventListener('pointercancel', up); b.addEventListener('lostpointercapture', up); }
 /* The table follows the state: refetched when the material, the table size,
  * the free position or the key map changes (a take, a clear, a re-slice). */
@@ -1707,7 +1784,7 @@ function syncKit(s) {
     }, e => warn('table', e)).finally(() => { poll.pTable = null; });
   }
   /* KEYP: the 24 keys' settings (0x69), read again whenever tableGen moves — every KEY_PARAMS, undo and load bumps it */
-  if (s.tableGen !== keypGen && !poll.pKeyp) { const g = s.tableGen; poll.pKeyp = HL.fetchKeyParams(link, { key: 'keyp' }).then(a => { keyp = a; keypGen = g; invalidate(D.kit | D.pads); }, e => warn('keys', e)).finally(() => { poll.pKeyp = null; }); }
+  if (s.tableGen !== keypGen && !poll.pKeyp) { const g = s.tableGen; poll.pKeyp = HL.fetchKeyParams(link, { key: 'keyp' }).then(a => { keyp = a; keypGen = g; if (kpOwnGen >= 0 && ((kpOwnGen - g) & 255) >= 128) kpTouch = -Infinity;   /* the settings moved past our last send (Undo, Redo, a spread, a load): the row lets go and shows them */ invalidate(D.kit | D.pads); }, e => warn('keys', e)).finally(() => { poll.pKeyp = null; }); }
   if (s.matGen !== hitsGen && !poll.pHits) { const gen = s.matGen; poll.pHits = fetchHits(link).then(hh => { hits = hh; hitsGen = gen; invalidate(D.kitwave | D.wave); }, e => warn('hits', e)).finally(() => { poll.pHits = null; }); }
 }
 
@@ -1733,6 +1810,8 @@ function asQueue(k) {
   Promise.resolve(ed.autoslice(k, false, join)).catch(() => {}).finally(() => { asBusy = false; if (asWant != null) { const w = asWant; asWant = null; asQueue(w); } else if (!asDrag) asSent = 0; });
 }
 $('as_k').addEventListener('input', e => { if (!asDrag) { asDrag = true; asSent = 0; asLast = -1; } asTouched = true; setText('as_n', e.target.value); asQueue(+e.target.value); });
+{ const asDragEnd = () => setTimeout(() => { if (!asDrag) return; asDrag = false; asTouched = false; if (!asBusy) asSent = 0; }, 0);   /* the same for the count: a drag with no change still ends */
+  for (const ev of ['pointerup', 'pointercancel', 'blur']) $('as_k').addEventListener(ev, asDragEnd); }
 $('as_k').addEventListener('change', e => { asTouched = false; if (!asDrag) { asSent = 0; asLast = -1; } asDrag = false; asQueue(+e.target.value); if (!asBusy) asSent = 0; });
 $('as_go').onclick = () => { if (link) ed.autoslice(+$('as_k').value, false); };
 $('as_reroll').onclick = () => { if (link) ed.autoslice(+$('as_k').value, true); };
@@ -2146,7 +2225,7 @@ function setDisconnected() {
   table = null; tableSig = ''; bufSig = ''; hits = null; hitsGen = -1; wave.cache.clear(); wave.queue.length = 0; wave.planSig = ''; keyCells.forEach(c => { c.sig = ''; });
   copyArm = -1; ed.selT = -1; ed.drag = null; ed.local = null; ed.history = new ED.History(); histSig = fieldSig = ''; closeMenu(); ghost(null); dropHi(-1); setConnectedUi(false);
   setSeqShown = -1; setAsked = null; setPill('s_status', '—', ''); $('s_save').disabled = $('s_load').disabled = true;
-  keyp = null; keypGen = -1; kpWant = null; kpBusy = false; kpDrag = false;   /* KEYP */
+  kpClose(); keyp = null; keypGen = -1; kpWant = null; kpBusy = false; kpDrag = false; kpOwnGen = -1;   /* KEYP (ENV: the sheet closes) */
   $('pd_sampler').hidden = true; $('mode_cue').hidden = true; lastText.delete('mode_cue'); for (const j of padJobs) j.cancelled = true; padJob.fill(null); $('pd_unsaved').hidden = true; $('pd_msg').hidden = true;
   for (const j of cardJobs) j.cancelled = true; $('cardnote').hidden = true;
   clearTimeout(sc.timer); sc.timer = null; sc.frames.length = 0; sc.fps = sc.rps = sc.bps = 0; sc.err = ''; invalidate(D.bigscope);
@@ -2177,6 +2256,10 @@ async function connectPort(port, isDemo) {
     setPill('modpill', `${info.name} ${info.fw}${isDemo ? ' (demo)' : transportName() === 'WebUSB' ? ' · WebUSB' : ''}`, 'ok');
     desc = await getDescriptor(l, info).catch(() => null);
     /* the page and the firmware ship together: anything but this page's api is the wrong build — one message, no partial mode */
+    if (!desc) {   /* a reply lost or garbled on the way: not a verdict on the firmware */
+      notice(`The module's descriptor did not come through (${info.name} ${info.fw}) — connect again.`);
+      say('descriptor unreadable — disconnected', true); setDisconnected(); await l.close(); return;
+    }
     const api = HL.apiOf(desc);
     if (api !== HL.API) {
       notice(`This page needs the Audiothurgist firmware it came with (page API ${HL.API}); the module runs ${info.name} ${info.fw}${api == null ? '' : ` (API ${api})`}. Flash the matching .bin, then connect again.`);
@@ -2243,7 +2326,12 @@ $('usbscan').onclick = scanUsb;
 document.addEventListener('serial-polyfill', () => { if (!navigator.serial) { $('usbscan').hidden = false; $('connect').disabled = false; } });
 async function connect() {
   notice('');
-  if (link) { const l = link; connectGen++; setDisconnected(); await l.close(); say('disconnected'); return; }
+  if (link) {
+    const l = link;
+    /* PADS: a drop still sending is called off on the module first — else it waits out its 5 s before it takes another */
+    if (padJobs.some(j => j.state === 'sending' && !j.cancelled)) await l.request(CMD.pads, Uint8Array.of(HL.PADS.abort), { urgent: true }).catch(() => {});
+    connectGen++; setDisconnected(); await l.close(); say('disconnected'); return;
+  }
   const api = serialApi();
   if (!api) { notice(describeNoSerial()); return; }
   try { const port = await api.requestPort({ filters: [{ usbVendorId: 0x0483 }] }); await connectPort(port, false); }
@@ -2263,7 +2351,8 @@ async function connect() {
  * sets/ and presets/ beside them, no Audiothurgist folder), `nocard` no card in. PADS: `emptykit` starts from New
  * empty kit (no break, Pads). START: `sampler` powers up with Start In = Sampler (Pads, the transport stopped — the
  * firmware's default; the Demo button does this); without it the boot preset says As saved (Classic, running), which
- * the selftest drives. KEYP: `keyp` opens the Kit with four keys' settings set (gain, tune, loop, a ½ ratchet). */
+ * the selftest drives. KEYP: `keyp` opens the Kit with four keys' settings set (gain, tune, loop, a ½ ratchet); ENV: and an
+ * open / closed hat pair in choke group 1 (A♯1 with a 300 ms decay to nothing, B1). */
 async function connectDemo(flags = '') {
   if (link) return; notice('');
   const f = new Set(flags.split(',').filter(Boolean));
@@ -2281,7 +2370,8 @@ async function connectDemo(flags = '') {
   if (f.has('play')) { d.setGrammar(DEMO.GRAM.play, d.grammar); d.options[G] = DEMO.GRAM.play; }
   if (f.has('pads')) { d.options[G] = DEMO.GRAM.pads; d.applyEdit(36, Uint8Array.of(36, 6, 0)); }
   if (f.has('emptykit')) d.padNewKit();
-  if (f.has('keyp')) { d.keyp[0] = { gain: -6, plays: 0, cents: 0, rat: 0 }; d.keyp[3] = { gain: 0, plays: 3, cents: 700, rat: 0 }; d.keyp[7] = { gain: 4, plays: 4, cents: -1200, rat: 1 }; d.keyp[12] = { gain: 0, plays: 1, cents: 25, rat: 0 }; showTab('tab_kit'); }   /* KEYP: four keys with settings */
+  if (f.has('keyp')) { d.keyp[0] = { gain: -6, plays: 0, cents: 0, rat: 0 }; d.keyp[3] = { gain: 0, plays: 3, cents: 700, rat: 0 }; d.keyp[7] = { gain: 4, plays: 4, cents: -1200, rat: 1 }; d.keyp[12] = { gain: 0, plays: 1, cents: 25, rat: 0 };
+    d.keyp[10] = { gain: 0, plays: 1, cents: 0, rat: 0, atk: 0, dec: 300, sus: 60, rel: 0, grp: 1 }; d.keyp[11] = { gain: 0, plays: 1, cents: 0, rat: 0, atk: 0, dec: 0, sus: 0, rel: 0, grp: 1 }; showTab('tab_kit'); }   /* KEYP: four keys with settings; ENV: an open hat (A♯1: a 300 ms decay to nothing) and a closed one (B1) in choke group 1 */
   if (f.has('locks')) d.lockMask = 0x0049;
   demoPort = new DEMO.FakePort(d);
   await connectPort(demoPort, true);
