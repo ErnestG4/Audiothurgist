@@ -98,7 +98,7 @@ const FW = '0.13.0-beta-demo';
 const SR = 48000, BUF_CAP = SR * 45, SLICE_LEN = 6000, KEYS = 24;   /* PADS: the firmware's planes, 45 s (kMaxSec) */
 /* PADS: an empty kit's silent stub (bb::kPadStubLen, 16 slices of 750) and how long the fake's commit and New empty
  * kit take (the firmware's are its main loop's; these only make the states visible). */
-const PAD_STUB = 12000, PAD_COMMIT_MS = 120, PAD_KIT_MS = 150;
+const PAD_STUB = 12000, PAD_COMMIT_MS = 120, PAD_KIT_MS = 150, PAD_RECLAIM_MS = 140;
 const REC_MIN = 480;
 /* EDIT: the engine's table geometry (core/bb_engine.h): the shortest grid slice an edit may leave, the
  * table's capacity, the flag bits, 48 samples per ms, the tap mark's 250 ms cap. */
@@ -128,7 +128,7 @@ const MANUAL = {
     { id: "brain", title: "Clock in, gates out", body: "Patch a clock into J3 and set its PPQN in Options; B1 flashes white per pulse and sits green when locked (the loop aligns to the pulse grid at lock). While following, P2 becomes a clock divider/multiplier (÷4 · ÷2 · ×1 · ×2 · ×4, wide ×1 centre) that engages once you move it and switches on the next beat, in phase. Unpatch and the tempo holds until P2 moves. Gates on J6/J7/J8 follow the classifier's labels: *Gate Fires* chooses every step or once per hit (as drums do), *Gate Lanes* can mark every class present in a hit, Gate Length and Gate Level (velocity from loudness, accents to the ceiling) shape them. If a break plays at half or double speed against your clock, set **Bars** in Options — the bar guess is the culprit." },
     { id: "languages", title: "Pattern languages (Grammar, in Options)", body: "**Classic** is BreakFix's Brocot cell grammar. **Collins** adds the breakbeat-science upgrades: faithful early in the phrase, restless toward its end; 3+3+2 odd cuts; a fill on every fourth loop that snaps back on the downbeat; stutter terminators; accelerating rolls. **Grids** speaks Mutable Instruments' drum map through your break's own kicks, snares and hats — Map X/Y and three densities on the **Brain** page (B1). **Euclid** spaces each class's hits evenly with Rotation. In both, the Chop knob sets how faithfully slices are chosen: full right plays each class's own nearest hit, lower swaps within the class; a rest lets the break run on underneath (or gates it: *Rests*). **Camp** rings the bar's cells through change-ringing permutations — deterministic, B2 rings the next change. **Play** has no pattern of its own: the bar is what you play into it from the keyboard or the web page, looped; B3 clears it. With **Quantize** Off (the default) it is a free looper — every hit replays at the exact moment you played it, held notes with their length, overdubbing pass after pass; 8ths snaps hits to the nearest 8th, 16ths writes the bar step by step as before. **B2** tap undoes the last pass's overdub, **B3** tap clears. **Pads** is the instrument with no looper: hits sound as you play them, nothing is written, keeping the beat is yours." },
     { id: "options", title: "Options, one line each", body: "**Classifier** — which lens labels kick/snare/hat (Hockman 3-band, the legacy hi/lo split, two-band, keyframe density, or Adaptive: each step judged at its hit, clustered per break). **Clock In** — J3 PPQN. **Voice** — Choke or Punch. **Gate Length / Level / Fires / Lanes** — see the Brain section. **Grammar** — the pattern language. **Bars** — override the bar guess (Auto reads the backbeat). **Rests** — continue or gate. **Fades** — fixed, or adaptive to each slice's brightness. **Slice Tail** — what a slot does at pitch: zoom (read on into the next slice, the record's way), gate, loop forward, or ping-pong. **Swaps** — class only, or class + loudness tier (a ghost never replaces a backbeat). **Flow Déjà Vu** — some flow bars replay from history. **Swing** — slice and step at the material's own swing. **Onsets** — the onset detector behind the bar guess and hit gates. **Jacks** — Brain (class gates out) or Voice (two v/oct + gate, hit trigger and velocity out); Follow grammar switches with Play. **Quantize** — Play's looper: Off (as played), 16ths (punch the bar), 8ths. **Autosave** — Off, or On: 2 s after an edit the slice table and key map are written to the set's JSON, or to sets/<file>.slices.json beside a loose WAV, and read back on load. **Key Plays** — one-shot, or held until the gate falls (a key's own Plays, in the Kit, overrides it). **Sampling** — mono, or stereo planes. **Record Source** — the inputs, or the module's own output. **Record** — arm a loop take into the break (see Sampling). **Tap Allowance** — how far back a tap-while-playing mark lands (your reaction time): 0–80 ms. **Start In** — Sampler (Pads, stopped; the default) or As saved (the boot preset's grammar, running); the boot preset's value is read at power-up." },
-    { id: "sampling", title: "Sampling (record into a key, loop-record the break)", body: "One buffer, one slice table: a loaded break and a recorded kit are the same thing. **Into a key** (Voice map): play J5 style note **7 = Record** — the buttons go red — and every key you hold on J4 records from the input for as long as its gate stands (release: trim, normalise, analyse, live; the key plays it, its position lights on P5's ring). Style **8 = Clear** puts a key back on its grid slice; any other style disarms. Records are appended after the break; a load clears them. **The break itself**: Options → **Record** = Arm, then **B3 tap** or the first **J6** edge starts a take into the other buffer. With a clock on J3 the take is the **Bars** count of bars at the followed tempo and stops itself on the bar; J6 edges during it drop **slice markers** (two or more replace the grid). Unclocked, B3 or J6 stops it. The take runs the load pipeline and plays; the arm drops after one take, and B3's reslice / load are held off while armed. **Record Source**: J1/J2, or the module's own output — play the keys into a take and chop the chop. **Sampling**: Mono sums J1+J2; Stereo keeps J1 → L, J2 → R (loads, takes and playback in two planes). Loads keep 28 s of the 45 s buffer free for keys and pads; a recording plays at its own pitch (P4 transposes it), the break's slices follow the tempo. **Pads**: drop an audio file on a pad in the browser (Play or Kit) and that key plays it, mono or stereo (a stereo one makes the kit stereo); **New empty kit** clears the break so the whole buffer is for pads. **Each key** has its own gain (−24…+6 dB), tune (±24 semitones) and Plays (follow Key Plays · one-shot · held · loop while held · ratchet while held: the sample again every whole, ½, ¼ or ⅛ of itself, or every 8th / 16th / 32nd at the tempo), set in the browser's Kit tab and saved with the set; they ride every call through the key — CV, the pads, Play's loop — never the pattern's steps. **Spread across keys** (Kit tab) puts one key's sample on all 24, a semitone apart: J4's V/oct plays it as a melody. A dropped sample lives in memory until you save a set. While a take runs the buttons are full red and P6 shows the input level. **Cards**: FAT32 microSD, everything in one folder, `Audiothurgist/`: breaks in `Audiothurgist/breaks` (WAV, PCM 16/24-bit, mono or stereo, the first 17 s used), 1–4 bar breaks are ideal (longer files trim to their first four bars; levels normalise on load). The Kit tab uploads any audio file the browser can open, and copies an old card's root WAVs in. Turn **Sample** (P5) to highlight a file, hold **B3** to load it — or pick it from the Sample dropdown here. New material opens at its own tempo until P2 moves. **Sets** — a break with its recorded keys, the Options and Play's loop — live in `Audiothurgist/sets/` as `<name>.wav` + `<name>.json`, listed as “name [set]” and loaded the same way; the browser's Kit tab saves and loads them by name. Every preset save also writes `Audiothurgist/presets/<slot>.json`; a slot the flash no longer honours after a firmware update comes back from it at boot." },
+    { id: "sampling", title: "Sampling (record into a key, loop-record the break)", body: "One buffer, one slice table: a loaded break and a recorded kit are the same thing. **Into a key** (Voice map): play J5 style note **7 = Record** — the buttons go red — and every key you hold on J4 records from the input for as long as its gate stands (release: trim, normalise, analyse, live; the key plays it, its position lights on P5's ring). Style **8 = Clear** puts a key back on its grid slice; any other style disarms. Records are appended after the break; a load clears them. **The break itself**: Options → **Record** = Arm, then **B3 tap** or the first **J6** edge starts a take into the other buffer. With a clock on J3 the take is the **Bars** count of bars at the followed tempo and stops itself on the bar; J6 edges during it drop **slice markers** (two or more replace the grid). Unclocked, B3 or J6 stops it. The take runs the load pipeline and plays; the arm drops after one take, and B3's reslice / load are held off while armed. **Record Source**: J1/J2, or the module's own output — play the keys into a take and chop the chop. **Sampling**: Mono sums J1+J2; Stereo keeps J1 → L, J2 → R (loads, takes and playback in two planes). Loads keep 28 s of the 45 s buffer free for keys and pads; a recording plays at its own pitch (P4 transposes it), the break's slices follow the tempo. **Pads**: drop an audio file on a pad in the browser (Play or Kit) and that key plays it, mono or stereo (a stereo one makes the kit stereo); **New empty kit** clears the break so the whole buffer is for pads. **Each key** has its own gain (−24…+6 dB), tune (±24 semitones) and Plays (follow Key Plays · one-shot · held · loop while held · ratchet while held: the sample again every whole, ½, ¼ or ⅛ of itself, or every 8th / 16th / 32nd at the tempo), set in the browser's Kit tab and saved with the set; they ride every call through the key — CV, the pads, Play's loop — never the pattern's steps. **Spread across keys** (Kit tab) puts one key's sample on all 24, a semitone apart: J4's V/oct plays it as a melody. A dropped sample lives in memory until you save a set (a set keeps only what plays). Memory a replaced or deleted sample held comes back with **Reclaim** in the browser, or by itself when a drop needs it. While a take runs the buttons are full red and P6 shows the input level. **Cards**: FAT32 microSD, everything in one folder, `Audiothurgist/`: breaks in `Audiothurgist/breaks` (WAV, PCM 16/24-bit, mono or stereo, the first 17 s used), 1–4 bar breaks are ideal (longer files trim to their first four bars; levels normalise on load). The Kit tab uploads any audio file the browser can open, and copies an old card's root WAVs in. Turn **Sample** (P5) to highlight a file, hold **B3** to load it — or pick it from the Sample dropdown here. New material opens at its own tempo until P2 moves. **Sets** — a break with its recorded keys, the Options and Play's loop — live in `Audiothurgist/sets/` as `<name>.wav` + `<name>.json`, listed as “name [set]” and loaded the same way; the browser's Kit tab saves and loads them by name. Every preset save also writes `Audiothurgist/presets/<slot>.json`; a slot the flash no longer honours after a firmware update comes back from it at boot." },
   ],
   presets: { help: "Preset slots store the complete state of the module. Slot 0 is the boot slot." },
 };
@@ -203,7 +203,7 @@ class FakeDevice {
     this.buf = new Float32Array(BUF_CAP); this.bufLen = 0; this.freePos = 0;
     /* PADS: the R plane (allocated when the kit turns stereo), whether it is, an empty kit (no break), the frames the
      * card holds of this kit (the unsaved note), the last drop made it stereo; the drop in flight and the op state. */
-    this.bufR = null; this.stereo = false; this.noBreak = false; this.onCard = 0; this.padStereo = false;
+    this.bufR = null; this.stereo = false; this.noBreak = false; this.cardMap = []; this.padStereo = false;
     this.padUp = { open: false, key: -1, ch: 1, frames: 0, total: 0, have: 0, start: 0, last: 0, bytes: null };
     this.padOp = { state: 0, progress: 0, result: 0, seq: 0, key: 255, t: 0, job: null };
     this.table = []; this.keySlice = new Int8Array(KEYS); this.hits = [];
@@ -211,7 +211,7 @@ class FakeDevice {
     /* SETS: the card's sets (name → a snapshot of everything a set carries) and the op in flight,
      * driven by time on each state poll: pending → saving / loading for 600 ms → done (seq bumps). */
     this.sets = new Map(); this.set = { state: 0, progress: 0, result: 0, seq: 0, name: '', t: 0, pending: null };
-    this.newMaterial(); this.onCard = this.bufLen;
+    this.newMaterial(); this.cardIdentity(this.bufLen);
     if (this.opts.kit) { this.recordKey(3, 0.35, 0); this.recordKey(7, 0.9, 1); this.recordKey(14, 1.6, 2); this.looperEvents = 3; this.sets.set('amen_kit', this.snapshot()); }
     this.blob = null;
     this.boot();
@@ -227,13 +227,16 @@ class FakeDevice {
     if (this.grammar === GRAM.pads) { const g = this.grammar; this.options[O['grammar.mode']] = this.lastDrum; this.setGrammar(this.lastDrum, g); }
     this.muted = false;
   }
-  /* SETS: what sets/<name>.wav + .json would hold. */
+  /* SETS: what sets/<name>.wav + .json would hold. RECLAIM: only what is live — the break and the live spans, packed
+   * (the firmware's PackForCard); packMap says where each live span lies in it (the card map after the save). */
   snapshot() {
-    return { nSlices: this.nSlices, bufLen: this.bufLen, freePos: this.freePos, table: this.table.map(e => Object.assign({}, e)),
+    const R = this.reclaimRuns(false), at = p => this.reclaimMap(R, p), pack = pl => { const o = new Float32Array(R.newFree); for (const r of R.runs) o.set(pl.subarray(r.a, r.b), r.dst); return o; };
+    return { nSlices: this.nSlices, bufLen: this.bufLen, freePos: R.newFree, table: this.table.map((e, t) => Object.assign({}, e, t >= this.nSlices ? { start: at(e.start) } : {})),
       keySlice: Int8Array.from(this.keySlice), hits: this.hits.slice(), looperEvents: this.looperEvents, options: Uint8Array.from(this.options),
-      buf: this.buf.slice(0, this.freePos), src: Int8Array.from(this.src), stepClass: Uint8Array.from(this.stepClass), env: Uint8Array.from(this.env),
-      bufR: this.stereo && this.bufR ? this.bufR.slice(0, this.freePos) : null, stereo: this.stereo, noBreak: this.noBreak,
-      keyp: this.keyp.map(p => Object.assign({}, p)) };   /* KEYP: the set JSON's "keyp" */
+      buf: pack(this.buf), src: Int8Array.from(this.src), stepClass: Uint8Array.from(this.stepClass), env: Uint8Array.from(this.env),
+      bufR: this.stereo && this.bufR ? pack(this.bufR) : null, stereo: this.stereo, noBreak: this.noBreak,
+      keyp: this.keyp.map(p => Object.assign({}, p)),   /* KEYP: the set JSON's "keyp" */
+      packMap: R.runs.map(r => ({ live: r.a, card: r.dst, len: r.b - r.a })) };
   }
   restore(sn) {
     this.opts.nSlices = sn.nSlices; this.bufLen = sn.bufLen; this.freePos = sn.freePos; this.table = sn.table.map(e => Object.assign({}, e));
@@ -241,7 +244,7 @@ class FakeDevice {
     this.buf.fill(0); this.buf.set(sn.buf); this.src.set(sn.src); this.stepClass.set(sn.stepClass); this.env.set(sn.env);
     /* PADS: a stereo set keeps its R plane (Sampling = Stereo); an empty kit's stub is recognised by its silence */
     this.stereo = !!(sn.stereo && sn.bufR) && this.options[O.sampling] === 1; if (this.stereo) { this.bufR = new Float32Array(BUF_CAP); this.bufR.set(sn.bufR); }
-    this.noBreak = !!sn.noBreak; this.onCard = sn.freePos; this.padStereo = false;
+    this.noBreak = !!sn.noBreak; this.cardIdentity(sn.freePos); this.padStereo = false;   /* RECLAIM: the planes are the set's WAV */
     this.keyp = sn.keyp ? sn.keyp.map(p => Object.assign({}, p)) : Array.from({ length: KEYS }, keypNeutral);   /* KEYP: an old set: neutral */
     this.rec = { state: 0, key: -1, t: 0, pos: 0 }; this.matGen = (this.matGen + 1) & 0xff; this.bumpGen(); this.journal = []; this.redoStack = [];
   }
@@ -256,7 +259,7 @@ class FakeDevice {
     const { op, name } = s.pending; s.pending = null; s.state = 0; s.progress = 0;
     if (op === 14) {
       if (name === 'nocard') s.result = 1; else if (name === 'full') s.result = 2;
-      else { this.sets.set(name, this.snapshot()); this.onCard = this.freePos; s.result = 0; s.name = name; const lab = name + ' [set]'; if (!this.files.includes(lab)) this.files.push(lab); this.cardPut('Audiothurgist/sets/' + name + '.wav', tinyWav()); this.file = this.files.indexOf(lab); this.live[OFF.sample] = this.file; }
+      else { const sn = this.snapshot(); this.sets.set(name, sn); this.cardMap = sn.packMap.map(x => Object.assign({}, x)); s.result = 0; s.name = name; const lab = name + ' [set]'; if (!this.files.includes(lab)) this.files.push(lab); this.cardPut('Audiothurgist/sets/' + name + '.wav', tinyWav()); this.file = this.files.indexOf(lab); this.live[OFF.sample] = this.file; }
     } else {
       const sn = this.sets.get(name);
       if (!sn) s.result = 5; else { this.restore(sn); s.result = 0; s.name = name; const i = this.files.indexOf(name + ' [set]'); this.file = i >= 0 ? i : 255; if (i >= 0) this.live[OFF.sample] = i; }
@@ -325,18 +328,71 @@ class FakeDevice {
   }
   padHeld() { return Math.max(0, this.freePos - this.bufLen - this.padLive()); }
   padMask() { let m = 0; for (let k = 0; k < KEYS; k++) if (this.table.some((e, t) => t >= this.nSlices && !this.isTomb(t) && e.key === k)) m |= 1 << k; return m >>> 0; }
-  /* KitUnsaved: the material not on the card, or a live entry reaching past what the card holds (an empty kit's stub is nothing) */
+  /* KitUnsaved through the card map (RECLAIM): the material not where the card holds it, or a live entry the card's copy
+   * does not hold (an empty kit's stub is nothing) */
   kitUnsaved() {
     if (!this.bufLen) return false;
-    if (!this.noBreak && this.bufLen > this.onCard) return true;
-    const lim = this.noBreak && this.onCard < this.bufLen ? this.bufLen : this.onCard;
-    return this.table.some((e, t) => t >= this.nSlices && !this.isTomb(t) && e.len > 0 && e.start + e.len > lim);
+    if (!this.noBreak && this.toCard(0, this.bufLen) !== 0) return true;
+    return this.table.some((e, t) => t >= this.nSlices && !this.isTomb(t) && e.len > 0 && !(this.noBreak && e.start + e.len <= this.bufLen) && this.toCard(e.start, e.len) < 0);
+  }
+  /* ── RECLAIM: held memory back (the firmware's core/bb_reclaim.h, op 4) ──
+   * The card map: segments { live, card, len } — where each live span lies in the card's copy of the kit. */
+  cardIdentity(n) { this.cardMap = n > 0 ? [{ live: 0, card: 0, len: n }] : []; }
+  toCard(start, len) { for (const g of this.cardMap) if (start >= g.live && start + len <= g.live + g.len) return g.card + start - g.live; return -1; }
+  /* the kept runs over [0, freePos): the break, every live span past the grid and (free: kReclaimFree) every span a live
+   * journal snapshot holds; merged where they touch, packed down (dst). */
+  reclaimRuns(free) {
+    const iv = [[0, this.bufLen]];
+    const add = tb => { for (let t = this.nSlices; t < tb.length; t++) { const e = tb[t]; if (!e || (e.flags & F_TOMB) || e.len <= 0) continue; iv.push([Math.max(0, e.start), Math.min(this.freePos, e.start + e.len)]); } };
+    add(this.table);
+    if (free && this.journalGen === this.tableGen) for (const sn of this.journal.concat(this.redoStack)) add(sn.table);
+    iv.sort((x, y) => x[0] - y[0]);
+    const runs = []; for (const [a, b] of iv) { if (b <= a) continue; const l = runs[runs.length - 1]; if (l && a <= l.b) l.b = Math.max(l.b, b); else runs.push({ a, b }); }
+    let at = 0; for (const r of runs) { r.dst = at; at += r.b - r.a; }
+    return { runs, newFree: runs.length ? at : this.freePos };
+  }
+  reclaimMap(R, p) {
+    if (p >= this.freePos) return p - (this.freePos - R.newFree);
+    for (const r of R.runs) { if (p < r.a) return r.dst; if (p < r.b) return r.dst + p - r.a; }
+    return R.newFree;
+  }
+  reclaimInside(R, lo, hi) { return hi <= lo || R.runs.some(r => lo >= r.a && hi <= r.b); }
+  /* of what is held, how much only the undo history keeps */
+  padUndoHeld() { const h = this.padHeld(); return h ? Math.max(0, h - (this.freePos - this.reclaimRuns(true).newFree)) : 0; }
+  /* op 4: the kept runs down over the gaps, every position with them — the table, the journal's snapshots (All: the
+   * steps that need a reclaimed span forgotten — the newest such and older on the undo side, from the first such on the
+   * redo side), the sounding voice (one on what went stops), the card map */
+  padReclaim() {
+    const o = this.padOp, all = o.mode === 1, R = this.reclaimRuns(!all), gain = this.freePos - R.newFree, live = this.journalGen === this.tableGen;
+    let forgot = 0;
+    if (gain > 0) {
+      if (!live) { this.journal = []; this.redoStack = []; }
+      else if (all) {
+        const needs = sn => sn.table.some((e, t) => t >= this.nSlices && !(e.flags & F_TOMB) && e.len > 0 && !this.reclaimInside(R, e.start, e.start + e.len));
+        let i = -1; this.journal.forEach((sn, k) => { if (needs(sn)) i = k; }); forgot += i + 1; this.journal = this.journal.slice(i + 1);
+        let j = -1; this.redoStack.forEach((sn, k) => { if (needs(sn)) j = k; }); forgot += j + 1; this.redoStack = this.redoStack.slice(j + 1);
+      }
+      for (const r of R.runs) { this.buf.copyWithin(r.dst, r.a, r.b); if (this.bufR) this.bufR.copyWithin(r.dst, r.a, r.b); }
+      const at = p => this.reclaimMap(R, p);
+      for (const sn of this.journal.concat(this.redoStack)) for (let t = this.nSlices; t < sn.table.length; t++) sn.table[t].start = at(sn.table[t].start);
+      for (let t = this.nSlices; t < this.nTable; t++) this.table[t].start = at(this.table[t].start);
+      const v = this.voice; if (v) { if (this.reclaimInside(R, v.start, v.start + v.len)) v.start = at(v.start); else this.voice = null; }
+      const out = [];
+      for (const g of this.cardMap) for (const r of R.runs) {
+        const lo = Math.max(g.live, r.a), hi = Math.min(g.live + g.len, r.b); if (hi <= lo) continue;
+        const l = r.dst + lo - r.a, c = g.card + lo - g.live, last = out[out.length - 1];
+        if (last && last.live + last.len === l && last.card + last.len === c) last.len += hi - lo; else out.push({ live: l, card: c, len: hi - lo });
+      }
+      this.cardMap = out;
+      this.freePos = R.newFree; this.bumpGen(); if (live) this.journalGen = this.tableGen;
+    }
+    o.reclaimed = Math.max(0, gain); o.forgot = Math.min(255, forgot); this.padFinish(0);
   }
   padTick() {
     const o = this.padOp, u = this.padUp, now = Date.now();
     if (o.state === 1 && u.open && now - u.last > 5000) { u.open = false; u.bytes = null; this.padFinish(5); }
-    if (!o.job || now - o.t < (o.job === 'kit' ? PAD_KIT_MS : PAD_COMMIT_MS)) return;
-    if (o.job === 'commit') this.padCommit(); else this.padNewKit();
+    if (!o.job || now - o.t < (o.job === 'kit' ? PAD_KIT_MS : o.job === 'reclaim' ? PAD_RECLAIM_MS : PAD_COMMIT_MS)) return;
+    if (o.job === 'commit') this.padCommit(); else if (o.job === 'reclaim') this.padReclaim(); else this.padNewKit();
   }
   /* the commit: the bytes → the planes (a stereo drop onto a mono kit grows the R plane, Sampling → Stereo), a crude
    * class from the zero-crossing rate, then the key's recording slot reused or a free one — one undo step */
@@ -369,7 +425,7 @@ class FakeDevice {
     this.env.fill(128); for (let k = 0; k < KEYS; k++) this.keySlice[k] = this.spanSlice(k);
     this.keyp = Array.from({ length: KEYS }, keypNeutral);   /* KEYP: a new kit, every key neutral */
     this.rec = { state: 0, key: -1, t: 0, pos: 0 }; this.loopEvents = []; this.looperEvents = 0; this.journal = []; this.redoStack = [];
-    this.noBreak = true; this.onCard = 0; this.padStereo = false; this.file = 255; this.set.name = '';
+    this.noBreak = true; this.cardMap = []; this.padStereo = false; this.file = 255; this.set.name = '';
     const g = this.grammar; this.options[O['grammar.mode']] = GRAM.pads; this.setGrammar(GRAM.pads, g);
     this.matGen = (this.matGen + 1) & 0xff; this.bumpGen(); this.padFinish(0);
   }
@@ -397,6 +453,7 @@ class FakeDevice {
       }
       case 2: if (o.state === 1) { u.open = false; u.bytes = null; this.padFinish(6); } return U8(0);
       case 3: if (this.padRefused() || o.state) return U8(3); o.state = 3; o.key = 255; o.job = 'kit'; o.t = Date.now(); return U8(0);
+      case 4: if (this.padRefused() || o.state) return U8(3); o.state = 4; o.key = 255; o.mode = body.length > 1 && body[1] ? 1 : 0; o.job = 'reclaim'; o.t = Date.now(); return U8(0);   /* RECLAIM */
       default: return U8(2);
     }
   }
@@ -510,7 +567,7 @@ class FakeDevice {
     this.matGen = (this.matGen + 1) & 0xff; this.bumpGen();
   }
   /* PADS: a loose break from the card — new material, on the card, a break again (Sampling decides the planes) */
-  loadBreak() { if (this.noBreak) this.opts.nSlices = 32; this.newMaterial(); this.keyp = Array.from({ length: KEYS }, keypNeutral); /* KEYP: new material, every key neutral */ this.noBreak = false; this.onCard = this.bufLen; this.padStereo = false; this.stereo = this.options[O.sampling] === 1; if (this.stereo) { this.bufR = this.bufR || new Float32Array(BUF_CAP); this.bufR.set(this.buf.subarray(0, this.bufLen)); } this.journal = []; this.redoStack = []; }
+  loadBreak() { if (this.noBreak) this.opts.nSlices = 32; this.newMaterial(); this.keyp = Array.from({ length: KEYS }, keypNeutral); /* KEYP: new material, every key neutral */ this.noBreak = false; this.cardIdentity(this.bufLen); this.padStereo = false; this.stereo = this.options[O.sampling] === 1; if (this.stereo) { this.bufR = this.bufR || new Float32Array(BUF_CAP); this.bufR.set(this.buf.subarray(0, this.bufLen)); } this.journal = []; this.redoStack = []; }
   /* The span mapping: key k → grid slice k · nSlices / span (Engine::SpanSlice). */
   spanSlice(key) { const n = this.nSlices, span = Math.min(n, KEYS), kk = key >= span ? span - 1 : key; return Math.floor(kk * n / span); }
   /* EDIT: the first tombstone's slot past the grid, else the end (−1 = full) — Engine::FreeSlot. */
@@ -984,6 +1041,7 @@ class FakeDevice {
           U8(o.state); U8(o.state === 1 && u.total ? Math.floor(u.have * 255 / u.total) : o.progress); U8(o.result); U8(o.seq); U8(o.key);
           U8((this.kitUnsaved() ? 1 : 0) | (this.noBreak ? 2 : 0) | (this.padStereo ? 4 : 0));
           U32(this.padRoom()); U32(Math.max(0, BUF_CAP - this.bufLen)); U32(this.padHeld()); U32(this.padMask());
+          U32(this.padUndoHeld()); U32(o.reclaimed || 0); U8(o.forgot || 0);   /* 315 RECLAIM */
         }
         break; }
       case CMD.wave: {

@@ -155,6 +155,7 @@ function histLabel(op, a = {}) {
     case 'keyp': return `${kn(a.key)} settings: ${(a.p && HL.keypText(a.p)) || 'neutral'}`;   /* KEYP */
     case 'spread': return `${kn(a.root)} spread chromatically` + (a.count == null ? (a.keep ? ' (pads kept)' : '') : ` (${a.count} key${a.count === 1 ? '' : 's'}${a.keep ? ', pads kept' : ''})`);   /* CHROMA */
     case 'undo': return 'undo'; case 'redo': return 'redo';
+    case 'reclaim': return `reclaimed ${(a.frames / 48000).toFixed(2)} s held` + (a.forgot ? ` — Undo forgot ${a.forgot} step${a.forgot === 1 ? '' : 's'}` : '');   /* RECLAIM: no undo step */
     case 'module': return 'changed on the module';
     default: return op;
   }
@@ -167,9 +168,22 @@ function histLabel(op, a = {}) {
 class History {
   constructor(max = K.histMax) { this.max = max; this.items = []; this.gen = null; this.undoDepth = 0; this.redoDepth = 0; }
   push(gen, label) { this.items = this.items.filter(x => !x.undone); this.items.push({ gen, label, undone: false }); if (this.items.length > this.max) this.items.shift(); this.gen = gen; }
+  /* RECLAIM: a line that is no undo step (held memory given back, gen = the module's), with the module's depths after it:
+   * the steps it forgot are marked — past the newest undoDepth live lines `gone` (listed, greyed: Undo stops before
+   * them), the undone ones past redoDepth dropped (the redo half went). Undo / redo never mark an info or gone line.
+   * A 'module' line the state poll already put on this gen is replaced. */
+  info(gen, label, undoDepth = 0, redoDepth = 0) {
+    const top = this.items[this.items.length - 1];
+    if (top && top.gen === gen && top.label === histLabel('module')) this.items.pop();
+    let live = 0, und = 0;
+    for (let i = this.items.length - 1; i >= 0; i--) { const x = this.items[i]; if (!x.info && !x.undone && !x.gone && ++live > undoDepth) x.gone = true; }
+    for (const x of this.items) if (x.undone && ++und > redoDepth) x.drop = true;
+    this.items = this.items.filter(x => !x.drop);
+    this.items.push({ gen, label, undone: false, info: true }); if (this.items.length > this.max) this.items.shift(); this.gen = gen;
+  }
   /* the newest live line, if its label matches, takes the new gen and label (a continued drag) */
   joinTop(gen, label, re) { const t = this.items[this.items.length - 1]; if (!t || t.undone || !re.test(t.label)) return false; t.gen = gen; t.label = label; this.gen = gen; return true; }
-  undo(gen) { for (let i = this.items.length - 1; i >= 0; i--) if (!this.items[i].undone) { this.items[i].undone = true; break; } this.gen = gen; }
+  undo(gen) { for (let i = this.items.length - 1; i >= 0; i--) { const x = this.items[i]; if (!x.undone && !x.info && !x.gone) { x.undone = true; break; } } this.gen = gen; }
   redo(gen) { for (let i = 0; i < this.items.length; i++) if (this.items[i].undone) { this.items[i].undone = false; break; } this.gen = gen; }
   /* the state's tail: a gen the page has not labelled is the module's; a redo depth of 0 means nothing is undone */
   note(gen, undoDepth = 0, redoDepth = 0) {
