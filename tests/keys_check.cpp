@@ -107,6 +107,16 @@ int main()
         CHECK(MilliVolts(40.f) == 32767 && MilliVolts(-40.f) == -32768, "saturating");
     }
 
+    SECTION("releases waiting for the audio thread: none lost, whatever posts them before a drain");
+    {
+        ReleaseSet q;
+        q.Post(3); q.Post(9);   // a page pad's up and a CV gate's fall inside one block (the single slot kept only the last)
+        q.Post(3); q.Post(-1); q.Post(24);
+        const uint32_t m = q.Take();
+        CHECK(m == ((1u << 3) | (1u << 9)), "two keys posted before a drain: both come out (%08x), out-of-range keys ignored", (unsigned)m);
+        CHECK(q.Take() == 0u, "…and the set is empty after the drain");
+    }
+
     printf("\nkeys_check: %d passed, %d failed\n", gPass, gFail);
     return gFail ? 1 : 0;
 }

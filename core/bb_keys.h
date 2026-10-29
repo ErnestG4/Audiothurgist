@@ -78,6 +78,16 @@ struct GateSettle
     bool Waiting() const { return wait >= 0; }
     bool FellPending() const { return fellOut; }   // true on the firing poll when the gate already fell
 };
+/* The keys waiting for their release, control → audio: a bit a key. Any number of posts before the audio thread
+ * drains it come out together (one slot kept only the last: a CV gate's fall and a page pad's up inside one block lost
+ * one, and a Loop key then looped on). Post on the control thread, Take on the audio thread; an atomic or / exchange,
+ * so a post racing the take lands in this take or the next, never neither. */
+struct ReleaseSet
+{
+    uint32_t bits = 0;
+    void     Post(int key) { if(key >= 0 && key < kKeys) __atomic_fetch_or(&bits, 1u << key, __ATOMIC_SEQ_CST); }
+    uint32_t Take() { return __atomic_exchange_n(&bits, 0u, __ATOMIC_SEQ_CST); }
+};
 /* J4 → the key 0..23: negatives clamp to 0, past 23 to 23. */
 inline int KeyOf(float volts, int& last)
 {

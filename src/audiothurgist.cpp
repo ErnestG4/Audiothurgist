@@ -349,7 +349,7 @@ static volatile float gCallLen = 1.f;     /* staccato style: fraction of the sli
  * falling edge asks the audio thread to release it (Options → Key Plays). */
 static volatile bool  gCallHeld = false;
 static volatile int   gCallKey  = -1;
-static volatile int   gRelKey   = -1;     /* poll → audio: release this key (-1 none) */
+static bb::keys::ReleaseSet gRel;          /* poll / HostLink → audio: the keys to release (a bit a key, none lost) */
 /* SAMPLE end */
 /* BETA: what the jacks read now and the last key called (state tail 268..273) */
 static volatile int16_t gJ4mV     = 0;      /* J4 in millivolts */
@@ -1081,7 +1081,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
                        engine.SyncRecordedMeta();   /* SAMPLE */
                        gReclass = false; }
     /* SAMPLE: a call carries its key and the held rule; a release follows the call it belongs to */
-    if(gRelKey >= 0) { engine.ReleaseKey(gRelKey); gRelKey = -1; }   /* the fall preceded the rise: release first */
+    for(uint32_t m = gRel.Take(); m; m &= m - 1u) engine.ReleaseKey(__builtin_ctz(m));   /* the fall preceded the rise: release first */
     if(gCallReq)     { engine.CallSlice(gCallIdx, gCallMul, gCallRev, gCallPunch, gCallRat, gCallLen, gCallHeld, gCallKey); gCallReq = false; }
     /* SAMPLE end */
     /* EDIT: one edit per block, before Process; clearing the flag is the ack */
@@ -1701,7 +1701,7 @@ static void OnPoll(uint32_t /*t_ms*/)
     gJ4mV = bb::keys::MilliVolts(j4v); gJ4Key = (uint8_t)j4key;
     /* a key held from the jacks when the map changes is released; the page's held pads are its own */
     static uint8_t s_prevMap = 0xFFu;
-    if(gJackMapCur != s_prevMap) { if(gCvKey >= 0) gRelKey = gCvKey; gCvKey = -1; s_prevMap = gJackMapCur; }
+    if(gJackMapCur != s_prevMap) { if(gCvKey >= 0) gRel.Post(gCvKey); gCvKey = -1; s_prevMap = gJackMapCur; }
     /* BETA (2026-10-23, "sometimes playing the last note"): the gate's sample-and-hold —
      * the key is read on the first poll from the edge on which J4 has stopped moving
      * (at once when it was already still, at most kSettleMax ms later). One for
@@ -1721,7 +1721,7 @@ static void OnPoll(uint32_t /*t_ms*/)
         const bool held = hw.cv[3].Volts() > 2.5f;
         /* SAMPLE: the gate's falling edge releases the held key (a no-op for one-shot voices);
          * BETA: a fall while the edge waits for J4 releases once the call is made, below */
-        if(gClkEdge.JustFell(3u) && gCvKey >= 0 && !s_settle.Waiting() && !fire) gRelKey = gCvKey;
+        if(gClkEdge.JustFell(3u) && gCvKey >= 0 && !s_settle.Waiting() && !fire) gRel.Post(gCvKey);
         const int st = bb::keys::StyleOf(hw.cv[kVoiceGateChan].Volts(), s_lastStyle);
         gJ5Style = bb::keys::StyleByte(st);
         /* RECORD: J5 style 7 = Record (armed: every key held records into
@@ -1755,7 +1755,7 @@ static void OnPoll(uint32_t /*t_ms*/)
             {
                 if(rose) gCvKey = j4key;
                 CallKey(gCvKey, st);   /* a re-strike calls the held key in the new style */
-                if(rose && s_settle.FellPending()) gRelKey = gCvKey;   /* BETA: a trigger shorter than the settle */
+                if(rose && s_settle.FellPending()) gRel.Post(gCvKey);   /* BETA: a trigger shorter than the settle */
             }
         }
     }
@@ -1763,11 +1763,11 @@ static void OnPoll(uint32_t /*t_ms*/)
     else
     {
         gJ5Style = 255u;
-        if(gClkEdge.JustFell(kVoiceGateChan) && gCvKey >= 0 && engine.KeyNeedsRelease(gCvKey, gKeyPlays.sel == 1) && !s_settle.Waiting() && !fire) gRelKey = gCvKey;   /* held only: no release events for one-shots in Play's loop (KEYP: the key's own Plays, or what it still holds) */
+        if(gClkEdge.JustFell(kVoiceGateChan) && gCvKey >= 0 && engine.KeyNeedsRelease(gCvKey, gKeyPlays.sel == 1) && !s_settle.Waiting() && !fire) gRel.Post(gCvKey);   /* held only: no release events for one-shots in Play's loop (KEYP: the key's own Plays, or what it still holds) */
         if(fire && engine.nSlices > 0)   /* BETA: the settled edge */
         {
             gCvKey = j4key; CallKey(j4key, 0);
-            if(s_settle.FellPending() && engine.KeyHeld(gCvKey, gKeyPlays.sel == 1)) gRelKey = gCvKey;
+            if(s_settle.FellPending() && engine.KeyHeld(gCvKey, gKeyPlays.sel == 1)) gRel.Post(gCvKey);
         }
     }
     /* Gate CV writes — control thread (I²C-safe), on CHANGE only so J6's
@@ -4163,8 +4163,8 @@ struct StateExt : hostlink::IHostlinkExtension
                     {
                         /* BETA: PLAY_KEY(u8 key 0..23, u8 down 1 / up 0) — the key as a CV note would play it
                          * (plain style, Options → Key Plays honoured), on any grammar and jack map; an up
-                         * releases a held key (a no-op for one-shot). The call / release slots are the jacks'
-                         * too: wait ≤ 2 ms (yielding to the clock) for a pending one to drain. */
+                         * releases a held key (a no-op for one-shot). The call slot is the jacks' too: a down waits
+                         * ≤ 2 ms (yielding to the clock) for a pending call to drain; an up joins the release set. */
                         if(f.len < 3 || f.body[1] >= bb::Engine::kKeys || f.body[2] > 1u) { w.U8(2u); return; }
                         if(!engine.buf || engine.nSlices < 1) { w.U8(3u); return; }
                         const uint32_t t0 = TickNow();
@@ -4174,10 +4174,7 @@ struct StateExt : hostlink::IHostlinkExtension
                             CallKey(f.body[1], 0);
                         }
                         else if(engine.KeyNeedsRelease(f.body[1], gKeyPlays.sel == 1))   /* KEYP: the key's own Plays, or what it still holds */
-                        {
-                            while(gRelKey >= 0 && (TickNow() - t0) < 2000u * gTicksPerUs) bb::Yield();
-                            gRelKey = f.body[1];
-                        }
+                            gRel.Post(f.body[1]);   /* queued beside any other key's release: none is lost */
                         break;
                     }
                     case 35:   /* BETA: SET_MUTE(u8 1 stopped / 0 running) — the transport */
