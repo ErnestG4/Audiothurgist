@@ -1086,6 +1086,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
     {
         gReclaimOk = bb::ReclaimSwap(engine, gPlan, gLoad, gLoadR);
         if(gReclaimOk) { float* t = gPlay; gPlay = gLoad; gLoad = t; t = gPlayR; gPlayR = gLoadR; gLoadR = t; }
+        gReclaimFade = false;   /* the plan's positions are the old planes': never read against the new ones */
         __asm__ volatile("dmb" ::: "memory");
         gReclaimSwap = false;
     }
@@ -3878,7 +3879,7 @@ static void PadReclaim()
         gReclaimFade = false;
         if(gReclaimSwap) { gReclaimSwap = false; res = bb::kPadBusy; break; }   /* the audio thread never ran */
         __asm__ volatile("dmb" ::: "memory");
-        if(!gReclaimOk) continue;   /* the table moved since the plan: plan again */
+        if(!gReclaimOk) continue;   /* the table moved since the plan: plan again (the fade went off with the refusal) */
         bb::ReclaimJournal(engine, gPlan);
         gCardNext.Follow(gCardMap, gPlan);
         gCardMap = gCardNext;
@@ -3894,7 +3895,7 @@ static void PadReclaim()
  * the plan (an edit on the audio thread) is worked out again next pass. */
 static void ServiceRoom()
 {
-    if(PadBusy() || gSetState || !engine.buf || (engine.tableGen == gRoomGen && engine.freePos == gRoomFree)) return;
+    if(PadBusy() || gSetState || gApply || gReapply || !engine.buf || (engine.tableGen == gRoomGen && engine.freePos == gRoomFree)) return;
     const uint8_t gen = engine.tableGen; const int fp = engine.freePos;
     const bb::PadRoom r = bb::PadRoomOf(engine);
     uint32_t u = 0;
