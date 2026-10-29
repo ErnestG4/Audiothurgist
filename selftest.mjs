@@ -2138,6 +2138,14 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
   G("$('kp_plays').value = '2'"); fireEv(G("$('kp_plays')"), 'change', {});
   G('selectKey(2)'); G("$('kp_plays').value = '3'"); fireEv(G("$('kp_plays')"), 'change', {});
   check('review: C♯1 → Held, then D1 → Loop before C♯1\'s reply: both reach the module', await until(() => G('demoDevice.keyp[2].plays') === 3) && G('demoDevice.keyp[1].plays') === 2, 'C♯1 ' + G('demoDevice.keyp[1].plays') + ', D1 ' + G('demoDevice.keyp[2].plays'));
+  /* KEYP: Undo pressed straight after a drag is released — the drag's queued last value must not go out after it */
+  await until(() => !G('kpBusy') && !G('kpWant') && !G('ed.busy'));
+  G('selectKey(4)'); G('invalidate(D.kit)'); await sleep(60);
+  { const gain = G("$('kp_gain')");
+    for (const v of [-2, -4, -6]) { G(`$('kp_gain').value = '${v}'`); fireEv(gain, 'input', {}); }
+    fireEv(gain, 'change', {}); G("$('ed_undo').onclick()"); }
+  await until(() => !G('kpBusy') && !G('kpWant') && !G('ed.busy')); await sleep(300);
+  check('review: Undo right after a gain drag — the drag is undone, nothing of it sent after the Undo', G('demoDevice.keyp[4].gain') === 0, 'E1 gain ' + G('demoDevice.keyp[4].gain'));
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
 }
 {

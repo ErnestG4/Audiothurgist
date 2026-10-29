@@ -1551,7 +1551,7 @@ $('ed_follow').onclick = () => {
   c.addEventListener('pointerdown', e => { if (!st) return; e.preventDefault(); down = true; try { c.setPointerCapture(e.pointerId); } catch {} at(e); });
   c.addEventListener('pointermove', e => { if (down) at(e); }); c.addEventListener('pointerup', () => { down = false; }); c.addEventListener('pointercancel', () => { down = false; }); }
 $('ed_onsets').onclick = () => ed.fromOnsets(edThresh);
-$('ed_undo').onclick = () => ed.undo(); $('ed_redo').onclick = () => ed.redo();
+$('ed_undo').onclick = () => { kpWant = null; ed.undo(); }; $('ed_redo').onclick = () => { kpWant = null; ed.redo(); };   /* KEYP: a drag's queued value never goes out after an Undo / Redo */
 /* the history list (the page's labels keyed by tableGen, the undone ones struck through), the journal's two depths,
  * the playhead for the Chop pad */
 let histSig = '';
