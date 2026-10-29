@@ -2219,7 +2219,12 @@ $('usbscan').onclick = scanUsb;
 document.addEventListener('serial-polyfill', () => { if (!navigator.serial) { $('usbscan').hidden = false; $('connect').disabled = false; } });
 async function connect() {
   notice('');
-  if (link) { const l = link; connectGen++; setDisconnected(); await l.close(); say('disconnected'); return; }
+  if (link) {
+    const l = link;
+    /* PADS: a drop still sending is called off on the module first — else it waits out its 5 s before it takes another */
+    if (padJobs.some(j => j.state === 'sending' && !j.cancelled)) await l.request(CMD.pads, Uint8Array.of(HL.PADS.abort), { urgent: true }).catch(() => {});
+    connectGen++; setDisconnected(); await l.close(); say('disconnected'); return;
+  }
   const api = serialApi();
   if (!api) { notice(describeNoSerial()); return; }
   try { const port = await api.requestPort({ filters: [{ usbVendorId: 0x0483 }] }); await connectPort(port, false); }
