@@ -1586,6 +1586,18 @@ struct Engine
         const uint8_t p = keyp[key].plays;
         return p == KeyParam::kFollow ? option : p != KeyParam::kOneShot;
     }
+    // Does the key's up (the gate's fall, the pad's up) need a release? When a call through it would hold now, or
+    // something it started still holds: a held voice tagged with it or its ratchet — its Plays (or the option) may
+    // have changed since the press, and a Loop never ends on its own. CONTROL (bytes and bools read whole).
+    bool KeyNeedsRelease(int key, bool option) const
+    {
+        if(KeyHeld(key, option)) return true;
+        if(key < 0 || key >= kKeys) return false;
+        if(keyRatOn & (1u << key)) return true;
+        for(int i = 0; i < kVoices; i++)
+            if(voices[i].active && voices[i].held && voices[i].key == key) return true;
+        return false;
+    }
     // One key's settings in, its gain and rate worked out. false = out of range (nothing written).
     BB_COLD bool PutKeyParam(int key, const KeyParam& p)   /* per edit, never per call: built for size */
     {

@@ -1763,7 +1763,7 @@ static void OnPoll(uint32_t /*t_ms*/)
     else
     {
         gJ5Style = 255u;
-        if(gClkEdge.JustFell(kVoiceGateChan) && gCvKey >= 0 && engine.KeyHeld(gCvKey, gKeyPlays.sel == 1) && !s_settle.Waiting() && !fire) gRelKey = gCvKey;   /* held only: no release events for one-shots in Play's loop (KEYP: the key's own Plays) */
+        if(gClkEdge.JustFell(kVoiceGateChan) && gCvKey >= 0 && engine.KeyNeedsRelease(gCvKey, gKeyPlays.sel == 1) && !s_settle.Waiting() && !fire) gRelKey = gCvKey;   /* held only: no release events for one-shots in Play's loop (KEYP: the key's own Plays, or what it still holds) */
         if(fire && engine.nSlices > 0)   /* BETA: the settled edge */
         {
             gCvKey = j4key; CallKey(j4key, 0);
@@ -4173,7 +4173,7 @@ struct StateExt : hostlink::IHostlinkExtension
                             while(gCallReq && (TickNow() - t0) < 2000u * gTicksPerUs) bb::Yield();
                             CallKey(f.body[1], 0);
                         }
-                        else if(engine.KeyHeld(f.body[1], gKeyPlays.sel == 1))   /* KEYP: the key's own Plays */
+                        else if(engine.KeyNeedsRelease(f.body[1], gKeyPlays.sel == 1))   /* KEYP: the key's own Plays, or what it still holds */
                         {
                             while(gRelKey >= 0 && (TickNow() - t0) < 2000u * gTicksPerUs) bb::Yield();
                             gRelKey = f.body[1];

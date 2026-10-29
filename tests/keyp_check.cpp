@@ -365,6 +365,16 @@ static void TestPlays()
         CHECK(worst < 0.06f, "the forward seam is bridged too: worst step %g", worst);
     }
     e.ReleaseKey(2);
+    // the gate's fall / the pad's up asks whether the key needs a release: what sounds decides, not the Plays now —
+    // a Loop key set to One-shot (or Follow on One-shot) while it loops must still take its release, or it loops on
+    Silence(e); e.CallSlice(t, 1.f, false, false, false, 1.f, false, 2);
+    v = Fresh(e);
+    SetKp(e, 2, 0, 0, 1);
+    CHECK(v && v->held && v->tail == 1 && !e.KeyHeld(2, false) && e.KeyNeedsRelease(2, false), "a looping key set to One-shot mid-loop still needs its release");
+    e.ReleaseKey(2);
+    CHECK(v && !v->held && v->tail == 0 && !e.KeyNeedsRelease(2, false), "…which ends the loop; then nothing is left to release");
+    CHECK(!e.KeyNeedsRelease(9, false) && e.KeyNeedsRelease(9, true), "a one-shot key with nothing held: no release (no release events in Play's loop); Follow on Held: one");
+    SetKp(e, 2, 0, 0, 3);
     // too short for the rate: a 100-sample grid slice at rate 16 → plain held
     {
         bb::EditReq q; q.op = bb::EditOp::SetBoundary; q.i = 5; q.start = e.slices[4].start + 100;
