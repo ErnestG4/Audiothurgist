@@ -2159,6 +2159,14 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
     fireEv(k, 'pointerup', {}); }
   await until(() => !G('asBusy') && G('asWant') == null); await sleep(60);
   check('review: …and so does the autoslice count\'s', G('asDrag') === false && G('asTouched') === false);
+  /* the tune readout: +3 st then −50 cents reads +2.5 st, as the cell does, and the row keeps 3 st and −50 c */
+  G("$('kp_semi').value = '3'"); fireEv(G("$('kp_semi')"), 'input', {}); fireEv(G("$('kp_semi')"), 'change', {});
+  await until(() => !G('kpBusy'));
+  G("$('kp_cents').value = '-50'"); fireEv(G("$('kp_cents')"), 'change', {});
+  await until(() => G('demoDevice.keyp[5].cents') === 250 && !G('kpBusy') && G('keyp[5].cents') === 250);
+  G('kpTouch = -Infinity'); G('invalidate(D.kit)'); await sleep(60);
+  check('review: +3 st −50 c reads "+2.5 st" beside the slider (the cell\'s words), the row 3 st and −50 c', G("$('kp_semi_v').textContent") === '+2.5 st' && G("$('kp_semi').value") === '3' && G("$('kp_cents').value") === '-50' && /\+2\.5 st/.test(G('keyCells[5].kp.textContent')),
+    G("$('kp_semi_v').textContent") + ' / ' + G("$('kp_semi').value") + ' / ' + G("$('kp_cents').value"));
   await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
 }
 {
