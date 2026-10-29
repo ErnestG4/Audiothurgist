@@ -349,6 +349,7 @@ static volatile float gCallLen = 1.f;     /* staccato style: fraction of the sli
  * falling edge asks the audio thread to release it (Options → Key Plays). */
 static volatile bool  gCallHeld = false;
 static volatile int   gCallKey  = -1;
+static volatile bool  gCallRelAfter = false;   /* the call's own release, right after it in the same block (a trigger shorter than the settle) */
 static bb::keys::ReleaseSet gRel;          /* poll / HostLink → audio: the keys to release (a bit a key, none lost) */
 /* SAMPLE end */
 /* BETA: what the jacks read now and the last key called (state tail 268..273) */
@@ -1082,7 +1083,7 @@ static void AudioCb(daisy::AudioHandle::InputBuffer  in,   /* RECORD: J1/J2 feed
                        gReclass = false; }
     /* SAMPLE: a call carries its key and the held rule; a release follows the call it belongs to */
     for(uint32_t m = gRel.Take(); m; m &= m - 1u) engine.ReleaseKey(__builtin_ctz(m));   /* the fall preceded the rise: release first */
-    if(gCallReq)     { engine.CallSlice(gCallIdx, gCallMul, gCallRev, gCallPunch, gCallRat, gCallLen, gCallHeld, gCallKey); gCallReq = false; }
+    if(gCallReq)     { engine.CallSlice(gCallIdx, gCallMul, gCallRev, gCallPunch, gCallRat, gCallLen, gCallHeld, gCallKey); if(gCallRelAfter) engine.ReleaseKey(gCallKey); gCallReq = false; }   /* a release posted with its call comes after it */
     /* SAMPLE end */
     /* EDIT: one edit per block, before Process; clearing the flag is the ack */
     if(gEditPend)
@@ -1408,7 +1409,7 @@ static void ServicePanel();   /* the main loop: after the EDIT helpers */
  * the jacks write it straight away, PLAY_KEY waits for it to drain first. In
  * Edit the key's entry is selected. Every call sets keyFlash and bumps keySeq
  * (tail 272 / 273), whoever made it. ─────────────────────────────────── */
-static void CallKey(int key, int style)
+static void CallKey(int key, int style, bool releaseAfter = false)
 {
     if(engine.nSlices < 1) return;
     if(key < 0) key = 0;
@@ -1424,6 +1425,7 @@ static void CallKey(int key, int style)
     gCallPunch = c.punch;
     gCallHeld  = engine.KeyHeld(key, gKeyPlays.sel == 1);   /* SAMPLE: Options → Key Plays = Held; KEYP: unless the key's own Plays says otherwise */
     gCallKey   = key;
+    gCallRelAfter = releaseAfter;   /* before gCallReq: the audio thread reads both together */
     gCallFlash = idx; gCallFlashT = 6;
     gKeyFlash  = (uint8_t)key; gKeySeq = (uint8_t)(gKeySeq + 1u);
     gCallReq   = true;
@@ -1754,8 +1756,8 @@ static void OnPoll(uint32_t /*t_ms*/)
             else if(engine.nSlices > 0)
             {
                 if(rose) gCvKey = j4key;
-                CallKey(gCvKey, st);   /* a re-strike calls the held key in the new style */
-                if(rose && s_settle.FellPending()) gRel.Post(gCvKey);   /* BETA: a trigger shorter than the settle */
+                CallKey(gCvKey, st, rose && s_settle.FellPending());   /* a re-strike calls the held key in the new style; BETA: a trigger shorter
+                                                                         * than the settle releases with the call (after it, in the same block) */
             }
         }
     }
@@ -1766,8 +1768,7 @@ static void OnPoll(uint32_t /*t_ms*/)
         if(gClkEdge.JustFell(kVoiceGateChan) && gCvKey >= 0 && engine.KeyNeedsRelease(gCvKey, gKeyPlays.sel == 1) && !s_settle.Waiting() && !fire) gRel.Post(gCvKey);   /* held only: no release events for one-shots in Play's loop (KEYP: the key's own Plays, or what it still holds) */
         if(fire && engine.nSlices > 0)   /* BETA: the settled edge */
         {
-            gCvKey = j4key; CallKey(j4key, 0);
-            if(s_settle.FellPending() && engine.KeyHeld(gCvKey, gKeyPlays.sel == 1)) gRel.Post(gCvKey);
+            gCvKey = j4key; CallKey(j4key, 0, s_settle.FellPending() && engine.KeyHeld(j4key, gKeyPlays.sel == 1));   /* a short trigger: released after its call */
         }
     }
     /* Gate CV writes — control thread (I²C-safe), on CHANGE only so J6's
@@ -4174,7 +4175,10 @@ struct StateExt : hostlink::IHostlinkExtension
                             CallKey(f.body[1], 0);
                         }
                         else if(engine.KeyNeedsRelease(f.body[1], gKeyPlays.sel == 1))   /* KEYP: the key's own Plays, or what it still holds */
+                        {
+                            while(gCallReq && gCallKey == f.body[1] && (TickNow() - t0) < 2000u * gTicksPerUs) bb::Yield();   /* its own call first: releases run before calls */
                             gRel.Post(f.body[1]);   /* queued beside any other key's release: none is lost */
+                        }
                         break;
                     }
                     case 35:   /* BETA: SET_MUTE(u8 1 stopped / 0 running) — the transport */
