@@ -74,13 +74,15 @@ same planes keeps them; a set brings its own back.
   the Brain map's gate fall and PLAY_KEY's up.
 - **Loop** — held, the key's own entry looping (the tail mechanism: loop
   forward over `[start, end − 2 − (rate + 2))`, the wrap bridged by the
-  click compensator) until the release, which fades it with the normal
-  choke geometry, forward from wherever it is, never past the entry's end.
+  click compensator) until the release, which fades it over the release's
+  full length (the choke's, counted in output samples) while it goes on
+  looping — a release next to the loop point is never cut short by the entry's
+  end.
   **Reversed** (J5's reverse style, or a looper event recorded reversed) it
   loops **backward**: from the entry's top down to `start + (rate + 2)`, then
   back up to the top (`Voice::kTailBack`, the same click bridge — the test's
   worst sample-to-sample step at the seam is 0.022, the tone's own slope); the
-  release turns it forward and fades it the same way. Another key's hit or a
+  release fades it the same way, still looping backward. Another key's hit or a
   step never chokes it (`WouldChoke` is false for a held loop). An entry too
   short for its rate's loop (a grid slice under ~100 samples at 16×) plays as
   plain Held.

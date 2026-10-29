@@ -68,6 +68,10 @@ struct Voice
      * everything else (Trigger resets it). One multiply per sample in the reader; exactly 1 leaves the bits as
      * they were. */
     float  gain = 1.f;
+    /* KEYP: a held Loop's release — it keeps looping (wrapping as before) under a fade of chokeLen output samples
+     * counted down here, so a release next to the loop point still fades for its whole length. 0 = none, −1 = done. */
+    int    relLeft = 0;
+    float  relInv  = 0.f;
 
     /* PLAY: per-voice fade geometry (Options → Fades). Trigger resets these
      * to the fixed 1 ms attack / 5 ms release; Adaptive mode then rewrites
@@ -99,6 +103,7 @@ struct Voice
         key    = -1;
         scratch = false;   /* EDIT-AUDITION: a stolen scratch voice is an ordinary one again */
         gain   = 1.f;      /* KEYP: a step, an audition, a keyless call: unity */
+        relLeft = 0;       /* KEYP: no Loop release in progress */
         start  = s.start;
         natEnd = s.start + s.len;
         int e  = s.start + (int)((float)s.len * ext);
@@ -150,6 +155,7 @@ struct Voice
         if(!active || !held) return;
         held = false;
         key  = -1;
+        if(tail) { relLeft = chokeLen > 1 ? chokeLen : 1; relInv = 1.f / (float)relLeft; return; }   /* KEYP: a held Loop fades as it loops */
         if(!tail && rate < 0.f) rate = -rate;
         Fade(epShape);
     }
@@ -197,8 +203,8 @@ struct Voice
         // direction-aware end test: a reversed voice STARTS at the top of its
         // slice — pos >= end-1 is only "finished" when travelling forward
         // (the symmetric check killed every reverse at birth once ext hit 1.0)
-        bool ended = (rate < 0.f) ? (pos < (double)start)
-                                  : (pos >= (double)(end - 1));
+        bool ended = relLeft < 0 || ((rate < 0.f) ? (pos < (double)start)
+                                                  : (pos >= (double)(end - 1)));
         if(ended)
         {
             if(active && lastOut != 0.f) clickComp += lastOut; // natural end
@@ -255,6 +261,13 @@ struct Voice
         if(h > 1.f) h = 1.f;
         if(h < 0.f) h = 0.f;
         if(epShape) { g = g * (2.f - g); h = h * (2.f - h); } // PLAY: ≈ equal power
+        if(relLeft > 0)   /* KEYP: a Loop's release, by time (the position wraps) */
+        {
+            float hr = (float)relLeft * relInv;
+            if(epShape) hr = hr * (2.f - hr);
+            h *= hr;
+            if(--relLeft == 0) relLeft = -1;
+        }
         pos += (double)rate;
         age++;
         const float o = s * g * h * relScale * gain;   /* KEYP: the key's gain (1 for steps, auditions, keyless calls) */

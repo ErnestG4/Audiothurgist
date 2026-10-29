@@ -316,7 +316,7 @@ static void TestPlays()
     CHECK(v->active && v->held && v->tail == 1, "another key's hit and the pattern's steps do not choke it");
     e.muted = true;
     e.ReleaseKey(2);
-    CHECK(!v->held && v->tail == 0, "the release: no longer held, the loop off");
+    CHECK(!v->held && v->relLeft > 0, "the release: no longer held, fading (the loop wraps on under the fade)");
     int n = 0; while(v->active && n < 100) { e.Process(l, r, 24); n++; }
     CHECK(!v->active && n * 24 <= v->chokeLen + 48, "…and it fades out within its release (%d samples)", n * 24);
     // fast: P4 up an octave, double, +24 semitones — rate 16, still never past the entry
@@ -354,7 +354,7 @@ static void TestPlays()
         CHECK(worst < 0.06f, "the backward seam is bridged: worst sample-to-sample step %g", worst);
     }
     e.ReleaseKey(2);
-    CHECK(v && !v->held && v->tail == 0 && v->rate > 0.f, "the release: the loop off, turned forward to fade");
+    CHECK(v && !v->held && v->relLeft > 0 && v->rate < 0.f, "the release: fading as it goes on looping backward");
     n = 0; while(v && v->active && n < 100) { e.Process(l, r, 24); n++; }
     CHECK(v && !v->active && n * 24 <= v->chokeLen + 48, "…and gone within its release (%d samples)", n * 24);
     // the forward seam, measured the same way
@@ -372,9 +372,24 @@ static void TestPlays()
     SetKp(e, 2, 0, 0, 1);
     CHECK(v && v->held && v->tail == 1 && !e.KeyHeld(2, false) && e.KeyNeedsRelease(2, false), "a looping key set to One-shot mid-loop still needs its release");
     e.ReleaseKey(2);
-    CHECK(v && !v->held && v->tail == 0 && !e.KeyNeedsRelease(2, false), "…which ends the loop; then nothing is left to release");
+    CHECK(v && !v->held && v->relLeft > 0 && !e.KeyNeedsRelease(2, false), "…which fades the loop out; then nothing is left to release");
     CHECK(!e.KeyNeedsRelease(9, false) && e.KeyNeedsRelease(9, true), "a one-shot key with nothing held: no release (no release events in Play's loop); Follow on Held: one");
     SetKp(e, 2, 0, 0, 3);
+    // a release just before the loop point keeps its whole fade: the loop goes on wrapping under it (it was cut to the
+    // few samples left before the entry's end — a click)
+    for(int rev = 0; rev < 2; rev++)
+    {
+        Silence(e); e.CallSlice(t, 1.f, rev != 0, false, false, 1.f, false, 2);
+        v = Fresh(e);
+        int k = 0;
+        while(v && k < 200000 && !(rev ? (v->pos - v->loopA < 30. && v->looping) : (v->loopB - v->pos < 30. && v->looping))) { e.Process(l, r, 24); k++; }
+        const int choke = v ? v->chokeLen : 0;
+        e.ReleaseKey(2);
+        float last = l[23], worst = 0.f; int m = 0;
+        while(v && v->active && m < 400) { e.Process(l, r, 24); m++; for(int i = 0; i < 24; i++) { worst = fmaxf(worst, fabsf(l[i] - last)); last = l[i]; } }
+        printf("  release at the loop point (%s): %d samples of fade (chokeLen %d), worst step %g\n", rev ? "backward" : "forward", m * 24, choke, worst);
+        CHECK(v && !v->active && m * 24 >= choke - 24 && m * 24 <= choke + 48 && worst < 0.06f, "a Loop released at its loop point (%s) fades for its whole release, no click (%d samples, worst step %g)", rev ? "backward" : "forward", m * 24, worst);
+    }
     // too short for the rate: a 100-sample grid slice at rate 16 → plain held
     {
         bb::EditReq q; q.op = bb::EditOp::SetBoundary; q.i = 5; q.start = e.slices[4].start + 100;
