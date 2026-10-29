@@ -771,6 +771,7 @@ static bool PadBusy() { return gPadState != bb::kPadIdle || gPadReq != 0u; }
  * made in Pads brings back the last drum grammar first: the boot preset's, or the one Pads was entered from
  * (Classic if neither). Stopping leaves the grammar where it is. */
 static uint8_t gLastDrum = 0u;
+static bool    gPadsByBoot = false;   /* the grammar is Pads only because Start In put it there (no grammar chosen since): a preset save keeps gLastDrum */
 static void TransportStart()
 {
     if(gGrammar.mode == 6u) { gGrammar.mode = gLastDrum; gGrammar.dirty = true; }
@@ -2674,11 +2675,33 @@ static bool WritePresetBackup(uint8_t slot)
     }
     return ok;
 }
+/* START: a preset saved while the grammar is Pads only because Start In = Sampler put it there at boot (no grammar
+ * chosen since) keeps the beat it came with — gLastDrum — not Pads: otherwise the first save in the sampler state
+ * turns the preset's beat into silent Pads for good (▶ in Pads would then bring back Classic, As saved would boot
+ * into Pads). Only a save of the live state is patched (its Options bytes are the live ones, the grammar byte
+ * Pads); an import of other bytes is left alone. One more flash write of the slot, the stored bytes with one byte
+ * changed. true = patched. */
+static BB_COLD bool PresetKeepsBeat(uint8_t slot)   /* once per preset save: built for size */
+{
+    if(!gPadsByBoot || gGrammar.mode != 6u) return false;
+    uint8_t stored[Options::kBytes], live[Options::kBytes];
+    if(!ReadSlotComponent(slot, &gOptions, stored, sizeof stored)) return false;
+    gOptions.Serialize(live);
+    if(stored[5] != 6u || memcmp(stored, live, sizeof live) != 0) return false;
+    uint32_t off = 0;
+    for(uint8_t i = 0; i < presets.NumManaged() && presets.ManagedAt(i) != &gOptions; i++) off += (uint32_t)presets.ManagedAt(i)->SerializedSize();
+    static_assert(sizeof gSetJson >= alchemy::kPresetBlobCapacity, "the whole slot fits the JSON scratch");
+    uint8_t* blob = reinterpret_cast<uint8_t*>(gSetJson);
+    uint32_t schema = 0; uint16_t total = 0;
+    if(presets.ReadSlotBytes(slot, 0, blob, (uint16_t)alchemy::kPresetBlobCapacity, &schema, &total) != (int32_t)total || off + 5u >= total) return false;
+    blob[off + 5u] = gLastDrum;
+    return presets.WriteSlotRaw(slot, schema, blob, total);
+}
 /* Every preset save — the Settings gesture, a host PRESET_SAVE, an import —
  * moves the slot's flash sequence; the poll (4 Hz, two header reads per
  * slot) sees it and writes the backup. A slot erased loses its backup too,
  * or the next boot would resurrect it. */
-static void ServicePresetBackup()
+static BB_COLD void ServicePresetBackup()   /* 4 Hz, out of line: built for size */
 {
     const uint32_t now = daisy::System::GetNow();
     if((uint32_t)(now - gPresetPollMs) < 250u) return;
@@ -2690,6 +2713,7 @@ static void ServicePresetBackup()
         if(seq == gPresetSeq[s]) continue;
         const bool wasValid = gPresetSeq[s] != 0u;
         gPresetSeq[s] = seq;
+        if(seq && in.schema_match && PresetKeepsBeat(s)) { const Presets::SlotInfo again = presets.InfoFor(s); gPresetSeq[s] = again.valid ? again.seq + 1u : 0u; }   /* START */
         if(seq) { if(in.schema_match) WritePresetBackup(s); }
         else if(wasValid)
         {
@@ -4497,7 +4521,7 @@ int main()
      * does. The preset itself is not touched: a preset load brings its grammar back; ▶ / B1 held starts the
      * preset's beat on the beat (the playhead ran on underneath). */
     if(gGrammar.mode != 6u) gLastDrum = gGrammar.mode;   /* START: the boot preset's beat, for ▶ in Pads */
-    if(gStartIn.sel == 0u) { gGrammar.mode = 6u; gGrammar.dirty = true; engine.muted = true; }
+    if(gStartIn.sel == 0u) { gPadsByBoot = gGrammar.mode != 6u; gGrammar.mode = 6u; gGrammar.dirty = true; engine.muted = true; }
 
     hw.StartAudio(AudioCb);
 
@@ -4600,7 +4624,7 @@ int main()
         if(gGrammar.dirty && !gPendReroll)
         {
             gGrammar.dirty     = false;
-            if(gGrammar.mode != 6u) gLastDrum = gGrammar.mode;   /* START: ▶ in Pads comes back to this */
+            if(gGrammar.mode != 6u) { gLastDrum = gGrammar.mode; gPadsByBoot = false; }   /* START: ▶ in Pads comes back to this; a grammar chosen since the boot */
             engine.patternMode = gGrammar.mode;
             engine.restSustain = (gGrammar.mode == 2 || gGrammar.mode == 3) && gRests.sel == 0;   /* Grids/Euclid rests continue the break */
             gPendReroll        = true;
