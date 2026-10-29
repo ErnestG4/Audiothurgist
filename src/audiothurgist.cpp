@@ -349,7 +349,12 @@ static volatile float gCallLen = 1.f;     /* staccato style: fraction of the sli
  * falling edge asks the audio thread to release it (Options → Key Plays). */
 static volatile bool  gCallHeld = false;
 static volatile int   gCallKey  = -1;
-static volatile bool  gCallRelAfter = false;   /* the call's own release, right after it in the same block (a trigger shorter than the settle) */
+static volatile bool  gCallRelAfter = false;
+/* PLAY_KEY's holds: the keys the page holds down (main thread only). A page that goes silent — the cable out, the tab
+ * gone — sends no up; the page polls the state all the time, so a second with no HostLink frame releases them
+ * (ServicePadHolds). The jacks' keys are not in it. */
+static uint32_t       gPadHeld    = 0;
+static uint32_t       gHostSeenMs = 0;   /* the last StateExt frame (main thread) */   /* the call's own release, right after it in the same block (a trigger shorter than the settle) */
 static bb::keys::ReleaseSet gRel;          /* poll / HostLink → audio: the keys to release (a bit a key, none lost) */
 /* SAMPLE end */
 /* BETA: what the jacks read now and the last key called (state tail 268..273) */
@@ -1494,9 +1499,23 @@ static void OnFrame()
     gDiagPhase = 4;
 }
 
+/* The page's held keys when the page went silent: released after a second without a HostLink frame. A key the jacks
+ * hold now (gCvKey) is left to its gate. A main loop that stalled (a load) restarts the second rather than count it. */
+static void ServicePadHolds()
+{
+    static uint32_t s_last = 0;
+    const uint32_t now = daisy::System::GetNow();
+    if((uint32_t)(now - s_last) > 200u) gHostSeenMs = now;
+    s_last = now;
+    if(!gPadHeld || (uint32_t)(now - gHostSeenMs) < 1000u) return;
+    const bool cvHolds = gCvKey >= 0 && hw.cv[gJackMapCur == 1u ? 3u : kVoiceGateChan].Volts() > 2.5f;   /* the jacks' gate is up on gCvKey */
+    for(uint32_t m = gPadHeld; m; m &= m - 1u) { const int k = __builtin_ctz(m); if(!(cvHolds && k == gCvKey)) gRel.Post(k); }
+    gPadHeld = 0;
+}
 static void OnPoll(uint32_t /*t_ms*/)
 {
     gDiagPhase = 1;
+    ServicePadHolds();   /* PLAY_KEY's holds outlive a page that went away */
     ServiceAudition();   /* EDIT-AUDITION: a rate-limited audition waiting for its window */
     if(gNeedNativeTempo)
     {
@@ -3933,6 +3952,7 @@ struct StateExt : hostlink::IHostlinkExtension
     }
     void Handle(const hostlink::ParsedFrame& f, hostlink::FrameWriter& w, uint32_t) override
     {
+        gHostSeenMs = daisy::System::GetNow();   /* the page is there (ServicePadHolds) */
         switch(f.type)
         {
             case 0x60u:
@@ -4173,11 +4193,16 @@ struct StateExt : hostlink::IHostlinkExtension
                         {
                             while(gCallReq && (TickNow() - t0) < 2000u * gTicksPerUs) bb::Yield();
                             CallKey(f.body[1], 0);
+                            gPadHeld |= 1u << f.body[1];   /* the page holds it until its up (or the watchdog) */
                         }
-                        else if(engine.KeyNeedsRelease(f.body[1], gKeyPlays.sel == 1))   /* KEYP: the key's own Plays, or what it still holds */
+                        else
                         {
-                            while(gCallReq && gCallKey == f.body[1] && (TickNow() - t0) < 2000u * gTicksPerUs) bb::Yield();   /* its own call first: releases run before calls */
-                            gRel.Post(f.body[1]);   /* queued beside any other key's release: none is lost */
+                            gPadHeld &= ~(1u << f.body[1]);
+                            if(engine.KeyNeedsRelease(f.body[1], gKeyPlays.sel == 1))   /* KEYP: the key's own Plays, or what it still holds */
+                            {
+                                while(gCallReq && gCallKey == f.body[1] && (TickNow() - t0) < 2000u * gTicksPerUs) bb::Yield();   /* its own call first: releases run before calls */
+                                gRel.Post(f.body[1]);   /* queued beside any other key's release: none is lost */
+                            }
                         }
                         break;
                     }
