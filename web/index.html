@@ -2141,6 +2141,10 @@ async function connectPort(port, isDemo) {
     setPill('modpill', `${info.name} ${info.fw}${isDemo ? ' (demo)' : transportName() === 'WebUSB' ? ' · WebUSB' : ''}`, 'ok');
     desc = await getDescriptor(l, info).catch(() => null);
     /* the page and the firmware ship together: anything but this page's api is the wrong build — one message, no partial mode */
+    if (!desc) {   /* a reply lost or garbled on the way: not a verdict on the firmware */
+      notice(`The module's descriptor did not come through (${info.name} ${info.fw}) — connect again.`);
+      say('descriptor unreadable — disconnected', true); setDisconnected(); await l.close(); return;
+    }
     const api = HL.apiOf(desc);
     if (api !== HL.API) {
       notice(`This page needs the Audiothurgist firmware it came with (page API ${HL.API}); the module runs ${info.name} ${info.fw}${api == null ? '' : ` (API ${api})`}. Flash the matching .bin, then connect again.`);
