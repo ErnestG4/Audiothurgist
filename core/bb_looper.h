@@ -55,6 +55,7 @@ struct Looper
     int      divisions = 16;   // steps per loop (the engine's nSlices), for the snap
     uint8_t  gen       = 0;    // generation being recorded into
     bool     dirty     = false; // something was recorded into `gen` since the last wrap
+    uint8_t  seq       = 0;    // LOOPVIEW: bumps with every change to the list (the page refetches on it)
     uint32_t heldMask  = 0;    // keys whose held note-on is recorded and awaits its release
     double   frontier  = -1.;  // unwrapped end phase of the last window (-1: none yet)
 
@@ -165,6 +166,7 @@ struct Looper
         dirty    = src.dirty;
         heldMask = 0;
         frontier = -1.;
+        seq++;
     }
 
     // AUDIO or CONTROL. Remove the newest generation. false = empty.
@@ -179,6 +181,7 @@ struct Looper
         gen      = g;      // the next overdub takes the freed slot
         dirty    = false;
         heldMask = 0;      // a pending release of an undone note-on is noise
+        seq++;
         return true;
     }
     void Clear()
@@ -187,6 +190,7 @@ struct Looper
         gen      = 0;
         dirty    = false;
         heldMask = 0;
+        seq++;
     }
     // The playhead jumped (new material, barPhase reset): forget the frontier.
     void ResetPlayhead() { frontier = -1.; }
@@ -210,6 +214,7 @@ struct Looper
             ev[w++] = e;
         }
         n = w;
+        seq++;
     }
 
     // AUDIO, once per block BEFORE the events are fired: the span the
@@ -269,6 +274,47 @@ struct Looper
         return (int)x;
     }
 
+    /* LOOPVIEW (0x6A GET_LOOP, docs/packages/sample-looper.md "The page's read"): one page of the list for the web
+     * page, written after the reply's status byte: u16 n, u8 seq, u8 gen, u8 flags (b0 dirty: something is
+     * recorded into `gen` this pass), u16 offset, u8 count (kWireHead = 8 bytes), then count × {u16 phase × 65535,
+     * i8 key, i8 slice, u8 style & kWire, u8 gen} (kWireEvent = 6) — as many as `room` bytes hold after the head.
+     * CONTROL thread, while the audio thread may be inserting (Insert's memmove, UndoLast's compaction): the
+     * display rule — a torn read is one frame of pixels, the page refetches on `seq` — but `n` is read once and
+     * clamped to kMax, so nothing past ev[kMax] is read, and a half-moved phase is clamped into the u16. An offset
+     * at or past n answers count 0. `W` is anything with Bytes(p, n) (hostlink::FrameWriter; the host test's): one
+     * call a record, so the firmware's copy stays small. */
+    static constexpr int kWireHead = 8, kWireEvent = 6;
+    // 0..1 → u16 × 65535, rounded; out of range and NaN clamped (NaN fails `p > 0.`). The tail's playhead too.
+    static uint16_t WirePhase(double phase)
+    {
+        const double p = phase * 65535. + 0.5;
+        return p > 0. ? (p < 65535. ? (uint16_t)p : (uint16_t)65535u) : (uint16_t)0u;
+    }
+    template<class W> int WritePage(W& w, int offset, int room) const
+    {
+        int nn = *(const volatile int*)&n;   // once: the clamp below holds for the whole page
+        if(nn < 0) nn = 0;
+        if(nn > kMax) nn = kMax;
+        if(offset < 0) offset = 0;
+        if(offset > nn) offset = nn;
+        int cnt = nn - offset;
+        const int fit = room > 0 ? room / kWireEvent : 0;
+        if(cnt > fit) cnt = fit;
+        uint8_t b[kWireHead];
+        b[0] = (uint8_t)nn; b[1] = (uint8_t)(nn >> 8); b[2] = seq; b[3] = gen; b[4] = dirty ? 1u : 0u;
+        b[5] = (uint8_t)offset; b[6] = (uint8_t)(offset >> 8); b[7] = (uint8_t)cnt;
+        w.Bytes(b, kWireHead);
+        for(int i = offset; i < offset + cnt; i++)
+        {
+            const Event& e = ev[i];
+            const uint16_t q = WirePhase(e.phase);
+            b[0] = (uint8_t)q; b[1] = (uint8_t)(q >> 8); b[2] = (uint8_t)e.key; b[3] = (uint8_t)e.slice;
+            b[4] = (uint8_t)(e.style & kWire); b[5] = e.gen;
+            w.Bytes(b, kWireEvent);
+        }
+        return cnt;
+    }
+
   private:
     // first index with phase >= p (events are sorted)
     int Lower(double p) const
@@ -303,6 +349,7 @@ struct Looper
         ev[at].style = style;
         ev[at].gen   = gen;
         n++;
+        seq++;
     }
     // Open the next generation. The byte wraps at 255: renumber from the
     // oldest generation still present, and if 256 generations are all
@@ -313,6 +360,7 @@ struct Looper
         uint8_t mn = 255;
         for(int i = 0; i < n; i++) if(ev[i].gen < mn) mn = ev[i].gen;
         if(n == 0) mn = 255;
+        seq++;   // LOOPVIEW: the events' generations change under the page
         if(mn == 0)
         {
             for(int i = 0; i < n; i++) if(ev[i].gen > 0) ev[i].gen--;

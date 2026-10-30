@@ -3276,6 +3276,13 @@ static void ServiceLoad()
  *                   → u8 status, u8 tableGen; one undo step (b0: folded into this key's previous step — a slider's drag)
  *   0x69 GET_KEYS   → u8 status, u8 n = 24, n × {i8 gain, u8 plays, i16 cents, u8 rate, u16 attack, u16 decay,
  *                   u8 sustain, u16 release, u8 group} (13 bytes a key)
+ *   LOOPVIEW (docs/packages/sample-looper.md, "The page's read"): Play's loop on the page —
+ *   0x6A GET_LOOP   ← [u16 offset] → u8 status, u16 n (events, ≤ 256), u8 seq, u8 gen (being recorded into), u8 flags
+ *                   (b0 dirty: something recorded into gen this pass), u16 offset, u8 count, then count × {u16 phase ×
+ *                   65535, i8 key (−1 keyless), i8 slice, u8 style (bb::Looper's bits, & 0x7F), u8 gen} (6 bytes; ≤ 169
+ *                   a reply — page with offset; an offset at or past n answers count 0). B2's undo takes the highest
+ *                   gen present. state tail 324 u8 loopSeq (bumps with every change to the list) · 325 u16 loopPhase
+ *                   (the playhead: barPhase × 65535) · 327 u8 loopQuant (Options → Quantize) — ends at 328
  *   CHROMA (docs/packages/chroma.md): one sample played chromatically —
  *   0x63 ACTION     38 SPREAD_KEYS(u8 root 0..23, u8 flags b0 keep pads [, u8 gen]) → u8 status, u8 tableGen, u8 count:
  *                   every key j ≠ root plays the root's entry, tuned (j − root) × 100 + the root's cents (clamped to
@@ -4077,6 +4084,20 @@ static void HandlePads(const hostlink::ParsedFrame& f, hostlink::FrameWriter& w)
 #pragma GCC pop_options
 /* ── end PADS ──────────────────────────────────────────────────────────── */
 
+/* LOOPVIEW: 0x6A GET_LOOP ← [u16 offset] → u8 status, then a page of Play's loop (bb::Looper::WritePage has the
+ * bytes). Read as the audio thread leaves it, unlocked (the display rule; WritePage clamps n and the phases); the
+ * page refetches whenever the tail's loopSeq moves. Out of line and built for size: a few reads a second at most. */
+static BB_COLD void HandleLoop(const hostlink::ParsedFrame& f, hostlink::FrameWriter& w)
+{
+    const int off = f.len >= 2 ? (int)(f.body[0] | (f.body[1] << 8)) : 0;
+    w.U8(0u);
+    engine.looper.WritePage(w, off, (int)hostlink::kMaxBody - 1 - bb::Looper::kWireHead);
+}
+static BB_COLD void LoopTail(hostlink::FrameWriter& w)   /* the state tail's 324..327 (the 0x60 comment has the bytes) */
+{
+    w.U8(engine.looper.seq); w.U16(bb::Looper::WirePhase(engine.barPhase)); w.U8((uint8_t)gQuantize.sel);
+}
+
 struct StateExt : hostlink::IHostlinkExtension
 {
     uint8_t FirstCmd() const override { return 0x60u; }
@@ -4087,7 +4108,7 @@ struct StateExt : hostlink::IHostlinkExtension
          * everything below (the commands, the ops, the state body). It refuses any other with one message —
          * flash the matching .bin — so there is no partial mode to keep working. Bump it with any change to the
          * wire, and HL.API in web/hostlink.js with it (the selftest's descriptor parity holds them equal). */
-        return "\"audiothurgist\":{\"api\":2}";   /* 2: ENV — KEY_PARAMS / GET_KEYS carry the envelope and the choke group; RECLAIM — 0x68 op 4, the tail to 324, sets saved packed */
+        return "\"audiothurgist\":{\"api\":3}";   /* 3: LOOPVIEW — 0x6A GET_LOOP, the tail to 328 (2: ENV's KEY_PARAMS / GET_KEYS, RECLAIM's 0x68 op 4, sets saved packed) */
     }
     /* WEB: one float → i8 (±127), saturating. */
     static int8_t ToI8(float v)
@@ -4192,6 +4213,10 @@ struct StateExt : hostlink::IHostlinkExtension
                  * undo history keeps: a Free reclaim leaves it) · u32 reclaimed (the last reclaim's frames) · u8
                  * undoForgot (undo steps it dropped) — ends at 324. State 4: reclaiming. */
                 PadsTail(w);
+                /* LOOPVIEW tail (324..327, docs/packages/sample-looper.md): u8 loopSeq (bumps with every change to the
+                 * loop: the page reads 0x6A again) · u16 loopPhase (barPhase × 65535: the playhead the page sweeps) ·
+                 * u8 loopQuant (Options → Quantize: 0 Off · 1 16ths, the looper silent · 2 8ths) — ends at 328. */
+                LoopTail(w);
                 return;
             }
             case 0x61u:
@@ -4451,6 +4476,7 @@ struct StateExt : hostlink::IHostlinkExtension
                 }
                 return;
             }
+            case 0x6Au: HandleLoop(f, w); return;   /* LOOPVIEW: GET_LOOP — Play's loop, a page of events */
             default: w.U8(1u); return;   /* UNSUPPORTED */
         }
     }

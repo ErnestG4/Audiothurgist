@@ -1828,6 +1828,80 @@ int main()
         CHECK(e.looper.n == 5 && e.looper.ev[2].gen == 0 && e.looper.ev[3].gen == 1, "…with five events in two generations");
     }
 
+    /* ── LOOPVIEW: the page's read of the loop (0x6A GET_LOOP, Looper::WritePage) and the tail's change byte ── */
+    struct PageW   // hostlink::FrameWriter's Bytes, into a vector
+    {
+        std::vector<uint8_t> b;
+        void Bytes(const uint8_t* p, size_t k) { b.insert(b.end(), p, p + k); }
+        int U16(size_t at) const { return b[at] | (b[at + 1] << 8); }
+    };
+    // the firmware's room: max_body 1024 less the status byte and the head
+    const int kRoom = 1024 - 1 - bb::Looper::kWireHead;
+    SECTION("LOOPVIEW: a page carries the head and every event as recorded — phase, key, slice, style (skip stripped), gen");
+    {
+        Prime(0);
+        PageW w0; CHECK(e.looper.WritePage(w0, 0, kRoom) == 0 && w0.b.size() == 8 && w0.U16(0) == 0 && w0.b[7] == 0, "an empty loop: the head alone, n 0, count 0");
+        e.barPhase = 0.25; e.CallSlice(e.KeySlice(4), 1.f, true, true, true, 1.f, true, 4);   // key 4, reversed, ratchet, held
+        e.barPhase = 0.5;  e.ReleaseKey(4);
+        RenderLoops(e, 1); Wrap();
+        e.barPhase = 0.1; e.CallSlice(3, 1.f, false, true, false);                            // keyless, the next pass: ahead of the playhead (skip)
+        PageW w; const int c = e.looper.WritePage(w, 0, kRoom);
+        CHECK(c == 3 && w.b.size() == 8u + 3u * 6u && w.U16(0) == 3 && w.b[2] == e.looper.seq && w.b[3] == 1 && w.b[4] == 1 && w.U16(5) == 0 && w.b[7] == 3,
+              "head: n 3, seq, gen 1 open and dirty, offset 0, count 3 (size %zu)", w.b.size());
+        const uint8_t* ev2 = &w.b[8]; const uint8_t* ev0 = &w.b[14]; const uint8_t* ev1 = &w.b[20];
+        CHECK((ev0[0] | (ev0[1] << 8)) == 16384 && (int8_t)ev0[2] == 4 && ev0[3] == e.KeySlice(4) && ev0[4] == (bb::Looper::kRev | bb::Looper::kRatchet | bb::Looper::kHeld) && ev0[5] == 0,
+              "the held note: phase ¼ → 16384, key 4, its slice, rev | ratchet | held, gen 0 (style %02x)", ev0[4]);
+        CHECK((ev1[0] | (ev1[1] << 8)) == 32768 && (int8_t)ev1[2] == 4 && ev1[4] == bb::Looper::kRelease && ev1[5] == 0, "its release at ½, key 4");
+        CHECK((ev2[0] | (ev2[1] << 8)) == 6554 && (int8_t)ev2[2] == -1 && ev2[3] == 3 && !(ev2[4] & bb::Looper::kSkip) && ev2[5] == 1 && (e.looper.ev[0].style & bb::Looper::kSkip),
+              "the keyless call at 0.1, first in phase: key −1, slice 3, gen 1 — the transient skip bit never reaches the wire");
+    }
+    SECTION("LOOPVIEW: paging fits max_body 1024 (169 a reply), offsets past n answer nothing, a torn n is clamped");
+    {
+        static bb::Looper L;
+        L.Clear();
+        for(int i = 0; i < 256; i++) L.Add((double)i / 256., i % 24, (int8_t)(i & 15), (uint8_t)(i & 0x7F), 1.f);
+        PageW a; const int ca = L.WritePage(a, 0, kRoom);
+        PageW b; const int cb = L.WritePage(b, ca, kRoom);
+        CHECK(ca == 169 && 1 + (int)a.b.size() <= 1024 && cb == 87 && b.U16(5) == 169 && b.b[7] == 87, "256 events: 169 + 87 (%d + %d), the first reply %zu bytes with its status", ca, cb, a.b.size() + 1);
+        bool order = true;
+        for(int i = 0; i < ca; i++) if(a.U16(8 + i * 6) != bb::Looper::WirePhase((double)i / 256.) || a.b[8 + i * 6 + 2] != i % 24) order = false;
+        for(int i = 0; i < cb; i++) if(b.U16(8 + i * 6) != bb::Looper::WirePhase((double)(ca + i) / 256.)) order = false;
+        CHECK(order, "the two pages are the list in order, nothing skipped or repeated");
+        PageW p1; PageW p2;
+        CHECK(L.WritePage(p1, 256, kRoom) == 0 && p1.U16(5) == 256 && L.WritePage(p2, 999, kRoom) == 0 && p2.U16(5) == 256 && p2.U16(0) == 256,
+              "an offset at n answers count 0; one past it is clamped to n");
+        PageW s; CHECK(L.WritePage(s, 0, 6 * 10 + 5) == 10 && s.b.size() == 8u + 60u, "a smaller room: whole events only");
+        L.n = 300;   // a torn or corrupt count: never read past ev[kMax]
+        PageW t; const int ct = L.WritePage(t, 200, kRoom);
+        CHECK(t.U16(0) == 256 && ct == 56, "n 300 reads as 256: from 200, 56 events (%d)", ct);
+        L.n = -5; PageW u; CHECK(L.WritePage(u, 0, kRoom) == 0 && u.U16(0) == 0, "a negative n reads as empty");
+        L.n = 256;
+        L.ev[0].phase = std::nan(""); L.ev[1].phase = 1.7; L.ev[2].phase = -0.3; L.ev[3].phase = 0.99999999;
+        PageW v; L.WritePage(v, 0, kRoom);
+        CHECK(v.U16(8) == 0 && v.U16(14) == 65535 && v.U16(20) == 0 && v.U16(26) == 65535, "a half-moved phase clamps: NaN → 0, 1.7 → 65535, −0.3 → 0, just under 1 → 65535");
+        CHECK(bb::Looper::WirePhase(0.) == 0 && bb::Looper::WirePhase(0.5) == 32768 && bb::Looper::WirePhase(1.) == 65535, "the playhead's u16: 0, ½, 1");
+    }
+    SECTION("LOOPVIEW: seq moves with every change to the list — undo then record at the same count included; a wrap alone does not");
+    {
+        static bb::Looper L, M;
+        L.Clear();
+        uint8_t q = L.seq;
+        CHECK(L.Record(0.1, 2, 2, 0, 1.f) && L.seq != q, "a record"); q = L.seq;
+        L.Record(0.3, 5, 5, bb::Looper::kHeld, 1.f); q = L.seq;
+        CHECK(L.RecordRelease(0.4, 5) && L.seq != q, "a release"); q = L.seq;
+        CHECK(!L.RecordRelease(0.45, 5) && L.seq == q, "nothing to release: no change");
+        bb::Looper::Window wd; L.Advance(0.98, 0.01, 24, wd); L.Advance(0.995, 0.01, 24, wd);
+        CHECK(L.gen == 1 && L.seq == q, "the wrap that closes a generation leaves seq alone (gen %d)", L.gen);
+        L.Record(0.6, 7, 7, 0, 1.f); const int n0 = L.n; q = L.seq;
+        CHECK(L.UndoLast() && L.seq != q, "an undo"); q = L.seq;
+        L.Record(0.6, 9, 9, 0, 1.f);
+        CHECK(L.n == n0 && L.seq != q, "undo then record at the same count: n %d as before, seq still moved", L.n); q = L.seq;
+        const int8_t map[16] = {0, 1, -1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+        L.RemapSlices(map, 16); CHECK(L.seq != q, "a remap"); q = L.seq;
+        M.Clear(); M.Adopt(L); CHECK(M.n == L.n && M.seq != 0, "an adopt (a set load) moves the receiver's");
+        L.Clear(); CHECK(L.seq != q && L.n == 0, "a clear");
+    }
+
     /* ── EDIT package: slice editing on the audio thread ──────────────────── */
     using bb::EditOp; using bb::EditReq; using bb::EditStatus;
     // does the grid tile [0, bufLen) with every slice ≥ kGridMin?
