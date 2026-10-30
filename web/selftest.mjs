@@ -74,7 +74,7 @@ function stateBody(len = HL.STATE_LEN) {
   return b;
 }
 {
-  check('state too short → null (not this firmware\'s body)', HL.parseState(stateBody(100)) === null && HL.parseState(stateBody(HL.STATE_LEN - 1)) === null && HL.STATE_LEN === 324);
+  check('state too short → null (not this firmware\'s body)', HL.parseState(stateBody(100)) === null && HL.parseState(stateBody(HL.STATE_LEN - 1)) === null && HL.STATE_LEN === 328);
   const s0 = HL.parseState(stateBody());
   check('state fixed part', s0 && s0.nSlices === 32 && s0.cur === 7 && s0.ext && s0.locked && !s0.muted && !s0.flowing && s0.brain && s0.grammar === 2 && s0.cls === 1 && s0.file === 3 && s0.chop === 200 && s0.histN === 5 && s0.histDepth === 2 && s0.callFlash === 255);
   check('state floats', Math.abs(s0.bpm - 174.5) < 1e-4 && s0.mult === 0.5);
@@ -250,7 +250,7 @@ await link.start();
   const kl = new HL.Link(new DEMO.FakePort(kit)); await kl.start();
   const info = await HL.hello(kl); const desc = await HL.getDescriptor(kl, info);
   const s = HL.parseState(await kl.request(HL.CMD.state));
-  check('kit state tail', s.nSlices === 64 && s.nTable === 67 && s.bufLen === 64 * DEMO.SLICE_LEN && s.freePos > s.bufLen && s.bufCap === DEMO.BUF_CAP && s.recState === 0 && s.recKey === -1 && s.looperEvents === 3 && s.keySlice.length === 24 && s.keyPlays === 0);
+  check('kit state tail', s.nSlices === 64 && s.nTable === 67 && s.bufLen === 64 * DEMO.SLICE_LEN && s.freePos > s.bufLen && s.bufCap === DEMO.BUF_CAP && s.recState === 0 && s.recKey === -1 && s.looperEvents === 4 && s.keySlice.length === 24 && s.keyPlays === 0);
   check('kit keys: recorded keys point past the grid, others at their span slice', s.keySlice[3] === 64 && s.keySlice[7] === 65 && s.keySlice[14] === 66 && s.keySlice[0] === 0 && s.keySlice[23] === 61);
   /* GET_TABLE chunks: 67 entries = 39 + 28. */
   kit.log.length = 0;
@@ -299,11 +299,15 @@ await link.start();
   const live = await HL.getLive(kl, info); const opts = HL.optionsInfo(desc); const kp = opts.fields.find(f => f.id === 'key.plays');
   check('key plays → options byte and the state tail', live.bytes[opts.comp.off + kp.off] === 1 && HL.parseState(await kl.request(HL.CMD.state)).keyPlays === 1);
   { let bad = null; try { await kl.request(HL.CMD.action, Uint8Array.of(HL.ACT.keyPlays, 2), { urgent: true }); } catch (e) { bad = e; } check('key plays 2 → BAD_ARGS', bad && /BAD_ARGS/.test(bad.message)); }
-  /* ACTION 12 / 13: looper undo and clear. */
+  /* ACTION 12 / 13: looper undo (the newest of the kit loop's three passes: the held note and its release) and clear
+   * (B3: Play's — elsewhere it does nothing, as on the module) */
   await kl.request(HL.CMD.action, Uint8Array.of(HL.ACT.looperUndo), { urgent: true });
-  check('looper undo', HL.parseState(await kl.request(HL.CMD.state)).looperEvents === 2);
+  check('looper undo: the newest pass, a note-on and its release', HL.parseState(await kl.request(HL.CMD.state)).looperEvents === 2);
   await kl.request(HL.CMD.action, Uint8Array.of(HL.ACT.looperClear), { urgent: true });
-  check('looper clear', HL.parseState(await kl.request(HL.CMD.state)).looperEvents === 0);
+  check('looper clear outside Play: nothing', HL.parseState(await kl.request(HL.CMD.state)).looperEvents === 2);
+  kit.options[DEMO.O['grammar.mode']] = DEMO.GRAM.play;
+  await kl.request(HL.CMD.action, Uint8Array.of(HL.ACT.looperClear), { urgent: true });
+  check('looper clear in Play', HL.parseState(await kl.request(HL.CMD.state)).looperEvents === 0);
   await kl.close();
 }
 
@@ -777,13 +781,18 @@ await link.start();
   const ev0 = s.looperEvents; await HL.playKey(l, 5, true); s = await state();
   check('Pads: a pad sounds and writes nothing', s.keyFlash === 5 && s.looperEvents === ev0 && s.srcValid === true);
   gram(DEMO.GRAM.play); s = await state();
-  check('Play: an empty loop to start (every step a rest, no events), the Voice map', s.looperEvents === 0 && Array.from(s.src).slice(0, 32).every(x => x === -1) && s.jackMap === 1);
-  await HL.playKey(l, 2, true); s = await state(); const wrote = Array.from(s.src).findIndex(x => x === s.keySlice[2]);
-  check('Play: a pad writes the loop — one event, its entry on a step', s.looperEvents === 1 && wrote >= 0);
+  check('Play: every step a rest, the Voice map; the kit\'s loop waited through the other grammars (4 events)', s.looperEvents === 4 && Array.from(s.src).slice(0, 32).every(x => x === -1) && s.jackMap === 1 && s.loopQuant === 0);
+  await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.looperClear), { urgent: true }); s = await state();
+  check('Play: ACTION 13 (B3) clears it', s.looperEvents === 0);
+  await HL.playKey(l, 2, true); s = await state();
+  check('Play, Quantize Off: a pad writes the loop — one event, no step', s.looperEvents === 1 && Array.from(s.src).slice(0, 32).every(x => x === -1));
   await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.looperUndo), { urgent: true }); s = await state();
   check('Play: ACTION 12 takes it back (B2\'s undo)', s.looperEvents === 0 && Array.from(s.src).slice(0, 32).every(x => x === -1));
+  d.options[DEMO.O.quantize] = 1; await HL.playKey(l, 2, true); s = await state(); const wrote = Array.from(s.src).findIndex(x => x === s.keySlice[2]);
+  check('Play, Quantize 16ths: the pad punches its step and the loop takes nothing (the looper is off)', s.looperEvents === 0 && wrote >= 0 && s.loopQuant === 1);
+  d.options[DEMO.O.quantize] = 0;
   await HL.playKey(l, 2, true); await HL.playKey(l, 4, true); await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.looperClear), { urgent: true }); s = await state();
-  check('Play: ACTION 13 clears the loop', s.looperEvents === 0 && Array.from(s.src).slice(0, 32).every(x => x === -1));
+  check('Play: ACTION 13 clears the loop and the punched bar', s.looperEvents === 0 && Array.from(s.src).slice(0, 32).every(x => x === -1));
   gram(DEMO.GRAM.classic); await l.close();
 
 }
@@ -1142,7 +1151,7 @@ await link.start();
   const info = await HL.hello(l), desc = await HL.getDescriptor(l, info);
   const state = async () => HL.parseState(await l.request(HL.CMD.state));
   const keys = () => HL.fetchKeyParams(l);
-  check('env: api 2 on both sides; GET_KEYS 13 bytes a key, every key neutral (no envelope, no group)', HL.API === 2 && HL.apiOf(desc) === 2 && (await l.request(HL.CMD.keys, new Uint8Array(0))).length === 2 + 24 * 13 && (await keys()).every(p => HL.keypNeutral(p) && p.atk === 0 && p.grp === 0));
+  check('env: api ≥ 2 (3 since LOOPVIEW) on both sides; GET_KEYS 13 bytes a key, every key neutral (no envelope, no group)', HL.API >= 2 && HL.apiOf(desc) === HL.API && (await l.request(HL.CMD.keys, new Uint8Array(0))).length === 2 + 24 * 13 && (await keys()).every(p => HL.keypNeutral(p) && p.atk === 0 && p.grp === 0));
   let s0 = await state();
   let r = await HL.keyParams(l, 3, { gain: -4, plays: 2, atk: 20, dec: 300, sus: 12, rel: 1200, grp: 2 });
   let k = await keys(), s = await state();
@@ -1202,8 +1211,8 @@ await link.start();
   const b = stateBody(); const dvb = new DataView(b.buffer);
   b[293] = 4; dvb.setUint32(307, 30000, true); dvb.setUint32(315, 12000, true); dvb.setUint32(319, 48000, true); b[323] = 3;
   const sp = HL.parseState(b).pads;
-  check('state: RECLAIM — 315 undoHeld, 319 reclaimed, 323 undoForgot; state 4 "reclaiming"; api 2', sp.held === 30000 && sp.undoHeld === 12000 && sp.reclaimed === 48000 && sp.undoForgot === 3
-    && HL.PADS.STATE[sp.state] === 'reclaiming' && HL.PADS.reclaim === 4 && HL.API === 2, JSON.stringify(sp));
+  check('state: RECLAIM — 315 undoHeld, 319 reclaimed, 323 undoForgot; state 4 "reclaiming"; api ≥ 2', sp.held === 30000 && sp.undoHeld === 12000 && sp.reclaimed === 48000 && sp.undoForgot === 3
+    && HL.PADS.STATE[sp.state] === 'reclaiming' && HL.PADS.reclaim === 4 && HL.API >= 2, JSON.stringify(sp));
   const P = (free, held, undoHeld) => ({ free, held, undoHeld }), J = x => JSON.stringify(x);
   check('padReclaimFor: a drop that fits, or nothing held → nothing; FREE when what no undo step needs is enough; else ALL (forgets when Undo needs some); longer than all of it → ALL, cut after',
     HL.padReclaimFor(P(1000, 500, 0), 900) === null && HL.padReclaimFor(P(1000, 0, 0), 5000) === null && HL.padReclaimFor(null, 10) === null
@@ -1276,6 +1285,82 @@ await link.start();
     check('…and while one runs: a drop, an edit, New empty kit refused', s.pads.state === 4 && e1 === 'BAD_STATE' && e2 === 'BAD_STATE' && e3 === 'BAD_STATE', [s.pads.state, e1, e2, e3].join()); }
   s = await settle(s.pads.seq);
   check('…then done: nothing was held, nothing moved', s.pads.result === 0 && s.pads.reclaimed === 0 && keyPrints().split('|')[7] !== '-');
+  await l.close();
+}
+
+/* ── 7i. LOOPVIEW (0x6A GET_LOOP, api 3): the tail's bytes from 324, a page's bytes, loopNotes, then the free looper
+ *        over the fake module — pads in Play at set playhead positions (a held note with its release, a pass closing
+ *        at the wrap, the newest pass, B2's undo, undo-then-record at the same count, 8ths), the replay, paging at 256
+ *        (169 + 87, the 257th refused), a read torn by a write between its pages, a set's loop, B3 ── */
+{
+  { const b = stateBody(); b[324] = 77; new DataView(b.buffer).setUint16(325, 49151, true); b[327] = 2; const s = HL.parseState(b);
+    check('state: LOOPVIEW — 324 loopSeq, 325 loopPhase (u16 → 0..1), 327 loopQuant; the body 328 long; api 3; GET_LOOP is 0x6A',
+      s.loopSeq === 77 && Math.abs(s.loopPhase - 0.75) < 1e-4 && s.loopQuant === 2 && HL.STATE_LEN === 328 && HL.API === 3 && HL.CMD.loop === 0x6A); }
+  { const b = Uint8Array.of(0, 3, 0, 9, 2, 1, 0, 0, 3, 0x00, 0x40, 5, 7, 0x20 | 0x01, 0, 0x00, 0x60, 5, 0xff, 0x40, 1, 0xff, 0xff, 0xff, 3, 0x08, 1);
+    const p = HL.parseLoopPage(b);
+    check('a page: the head (n, seq, gen, dirty, offset, count), events with signed key / slice', p && p.n === 3 && p.seq === 9 && p.gen === 2 && p.dirty && p.offset === 0 && p.count === 3
+      && Math.abs(p.events[0].phase - 0.25) < 1e-4 && p.events[0].key === 5 && p.events[0].style === 0x21 && p.events[1].slice === -1 && p.events[2].key === -1 && p.events[2].phase === 1 && p.events[2].gen === 1, JSON.stringify(p));
+    check('a short page → null; a page cut short keeps only whole events', HL.parseLoopPage(Uint8Array.of(0, 1, 0)) === null && HL.parseLoopPage(b.subarray(0, 20)).events.length === 1); }
+  { const L = HL.LOOP, E = (phase, key, style, gen) => ({ phase, key, slice: key, style, gen });
+    const r = HL.loopNotes([E(0.1, 4, L.release, 1), E(0.2, 3, 0, 0), E(0.5, 4, L.held, 1), E(0.6, 6, L.held, 1), E(0.9, 7, L.rev | L.ratchet, 0)]);
+    const n4 = r.notes.find(n => n.key === 4), n6 = r.notes.find(n => n.key === 6);
+    check('loopNotes: releases are no notes; a held note ends at its key\'s next release round the loop (0.5 → 0.1); none yet → null; the newest pass is the highest gen (Undo counts its releases too)',
+      r.notes.length === 4 && n4.end === 0.1 && n6.end === null && r.top === 1 && r.newest === 3 && n4.newest && !r.notes.find(n => n.key === 3).newest && HL.loopNotes([]).top === -1); }
+
+  const d = new DEMO.FakeDevice({ nSlices: 32, latencyMs: 1 });
+  const l = new HL.Link(new DEMO.FakePort(d)); await l.start(); await HL.hello(l);
+  const state = async () => HL.parseState(await l.request(HL.CMD.state));
+  const at = beat => { d.beatAt = () => beat; };   /* the fake's playhead, by hand: 32 16ths a loop */
+  const page = async (off = 0) => HL.parseLoopPage(await l.request(HL.CMD.loop, Uint8Array.of(off & 255, off >> 8)));
+  at(1); d.setGrammar(DEMO.GRAM.play, d.grammar); d.options[DEMO.O['grammar.mode']] = DEMO.GRAM.play; d.options[DEMO.O['key.plays']] = 1;
+  let s = await state(); const seq0 = s.loopSeq;
+  check('fake: Play, Quantize Off, an empty loop; the playhead in the tail', s.grammar === 5 && s.loopQuant === 0 && s.looperEvents === 0 && Math.abs(s.loopPhase - 1 / 32) < 1e-4 && (await HL.fetchLoop(l)).n === 0);
+  at(4); await HL.playKey(l, 0, true); at(10); await HL.playKey(l, 0, false); s = await state();
+  let lp = await HL.fetchLoop(l);
+  check('a held pad: its note-on where it went down (4/32), its release where it came up (10/32), pass 0, seq moved', s.looperEvents === 2 && s.loopSeq !== seq0 && lp.seq === s.loopSeq && lp.n === 2
+    && Math.abs(lp.events[0].phase - 0.125) < 1e-4 && lp.events[0].key === 0 && lp.events[0].style === HL.LOOP.held && lp.events[1].style === HL.LOOP.release && Math.abs(lp.events[1].phase - 10 / 32) < 1e-4 && lp.gen === 0 && lp.dirty, JSON.stringify(lp));
+  check('…loopNotes: one note, 4/32 → 10/32', (n => n.length === 1 && Math.abs(n[0].end - 10 / 32) < 1e-4)(HL.loopNotes(lp.events).notes));
+  d.options[DEMO.O['key.plays']] = 0;
+  at(34); s = await state(); lp = await HL.fetchLoop(l);
+  check('the wrap after recording closes the pass: gen 1 open, not dirty — seq unmoved (nothing in the list changed)', lp.gen === 1 && !lp.dirty && lp.seq === s.loopSeq && s.loopSeq === lp.seq);
+  const seqW = s.loopSeq; at(40); await HL.playKey(l, 4, true); at(48); await HL.playKey(l, 9, true); lp = await HL.fetchLoop(l);
+  const nn = HL.loopNotes(lp.events);
+  check('two one-shots in pass 1 (8/32, 16/32): the newest pass is theirs, the held note is older', lp.n === 4 && nn.top === 1 && nn.newest === 2 && nn.notes.filter(n => n.newest).map(n => n.key).join() === '4,9' && !nn.notes.find(n => n.key === 0).newest && lp.seq !== seqW);
+  d.voice = null; at(72.5); await state();
+  check('the replay: the next pass crossing 8/32 sounds key 4 again (the fake\'s voice; no key flash, as on the module)', d.voice && d.voice.key === 4);
+  at(80); s = await state(); const n0 = s.looperEvents, sq = s.loopSeq;
+  await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.looperUndo), { urgent: true }); s = await state(); lp = await HL.fetchLoop(l);
+  check('B2\'s undo (ACTION 12): the newest pass goes (keys 4 and 9), the held note stays, seq moves', s.looperEvents === n0 - 2 && lp.events.every(e => e.key === 0) && s.loopSeq !== sq && lp.gen === 1);
+  const sqU = s.loopSeq; at(84); await HL.playKey(l, 4, true); await HL.playKey(l, 9, true); s = await state();
+  check('undo then record at the same count: n as before the undo, seq different from both', s.looperEvents === n0 && s.loopSeq !== sq && s.loopSeq !== sqU);
+  d.options[DEMO.O.quantize] = 2; at(96 + 3.1); await HL.playKey(l, 11, true); lp = await HL.fetchLoop(l);
+  check('Quantize 8ths: 3.1/32 snaps to the nearest 8th, 4/32', lp.events.some(e => e.key === 11 && Math.abs(e.phase - 0.125) < 1e-4));
+  at(96 + 31.9); await HL.playKey(l, 12, true); lp = await HL.fetchLoop(l);
+  check('…and a late hit at 31.9/32 lands on the downbeat', lp.events.some(e => e.key === 12 && e.phase === 0));
+  d.options[DEMO.O.quantize] = 0;
+  { const p = await page(lp.n); const p2 = await page(999);
+    check('GET_LOOP: an offset at n answers count 0; past it, clamped to n', p.count === 0 && p.offset === lp.n && p2.count === 0 && p2.offset === lp.n); }
+  /* paging: fill to 256 */
+  for (let i = 0; d.loop.ev.length < 256; i++) { at(128 + i * 0.1); d.loopRecord(i % 24, i % 24, 0); }
+  at(200); s = await state(); d.log.length = 0; lp = await HL.fetchLoop(l);
+  check('256 events: two requests (169 + 87), every event once, in phase order; the tail says 255 (its byte)', d.log.filter(t => t === HL.CMD.loop).length === 2 && lp.n === 256 && lp.events.length === 256
+    && lp.events.every((e, i, a) => !i || e.phase >= a[i - 1].phase) && s.looperEvents === 255 && (await page(0)).count === 169 && (await page(169)).count === 87);
+  await HL.playKey(l, 3, true); check('the 257th is refused (the call still sounds)', d.loop.ev.length === 256 && (await state()).keyFlash === 3);
+  /* a write between two pages: the read starts again */
+  { await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.looperUndo), { urgent: true }); await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.looperClear), { urgent: true });
+    for (let i = 0; i < 200; i++) { at(300 + i * 0.1); d.loopRecord(1, 1, 0); }
+    let first = true; const h = d.handle.bind(d); d.handle = (t, b) => { const r = h(t, b); if (t === HL.CMD.loop && first) { first = false; at(330); d.loopRecord(2, 2, 0); } return r; };
+    d.log.length = 0; lp = await HL.fetchLoop(l); d.handle = h;
+    check('a record between the two pages: seq moved, the read starts over and comes back whole (201)', lp.n === 201 && lp.events.length === 201 && lp.events.some(e => e.key === 2) && d.log.filter(t => t === HL.CMD.loop).length === 4); }
+  /* a set keeps the loop: saved, loaded back sealed in one pass (the next overdub its own undo unit) */
+  { await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.looperClear), { urgent: true });
+    at(400); await HL.playKey(l, 5, true); at(433); await state(); at(440); await HL.playKey(l, 6, true);
+    await HL.saveSet(l, 'loopy'); await state(); d.set.t -= 5000; await state();
+    await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.looperClear), { urgent: true });
+    await HL.loadSet(l, 'loopy'); await state(); d.set.t -= 5000; await state(); lp = await HL.fetchLoop(l);
+    check('a set saves the loop and loads it back as one pass (gen 0, pass 1 open)', lp.n === 2 && lp.events.every(e => e.gen === 0) && lp.gen === 1 && lp.events.map(e => e.key).join() === '5,6', JSON.stringify(lp));
+    d.options[DEMO.O['grammar.mode']] = DEMO.GRAM.classic; await l.request(HL.CMD.action, Uint8Array.of(HL.ACT.looperClear), { urgent: true });
+    check('B3 outside Play clears nothing; the loop waits', (await state()).looperEvents === 2); }
   await l.close();
 }
 
@@ -1627,7 +1712,7 @@ function domStub(html) {
   const ids = new Set([...html.matchAll(/ id="([^"]+)"/g)].map(m => m[1]));
   const errors = [], warns = [], unknownIds = new Set(), themes = cssThemes(html), store = new Map();
   class El {
-    constructor(tag, id) { this._attr = {}; this._log = { text: [], arcs: 0, rects: 0, fills: [] }; this.tagName = String(tag).toUpperCase(); this.id = id || ''; this.className = ''; this.style = {}; this.dataset = {}; this.hidden = false; this.disabled = false; this.value = ''; this._text = ''; this._html = ''; this._on = {}; this.children = []; this._q = new Map(); this._parent = null; this._calls = 0; this.offsetWidth = 200; this.offsetHeight = 100; this.width = 0; this.height = 0; this._w = 600; this._h = 290; this.checked = false; this.title = ''; this.textContentSet = 0; }
+    constructor(tag, id) { this._attr = {}; this._log = { text: [], arcs: 0, rects: 0, fills: [], fa: [], paths: 0 }; this.tagName = String(tag).toUpperCase(); this.id = id || ''; this.className = ''; this.style = {}; this.dataset = {}; this.hidden = false; this.disabled = false; this.value = ''; this._text = ''; this._html = ''; this._on = {}; this.children = []; this._q = new Map(); this._parent = null; this._calls = 0; this.offsetWidth = 200; this.offsetHeight = 100; this.width = 0; this.height = 0; this._w = 600; this._h = 290; this.checked = false; this.title = ''; this.textContentSet = 0; }
     get classList() { const el = this; return { add: (...c) => { for (const x of c) if (!el.classList.contains(x)) el.className = (el.className + ' ' + x).trim(); }, remove: (...c) => { el.className = el.className.split(/\s+/).filter(x => x && !c.includes(x)).join(' '); }, toggle: (x, on) => { const has = el.classList.contains(x); const want = on == null ? !has : !!on; if (want && !has) el.classList.add(x); if (!want && has) el.classList.remove(x); return want; }, contains: x => el.className.split(/\s+/).includes(x) }; }
     get textContent() { return this._text; } set textContent(v) { this._text = String(v); this.textContentSet++; }
     get innerHTML() { return this._html; } set innerHTML(v) { this._html = String(v); this.children.length = 0; this._q.clear(); }
@@ -1645,8 +1730,9 @@ function domStub(html) {
     /* The draw log (Kyklophoria's pagecheck): what the last frame drew — its text with the fill it was drawn in, its
      * arcs, its rects — reset by a full clearRect, so a check can assert what is on the canvas, not that something was. */
     getContext() { const el = this; return new Proxy({}, { get: (o, k) => { if (k === 'measureText') return () => ({ width: 10 }); if (typeof k === 'string' && k in o) return o[k]; return (...a) => { el._calls++; if (GEOM.has(k)) for (const v of a) if (typeof v === 'number' && !Number.isFinite(v)) { nanDraws.push(k + '(' + a.map(x => String(x)).join(',') + ')'); }
-      if (k === 'clearRect' && a[0] === 0 && a[1] === 0) el._log = { text: [], arcs: 0, rects: 0, fills: [] };
-      else if (k === 'fillText') el._log.text.push(String(a[0])); else if (k === 'arc') el._log.arcs++; else if (k === 'fillRect' || k === 'strokeRect') { el._log.rects++; if (el._log.fills.length < 4000) el._log.fills.push(String(o.fillStyle)); } }; }, set: (o, k, v) => { o[k] = v; return true; } }); }
+      if (k === 'clearRect' && a[0] === 0 && a[1] === 0) el._log = { text: [], arcs: 0, rects: 0, fills: [], fa: [], paths: 0 };
+      else if (k === 'fill') el._log.paths++;   /* LOOPVIEW: a filled path (the reversed hit's wedge) */
+      else if (k === 'fillText') el._log.text.push(String(a[0])); else if (k === 'arc') el._log.arcs++; else if (k === 'fillRect' || k === 'strokeRect') { el._log.rects++; if (el._log.fills.length < 4000) { el._log.fills.push(String(o.fillStyle)); el._log.fa.push(String(o.fillStyle) + '@' + (o.globalAlpha == null ? 1 : o.globalAlpha)); } } }; }, set: (o, k, v) => { o[k] = v; return true; } }); }
   }
   const byId = new Map();
   const document = {
@@ -2478,6 +2564,72 @@ const tone = (n, f, a, ph = 0) => Float32Array.from({ length: n }, (_, i) => a *
   check('a 0.10 s drop on F1: FREE first (Undo loses nothing), lands whole, the line says what came back only', await dropped(5, 'i 0.1s 48k.wav') && G('demoDevice.padModes').join() === '1,1,0' && G(`padJobs[${n - 1}].plan.frames`) === 4800
     && /· reclaimed 0\.10 s first$/.test(G("$('pd_msg').textContent")), G("$('pd_msg').textContent") + ' ' + G('demoDevice.padModes').join());
   check('reclaim page: no unknown ids, no runtime errors', D.unknownIds.size === 0 && D.errors.length === 0, [...D.unknownIds].join(',') + ' ' + D.errors.join(' | ').slice(0, 300));
+}
+/* ── 9l. LOOPVIEW, the page: Play's loop drawn live (the bench finding, 2026-10-30: "playing in the notes to the looper
+ *        worked but didn't show on the page live"). `?demo`, the mode chip to Play, then real pad presses at set
+ *        playhead positions — every check what reached the fake and what the strip and the ring drew: the lanes and
+ *        letters in the class colours, a held note's span, the newest pass bright and the older dimmed, B2's undo,
+ *        undo-then-record at the same count, a reversed ratchet's wedge and gap, the playhead, the line under the bar,
+ *        B3's clear, and Quantize 16ths handing the bar back to the steps ── */
+{
+  const { D, G } = await loadPage('?demo');
+  check('loop page: connected', await until(() => G('!!(st && table)')), D.errors.join(' | ').slice(0, 300));
+  spyActs(G); G('__beat = 1; demoDevice.beatAt = () => __beat');
+  const chip = g => G(`modeChips.find(c => c.g === ${g}).el`), pad = k => G(`padEls[${k}].el`), strip = () => G("$('strip')._log"), ring = () => G("$('ring')._log");
+  const col = c => G(`COL[${c}]`), cls = k => G(`demoDevice.table[demoDevice.keySlice[${k}]].cls & 3`);
+  const press = async (k, beat, upBeat = beat, id = 40 + k) => { G(`__beat = ${beat}`); fireEv(pad(k), 'pointerdown', { pointerId: id }); await until(() => sentAct(G, 32, k, 1)); G(`__beat = ${upBeat}`); fireEv(pad(k), 'pointerup', { pointerId: id }); await until(() => sentAct(G, 32, k, 0)); };
+  G("showTab('tab_play')"); fireEv(chip(5), 'click', {});
+  check('Play: the loop view — read once on the way in (GET_LOOP), empty; its key shown, "call / punch" hidden; the line says how to fill it',
+    await until(() => G('st.grammar') === 5 && G('loopView(st)') === true) && await until(() => G('!!loop') && G('loop.n') === 0) && G('demoDevice.log').includes(HL.CMD.loop)
+    && await until(() => G("$('loop_key').hidden") === false && G("$('lg_call').hidden") === true && /^The loop is empty — play the pads/.test(G("$('loop_line').textContent"))));
+  await sleep(60);
+  check('the strip draws every frame in the loop view: four lanes, the 32 steps, the playhead (cv-play)', strip().fills.filter(f => f === G("TOK['cv-lane']")).length === 4 && strip().fills.includes(G("TOK['cv-play']")) && ring().arcs >= 16 + 4);
+  await press(0, 4); await press(5, 12);
+  check('two pads in Play → two events in the loop, the page reads them as they land (loopSeq moved)', await until(() => G('loop && loop.n') === 2 && G('loop.seq') === G('st.loopSeq')) && G('loop.events.map(e => e.key).join()') === '0,5',
+    G('JSON.stringify(loop) + " st " + st.loopSeq'));
+  await sleep(60);
+  check('the strip: each mark in its key\'s class colour and lettered (K / S / H / O); the ring: a dot each',
+    strip().fills.includes(col(cls(0))) && strip().fills.includes(col(cls(5))) && strip().text.includes('KSHO'[cls(0)]) && strip().text.includes('KSHO'[cls(5)]) && ring().arcs >= 16 + 4 + 2, JSON.stringify(strip().text));
+  check('…one pass so far: all of it bright; the line says Undo takes it all', strip().fa.includes(col(cls(0)) + '@1') && !strip().fa.includes(col(cls(0)) + '@0.4') && await until(() => /^2 events in the loop · one pass so far: Undo takes it all/.test(G("$('loop_line').textContent"))));
+  /* Key Plays = Held: a pad held from 16 to 22 */
+  G('action(ACT.keyPlays, 1)'); await until(() => G('st.keyPlays') === 1);
+  await press(9, 16, 22);
+  check('a held pad: a note-on and its release, drawn as one note spanning 16/32 → 22/32', await until(() => G('loop && loop.n') === 4) && Math.abs(G("HL.loopNotes(loop.events).notes.find(n => n.key === 9).end") - 22 / 32) < 1e-3);
+  G('action(ACT.keyPlays, 0)'); await until(() => G('st.keyPlays') === 0);
+  /* the next pass: one more hit, the newest; the first pass dims */
+  G('__beat = 33'); await sleep(250); await press(2, 40);
+  check('the next pass: its hit is the newest — bright — and the first pass dims (alpha 0.4); the line counts what Undo takes',
+    await until(() => G('loop && loop.n') === 5) && await until(() => strip().fa.includes(col(cls(2)) + '@1') && strip().fa.includes(col(cls(0)) + '@0.4'))
+    && await until(() => /^5 events in the loop · the newest pass \(bright\): 1 event — Undo takes those/.test(G("$('loop_line').textContent"))), G("$('loop_line').textContent"));
+  const seqA = G('loop.seq');
+  fireEv(G("$('t_dice')"), 'click', {});
+  check('Undo (B2) → ACTION 12: the newest pass goes, the first is bright again', await until(() => sentAct(G, 12)) && await until(() => G('loop.n') === 4) && G('loop.events.every(e => e.key !== 2)') && G('loop.seq') !== seqA
+    && await until(() => strip().fa.includes(col(cls(0)) + '@1') && !strip().fa.some(f => f.endsWith('@0.4'))));
+  const seqB = G('loop.seq'); await press(14, 44);
+  check('undo then record at the same count (5 again): the page still follows — loopSeq moved, the new key is there', await until(() => G('loop.n') === 5 && G('loop.events.some(e => e.key === 14)')) && G('loop.seq') !== seqA && G('loop.seq') !== seqB);
+  /* J5's styles reach the loop through the jacks; here, put in by hand: a reversed ratchet at the half */
+  G('demoDevice.loop.ev.push({ phase: 0.5, key: 7, slice: demoDevice.keySlice[7], style: HL.LOOP.rev | HL.LOOP.ratchet, gen: demoDevice.loop.gen, skip: null }); demoDevice.loop.ev.sort((a, b) => a.phase - b.phase); demoDevice.loop.seq = (demoDevice.loop.seq + 1) & 255');
+  check('a reversed ratchet: a wedge (a filled path) on the strip and the ratchet\'s gap (cv-bg) — not colour alone', await until(() => G('loop.n') === 6) && await until(() => strip().paths >= 1 && strip().fills.includes(G("TOK['cv-bg']"))));
+  check('the Play tab counts the events itself; the Kit\'s count agrees', /^6 events in the loop/.test(G("$('loop_line').textContent")) && G('st.looperEvents') === 6);
+  /* the playhead sweeps between polls */
+  G('demoDevice.beatAt = DEMO.FakeDevice.prototype.beatAt'); await sleep(300);
+  { const a = G('loopPhaseNow()'); await sleep(120); const b = G('loopPhaseNow()');
+    check('the playhead sweeps between two polls (the rate from the tail\'s phase)', G('lp.rate') > 0 && ((b - a + 1) % 1) > 0.005 && ((b - a + 1) % 1) < 0.5, `${a} → ${b} at ${G('lp.rate')}`); }
+  G('confirmAnswer = true'); fireEv(G("$('t_reslice')"), 'click', {});
+  check('Clear (B3) → ACTION 13: the loop empties on the page', await until(() => sentAct(G, 13)) && await until(() => G('loop.n') === 0) && await until(() => /^The loop is empty/.test(G("$('loop_line').textContent"))));
+  /* Quantize 16ths: the looper is silent, the bar is the steps — drawn as steps only */
+  G('demoDevice.options[DEMO.O.quantize] = 1');
+  await press(3, 0);
+  check('Quantize 16ths: no loop view — the strip draws the steps (a punched step in its class colour), the loop key hidden, "call / punch" back, the line says so',
+    await until(() => G('st.loopQuant') === 1 && G('loopView(st)') === false) && await until(() => G("$('loop_key').hidden") === true && G("$('lg_call').hidden") === false)
+    && await until(() => /^Quantize 16ths: each hit punches/.test(G("$('loop_line').textContent"))) && await until(() => !strip().fills.includes(G("TOK['cv-lane']")) && strip().fills.includes(col(cls(3)))));
+  G('demoDevice.options[DEMO.O.quantize] = 0');
+  check('…back to Off: the loop view again', await until(() => G('loopView(st)') === true && G("$('loop_key').hidden") === false));
+  fireEv(chip(6), 'click', {});
+  check('Pads: no loop line, no loop key', await until(() => G('st.grammar') === 6) && await until(() => G("$('loop_line').hidden") === true && G("$('loop_key').hidden") === true));
+  check('loop page: no unknown ids, no runtime errors, no link warnings', D.unknownIds.size === 0 && D.errors.length === 0 && !D.warns.some(w => /loop/.test(w)), [...D.unknownIds].join(',') + ' ' + D.errors.concat(D.warns).join(' | ').slice(0, 300));
+  await G('(async () => { const l = link; setDisconnected(); await l.close(); })()');
+  check('disconnect forgets the loop', G('loop') === null && G("$('loop_line').hidden") === true);
 }
 /* ── 9c. Contrast, measured: every text token against every surface it sits on, in both themes, ≥ 4.5:1; and no
  *        colour outside the token blocks — not in a CSS rule, not in an inline style, not in the script ── */
