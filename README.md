@@ -10,18 +10,13 @@ re-slice it.
 Audiothurgist is the Eurorack form of BreakFix
 (Daisy Pod), rebuilt for the [Alchemy Lab v2](https://hermeticmodular.com)
 (Daisy Seed 2 DFM, six pots with LED rings, three buttons, ten jacks, SD,
-USB). **Status: beta (firmware 0.13.0-beta).** The slicer and the CV keys
-are played daily; the sampler work (per-key settings, envelopes, choke
-groups, spread, Reclaim) is new and going through its first hardware pass
-(`docs/hardware-pass-beta.md`). The manual is in the firmware and on the
-page's Manual tab.
+USB). **Firmware 0.13.0-beta.** The manual is built into the firmware and
+shown on the page's Manual tab.
 
 **Quick start:** flash the firmware (*Flashing*, below), put breaks on a
 FAT32 card, and open the page —
 **[ernestg4.github.io/Audiothurgist](https://ernestg4.github.io/Audiothurgist/)**
-in Chrome or Edge — then Connect. The page and the firmware are built from
-the same commit and check each other: the published page always matches the
-newest `beta` build. **It powers up as a sampler**: Pads, the
+in Chrome or Edge — then Connect. **It powers up as a sampler**: Pads, the
 pattern stopped — play the 24 pads or the J4 keys, drop your own samples on
 the pads. For a beat, pick a mode (Classic · Grids · Loop) and press **▶**
 (or hold **B1** on the panel); ▶/■ starts and stops it from then on. ▶ or
@@ -130,10 +125,11 @@ and press ▶ — it comes in on the beat. Details: `docs/packages/pads.md`.
 
 1. Rack and power the module, panel USB-C to the computer.
 2. Open Hermetic's web flasher (`/program`) in Chrome or Edge and flash the
-   `.bin`: from [Releases](https://github.com/ErnestG4/Audiothurgist/releases)
-   once 0.13.0-beta is tagged, or `build/audiothurgist.bin` from *Building*.
-   Use the build that matches the page you open (the page says so in one line
-   if it doesn't, and won't connect).
+   `.bin` from [Releases](https://github.com/ErnestG4/Audiothurgist/releases),
+   or `build/audiothurgist.bin` from *Building*. The page at
+   [ernestg4.github.io/Audiothurgist](https://ernestg4.github.io/Audiothurgist/)
+   matches the latest release; if the module runs a different build, the page
+   tells you which to flash.
 3. FAT32 microSD with your breaks in `Audiothurgist/breaks/` — or upload
    them from the page (see *The card* below). 1 to 4 bar breaks are ideal.
 
