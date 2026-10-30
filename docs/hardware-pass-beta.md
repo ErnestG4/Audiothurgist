@@ -7,8 +7,8 @@ proves the ground under the next, so **stop and report at the first
 failure**. Write **ok** or what you saw next to each box. "Listen for" is what
 tells pass from fail.
 
-Setup: `audiothurgist-beta8-env-reclaim-f374aac.bin` from the Desktop's
-`Audiothurgist-flash/` flashed (md5 a66c0c45…), and the page from the same
+Setup: `audiothurgist-beta9-loopview-7e0b9ba.bin` from the Desktop's
+`Audiothurgist-flash/` flashed (md5 149c0aad…), and the page from the same
 commit (GitHub Pages after the push). The page checks the firmware's api
 number and refuses any other build, so the two always go together.
 **Flashing it drops the saved presets once**: each slot that has a backup on
