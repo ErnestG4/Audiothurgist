@@ -10,15 +10,23 @@ re-slice it.
 Audiothurgist is the Eurorack form of BreakFix
 (Daisy Pod), rebuilt for the [Alchemy Lab v2](https://hermeticmodular.com)
 (Daisy Seed 2 DFM, six pots with LED rings, three buttons, ten jacks, SD,
-USB). **Status: beta (firmware 0.13.0-beta).** It works and it is being
-played; the manual is in the firmware and on the page's Manual tab.
+USB). **Status: beta (firmware 0.13.0-beta).** The slicer and the CV keys
+are played daily; the sampler work (per-key settings, envelopes, choke
+groups, spread, Reclaim) is new and going through its first hardware pass
+(`docs/hardware-pass-beta.md`). The manual is in the firmware and on the
+page's Manual tab.
 
-**Quick start:** flash `audiothurgist.bin` (below), put breaks on a FAT32
-card, and open the page — [ernestg4.github.io/Audiothurgist](https://ernestg4.github.io/Audiothurgist/)
-in Chrome or Edge — then Connect. **It powers up as a sampler**: Pads, the
+**Quick start:** flash the firmware (*Flashing*, below), put breaks on a
+FAT32 card, and open the page —
+**[ernestg4.github.io/Audiothurgist](https://ernestg4.github.io/Audiothurgist/)**
+in Chrome or Edge — then Connect. The page and the firmware are built from
+the same commit and check each other: the published page always matches the
+newest `beta` build. **It powers up as a sampler**: Pads, the
 pattern stopped — play the 24 pads or the J4 keys, drop your own samples on
 the pads. For a beat, pick a mode (Classic · Grids · Loop) and press **▶**
-(or hold **B1** on the panel); ▶/■ starts and stops it from then on.
+(or hold **B1** on the panel); ▶/■ starts and stops it from then on. ▶ or
+B1 while still in Pads brings back the last mode — the boot preset's — so
+the panel alone gets from the sampler start to a beat.
 Options → Power-up → *Start In: As saved* (then save the preset) powers up
 in the preset's mode, running, instead. No module? Press **Demo** (or add `?demo=sampler` to the
 page's address).
@@ -121,9 +129,11 @@ and press ▶ — it comes in on the beat. Details: `docs/packages/pads.md`.
 ## Flashing
 
 1. Rack and power the module, panel USB-C to the computer.
-2. Open Hermetic's web flasher (`/program`) in Chrome or Edge and flash
-   `audiothurgist.bin` (a release build is attached to each tag; see
-   *Building* to make your own).
+2. Open Hermetic's web flasher (`/program`) in Chrome or Edge and flash the
+   `.bin`: from [Releases](https://github.com/ErnestG4/Audiothurgist/releases)
+   once 0.13.0-beta is tagged, or `build/audiothurgist.bin` from *Building*.
+   Use the build that matches the page you open (the page says so in one line
+   if it doesn't, and won't connect).
 3. FAT32 microSD with your breaks in `Audiothurgist/breaks/` — or upload
    them from the page (see *The card* below). 1 to 4 bar breaks are ideal.
 
@@ -283,14 +293,20 @@ tests/run.sh                         # host test suite (needs g++, ASan)
 ```
 
 The pure engine lives in `core/` (no hardware, no allocation); the Alchemy
-Lab shell is `src/audiothurgist.cpp`; `tests/` holds a grammar-hash gate,
-an engine suite, a clock suite and a scope suite under ASan/UBSan, plus
-corpus tools.
+Lab shell is `src/audiothurgist.cpp`; `tests/` holds the host suites under
+ASan/UBSan — the engine, grammars, clock, bars, classifier, scope, panel,
+keys, sets and persistence, the card, pads, per-key settings and Reclaim —
+plus corpus tools. `node web/selftest.mjs` runs the page against a fake
+module (`web/demo.js`) through real clicks, drags and drops, and checks the
+wire against the SDK's golden vectors.
 
 ## Documents
 
 `docs/audiothurgist-spec.md` (the design), `docs/lit-review-2026-09-05.md`
-(the literature behind the choices), `docs/packages/*.md` (each subsystem),
+(the literature behind the choices), `docs/packages/*.md` (each subsystem:
+`pads.md`, `keyp.md`, `chroma.md`, `card.md` for the sampler side),
+`docs/hardware-pass-beta.md` (the bench checklist), `docs/colors.md` (the
+page's colour-blind-safe palette),
 `docs/optimizations-2026-09-06.md`, and `docs/for-luke-getus-wrap.md`
 (a platform timer bug found along the way).
 
