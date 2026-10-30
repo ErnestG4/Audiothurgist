@@ -125,9 +125,88 @@ then release. `Reslice()` (B3) clears the loop with the punch bar in Play.
   mapping it to undo is the web phase's call.
 - **State tail byte 176**: `u8 looperEvents` (count, capped 255) after the
   jack map (175); `docs/round-plan-2026-09-06.md`'s table updated. Drawing
-  the events on the bar strip is the web phase.
+  the events on the bar strip is the web phase — LOOPVIEW, below.
 - **Manual**: the Play sentence in *languages* (Quantize, B2 undo, B3
   clear), the keymap's B2/B3 parentheticals, a Quantize entry in *options*.
+
+## The page's read (LOOPVIEW, branch `beta-loopview`, 2026-10-30)
+
+The bench finding with beta8: *"playing in the notes to the looper worked but
+didn't show on the page live."* The page had the count (tail 176) and nothing
+else; the free looper writes no steps, so Play's strip stayed empty. Now the
+page reads the list and draws it.
+
+**`0x6A GET_LOOP`** ← `[u16 offset]` → `u8 status, u16 n, u8 seq, u8 gen,
+u8 flags (b0 dirty), u16 offset, u8 count`, then `count ×` 6 bytes
+`{u16 phase × 65535, i8 key, i8 slice, u8 style & 0x7F, u8 gen}` — sorted by
+phase, ≤ 169 a reply at max_body 1024, so a full loop is two pages; an offset
+at or past `n` answers count 0. `gen` is the pass being recorded into, `dirty`
+whether anything is yet; B2's undo takes the highest `gen` present.
+`Looper::WritePage` (pure, a template over the writer, host-tested) writes it;
+`HandleLoop` calls it, out of line and `BB_COLD`.
+
+**The race.** The control thread reads `ev[]` while the audio thread may be
+inserting (Insert's memmove) or compacting (UndoLast). The codebase's display
+rule holds — a torn read is one frame of pixels, nothing is locked — with two
+guards: `n` is read once (a volatile read) and clamped to `kMax`, so the read
+never goes past `ev[256]`; a half-moved `phase` (any double, NaN included) is
+clamped into the u16 (`Looper::WirePhase`). A torn read does not stay on the
+page: `seq` goes into the head before any event is read, so a change during
+the read moves the tail's `loopSeq` past it and the page reads again.
+
+**`Looper::seq`** bumps with every change to the list: `Insert` (a record, a
+release, a loader's `Add`), `UndoLast`, `Clear`, `Adopt`, `RemapSlices` and the
+generation byte's renumbering — not on a plain wrap (closing a pass changes no
+event). The event count alone misses undo-then-record at the same count; `seq`
+does not. One byte, in the padding after `dirty`: `Engine` does not grow.
+
+**State tail 324..327** (`LoopTail`, out of line): `u8 loopSeq`, `u16
+loopPhase` (`barPhase × 65535`: the playhead the page sweeps between polls)
+and `u8 loopQuant` (Options → Quantize). The body is 328 bytes; **api 3**.
+
+**The page** (`web/index.html`, `drawLoopBar`): in Play with Quantize Off or
+8ths the ring and the strip show the loop, read again whenever `loopSeq`
+moves. The strip has a lane per class (other · hat · snare · kick, top to
+bottom); a hit is a mark at its phase in its key's class colour (the key
+resolved through the key table as it is now, as the replay does; a keyless
+event by its slice), lettered K / S / H / O when it is 11 px wide; a held note
+is a bar to its key's next release round the loop (`HL.loopNotes`; none yet:
+on to the end); a reversed hit is a ◀ wedge with its point on the hit, a
+ratchet is split in two — shape, not colour alone. The newest pass is drawn
+full and the older ones at 40 %, so Undo's target is visible before B2 is
+pressed; the line under the bar counts the events and what Undo takes. The
+ring is the same loop on a clock face (a track per class, dots, an arc per
+held note, the 16 steps as ticks, a hand for the playhead). The playhead is
+interpolated from the tail's phase at the rate it moved (seeded from the
+tempo) and redrawn every frame while the Play tab shows.
+
+**Steps and loop, one drawing at a time.** With Quantize 16ths the looper is
+silent (it neither records nor fires), so the bar is the steps, drawn as in
+every other grammar, and the line says the loop's events wait. In Off and
+8ths, steps punched earlier still play (Play's overlay), so they stay as
+faint blocks in their class lanes behind the loop's marks — never the two at
+full strength on top of each other.
+
+**The fake** (`web/demo.js`) is the looper now, not a step punch: PLAY_KEY in
+Play records at the fake's bar phase (8ths snapped, 1.0 → the downbeat), a
+held note with its release, a pass closes at the wrap, the crossed events
+replay (the fake voice; no key flash, as on the module), B2 undoes the newest
+pass, B3 clears in Play only, 256 at most, a set keeps the loop and loads it
+back as one pass, GET_LOOP and the tail as above.
+
+**Sizes.** `HandleLoop` 324 B, `LoopTail` 148 B, the `seq` bumps ~170 B. SRAM
+476 544 → 475 392 B (96.95 → 96.72 %): with the tail a call, the inliner gives
+`StateExt::Handle` 2 KB back.
+
+**Tests.** `engine_check` LOOPVIEW (+19): a page's bytes (the head, a held note
+and its release, a keyless call, the skip bit never on the wire), paging
+169 + 87 in order, offsets at and past `n`, a torn `n` of 300 and −5, NaN and
+out-of-range phases, `WirePhase`, and `seq` through a record, a release, a
+wrap (unmoved), an undo, undo-then-record at the same count, a remap, an adopt
+and a clear. `selftest` §7i (the protocol over the fake) and §9l (the page
+under the stub, pads pressed at set playhead positions: lanes, letters, class
+colours, the held span, newest bright and older dimmed, Undo, a reversed
+ratchet's wedge and gap, the playhead sweeping, Clear, Quantize 16ths).
 
 ## Tests (`tests/engine_check.cpp`, LOOPER sections; `tests/run.sh`)
 

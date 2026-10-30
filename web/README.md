@@ -15,9 +15,9 @@ panel that always says what B1/B2/B3 and the six knobs do right now**, a
 DC-coupled CV traces, zoom, trigger, ≤ 30 frames/s), the module's Options,
 and its manual. It speaks **HostLink over Web Serial** to
 the module's front USB-C — the same protocol Hermetic's `/program` uses —
-plus the firmware's `StateExt` (commands 0x60–0x69: the state, the envelope,
+plus the firmware's `StateExt` (commands 0x60–0x6A: the state, the envelope,
 the scope, the actions, the Kit's wave / table / hits reads, the card, the
-pads, the keys' settings). No dependencies, four static files (plus the
+pads, the keys' settings, Play's loop). No dependencies, four static files (plus the
 vendored Android polyfill), phone-friendly.
 
 **The page and the firmware ship together**, from this repo. On connect the
@@ -87,7 +87,7 @@ a clock at ×2, in Grids, with two motion locks; `?demo=ext,pending` leaves a
 ×4 switch waiting for its beat; `?demo=camp` starts in Camp; **`?demo=kit`**
 opens the Kit tab — the slice editor — on a swung 32-slice break with three keys already
 recorded (arm a key and the fake take runs armed → taking → pending →
-committed by itself; the looper count drifts up; every edit op, the audition
+committed by itself; a loop of three passes waits for Play — a kick, a reversed ratchet, a held note; every edit op, the audition
 voice and the tap mark answer as the firmware would); **`?demo=play`**
 starts in Play (an empty loop: what the pads play is written into it),
 **`?demo=pads`** in Pads with six autoslice markers already on the keys;
@@ -158,6 +158,23 @@ how it powers up), never an older firmware: there is none to model.
   3); in **Play / Pads** it is the kit instead, one column per key, lit as
   the key fires — no grid ghosts — and a click plays that key. `callFlash`
   is a slice: the steps that play it light, not step `callFlash`.
+- **The bar, in Play (Quantize Off / 8ths): the loop as it is.** Every hit
+  played in — from the pads, J4 or the panel — appears where it landed, the
+  moment it lands: on the strip, one lane per class (other · hat · snare ·
+  kick, top to bottom), each hit a mark in its key's class colour lettered
+  K / S / H / O where it is wide enough; a held note a bar from its note-on
+  to its release (round the loop's end when it crosses it); a reversed hit a
+  ◀ wedge whose point is the hit, a ratchet split in two. The **newest pass**
+  — what B2 / Undo takes — is drawn full, the older passes dimmed. The ring
+  is the same loop on a clock face: a track per class, a dot per hit, an arc
+  per held note, a hand for the playhead. The playhead sweeps between polls
+  (the tail's `loopPhase` and the rate it moves at). A line under the bar
+  counts the events and what Undo would take. Steps punched with Quantize
+  16ths still play in Off and 8ths: they stay behind the lanes as faint
+  blocks. With **Quantize 16ths** the looper is silent and the bar is the
+  steps, drawn as in every other grammar (the line says the loop waits).
+  The page reads the loop with `0x6A GET_LOOP` whenever the state's
+  `loopSeq` moves.
 - **The bar:** ring + strip with the playhead, plus grammar, classifier,
   chop, history, sample, page, **native BPM**, **grid** (bars · steps), the
   **Bars** option (editable here as well as in Options), and the clock line:
@@ -347,7 +364,7 @@ node web/selftest.mjs
 pins `hostlink.js` to the SDK's golden vectors
 (`../alchemy-sdk/tests/host/golden/hostlink_golden.json`: 11/11 — CRC32,
 COBS, the HELLO frame both ways — plus every recorded exchange frame and
-the golden descriptor), parses a synthetic 315-byte `GET_STATE` body field by
+the golden descriptor), parses a synthetic 328-byte `GET_STATE` body field by
 field (a shorter one is refused) plus `GET_WAVE`, `GET_TABLE` and `GET_HITS`
 bodies, and parses the SCOPE request / reply and plans frames at 512 / 1024 /
 2048,
@@ -377,7 +394,14 @@ cells, menu and panel. Then the transports (Link over a SerialTransport, bytesIn
 unplug as onClose, a WebSocket transport); the KEYS bytes and ACTION 32–36
 over the fake (the transport, pads, nested autoslice draws, re-roll, JOIN,
 in-place re-spans, markers → keys, clear markers, Pads' keys following,
-Play's loop); the **descriptor parity** — it parses `src/audiothurgist.cpp`
+Play's loop); LOOPVIEW: the tail's loop bytes, a `GET_LOOP` page, `loopNotes`, then
+the free looper over the fake (a held pad's note-on and release at the playhead, a
+pass closing at the wrap, the newest pass, B2's undo, undo-then-record at the same
+count, 8ths, the replay, 256 events in 169 + 87, a read torn between its pages, a
+set's loop, B3) and the page under the stub, pads pressed in Play at set playhead
+positions (the lanes, letters and class colours drawn, a held note's span, the
+newest pass bright and the older dimmed, Undo, a reversed ratchet's wedge, the
+playhead sweeping, Clear, Quantize 16ths handing the bar back to the steps); the **descriptor parity** — it parses `src/audiothurgist.cpp`
 (the Options block's ids, names, offsets, zones and enum labels, its size,
 hash and live defaults, the jacks, the pager's knobs, the descriptor root's
 `api` against `HL.API`) and fails when `demo.js` drifts (and proves the check
@@ -412,13 +436,13 @@ Start In on the Options tab, a mono and a stereo WAV (real RIFF bytes) dropped o
 sample for sample, both played from the page's pads, the kit turned stereo,
 normalise drops (remembered), Save set, a power-cycle on the same card with the
 page reconnected, Load set — the same pads, stereo, playing — and the flip to
-Classic, stopped until ▶. 733 checks. Pass `--golden <path>` if the SDK lives elsewhere (it is found
+Classic, stopped until ▶. 856 checks. Pass `--golden <path>` if the SDK lives elsewhere (it is found
 above a worktree too) and `--fw-src <file>` to check the parity against
 another firmware source (`git show beta-fw:src/audiothurgist.cpp > /tmp/f.cpp`).
 
 ## The GET_STATE body
 
-315 bytes, every field always there; the page refuses a shorter body (not
+328 bytes, every field always there; the page refuses a shorter body (not
 this firmware's).
 
 ```
@@ -448,6 +472,8 @@ u16 rootWavs u16 pending u16 breaks u8 lastIdx u16 copied u16 skipped
 u8 nFiles                                                         (276..292, CARD)
 u8 padState u8 padProgress u8 padResult u8 padSeq u8 padKey u8 padFlags
 u32 free u32 total u32 held u32 mask                              (293..314, PADS)
+u32 undoHeld u32 reclaimed u8 undoForgot                          (315..323, RECLAIM)
+u8 loopSeq u16 loopPhase u8 loopQuant                             (324..327, LOOPVIEW)
 ```
 
 `recState`: 0 idle · 1 armed (waiting for the gate) · 2 taking · 3 pending
@@ -471,7 +497,31 @@ module's journal depths in steps — Undo / Redo enable from them;
 `selSlice` is the panel's selection (255 none). `srcPos` is the material position of the youngest
 sounding voice (else the current step's source), snapshotted by the audio
 thread once per block — the Chop pad's display, and what a TAP_MARK is
-timestamped from.
+timestamped from. `loopSeq` (LOOPVIEW) bumps with every change to Play's
+loop — a hit, a release, an undo, a clear, a set load — so undo-then-record
+at the same count still moves it; `loopPhase` is the playhead (`barPhase` ×
+65535); `loopQuant` mirrors Options → Quantize (0 Off · 1 16ths · 2 8ths).
+
+## Play's loop (0x6A)
+
+```
+0x6A GET_LOOP  ← [u16 offset]
+               → u8 status, u16 n (≤ 256), u8 seq, u8 gen (the pass being recorded into),
+                 u8 flags (b0 something is recorded into it), u16 offset, u8 count,
+                 count × { u16 phase × 65535, i8 key (−1 keyless), i8 slice,
+                           u8 style (1 rev · 2 half · 4 double · 8 ratchet · 16 staccato
+                                     · 32 held · 64 release), u8 gen }
+```
+
+Sorted by phase, 6 bytes an event, ≤ 169 a reply at max_body 1024: a full
+loop is two requests (`HL.fetchLoop` pages with `offset`, and starts again
+when `seq` or `n` moved between pages). An offset at or past `n` answers
+count 0. The module reads its list unlocked while the audio thread may be
+inserting (a torn read is one frame of pixels: `seq` moves and the page
+reads again), but `n` is clamped to 256 and a half-moved phase to 0..65535.
+B2's undo takes the highest `gen` present; `HL.loopNotes` pairs each held
+note-on with its key's next release round the loop and marks that pass
+`newest`.
 
 ## The sample-mode commands (0x64–0x66)
 
@@ -710,7 +760,7 @@ number of bells, B2 rings the next change, Brain knobs unused).
 | labels, help, manual     | `0x02 GET_DESCRIPTOR`             | the module's own descriptor JSON; its `"api"` must be the page's |
 | option values            | `0x20 GET_LIVE`                   | at connect, before each write, on mismatch   |
 | option edits             | `0x12/0x13/0x14 BLOB_*` to `live` | audition; save a preset to keep it           |
-| bar / playhead / state   | `0x60 GET_STATE`                  | 10 Hz; the one 315-byte body                 |
+| bar / playhead / state   | `0x60 GET_STATE`                  | 10 Hz; the one 328-byte body                 |
 | waveform                 | `0x61 GET_ENV`                    | refetched when the material changes          |
 | scope (Play tab)         | `0x62 SCOPE` (empty body)         | 5 Hz while visible; 256 samples ×4 decimated |
 | scope (Scope tab)        | `0x62 SCOPE` (body)               | ≤ 30 frames/s; audio 4 × 253 or out L + 3 jacks × 252 per request at max_body 1024; trigger, peak, at-pos, the jacks' own decimation |
@@ -724,6 +774,7 @@ number of bells, B2 rings the next change, Brain knobs unused).
 | onset ticks              | `0x66 GET_HITS`                   | when `matGen` changes                        |
 | card: upload, copy, list | `0x67 CARD`                       | one job at a time; chunks of max_body − 24; state bytes 276.. report |
 | samples onto pads        | `0x68 PADS`                       | through the card's queue; raw PCM16; state bytes 293.. report |
+| Play's loop              | `0x6A GET_LOOP`                   | in Play, when the state's `loopSeq` moves; paged by offset (169 a reply) |
 
 Flashing, presets and settings stay in `/program`; this page is deliberately
 the *instrument* view.

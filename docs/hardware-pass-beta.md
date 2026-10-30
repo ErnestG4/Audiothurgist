@@ -68,6 +68,13 @@ rest of this pass boots as written.
       greyed.
 - [ ] **Loop** (Play grammar): the transport's Dice reads **Undo** and
       Reslice reads **Clear**, which asks before wiping the loop.
+- [ ] **Loop, played in** (Quantize Off; the LOOPVIEW build, api 3): play
+      a few pads or J4 notes over a bar, one of them held. *See*, as each
+      lands: a mark on the strip where you played it, in its key's class
+      colour and lane (the held one a bar to where you let go), a dot on the
+      ring, the playhead sweeping through them, and the line under the bar
+      counting them. Play one more on the next pass: it is bright, the rest
+      dim, and **Undo takes exactly the bright ones**. Clear empties the strip.
 - [ ] **Pads from the page**: press three pads with three fingers (phone)
       or one after another (mouse): each plays its key; a pad lights when
       the same key comes from J4. With Key Plays = Held a pad sounds until

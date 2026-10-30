@@ -90,7 +90,10 @@ What carries a meaning besides its colour:
 
 - **Classes.** The key cells always name the class (`0.375 s · hat`). The Play tab's bar strip letters each step
   K / S / H / O (new; drawn when a step is at least 9 px wide). The ring beside it shows the same 16 steps as the
-  strip.
+  strip. LOOPVIEW: Play's free loop on the same strip puts each class in its own **lane** (other · hat · snare · kick,
+  top to bottom; on the ring, its own track) and letters a mark at least 11 px wide; a reversed hit is a **◀ wedge**, a
+  ratchet is **split in two**, a held note is a **bar to its release** — and the newest pass is told from the older
+  ones by **brightness** (full / 40 %), which the line under the bar also counts in words.
 - **Marker kinds.** A marker you placed or moved is orange and solid. An untouched marker is grey and is now drawn
   **dotted** in the marker lane, with a **hollow** handle (new). Its key cell already had a dotted border, and the
   legend's swatch is now a dotted box to match. Recordings are labelled with their key, markers with `m<n>`, and grid
