@@ -7,7 +7,7 @@
  * BLOB writes) and the firmware's StateExt parsers (0x60–0x66: state, envelope,
  * scope — the small output trace and the ten-channel SCOPE body —, actions, the
  * sample-mode wave / table / hits reads, the set save / load, and CARD's 0x67:
- * a break uploaded from a file the browser decoded, an old card copied in).
+ * a break uploaded from a file the browser decoded, an old card copied in; LOOPVIEW's 0x6A: Play's loop).
  *
  * Plain script in the browser (globals via window.HL); CommonJS in node so
  * selftest.mjs can pin it to the SDK's golden vectors. No dependencies.
@@ -19,13 +19,14 @@ const PROTO = 1;
 /* The version of the firmware's side of everything below (the commands, the ops, the state body), from its descriptor
  * ("audiothurgist": { "api": n }, StateExt::DescriptorRootJson). The page and the firmware ship together; on connect the
  * page refuses any other number with one message — flash the matching .bin. Bump both with any change to the wire. */
-const API = 2;   /* 2: ENV — KEY_PARAMS / GET_KEYS carry each key's amp envelope and choke group; RECLAIM — 0x68 op 4, the state body to 324, sets saved packed */
+const API = 3;   /* 3: LOOPVIEW — 0x6A GET_LOOP, the state body to 328 (2: ENV's KEY_PARAMS / GET_KEYS, RECLAIM's 0x68 op 4, sets saved packed) */
 const apiOf = desc => (desc && desc.audiothurgist && Number.isInteger(desc.audiothurgist.api)) ? desc.audiothurgist.api : null;
 const CMD = {
   hello: 0x01, getDescriptor: 0x02, blobBegin: 0x12, blobData: 0x13, blobCommit: 0x14,
   getLive: 0x20, reboot: 0x40,
   state: 0x60, env: 0x61, scope: 0x62, action: 0x63, wave: 0x64, table: 0x65, hits: 0x66, card: 0x67, pads: 0x68,
   keys: 0x69,   /* KEYP: GET_KEYS — every key's gain / tune / plays (ENV: envelope, choke group) */
+  loop: 0x6A,   /* LOOPVIEW: GET_LOOP — Play's loop, a page of events */
 };
 const ACT = { dice: 0, reslice: 1, punch: 3, flow: 4, scrub: 5, load: 6, clearLocks: 7, page: 8,
   recArm: 9, recClear: 10, keyPlays: 11, looperUndo: 12, looperClear: 13, saveSet: 14, loadSet: 15,
@@ -326,7 +327,7 @@ function concat(parts) { const all = new Uint8Array(parts.reduce((s, p) => s + p
 /* ───────────── StateExt (0x60–0x63) ─────────────
  * GET_STATE body (after status), STATE_LEN bytes, every field always there: anything else is not this firmware's
  * (null). */
-const STATE_LEN = 324;
+const STATE_LEN = 328;
 const ZONE_MULT = [0.25, 0.5, 1, 2, 4];   /* P2 zones 0..4 while following: ÷4 ÷2 ×1 ×2 ×4 */
 function parseState(b) {
   if (!b || b.length < STATE_LEN) return null;
@@ -396,6 +397,9 @@ function parseState(b) {
       unsaved: !!(f & PADS.F.unsaved), noBreak: !!(f & PADS.F.noBreak), madeStereo: !!(f & PADS.F.madeStereo),
       free: u32(b, 299), total: u32(b, 303), held: u32(b, 307), mask: u32(b, 311),
       undoHeld: u32(b, 315), reclaimed: u32(b, 319), undoForgot: b[323] }; }
+  /* 324 LOOPVIEW: loopSeq (bumps with every change to Play's loop: GET_LOOP again), 325 loopPhase (the playhead, 0..1),
+   * 327 loopQuant (Options → Quantize: 0 Off · 1 16ths — the looper silent, the bar written step by step · 2 8ths) */
+  st.loopSeq = b[324]; st.loopPhase = u16(b, 325) / 65535; st.loopQuant = b[327];
   return st;
 }
 /* GET_WAVE: one window of the material buffer — n ≤ 480 output bytes, each
@@ -578,6 +582,58 @@ function spreadPlan(keySlice, entries, nSlices, root) {
 }
 /* key j's cents after a spread of a root tuned `rootCents` */
 const spreadCents = (j, root, rootCents = 0) => Math.max(-KEYP.centsMax, Math.min(KEYP.centsMax, (j - root) * 100 + rootCents));
+
+/* ───────────── LOOPVIEW (0x6A GET_LOOP) ─────────────
+ * Play's loop as the module holds it (core/bb_looper.h): ≤ 256 events sorted by phase, each { phase 0..1, key (-1 a
+ * keyless call), slice (the entry it was called with), style (LOOP's bits), gen (the pass it was recorded in) }. A
+ * reply is u8 status, u16 n, u8 seq, u8 gen (the pass being recorded into), u8 flags (b0 dirty: something is recorded
+ * into it), u16 offset, u8 count, then count × 6 bytes ({u16 phase × 65535, i8 key, i8 slice, u8 style, u8 gen});
+ * ≤ 169 a reply, so a full loop is two. fetchLoop pages through and starts again (≤ 3 times) when the loop changed
+ * between two pages (seq or n moved); the state tail's loopSeq says when to read it again. B2's undo takes the
+ * highest gen present: loopNotes marks those `newest`. */
+const LOOP = { rev: 1, half: 2, double: 4, ratchet: 8, staccato: 16, held: 32, release: 64, max: 256, perReply: 169, head: 9, ev: 6,
+  QUANT: ['Off (as played)', '16ths (punch the bar)', '8ths'] };
+function parseLoopPage(b) {
+  if (!b || b.length < LOOP.head) return null;
+  const count = b[8], events = [];
+  for (let i = 0; i < count && LOOP.head + (i + 1) * LOOP.ev <= b.length; i++) {
+    const o = LOOP.head + i * LOOP.ev, k = b[o + 2], s = b[o + 3];
+    events.push({ phase: u16(b, o) / 65535, key: k > 127 ? k - 256 : k, slice: s > 127 ? s - 256 : s, style: b[o + 4], gen: b[o + 5] });
+  }
+  return { n: u16(b, 1), seq: b[3], gen: b[4], dirty: !!(b[5] & 1), offset: u16(b, 6), count, events };
+}
+async function fetchLoop(link, opts = {}) {
+  let out = null;
+  for (let tries = 0; tries < 3; tries++) {
+    let off = 0, torn = false; out = null;
+    do {
+      const p = parseLoopPage(await link.request(CMD.loop, Uint8Array.of(off & 0xff, off >> 8), Object.assign({ key: 'loop' + off }, opts)));
+      if (!p) throw new Error('short GET_LOOP reply');
+      if (!out) out = { n: p.n, seq: p.seq, gen: p.gen, dirty: p.dirty, events: [] };
+      else if (p.seq !== out.seq || p.n !== out.n) { torn = true; break; }
+      out.events.push(...p.events); off += p.events.length;
+      if (!p.events.length) break;
+    } while (off < out.n);
+    if (!torn) break;
+  }
+  return out;
+}
+/* The loop as notes, for drawing: every event but the releases, each with `end` — a held note's release phase (the
+ * first release of its key after it, round the loop; null when none is recorded yet: it holds on), and `newest` — in
+ * the highest pass present, what B2's undo takes. → { notes, top (that pass, -1 empty), newest (its events, releases
+ * included, as Undo counts them) } */
+function loopNotes(events) {
+  let top = -1; for (const e of events) if (e.gen > top) top = e.gen;
+  const n = events.length, notes = []; let newest = 0;
+  for (let i = 0; i < n; i++) {
+    const e = events[i]; if (e.gen === top) newest++;
+    if (e.style & LOOP.release) continue;
+    let end = null;
+    if (e.style & LOOP.held) for (let j = 1; j < n; j++) { const r = events[(i + j) % n]; if ((r.style & LOOP.release) && r.key === e.key) { end = r.phase; break; } }
+    notes.push({ phase: e.phase, key: e.key, slice: e.slice, style: e.style, gen: e.gen, end, newest: e.gen === top });
+  }
+  return { notes, top, newest };
+}
 
 /* ───────────── CARD (0x67) ─────────────
  * The card is one folder, Audiothurgist/: breaks/*.wav (the list), sets/, presets/. The page turns any file the
@@ -900,6 +956,7 @@ const api = { PROTO, API, apiOf, CMD, ACT, REC, NOTE_NAMES, keyName, STATUS, sta
   CARD, breakNameOk, breakName, uploadPlan, encodeWav, serial, uploadBreak, copyOldCard, cardRescan, cardList,
   PADS, padPlan, encodePcm16, padNormalize, uploadPad, newKit, reclaimPads, padReclaimFor,
   KEYP, keyParams, parseKeyParams, fetchKeyParams, keypNeutral, keypZero, keypText, keypGainText, keypTuneText, keypMsText, keypSusText, keypEnvText, envMs, envPos,
-  CHROMA, spreadKeys, spreadPlan, spreadCents };
+  CHROMA, spreadKeys, spreadPlan, spreadCents,
+  LOOP, parseLoopPage, fetchLoop, loopNotes };
 if (typeof module === 'object' && module.exports) module.exports = api; else root.HL = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
