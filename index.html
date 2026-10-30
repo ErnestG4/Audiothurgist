@@ -530,10 +530,10 @@
   <section class="wide"><h2>Manual</h2><div id="manual" class="man"><p class="note">Connect to read the module's manual from its descriptor.</p></div></section>
 </main>
 
-<footer>Runs over the module's front USB-C. Hermetic's <code>/program</code> keeps flashing, presets and settings; this page is the instrument's window. <span title="the commit this page was published from (web/publish-pages.sh stamps it); local when opened from the repo">page <!--page-build--><b>local</b></span> · <a href="https://github.com/ErnestG4/Audiothurgist">github.com/ErnestG4/Audiothurgist</a></footer>
+<footer>Runs over the module's front USB-C. Hermetic's <code>/program</code> keeps flashing, presets and settings; this page is the instrument's window. <span title="the commit this page was published from (web/publish-pages.sh stamps it); local when opened from the repo">page <!--page-build--><b>2e62ae3</b></span> · <a href="https://github.com/ErnestG4/Audiothurgist">github.com/ErnestG4/Audiothurgist</a></footer>
 
-<script src="hostlink.js"></script>
-<script src="edit.js"></script>
+<script src="hostlink.js?v=2e62ae3"></script>
+<script src="edit.js?v=2e62ae3"></script>
 <!-- Web Serial on top of WebUSB for Chrome on Android (desktop Chromium has
      navigator.serial and never loads this). A module script so the vendored
      file stays byte-for-byte upstream; it fails quietly on file://. -->
@@ -544,7 +544,7 @@
   }
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('./sw.js').catch(() => {});
 </script>
-<script src="demo.js"></script>
+<script src="demo.js?v=2e62ae3"></script>
 <script>
 'use strict';
 const { CMD, ACT, REC, KEYS, ZONE_MULT, keyName, Link, hello, getDescriptor, getLive, setLive, parseState, fetchEnv, parseScope, SCOPE, SCOPE_CH, SCOPE_JACK_ROLE, SCOPE_JACK_IN, scopeVolts, scopePlan, fetchScopeFrame, fetchWave, fetchTable, fetchHits, fieldLabels, pagerInfo, optionsInfo, manualInfo, SET_STATE, SET_RESULT, setNameOk, setLabelName, saveSet, loadSet, playKey, setMute, CARD } = HL;
