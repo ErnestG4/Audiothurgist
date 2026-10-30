@@ -308,8 +308,10 @@
       <div style="flex:1;min-width:200px">
         <canvas id="strip" style="height:56px"></canvas>
         <div class="legend" style="margin-top:6px">
-          <span><i class="sw-kick"></i>kick</span><span><i class="sw-snare"></i>snare</span><span><i class="sw-hat"></i>hat</span><span><i class="sw-other"></i>other</span><span><i class="sw-play"></i>playhead</span><span><i class="sw-call"></i>call / punch</span>
+          <span><i class="sw-kick"></i>kick</span><span><i class="sw-snare"></i>snare</span><span><i class="sw-hat"></i>hat</span><span><i class="sw-other"></i>other</span><span><i class="sw-play"></i>playhead</span><span id="lg_call"><i class="sw-call"></i>call / punch</span>
         </div>
+        <div id="loop_key" class="legend" style="margin-top:4px" hidden><span>▮ a hit</span><span>▬ held, to its release</span><span>◀ reversed</span><span>‖ ratchet</span><span><b>bright</b>: the newest pass (Undo takes it) · dim: older ones</span></div>
+        <p id="loop_line" class="note" style="margin:6px 0 0" role="status" hidden>—</p>
         <div class="kv" style="margin-top:8px">
           <span>classifier</span><b id="k_cls">—</b><span>chop</span><b id="k_chop">—</b><span>history</span><b id="k_hist">—</b>
           <span>sample</span><b id="k_file">—</b><span>native</span><b id="k_native">—</b><span>grid</span><b id="k_grid">—</b>
@@ -587,6 +589,11 @@ let demoDevice = null, demoPort = null;
 let table = null, tableSig = '', bufSig = '', hits = null, hitsGen = -1, selKey = 0, kitShown = false;
 /* EDIT-UI: the onset threshold for the histogram, the key armed for a copy (long-press). */
 let edThresh = 128, copyArm = -1;
+/* LOOPVIEW: Play's loop as GET_LOOP last read it ({ n, seq, gen, dirty, events }) and its playhead — the tail's
+ * loopPhase at the last state, when it came, and the rate it moves at (loop lengths a second), so the strip and the
+ * ring can sweep between two polls. */
+let loop = null;   /* + view: HL.loopNotes of its events, once per read */
+const lp = { ph: 0, t: 0, rate: 0 };
 /* Sets: the last op's sequence the page has shown, and the op it asked for. */
 let setSeqShown = -1, setAsked = null;
 const view = { a: 0, b: 1 };
@@ -667,7 +674,8 @@ function drawAll(m) {
   if (m & D.transport) drawTransport();
   if (!st) return;
   const ns = Math.max(1, st.nSlices), cur = Math.min(st.cur, ns - 1), base = Math.floor(cur / 16) * 16, pads = st.grammar === GR.pads;
-  if (m & D.bar) {
+  if ((m & D.bar) && loopView(st)) { drawLoopBar(); if (playShown()) invalidate(D.bar); }   /* LOOPVIEW: the playhead sweeps every frame */
+  else if (m & D.bar) {
     const [g, w, h] = ctx($('ring')); g.clearRect(0, 0, w, h); const cx = w / 2, cy = h / 2, R = Math.min(w, h) * 0.42;
     for (let i = 0; i < 16; i++) { const s = base + i, a = -Math.PI / 2 + i * Math.PI * 2 / 16; let col = stepColor(s);
       if (calledStep(s)) col = TOK['cv-call']; else if (s === cur) col = TOK['cv-play'];
@@ -702,6 +710,85 @@ function drawGridSlices(g, w, h, ns, cur) {
   if (hits && gridTable()) { g.fillStyle = TOK['cv-call']; for (const p of hits) { if (p >= st.bufLen) break; const x = p / st.bufLen * w; g.fillRect(x - 1, 0, 3, 6); } }
   if (playing >= 0 && playing < ns) { const x0 = sliceX(playing, w), x1 = sliceX(playing + 1, w); g.strokeStyle = TOK['cv-play']; g.lineWidth = 2; g.strokeRect(x0 + 1, 1, Math.max(1, x1 - x0 - 2), h - 2); }
   if (selSlice >= 0) { const x0 = sliceX(selSlice, w), x1 = sliceX(selSlice + 1, w); g.strokeStyle = TOK['cv-sel']; g.lineWidth = 2; g.setLineDash([4, 3]); g.strokeRect(x0 + 1, 1, Math.max(1, x1 - x0 - 2), h - 2); g.setLineDash([]); }
+}
+/* ───────────── LOOPVIEW: Play's free loop on the bar (Quantize Off / 8ths) ─────────────
+ * What the looper holds, drawn where it plays: on the strip, one lane per class (other · hat · snare · kick, top to
+ * bottom), each hit a mark at its phase in its key's class colour with the K / S / H / O letter where it is wide
+ * enough, a held note a bar from its note-on to its release (wrapping round the loop's end; no release yet: on to
+ * the end, open), a reversed hit a ◀ wedge whose point is the hit, a ratchet split in two ‖ — shape as well as
+ * colour. The newest pass (the highest gen: what B2's undo takes) is drawn full, older passes dimmed. Steps punched
+ * earlier (Quantize 16ths) still play in Off and 8ths: they stay behind as faint blocks. The ring is the same loop
+ * round a clock face: one track per class, a dot per hit, an arc per held note, the 16 steps as ticks, and a hand
+ * for the playhead. With Quantize 16ths the looper is silent and the bar is the steps (the drawing above). */
+const loopView = s => !!s && s.grammar === GR.play && s.loopQuant !== 1;
+const playShown = () => $('play').classList.contains('show') && document.visibilityState !== 'hidden';
+const LOOP_ROW = c => 3 - c;   /* kick at the bottom, other on top */
+function loopClass(n) { const t = n.key >= 0 ? (st.keySlice ? st.keySlice[n.key] : -1) : n.slice; return table && t >= 0 && t < table.entries.length ? table.entries[t].cls & 3 : 3; }
+/* the tail's loopPhase at each state, and the rate it moved at since the one before (smoothed; seeded from the tempo:
+ * the loop is nSlices 16ths) */
+function loopClock(s) {
+  const now = performance.now(), ph = s.loopPhase, seed = s.bpm > 0 && s.nSlices > 0 ? s.bpm * 4 / 60 / s.nSlices : 0;
+  if (lp.t && now - lp.t > 20 && now - lp.t < 500) { let d = ph - lp.ph; if (d < -0.5) d += 1; if (d >= 0 && d < 0.5) { const r = d / ((now - lp.t) / 1000); lp.rate = lp.rate ? lp.rate * 0.8 + r * 0.2 : r; } }
+  else if (!lp.rate) lp.rate = seed;
+  if (seed && (lp.rate > seed * 3 || lp.rate < seed / 3)) lp.rate = seed;   /* a stall or a jump: back to the tempo */
+  lp.ph = ph; lp.t = now;
+}
+const loopPhaseNow = () => { const dt = Math.min(0.3, Math.max(0, (performance.now() - lp.t) / 1000)); const p = lp.ph + lp.rate * dt; return p - Math.floor(p); };   /* the clock runs on while stopped: so does the playhead */
+/* a mark: rect, or a ◀ wedge for a reversed hit (its point at x), split for a ratchet */
+function loopMark(g, x, y, w, h, style) {
+  if (style & HL.LOOP.rev) { const hw = Math.min(w, h * 0.8); g.beginPath(); g.moveTo(x, y + h / 2); g.lineTo(x + hw, y); g.lineTo(x + hw, y + h); g.closePath(); g.fill(); if (w > hw) g.fillRect(x + hw, y, w - hw, h); }
+  else g.fillRect(x, y, w, h);
+  if ((style & HL.LOOP.ratchet) && w >= 5) { const f = g.fillStyle; g.fillStyle = TOK['cv-bg']; g.fillRect(x + Math.max(2, Math.min(w, 14) / 2) - 1, y, 2, h); g.fillStyle = f; }
+}
+function drawLoopBar() {
+  const ns = Math.max(1, st.nSlices), L = loop ? loop.view : { notes: [], top: -1, newest: 0 }, ph = loopPhaseNow();
+  /* the strip */
+  const [g, w, h] = ctx($('strip')); g.clearRect(0, 0, w, h);
+  const top = 3, lh = (h - 6) / 4, stepW = w / ns, mw = Math.max(5, Math.min(24, stepW * 0.6));
+  for (let r = 0; r < 4; r++) { g.fillStyle = TOK['cv-lane']; g.fillRect(0, top + r * lh + 0.5, w, lh - 1); }
+  for (let s = 0; s < ns; s++) { const x = s * stepW, c = stepCls(s);
+    if (c >= 0) { g.fillStyle = COL[c]; g.globalAlpha = 0.16; g.fillRect(x + 1, top + LOOP_ROW(c) * lh, Math.max(1, stepW - 2), lh); g.globalAlpha = 1; }   /* a punched step still playing */
+    g.fillStyle = s % 4 === 0 ? TOK['cv-grid'] : TOK['cv-grid2']; g.fillRect(x, 0, 1, h); }
+  g.font = '700 9px system-ui'; g.textAlign = 'center';
+  for (const n of L.notes) {
+    const c = loopClass(n), y = top + LOOP_ROW(c) * lh + 1, mh = lh - 2, x0 = n.phase * w;
+    const span = (n.style & HL.LOOP.held) ? (n.end == null ? 1 - n.phase : ((n.end - n.phase + 1) % 1)) : 0;
+    const pieces = span * w > mw ? (n.phase + span <= 1 ? [[x0, span * w]] : [[x0, w - x0], [0, (n.phase + span - 1) * w]]) : [[x0, Math.min(mw, w - x0)]];
+    g.globalAlpha = n.newest ? 1 : 0.4; g.fillStyle = COL[c];
+    pieces.forEach(([x, pw], i) => { loopMark(g, x, y, pw, mh, i ? n.style & ~(HL.LOOP.rev | HL.LOOP.ratchet) : n.style);
+      if (pw >= 11 && mh >= 9) { g.fillStyle = TOK['cv-bg']; g.fillText(CLS_NAME[c][0].toUpperCase(), x + Math.min(pw, mw + 4) / 2 + ((n.style & HL.LOOP.rev) && !i ? 2 : 0), y + mh / 2 + 3); g.fillStyle = COL[c]; } });
+    if ((n.style & HL.LOOP.held) && n.end == null) { g.strokeStyle = COL[c]; g.lineWidth = 1; g.setLineDash([3, 2]); g.strokeRect(w - 2, y, 1, mh); g.setLineDash([]); }   /* no release yet: it holds on */
+    g.globalAlpha = 1;
+  }
+  { const x = ph * w; g.fillStyle = TOK['cv-play']; g.fillRect(Math.min(w - 2, x), 0, 2, h); }
+  /* the ring */
+  const [r, rw, rh] = ctx($('ring')); r.clearRect(0, 0, rw, rh); const cx = rw / 2, cy = rh / 2, R = Math.min(rw, rh) * 0.42;
+  const ang = p => -Math.PI / 2 + p * Math.PI * 2, rad = c => R * (0.98 - 0.15 * LOOP_ROW(c)) - 2;
+  for (let i = 0; i < 16; i++) { const s = Math.floor(i * ns / 16), a = ang(i / 16), c = stepCls(s);
+    r.beginPath(); r.arc(cx + Math.cos(a) * R * 1.12, cy + Math.sin(a) * R * 1.12, i % 4 === 0 ? 2.5 : 1.5, 0, Math.PI * 2); r.fillStyle = c >= 0 ? COL[c] : TOK['cv-grid']; r.fill(); }
+  for (let c = 0; c < 4; c++) { r.beginPath(); r.arc(cx, cy, rad(c), 0, Math.PI * 2); r.strokeStyle = TOK['cv-lane']; r.lineWidth = 6; r.stroke(); }
+  r.lineCap = 'round';
+  for (const n of L.notes) {
+    const c = loopClass(n), a = ang(n.phase), rr = rad(c); r.globalAlpha = n.newest ? 1 : 0.4;
+    if (n.style & HL.LOOP.held) { const e = n.end == null ? 1 : (n.end < n.phase ? n.end + 1 : n.end); r.beginPath(); r.arc(cx, cy, rr, a, ang(Math.max(e, n.phase + 0.004))); r.strokeStyle = COL[c]; r.lineWidth = 5; r.stroke(); }
+    r.beginPath(); r.arc(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr, 3.5, 0, Math.PI * 2); r.fillStyle = COL[c]; r.fill(); r.globalAlpha = 1;
+  }
+  r.lineCap = 'butt';
+  { const a = ang(ph); r.beginPath(); r.moveTo(cx + Math.cos(a) * R * 0.5, cy + Math.sin(a) * R * 0.5); r.lineTo(cx + Math.cos(a) * R * 1.12, cy + Math.sin(a) * R * 1.12); r.strokeStyle = TOK['cv-play']; r.lineWidth = 2; r.stroke(); }
+  r.fillStyle = TOK['cv-ink']; r.textAlign = 'center'; r.font = '600 20px system-ui'; r.fillText(st.bpm.toFixed(0), cx, cy + 4);
+  r.font = '11px system-ui'; r.fillStyle = TOK['cv-ink2']; r.fillText(st.muted ? 'STOPPED' : (st.mult !== 1 ? multLabel(st.mult) : 'BPM'), cx, cy + 19);
+}
+/* the Play tab's line about the loop: its size and what Undo would take; with Quantize 16ths, that it waits silent */
+function drawLoopText() {
+  const play = !!st && st.grammar === GR.play, lv = loopView(st);
+  $('loop_line').hidden = !play; $('loop_key').hidden = !lv; $('lg_call').hidden = lv;
+  if (!play) return;
+  const n = loop ? loop.n : st.looperEvents, L = loop ? loop.view : null, ev = k => `${k} event${k === 1 ? '' : 's'}`;
+  let t;
+  if (!lv) t = n ? `Quantize 16ths: the bar is written step by step; the loop's ${ev(n)} wait silent (Quantize Off or 8ths plays them).` : 'Quantize 16ths: each hit punches the step it lands on.';
+  else if (!n) t = `The loop is empty — play the pads or J4 and every hit is written where you play it${st.loopQuant === 2 ? ' (to the nearest 8th)' : ''}, then replays every pass.`;
+  else t = `${ev(n)} in the loop${L && L.newest < n ? ` · the newest pass (bright): ${ev(L.newest)} — Undo takes those` : ' · one pass so far: Undo takes it all'}${st.loopQuant === 2 ? ' · 8ths' : ''}.`;
+  setText('loop_line', t);
 }
 /* Play and Pads: no grid ghosts. The kit instead — one column per key with what it plays (a slice's envelope, a
  * marker, a recording), lit as the key fires from any source (keyFlash / keySeq, else the callFlash entry). */
@@ -765,6 +852,7 @@ function drawText() {
   setPill('syncpill', st.ext ? (st.locked ? 'clock locked' : 'clock following') : 'clock internal', st.ext ? (st.locked ? 'ok' : 'warn') : '');
   const hs = $('hist'); if (document.activeElement !== hs) { const mx = Math.max(0, st.histN - 1), v = Math.max(0, st.histN - 1 - st.histDepth); if (+hs.max !== mx) hs.max = mx; if (+hs.value !== v) hs.value = v; }
   const sel = $('sample'); if (document.activeElement !== sel && st.file !== 255 && sel.value !== String(st.file)) sel.value = String(st.file);
+  drawLoopText();
   drawCpu();
 }
 /* The CPU meter: the audio callback's mean (the bar) and peak (the tick) over the last second against the block's
@@ -1206,7 +1294,7 @@ const popcount = n => { let c = 0; while (n) { c += n & 1; n >>= 1; } return c; 
  * State ~10 Hz, scope ~5 Hz while visible, envelope only when matGen moves.
  * Each stream keeps at most one request outstanding; user actions go out
  * `urgent` and are pumped before any queued poll. Paused while hidden. */
-const poll = { on: false, timer: null, tState: 0, tScope: 0, tLink: 0, tWave: 0, pState: null, pScope: null, pEnv: null, pLive: null, pTable: null, pHits: null, pWave: null };
+const poll = { on: false, timer: null, tState: 0, tScope: 0, tLink: 0, tWave: 0, pState: null, pScope: null, pEnv: null, pLive: null, pTable: null, pHits: null, pWave: null, pLoop: null };
 const STATE_MS = 100, SCOPE_MS = 200, SCOPE_TAB_STATE_MS = 250;   /* the Scope tab eases the state poll to 4 Hz */
 function startPolling() { poll.on = true; poll.tState = poll.tScope = 0; tick(); }
 function stopPolling() { poll.on = false; clearTimeout(poll.timer); }
@@ -1241,6 +1329,10 @@ function onState(b) {
   }
   /* KEYS: a key call from anywhere (CV, the panel, a pad) — keySeq bumps, keyFlash names the key */
   if (p && s.keySeq !== p.keySeq && s.keyFlash >= 0) flashKey(s.keyFlash);
+  /* LOOPVIEW: in Play, read the loop again whenever its seq moves (and once on the way in); the playhead's clock */
+  if (s.grammar === GR.play && (!loop || loop.seq !== s.loopSeq) && !poll.pLoop) poll.pLoop = HL.fetchLoop(link).then(r => { r.view = HL.loopNotes(r.events); loop = r; invalidate(D.bar | D.text); }, e => warn('loop', e)).finally(() => { poll.pLoop = null; });
+  loopClock(s);
+  if (p && p.loopQuant !== s.loopQuant) m |= D.bar;
   if (s.matGen !== envGen && !poll.pEnv) { const gen = s.matGen; poll.pEnv = fetchEnv(link, s.nSlices).then(e => { env = e; envGen = gen; selSlice = -1; invalidate(D.wave); }, e => warn('env', e)).finally(() => { poll.pEnv = null; }); }
   syncKit(s);
   drawCard();
@@ -2225,6 +2317,7 @@ function setDisconnected() {
   table = null; tableSig = ''; bufSig = ''; hits = null; hitsGen = -1; wave.cache.clear(); wave.queue.length = 0; wave.planSig = ''; keyCells.forEach(c => { c.sig = ''; });
   copyArm = -1; ed.selT = -1; ed.drag = null; ed.local = null; ed.history = new ED.History(); histSig = fieldSig = ''; closeMenu(); ghost(null); dropHi(-1); setConnectedUi(false);
   setSeqShown = -1; setAsked = null; setPill('s_status', '—', ''); $('s_save').disabled = $('s_load').disabled = true;
+  loop = null; lp.t = lp.rate = 0; $('loop_line').hidden = $('loop_key').hidden = true; $('lg_call').hidden = false;   /* LOOPVIEW */
   kpClose(); keyp = null; keypGen = -1; kpWant = null; kpBusy = false; kpDrag = false; kpOwnGen = -1;   /* KEYP (ENV: the sheet closes) */
   $('pd_sampler').hidden = true; $('mode_cue').hidden = true; lastText.delete('mode_cue'); for (const j of padJobs) j.cancelled = true; padJob.fill(null); $('pd_unsaved').hidden = true; $('pd_msg').hidden = true;
   for (const j of cardJobs) j.cancelled = true; $('cardnote').hidden = true;
@@ -2361,7 +2454,7 @@ async function connectDemo(flags = '') {
   if (f.has('scope')) showTab('tab_scope');
   if (f.has('cv')) $('sc_p_cv').onclick(); if (f.has('gates')) $('sc_p_gates').onclick();
   if (f.has('card')) setTimeout(() => { if (demoDevice === d) cardShowPanel(); }, 0);
-  if (f.has('kit')) { showTab('tab_kit'); setInterval(() => { if (demoDevice === d && d.looperEvents < 16 && Math.random() < 0.5) d.looperEvents++; }, 3000); }
+  if (f.has('kit')) showTab('tab_kit');
   if (f.has('brain')) d.brain = true;
   if (f.has('ext')) { d.ext = true; d.locked = true; d.mult = 2; d.multZone = 3; d.p2Engaged = true; }
   if (f.has('pending')) { d.multZone = 4; d.pending = true; }

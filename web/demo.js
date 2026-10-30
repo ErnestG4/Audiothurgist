@@ -12,7 +12,7 @@
 (function (root) {
 'use strict';
 const HL = typeof module === 'object' && module.exports ? require('./hostlink.js') : root.HL;
-const { CMD, crc32, buildFrame, FrameParser, u16, u32 } = HL;
+const { CMD, crc32, buildFrame, FrameParser, u16, u32, LOOP } = HL;
 
 /* The Options block as src/audiothurgist.cpp's Options::Describe writes it — id, name, the enum labels (each
  * field's `zones` is the label count), byte = index, and the live default from the struct initialisers
@@ -179,10 +179,14 @@ class FakeDevice {
     this.options[O['start.in']] = this.opts.startIn ? 1 : 0;
     this.desc = new TextEncoder().encode(JSON.stringify(buildDescriptor(this.files, this.opts.api)));
     /* KEYS: the pad / CV voice (the key, when it started, its span, until when it sounds — Infinity while a held key is
-     * down), the key-call flash and sequence, the play loop's events (Play: each write, for B2's undo), the autoslice
-     * seed and count, the selection the panel publishes (tail 257), and the last position something sounded at
-     * (srcPos holds still while nothing does — the Chop pad's guard). */
-    this.voice = null; this.ringing = []; this.keyFlash = 255; this.keySeq = 0;   /* ENV: ringing — every key call still sounding (its key, group, until when) */ this.loopEvents = []; this.autoSeed = 1; this.autoK = 0; this.selSlice = 255; this.lastSrcPos = 0;
+     * down), the key-call flash and sequence, the autoslice seed and count, the selection the panel publishes (tail
+     * 257), and the last position something sounded at (srcPos holds still while nothing does — the Chop pad's guard). */
+    this.voice = null; this.ringing = []; this.keyFlash = 255; this.keySeq = 0;   /* ENV: ringing — every key call still sounding (its key, group, until when) */ this.autoSeed = 1; this.autoK = 0; this.selSlice = 255; this.lastSrcPos = 0;
+    /* LOOPVIEW: Play's free looper as core/bb_looper.h keeps it — events sorted by phase { phase, key, slice, style,
+     * gen, skip (the pass whose crossing it sits out: recorded live, it already sounded) }, the pass being recorded
+     * into and whether anything was, the keys whose held note awaits its release, the change sequence (tail 324), and
+     * where the playhead was at the last look (loopTick: a wrap closes the pass, the crossed events replay). */
+    this.loop = { ev: [], gen: 0, dirty: false, held: 0, seq: 0, pass: null, beat: null };
     /* EDIT: the table generation (never 0), the audition voice's last request, its rate window and the request held
      * for it (ten a second; a later one replaces), and how many went out. */
     this.tableGen = 1; this.audition = null; this.auditionAt = -1e9; this.auditionHeld = null; this.auditionPosted = 0;
@@ -209,12 +213,12 @@ class FakeDevice {
     this.padUp = { open: false, key: -1, ch: 1, frames: 0, total: 0, have: 0, start: 0, last: 0, bytes: null };
     this.padOp = { state: 0, progress: 0, result: 0, seq: 0, key: 255, t: 0, job: null };
     this.table = []; this.keySlice = new Int8Array(KEYS); this.hits = [];
-    this.rec = { state: 0, key: -1, t: 0, pos: 0 }; this.inLevel = 0; this.looperEvents = 0;
+    this.rec = { state: 0, key: -1, t: 0, pos: 0 }; this.inLevel = 0;
     /* SETS: the card's sets (name → a snapshot of everything a set carries) and the op in flight,
      * driven by time on each state poll: pending → saving / loading for 600 ms → done (seq bumps). */
     this.sets = new Map(); this.set = { state: 0, progress: 0, result: 0, seq: 0, name: '', t: 0, pending: null };
     this.newMaterial(); this.cardIdentity(this.bufLen);
-    if (this.opts.kit) { this.recordKey(3, 0.35, 0); this.recordKey(7, 0.9, 1); this.recordKey(14, 1.6, 2); this.looperEvents = 3; this.sets.set('amen_kit', this.snapshot()); }
+    if (this.opts.kit) { this.recordKey(3, 0.35, 0); this.recordKey(7, 0.9, 1); this.recordKey(14, 1.6, 2); this.kitLoop(); this.sets.set('amen_kit', this.snapshot()); }
     this.blob = null;
     this.boot();
   }
@@ -234,7 +238,7 @@ class FakeDevice {
   snapshot() {
     const R = this.reclaimRuns(false), at = p => this.reclaimMap(R, p), pack = pl => { const o = new Float32Array(R.newFree); for (const r of R.runs) o.set(pl.subarray(r.a, r.b), r.dst); return o; };
     return { nSlices: this.nSlices, bufLen: this.bufLen, freePos: R.newFree, table: this.table.map((e, t) => Object.assign({}, e, t >= this.nSlices ? { start: at(e.start) } : {})),
-      keySlice: Int8Array.from(this.keySlice), hits: this.hits.slice(), looperEvents: this.looperEvents, options: Uint8Array.from(this.options),
+      keySlice: Int8Array.from(this.keySlice), hits: this.hits.slice(), loop: this.loop.ev.map(e => Object.assign({}, e, { skip: null })), options: Uint8Array.from(this.options),
       buf: pack(this.buf), src: Int8Array.from(this.src), stepClass: Uint8Array.from(this.stepClass), env: Uint8Array.from(this.env),
       bufR: this.stereo && this.bufR ? pack(this.bufR) : null, stereo: this.stereo, noBreak: this.noBreak,
       keyp: this.keyp.map(p => Object.assign({}, p)),   /* KEYP: the set JSON's "keyp" */
@@ -242,7 +246,7 @@ class FakeDevice {
   }
   restore(sn) {
     this.opts.nSlices = sn.nSlices; this.bufLen = sn.bufLen; this.freePos = sn.freePos; this.table = sn.table.map(e => Object.assign({}, e));
-    this.keySlice.set(sn.keySlice); this.hits = sn.hits.slice(); this.looperEvents = sn.looperEvents; this.options.set(sn.options);
+    this.keySlice.set(sn.keySlice); this.hits = sn.hits.slice(); this.loopAdopt(sn.loop || []); this.options.set(sn.options);
     this.buf.fill(0); this.buf.set(sn.buf); this.src.set(sn.src); this.stepClass.set(sn.stepClass); this.env.set(sn.env);
     /* PADS: a stereo set keeps its R plane (Sampling = Stereo); an empty kit's stub is recognised by its silence */
     this.stereo = !!(sn.stereo && sn.bufR) && this.options[O.sampling] === 1; if (this.stereo) { this.bufR = new Float32Array(BUF_CAP); this.bufR.set(sn.bufR); }
@@ -426,7 +430,7 @@ class FakeDevice {
     for (let s = 16; s < 64; s++) { this.stepClass[s] = 0; this.src[s] = 0; }
     this.env.fill(128); for (let k = 0; k < KEYS; k++) this.keySlice[k] = this.spanSlice(k);
     this.keyp = Array.from({ length: KEYS }, keypNeutral);   /* KEYP: a new kit, every key neutral */
-    this.rec = { state: 0, key: -1, t: 0, pos: 0 }; this.loopEvents = []; this.looperEvents = 0; this.journal = []; this.redoStack = [];
+    this.rec = { state: 0, key: -1, t: 0, pos: 0 }; this.loopClear(); this.journal = []; this.redoStack = [];
     this.noBreak = true; this.cardMap = []; this.padStereo = false; this.file = 255; this.set.name = '';
     const g = this.grammar; this.options[O['grammar.mode']] = GRAM.pads; this.setGrammar(GRAM.pads, g);
     this.matGen = (this.matGen + 1) & 0xff; this.bumpGen(); this.padFinish(0);
@@ -569,7 +573,7 @@ class FakeDevice {
     this.matGen = (this.matGen + 1) & 0xff; this.bumpGen();
   }
   /* PADS: a loose break from the card — new material, on the card, a break again (Sampling decides the planes) */
-  loadBreak() { if (this.noBreak) this.opts.nSlices = 32; this.newMaterial(); this.keyp = Array.from({ length: KEYS }, keypNeutral); /* KEYP: new material, every key neutral */ this.noBreak = false; this.cardIdentity(this.bufLen); this.padStereo = false; this.stereo = this.options[O.sampling] === 1; if (this.stereo) { this.bufR = this.bufR || new Float32Array(BUF_CAP); this.bufR.set(this.buf.subarray(0, this.bufLen)); } this.journal = []; this.redoStack = []; }
+  loadBreak() { if (this.noBreak) this.opts.nSlices = 32; this.newMaterial(); this.loopClear();   /* LOOPVIEW: new planes, an empty loop */ this.keyp = Array.from({ length: KEYS }, keypNeutral); /* KEYP: new material, every key neutral */ this.noBreak = false; this.cardIdentity(this.bufLen); this.padStereo = false; this.stereo = this.options[O.sampling] === 1; if (this.stereo) { this.bufR = this.bufR || new Float32Array(BUF_CAP); this.bufR.set(this.buf.subarray(0, this.bufLen)); } this.journal = []; this.redoStack = []; }
   /* The span mapping: key k → grid slice k · nSlices / span (Engine::SpanSlice). */
   spanSlice(key) { const n = this.nSlices, span = Math.min(n, KEYS), kk = key >= span ? span - 1 : key; return Math.floor(kk * n / span); }
   /* EDIT: the first tombstone's slot past the grid, else the end (−1 = full) — Engine::FreeSlot. */
@@ -852,7 +856,7 @@ class FakeDevice {
     const now = Date.now();
     const kp = this.keyp[key] || keypNeutral();
     /* ENV: a held key's up lets its Release run (none: the 5 ms fade, here at once) */
-    if (!down) { for (const v of [this.voice, ...this.ringing]) if (v && v.key === key && v.until === Infinity) { v.until = now + (kp.rel | 0); v.released = true; } return 0; }
+    if (!down) { for (const v of [this.voice, ...this.ringing]) if (v && v.key === key && v.until === Infinity) { v.until = now + (kp.rel | 0); v.released = true; } this.loopRelease(key, now); return 0; }
     const t = this.keySlice[key], e = this.table[t]; if (!e || !e.len) return 3;
     const held = this.keyHeld(key), loop = kp.plays === 3;   /* KEYP: the key's own Plays, else the option */
     /* ENV: a key in a choke group cuts every other key's sound in the group (5 ms), its own never */
@@ -863,7 +867,8 @@ class FakeDevice {
     this.voice = { key, grp: kp.grp | 0, t: now, start: e.start, len: held && !loop ? Math.max(e.len, this.freePos - e.start) : e.len, until: held ? Infinity : now + Math.min(natural, decayed), loop };
     this.ringing.push(this.voice);
     this.keyFlash = key; this.keySeq = (this.keySeq + 1) & 0xff; this.callFlash = t; this.callT = 6;
-    if (this.grammar === GRAM.play && t < 128) { const s = this.curStep(); this.loopEvents.push({ s, prev: this.src[s] }); this.src[s] = t; this.looperEvents = Math.min(255, this.looperEvents + 1); }
+    /* Play: Quantize Off / 8ths writes the loop at this phase (LOOPVIEW); 16ths punches the current step, as before */
+    if (this.grammar === GRAM.play && t < 128) { if (this.loopActive()) this.loopRecord(key, t, held ? LOOP.held : 0, now); else this.src[this.curStep()] = t; }
     return 0;
   }
   /* CHROMA: the spread of `root` — every key but the root on its entry, (j − root) × 100 + the root's cents (±2400), the
@@ -882,13 +887,87 @@ class FakeDevice {
   }
   /* KEYP: does a call through `key` hold? Follow → Options → Key Plays; One-shot never; Held, Loop and Ratchet always */
   keyHeld(key) { const p = this.keyp[key] ? this.keyp[key].plays : 0; return p === 0 ? this.options[O['key.plays']] === 1 : p !== 1; }
-  /* LOOPER in Play: B2 / ACTION 12 takes the last write back, B3 / ACTION 13 clears the loop */
-  looperUndo() { const ev = this.loopEvents.pop(); if (ev) this.src[ev.s] = ev.prev; this.looperEvents = Math.max(0, this.looperEvents - 1); }
-  looperClear() { if (this.grammar === GRAM.play) this.src.fill(-1); this.loopEvents = []; this.looperEvents = 0; }
+  /* LOOPER: B2 / ACTION 12 undoes the last pass's overdub (any grammar: the firmware's gPendUndo); B3 / ACTION 13 in
+   * Play is the Reslice that clears the punch bar and the loop (elsewhere ACTION 13 does nothing) */
+  looperUndo() { this.loopTick(); this.loopUndo(); }
+  looperClear() { if (this.grammar !== GRAM.play) return; this.src.fill(-1); this.loopClear(); }
+  /* ── LOOPVIEW: the free looper (core/bb_looper.h), driven by the fake's clock ──
+   * The playhead is the step clock's: the loop is the bar of nSlices 16ths. Active in Play with Quantize Off or 8ths
+   * (16ths punches steps and the loop sits silent). */
+  beatAt(now = Date.now()) { return (now - this.t0) / 60000 * this.opts.bpm * this.mult * 4; }
+  loopPhaseAt(now = Date.now()) { const N = this.nSlices, b = this.beatAt(now); return (b - Math.floor(b / N) * N) / N; }
+  loopActive() { return this.grammar === GRAM.play && this.options[O.quantize] !== 1; }
+  get looperEvents() { return Math.min(255, this.loop.ev.length); }   /* tail 176 */
+  /* Looper::Advance's half: a wrap after something was recorded closes the pass (gen + 1); while active, every event
+   * whose phase the playhead crossed since the last look replays (the fake voice sounds it: srcPos follows) — except
+   * on the pass it sits out. Called before anything reads or writes the loop. */
+  loopTick(now = Date.now()) {
+    const L = this.loop, N = this.nSlices, b = this.beatAt(now), pass = Math.floor(b / N);
+    if (L.pass != null && pass > L.pass && L.dirty) { L.dirty = false; this.loopNextGen(); }
+    if (L.beat != null && b > L.beat && this.loopActive() && L.ev.length) {
+      const from = Math.max(L.beat, b - N); let last = null;
+      for (let k = Math.floor(from / N); k <= pass; k++) for (const e of L.ev) { const t = (k + e.phase) * N; if (t > from && t <= b && e.skip !== k) last = e; }
+      if (last && !(last.style & LOOP.release)) this.loopFire(last, now);
+    }
+    L.pass = pass; L.beat = b;
+  }
+  loopFire(e, now) {
+    const t = e.key >= 0 ? this.keySlice[e.key] : e.slice, en = this.table[t]; if (!en || !en.len) return;
+    this.voice = { key: e.key, grp: 0, t: now, start: en.start, len: en.len, until: now + en.len / SR * 1000, loop: false };
+  }
+  loopNextGen() { const L = this.loop; if (L.gen < 255) { L.gen++; return; } const mn = L.ev.reduce((m, e) => Math.min(m, e.gen), 255); for (const e of L.ev) e.gen -= mn; L.gen = 255 - mn + 1; L.seq = (L.seq + 1) & 255; }
+  /* Looper::Record: at the playhead (8ths: the nearest pair of steps, 1.0 → the downbeat), sorted after any event at
+   * the same phase; one ahead of the playhead sits out the crossing still to come in this pass (the live call already
+   * sounded); 256 at most (refused, the call still sounded). A held call arms its key for the release. */
+  loopRecord(key, slice, style, now = Date.now()) {
+    this.loopTick(now); const L = this.loop; if (L.ev.length >= LOOP.max) return false;
+    const N = this.nSlices, cur = this.loopPhaseAt(now), pass = Math.floor(this.beatAt(now) / N);
+    let phase = cur;
+    if (this.options[O.quantize] === 2) { const d = Math.max(1, N / 2); phase = Math.floor(cur * d + 0.5) / d; if (phase >= 1) phase -= 1; }
+    let ahead = phase - cur; if (ahead < 0) ahead += 1;
+    const ev = { phase, key, slice, style: style & 0x7f, gen: L.gen, skip: ahead < 0.5 ? (phase >= cur ? pass : pass + 1) : null };
+    let at = L.ev.length; while (at > 0 && L.ev[at - 1].phase > phase) at--;
+    L.ev.splice(at, 0, ev); L.dirty = true; L.seq = (L.seq + 1) & 255;
+    if ((style & LOOP.held) && key >= 0) L.held |= 1 << key;
+    return true;
+  }
+  /* Looper::RecordRelease: only for a held note-on recorded and not yet released */
+  loopRelease(key, now = Date.now()) {
+    if (!this.loopActive() || key < 0 || !(this.loop.held & (1 << key))) return false;
+    this.loop.held &= ~(1 << key);
+    return this.loopRecord(key, -1, LOOP.release, now);
+  }
+  /* Looper::UndoLast: the highest pass present goes; the next overdub takes its number */
+  loopUndo() {
+    const L = this.loop; if (!L.ev.length) return false;
+    const g = L.ev.reduce((m, e) => Math.max(m, e.gen), 0);
+    L.ev = L.ev.filter(e => e.gen !== g); L.gen = g; L.dirty = false; L.held = 0; L.seq = (L.seq + 1) & 255;
+    return true;
+  }
+  loopClear() { const L = this.loop; L.ev = []; L.gen = 0; L.dirty = false; L.held = 0; L.seq = (L.seq + 1) & 255; }
+  /* a set's loop: the loader Adds every event into one pass and Seals it (a set keeps no passes), so the first live
+   * overdub is its own undo unit; Looper::Adopt hands it to the audio thread */
+  loopAdopt(evs) { const L = this.loop; L.ev = evs.map(e => Object.assign({}, e, { gen: 0, skip: null })).sort((a, b) => a.phase - b.phase); L.gen = L.ev.length ? 1 : 0; L.dirty = false; L.held = 0; L.seq = (L.seq + 1) & 255; }
+  /* ?demo=kit's loop, as if played in over three passes: the kick on the downbeat, a reversed ratchet on the snare's
+   * key at the half (J5's styles), a held note on key 14 from the 10th 16th to the 13th (the newest pass) */
+  kitLoop() {
+    const L = this.loop;
+    L.ev = [{ phase: 0, key: 3, slice: this.keySlice[3], style: 0, gen: 0, skip: null },
+      { phase: 0.5, key: 7, slice: this.keySlice[7], style: LOOP.rev | LOOP.ratchet, gen: 1, skip: null },
+      { phase: 0.5625, key: 14, slice: this.keySlice[14], style: LOOP.held, gen: 2, skip: null }, { phase: 0.75, key: 14, slice: -1, style: LOOP.release, gen: 2, skip: null }];
+    L.gen = 3; L.dirty = false; L.held = 0; L.seq = (L.seq + 1) & 255;
+  }
+  /* 0x6A GET_LOOP: the firmware's Looper::WritePage — n, seq, gen, dirty, the offset, then ≤ 169 events of 6 bytes */
+  loopPage(body, U8, U16) {
+    this.loopTick(); const L = this.loop, n = Math.min(LOOP.max, L.ev.length);
+    const off = Math.min(n, body.length >= 2 ? u16(body, 0) : 0), cnt = Math.min(n - off, Math.floor((MAX_BODY - LOOP.head) / LOOP.ev));
+    U8(0); U16(n); U8(L.seq); U8(L.gen); U8(L.dirty ? 1 : 0); U16(off); U8(cnt);
+    for (let i = off; i < off + cnt; i++) { const e = L.ev[i]; U16(Math.min(65535, Math.max(0, Math.round(e.phase * 65535)))); U8(e.key); U8(e.slice); U8(e.style & 0x7f); U8(e.gen); }
+  }
   /* a grammar change: Play starts from an empty loop, the others draw a fill */
   setGrammar(g, before) {
     if (g !== GRAM.pads) this.lastDrum = g;
-    if (g === before) return; if (g === GRAM.play) { this.src.fill(-1); this.loopEvents = []; this.looperEvents = 0; } else this.dice();
+    if (g === before) return; if (g === GRAM.play) this.src.fill(-1); else this.dice();   /* LOOPER: the loop itself waits through other grammars */
     /* entering Pads puts the markers on the keys once, as its own undo step */
     if (g === GRAM.pads && this.liveMarkers().length && this.bufLen) { const sn = this.tableSnap(); this.journalCheck(); this.edKeysFromMarkers(); this.bumpGen(); this.journalPush(sn); }
   }
@@ -1005,13 +1084,14 @@ class FakeDevice {
         const before = Uint8Array.from(this.options); this.live.set(this.blob.bytes); this.blob = null;
         this.setGrammar(this.grammar, before[O['grammar.mode']]);      /* Play starts from an empty loop, the rest reroll */
         if (before[O.bars] !== this.options[O.bars]) { const b = this.options[O.bars]; this.opts.nSlices = b ? Math.min(64, 16 << (b - 1)) : 32; this.newMaterial(); }
-        if (this.live[OFF.sample] !== this.file) { this.file = this.live[OFF.sample]; this.newMaterial(); }
+        if (this.live[OFF.sample] !== this.file) { this.file = this.live[OFF.sample]; this.newMaterial(); this.loopClear(); }
         U8(0); break; }
       case CMD.state: {
         this.setTick();        /* SETS: the op finishes before the body is built, as the firmware's main loop does */
         this.cardTick();       /* CARD: the same for an upload's write, a copy, a rescan */
         this.padTick();        /* PADS: a drop's commit, New empty kit, a quiet drop dropped */
         this.auditionTick();   /* EDIT-AUDITION: a held request whose window has ended */
+        this.loopTick();       /* LOOPVIEW: a wrap closes the pass, crossed events replay */
         if (this.callT > 0 && --this.callT === 0) this.callFlash = 255;
         const flags = (this.muted ? 1 : 0) | (this.ext ? 2 : 0) | (this.locked ? 4 : 0) | (this.flowing ? 8 : 0) | (this.brain ? 16 : 0);
         U8(0); U8(this.nSlices); U8(this.curStep()); U8(flags); U8(this.matGen); U8(this.grammar); U8(this.options[O['class.mode']]); U8(this.file);
@@ -1054,6 +1134,7 @@ class FakeDevice {
           U32(this.padRoom()); U32(Math.max(0, BUF_CAP - this.bufLen)); U32(this.padHeld()); U32(this.padMask());
           U32(this.padUndoHeld()); U32(o.reclaimed || 0); U8(o.forgot || 0);   /* 315 RECLAIM */
         }
+        U8(this.loop.seq); U16(Math.min(65535, Math.round(this.loopPhaseAt() * 65535))); U8(this.options[O.quantize]);   /* 324 LOOPVIEW */
         break; }
       case CMD.wave: {
         if (body.length < 7) { U8(2); break; }
@@ -1186,6 +1267,7 @@ class FakeDevice {
         U8(0); U8(KEYS);
         for (const p of this.keyp) { U8(p.gain & 0xff); U8(p.plays); U8(p.cents & 0xff); U8((p.cents >> 8) & 0xff); U8(p.rat | 0); U16(p.atk | 0); U16(p.dec | 0); U8(p.sus | 0); U16(p.rel | 0); U8(p.grp | 0); }
         break;
+      case CMD.loop: this.loopPage(body, U8, U16); break;   /* LOOPVIEW: 0x6A GET_LOOP */
       default: U8(1);
     }
     return Uint8Array.from(w);
