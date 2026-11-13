@@ -1,174 +1,161 @@
 # Audiothurgist
 
 **A sampling, slicing and rearranging toolkit for the Hermetic Modular
-Alchemy Lab.** Load a break from the card or sample the rack into it, and one
-knob travels from *the record, verbatim* to chops, rolls and bursts. Patterns hold until you ask
-for new ones. Every sound is a slice of real material played from its
-attack, on the grid: no grains, no time-stretch. If you don't like it,
-re-slice it.
+Alchemy Lab.** Play it as a mono or stereo sampler with 24 pads, or load a
+break and let one knob carry it from *the record, verbatim* to chops, rolls
+and bursts. Every sound is real material played from its attack, on the
+grid: no grains, no time-stretch.
 
-Audiothurgist is the Eurorack form of BreakFix
-(Daisy Pod), rebuilt for the [Alchemy Lab v2](https://hermeticmodular.com)
-(Daisy Seed 2 DFM, six pots with LED rings, three buttons, ten jacks, SD,
-USB). **Firmware 0.13.0-beta.** The manual is built into the firmware and
-shown on the page's Manual tab.
+Audiothurgist is the Eurorack form of BreakFix (Daisy Pod), rebuilt for the
+[Alchemy Lab v2](https://hermeticmodular.com) (Daisy Seed 2 DFM, six pots
+with LED rings, three buttons, ten jacks, microSD, USB). Firmware
+**0.13.0-beta**. The manual is built into the firmware and shown on the
+page's Manual tab.
 
-**Quick start:** flash the firmware (*Flashing*, below), put breaks on a
-FAT32 card, and open the page —
-**[ernestg4.github.io/Audiothurgist](https://ernestg4.github.io/Audiothurgist/)**
-in Chrome or Edge — then Connect. **It powers up as a sampler**: Pads, the
-pattern stopped — play the 24 pads or the J4 keys, drop your own samples on
-the pads. For a beat, pick a mode (Classic · Grids · Loop) and press **▶**
-(or hold **B1** on the panel); ▶/■ starts and stops it from then on. ▶ or
-B1 while still in Pads brings back the last mode — the boot preset's — so
-the panel alone gets from the sampler start to a beat.
-Options → Power-up → *Start In: As saved* (then save the preset) powers up
-in the preset's mode, running, instead. No module? Press **Demo** (or add `?demo=sampler` to the
-page's address).
+**The page:** **[ernestg4.github.io/Audiothurgist](https://ernestg4.github.io/Audiothurgist/)**
+(Chrome or Edge on a computer, Chrome on Android).
 
-## Three roles, one engine
+## Quick start
 
-- **Chopper** — the knobs and buttons: slice, rearrange, dice, flow,
-  history, tempo, pitch.
-- **Voice** — the rack plays *it*: **J4 is the key in every map — 0 V =
-  key 0 (C1)**, a semitone per key to key 23, negatives = key 0, each key
-  playing what the Kit's key table says. With the Voice jack map J5 is the
-  style note (reverse, half, double, ratchet, staccato, punch/choke — and
-  Record; under ~70 mV is plain), J6 the gate; J7 sends a trigger per hit
-  and J8 its velocity; with the Brain map J5 is the gate. Two play grammars: **Play** loops what you play in
-  (unquantized by default), **Pads** is the MPC — nothing written, the beat
-  is yours.
-- **Brain** — it plays the rack: kick, snare and hat gates on J6/J7/J8 as
-  the pattern runs; a clock on J3 locks the loop to your master.
+1. Flash the firmware (*Flashing*, below).
+2. Put breaks and samples on a FAT32 microSD card in `Audiothurgist/breaks/`,
+   or upload them from the page later.
+3. Open the page, close Hermetic's `/program` if it's open, and press
+   **Connect**.
 
-The roles run at once; nothing needs a mode. **Sampling**: hold a key with
-the Record style and it records from J1/J2 (mono or stereo) into that key;
-arm Record and B3 or a J6 edge takes a whole loop into the break, with J6
-edges dropping slice markers while it runs. One buffer, one slice table: a
-break and a kit are the same thing, played by different rules (slice or held).
+**It powers up as a sampler**: Pads mode, the pattern stopped. Play the 24
+pads on the page or the keys from J4, and drop your own samples onto the
+pads. For a beat, pick a mode (**Classic**, **Grids** or **Loop**) and press
+**▶**, or hold **B1** on the panel. ▶ or B1 while still in Pads brings back
+the boot preset's mode, so the panel alone gets you from the sampler to a
+beat. To power up in your preset's mode, running, set Options → Power-up →
+*Start In: As saved* and save the preset.
 
-## Use it as a sampler
+No module at hand? Press **Demo** on the page.
 
-The 24 keys (J4, the page's pads, the Kit) are a sampler's pads as much as a
-break's slices — and the module powers up as one (**Start In = Sampler**:
-Pads, the pattern stopped; the page opens on the pads). Three ways to put a
-sound on a pad:
+## Play it as a sampler
 
-1. **A break, autosliced** — load or upload a break, then **Autoslice** (Kit →
-   Edit, or P5 on the panel's Edit page); in **Pads** the keys follow the
-   markers. BreakFix's way: the slices follow the tempo.
-2. **Record from CV** — Voice map, J5 style 7 (Record), hold the key on J4:
-   the input goes into that key.
-3. **Drop a file on a pad** — drag any audio file the browser can open onto a
-   pad (Play) or a key cell (Kit), or *Choose samples…* on a phone. Mono or
-   stereo, as the file is (no trim; a stereo one makes the kit stereo); tick
-   **normalise drops** to bring each file's peak to −1 dBFS first (off by
-   default, remembered by the browser). Several files fill that pad and the
-   next ones.
+The 24 keys are a sampler's pads. J4's CV, the page's pads and the Kit tab
+all play them, and J4 is the key in every jack map: 0 V is key 0 (C1), a
+semitone per key up to key 23.
 
-**Each key has its own settings** (Kit tab → select a key): **gain** (−24 …
-+6 dB), **tune** (±24 semitones, with cents) and **Plays** — *Follow* Options →
-Key Plays, *One-shot*, *Held* (while the gate or the pad is down), *Loop* (held,
-the key's own sample looping) or *Ratchet* (held, the sample again from its
-start every whole, ½, ¼ or ⅛ of itself, or every 8th / 16th / 32nd at the
-tempo). They ride every call through the key — CV, the pads, Play's loop —
-never the pattern's steps; they are saved with the set, and an untouched key
-plays exactly as before. Details: `docs/packages/keyp.md`.
+**Put a sound on a pad** in any of three ways:
 
-**Each key has an amp envelope and a choke group** too, on the same row:
+1. **Drop a file on a pad.** Drag any audio file the browser can open onto a
+   pad (Play tab) or a key cell (Kit tab), or use *Choose samples…* on a
+   phone. It keeps its channels: a stereo file makes the kit stereo. Tick
+   **normalise drops** to bring each file's peak to −1 dBFS first. Several
+   files fill that pad and the ones after it.
+2. **Record from CV.** With the Voice jack map, send J5 style 7 (Record) and
+   hold the key on J4: the inputs record into that key for as long as the
+   gate is up.
+3. **Slice a break.** Load or upload a break, then **Autoslice** (Kit → Edit,
+   or P5 on the panel's Edit page). In Pads the keys follow the markers, in
+   time order. A break's slices follow the tempo; recordings and dropped
+   samples keep their own pitch, and P4 transposes them.
 
-- **Attack** (to 2 s) fades the key in; **Decay** eases it down to the
-  **Sustain** level (0 dB down to off); **Release** (to 4 s) is how a held key
-  (Held, Loop, Ratchet) fades once its gate falls or the pad comes up — a
-  Loop key keeps looping through it. All at zero is the key as it always
-  was: the short click-safe fades and nothing else.
-- A **one-shot** has no "up", so Release does nothing for it; shorten one with
-  **Decay** and **Sustain off** instead (the drum sampler's decay knob).
-- **Choke group** 1–4: a key struck in a group cuts every *other* key's sound
-  in the same group within 5 ms — put an open and a closed hat in group 1 and
-  the closed one chokes the open one. A key never chokes itself, and the
-  pattern's steps take no part.
+**Shape each key** from the Kit tab (select a key), or from the **⋯** in a
+pad's corner on the Play tab, which opens the same settings in a sheet while
+the pads keep playing:
 
-**From the Play tab**, the **⋯** in a pad's corner opens the same settings for
-that pad in a sheet (a press on the pad itself is still a note). The pads keep
-playing under it, so you can tweak a release and hit the pad; **Esc** or ✕
-closes it.
+- **Gain** −24 to +6 dB, **Tune** ±24 semitones with cents.
+- **Plays**: *Follow* (Options → Key Plays), *One-shot*, *Held* (while the
+  gate or pad is down), *Loop* (held, the sample looping, forward or
+  reversed) or *Ratchet* (held, the sample again every whole, ½, ¼ or ⅛ of
+  itself, or every 8th, 16th or 32nd at the tempo).
+- **Envelope**: Attack up to 2 s; Decay down to a Sustain level (0 dB, lower,
+  or off); Release up to 4 s for held keys. Shorten a one-shot with Decay and
+  Sustain off.
+- **Choke group** 1–4: a key struck in a group cuts the other keys of that
+  group. Put an open and a closed hat in group 1.
 
-**Play one sample chromatically** — the mono sampler's way: put a sound on a
-key, select it in the Kit and press **Spread [key] chromatically (C1 … B2)**.
-Every key then plays that sample, each a semitone from the next (the key you
-spread from stays where it is; a key 7 above it plays a fifth up), with its
-gain and Plays — so J4's V/oct plays a melody from one sample (0 V = C1, as
-always). If other keys hold pads of their own the page asks first: spread
-around them (the default — they keep their pads), over them too, or cancel. One
-**Undo** puts every key back. A recording or a dropped pad stays in tune at any
-tempo; a slice of the break spread this way still follows the tempo. Details:
-`docs/packages/chroma.md`.
+A key's settings apply to everything played through it (CV, pads, the Loop
+mode's replays), never to a pattern's steps, and they're saved with the set.
+Each edit, including a whole slider drag, is one Undo step.
 
-Recordings and dropped samples play at their own pitch (P4 transposes them);
-the break's slices follow the tempo. The sample memory is 45 s per channel: a
-break takes at most 17 s and the pads get the rest — or press **New empty
-kit** (Play → Pads) for no break at all and 44.75 s of pads, in Pads mode.
-Replacing, deleting or undoing a pad leaves its memory **held** (the room line
-says how much); **Reclaim** beside it gives it back — the pads move down in
-memory, everything plays exactly as before (sounding pads included), and if
-Undo could still have brought one of those sounds back it asks first, since
-those undo steps go. A drop that does not fit reclaims on its own, then lands
-whole. A dropped sample lives in the module's memory; the page shows
-**Unsaved kit** until you **Save set** (the break, every pad, the table and
-the options, in `Audiothurgist/sets/` — only what plays: held memory is never
-written), and a power-off before that loses it. To play a
-beat with your kit, pick Classic or Grids (the line over the pads has both)
-and press ▶ — it comes in on the beat. Details: `docs/packages/pads.md`.
+**Play one sample melodically:** select a key in the Kit and press
+**Spread … chromatically**. Every key plays that sample a semitone apart, so
+a V/oct sequence on J4 plays a melody from it. If other keys hold pads of
+their own, the page asks whether to spread around them or over them. One
+Undo puts every key back.
+
+**Memory:** 45 s per channel. A break takes at most 17 s and the pads get the
+rest, or press **New empty kit** (Play tab → Pads) for no break and 44.75 s of
+pads. Replacing or deleting a pad leaves its memory *held* until you press
+**Reclaim** (beside the memory meter); the pads move down and keep playing
+throughout. A drop that doesn't fit reclaims by itself first.
+
+**Keep your kit:** dropped samples live in the module's memory, and the page
+shows *Unsaved kit* until you press **Save set**. A set holds the break,
+every pad, the key table, each key's settings, the options and the loop, in
+`Audiothurgist/sets/`.
+
+## Play it as a break machine
+
+Load a break (P5 to pick, hold B3 to load, or the page's Sample list), pick a
+mode and press ▶.
+
+- **Classic**, **Collins**, **Grids**, **Euclid**, **Camp**: pattern
+  grammars that rearrange the break's slices. P1 (Chop) runs from the record
+  verbatim (full right) through traded beats, chops and rolls to the cluster
+  zone (full left). B2 dices a new arrangement, B2 held flows a new bar every
+  loop, B3 reslices, and P3 steps back through the last sixteen patterns.
+- **Loop**: what you play in (pads or J4) is looped. With Options → Quantize
+  *Off* (the default) every hit replays exactly when you played it, held
+  notes with their length, overdubbing pass after pass. The Play tab draws
+  the loop live: each hit at its place in the bar in its drum colour, held
+  notes as bars, the newest pass bright. B2 undoes the newest pass and B3
+  clears the loop. *16ths* punches the bar step by step instead.
+- **Pads**: nothing is written; the beat is yours.
+
+**Brain:** while a pattern runs, the module sends kick, snare and hat gates on
+J6/J7/J8. A clock on J3 locks the loop to your master, and P2 then becomes a
+divider/multiplier. **Voice:** with the Voice jack map the rack plays the
+module: J4 key, J5 style (reverse, half, double, ratchet, staccato, punch,
+record), J6 gate in, J7 a trigger per hit and J8 its velocity out.
+
+**Sample the rack into the break:** Options → Record = Arm, then B3 or a J6
+edge takes a whole loop from J1/J2 (or the module's own output), with J6 edges
+dropping slice markers while it runs.
 
 ## Flashing
 
-1. Rack and power the module, panel USB-C to the computer.
+1. Rack and power the module and connect its panel USB-C to the computer.
 2. Open Hermetic's web flasher (`/program`) in Chrome or Edge and flash the
    `.bin` from [Releases](https://github.com/ErnestG4/Audiothurgist/releases),
-   or `build/audiothurgist.bin` from *Building*. The page at
-   [ernestg4.github.io/Audiothurgist](https://ernestg4.github.io/Audiothurgist/)
-   matches the latest release; if the module runs a different build, the page
-   tells you which to flash.
-3. FAT32 microSD with your breaks in `Audiothurgist/breaks/` — or upload
-   them from the page (see *The card* below). 1 to 4 bar breaks are ideal.
+   or `build/audiothurgist.bin` from *Building*. The published page matches
+   the latest release; if the module runs a different build, the page tells
+   you which to flash.
+3. Close `/program` (one page holds the port at a time), then open the page.
 
-If a build ever leaves the module USB-silent, tap **BOOT** during the
+If a build ever leaves the module silent on USB, tap **BOOT** during the
 power-up breathing pulse to reach the Daisy bootloader, then flash.
 
-A build that changes the Options block (this one added Start In) moves the
-preset schema: the flash slots are dropped once at the first power-up, and
-each slot with a backup on the card (`Audiothurgist/presets/<slot>.json`)
-comes back from it — options, knobs, sample and name; its motion locks and
-the brightness do not.
+A build that changes the options drops the preset slots once at its first
+power-up. Each slot with a backup on the card
+(`Audiothurgist/presets/<slot>.json`) comes back with its options, knobs,
+sample and name; re-make its motion locks and save it again.
 
 ## The card
 
-Everything the module reads or writes lives in one folder, `Audiothurgist/`:
+Everything lives in one folder, `Audiothurgist/`:
 
 | | |
 |---|---|
 | `Audiothurgist/breaks/*.wav` | the breaks P5 and the page's Sample list show, sorted |
-| `Audiothurgist/sets/` | sets (`<name>.wav` + `<name>.json`) and the loose files' edits (`<wav>.slices.json`) |
+| `Audiothurgist/sets/` | sets (`<name>.wav` + `<name>.json`) and loose files' edits (`<wav>.slices.json`) |
 | `Audiothurgist/presets/` | preset backups (`<slot>.json`) |
 
-The folders are made the first time something is written. **What loads:** WAV,
-PCM 16- or 24-bit, mono or stereo, 8 kHz or more, at least ¼ s; the first 17 s
-are used (the rest of the 45 s buffer is kept for takes into keys and samples
-dropped onto pads); any rate is converted to 48 kHz on load (a 192 kHz file:
-its first 8.5 s). **Uploads** from the page (Kit → Card, or *Add
-breaks…* beside the Sample list) take anything the browser can decode — WAV of
-any kind including float, AIFF, MP3, FLAC, OGG — and send it as a 48 kHz PCM16
-WAV, stereo kept, cut to 17 s; the module writes it into `breaks/` while the
-music plays.
+The folders are made the first time something is written.
 
-**Cards from older firmware** kept WAVs in the root and `sets/`, `presets/`
-beside them. This firmware reads only `Audiothurgist/` and moves nothing for
-you — files in the root may belong to another module. The page says so and
-offers **Copy them in**: the root's WAVs, `sets/` and `presets/` are *copied*
-into the folder (anything already there is skipped; nothing is moved or
-deleted). Do it before relying on preset backups. Details:
-`docs/packages/card.md`.
+- **What loads:** WAV, PCM 16- or 24-bit, mono or stereo, 8 kHz or more, at
+  least ¼ s. The first 17 s are used, converted to 48 kHz.
+- **Uploads** from the page (Kit → Card, or *Add breaks…* beside the Sample
+  list) take anything the browser can decode (WAV including float, AIFF, MP3,
+  FLAC, OGG) and write a 48 kHz WAV into `breaks/` while the music plays.
+- **A card from older firmware** (WAVs in the root): the page offers **Copy
+  them in**, which copies the root's WAVs, `sets/` and `presets/` into
+  `Audiothurgist/`. Nothing is moved or deleted.
 
 ## Controls
 
@@ -218,7 +205,7 @@ In **Pads** the keys follow the markers (time order on keys 0, 1, 2…).
 | Voice | **Choke** · Punch (writes the bar) |
 | Gate Length | **6 ms** · 20 ms · 50 ms · Hold to next hit |
 | Gate Level | **Fixed 5 V** · Velocity (accents to the ceiling) |
-| Grammar | **Classic** · Collins · Grids · Euclid · Camp · Play (looped) · Pads (free) |
+| Grammar | **Classic** · Collins · Grids · Euclid · Camp · Play (the page's **Loop**) · Pads (free) |
 | Gate Fires | Every step · **Onsets only (once per hit)** |
 | Bars | **Auto (backbeat)** · 1 · 2 · 4 · 8 — fixes a break playing at half or double speed |
 | Rests | **Continue the break** · Gate (silence) |
@@ -234,86 +221,82 @@ In **Pads** the keys follow the markers (time order on keys 0, 1, 2…).
 | Sampling | **Mono (J1+J2)** · Stereo |
 | Record Source | **Inputs** · Output (resample the module) |
 | Record | **Off** · Arm (B3 tap or J6 starts a loop take) |
-| Quantize | **Off (as played)** · 16ths · 8ths — Play's looper |
+| Quantize | **Off (as played)** · 16ths (punch the bar) · 8ths — the Loop mode's looper |
 | Tap Allowance | 0 · 20 · **40** · 60 · 80 ms — a tap-while-playing mark lands this far back (slice editing) |
 | Autosave | Off · **On (2 s after an edit)** — the slice table and key map to the set's JSON, or a `sets/<file>.slices.json` sidecar beside a loose WAV |
 | Start In | **Sampler (Pads, stopped)** · As saved (the preset's mode, running) — read from the boot preset at power-up; a set load leaves it alone |
 
 ## The web app
 
-`web/` is a single-page WebSerial instrument view: the bar ring and loop
-strip, per-slice waveform envelopes, an oscilloscope, every button and
-knob function for the current page and grammar, locks, options, presets,
-the manual, a diagnostics line, a **Kit** tab: the 24 keys, each
-recording's waveform with onsets and boundaries, record/clear per key, the
-looper's events, set save/load, and the **Card** panel (upload breaks,
-copy an old card in) — and a **Scope** tab: out L/R and
-in L/R at full rate plus the six jacks J3–J8 as DC-coupled CV traces
-(LFOs, sequences, gates — ours read back too), ten colours, time zoom per
-tier, gain, a trigger on any channel, peak decimation, afterglow, at up to
-30 frames/s (`docs/packages/scope.md`). Serve it from a secure context:
+The page is the module's full instrument view over Web Serial:
+
+- **Play:** the transport, the modes, the 24 pads, the bar ring and loop
+  strip, the knobs and buttons for the current page and mode.
+- **Kit:** the keys and their settings, each sample's waveform with its
+  markers and onsets, the slice editor with Undo/Redo, sets, the memory
+  meter with Reclaim, and the Card panel.
+- **Scope:** out L/R and in L/R at full rate plus the six CV jacks J3–J8 as
+  DC-coupled traces, with a trigger, zoom and gain.
+- **Options**, **Manual**, presets and locks.
+
+**Phones and tablets:** Chrome on Android reaches the module through an OTG
+cable to its front USB-C (Google's Web Serial polyfill over WebUSB is
+built in), and *Install app* puts the page on the home screen. iOS browsers
+have no USB access.
+
+**The page and the firmware go together:** the page checks the firmware's
+protocol version on Connect and names the build to flash if they differ.
+
+To serve it yourself from a checkout (a secure context is required):
 
 ```sh
-cd web && python3 -m http.server 8080     # then http://localhost:8080 in Chrome/Edge
+cd web && python3 -m http.server 8080     # then http://localhost:8080 in Chrome or Edge
 ```
 
-or publish it: `./web/publish-pages.sh && git push --force-with-lease github pages` →
-https://ernestg4.github.io/Audiothurgist/. **Phones and tablets:** on
-Chrome for Android the page uses Google's Web Serial polyfill over WebUSB
-(vendored, Apache-2.0), so an OTG cable to the module's front USB-C is
-enough; Chrome's *Install app* puts it on the home screen. iOS has no
-USB API in the browser. Details, and how to test a phone against a page
-served from the PC, in `web/README.md`.
-
-Close `/program` first (one page holds the port). Press **Demo** to try it
-without the module. `node web/selftest.mjs` checks the protocol against
-the SDK's golden vectors. **The page and the firmware go together**: flash
-the `.bin` built from the same commit as the page; a page that finds another
-build on the port says so in one line and does not connect.
-
-Platform gotchas live in `docs/sdk-quirks.md`; `make sdramcheck` reads the
-ELF for static initialisers touching SDRAM; the module's HELLO carries the
-git hash it was built from, so a flashed binary can identify itself.
+To publish it: `./web/publish-pages.sh && git push --force-with-lease github pages`.
+More in `web/README.md`.
 
 ## Building
 
-Siblings expected next to this repo: [`alchemy-sdk`](https://github.com/hermetic-modular/alchemy-sdk)
-(v0.11 with its vendored libDaisy; until Hermetic's point release the 480 MHz
-boost needs a one-line local patch to `AlchemyLabV2::Init` — see
-`docs/optimizations-2026-09-06.md`) and `DaisySP/DaisySP-LGPL`. Then:
+Siblings expected next to this repo:
+[`alchemy-sdk`](https://github.com/hermetic-modular/alchemy-sdk) (v0.11 with
+its vendored libDaisy; the 480 MHz boost needs a one-line local patch to
+`AlchemyLabV2::Init`, see `docs/optimizations-2026-09-06.md`) and
+`DaisySP/DaisySP-LGPL`. Then:
 
 ```sh
 git submodule update --init          # vendor/capicola (not --recursive)
 make                                 # build/audiothurgist.bin
-tests/run.sh                         # host test suite (needs g++, ASan)
+tests/run.sh                         # host test suites (g++, ASan/UBSan)
+node web/selftest.mjs                # the page against a fake module
+make sdramcheck                      # no static initialiser touches SDRAM
 ```
 
-The pure engine lives in `core/` (no hardware, no allocation); the Alchemy
-Lab shell is `src/audiothurgist.cpp`; `tests/` holds the host suites under
-ASan/UBSan — the engine, grammars, clock, bars, classifier, scope, panel,
-keys, sets and persistence, the card, pads, per-key settings and Reclaim —
-plus corpus tools. `node web/selftest.mjs` runs the page against a fake
-module (`web/demo.js`) through real clicks, drags and drops, and checks the
-wire against the SDK's golden vectors.
+The pure engine lives in `core/` (no hardware, no allocation), the Alchemy
+Lab shell in `src/audiothurgist.cpp`, the page in `web/`. `tests/` covers
+the engine, grammars, clock, bars, classifier, scope, panel, keys, sets and
+persistence, the card, pads, per-key settings and Reclaim. The page test
+drives the real page against `web/demo.js` with clicks, drags and drops.
+Platform gotchas are in `docs/sdk-quirks.md`. The module's HELLO carries the
+git hash it was built from.
 
 ## Documents
 
-`docs/audiothurgist-spec.md` (the design), `docs/lit-review-2026-09-05.md`
-(the literature behind the choices), `docs/packages/*.md` (each subsystem:
-`pads.md`, `keyp.md`, `chroma.md`, `card.md` for the sampler side),
-`docs/hardware-pass-beta.md` (the bench checklist), `docs/colors.md` (the
-page's colour-blind-safe palette),
-`docs/optimizations-2026-09-06.md`, and `docs/for-luke-getus-wrap.md`
-(a platform timer bug found along the way).
+- `docs/audiothurgist-spec.md`: the design.
+- `docs/packages/*.md`: each subsystem. For the sampler, start with
+  `pads.md`, `keyp.md`, `chroma.md` and `sample-looper.md`.
+- `docs/hardware-pass-beta.md`: the bench checklist.
+- `docs/colors.md`: the page's colour-blind-safe palette.
+- `docs/lit-review-2026-09-05.md`: the literature behind the choices.
 
 ## Credits
 
-Ernest Garrison (combust) — design and direction. Built with Claude Code.
-**Matthew Nielsen** — the keyframe (extrema-sampling) DSP core from
+Ernest Garrison (combust): design and direction. Built with Claude Code.
+**Matthew Nielsen**: the keyframe (extrema-sampling) DSP core from
 [capicola](https://github.com/heavylight-industries/capicola), used with his
-permission (`THIRD_PARTY.md`). **Luke / Hermetic Modular** — the Alchemy
-Lab and its SDK. **Émilie Gillet / Mutable Instruments** — the Grids drum
-map. **Nick Collins** — the breakbeat-cutting grammars this one leans on.
+permission (`THIRD_PARTY.md`). **Luke / Hermetic Modular**: the Alchemy Lab
+and its SDK. **Émilie Gillet / Mutable Instruments**: the Grids drum map.
+**Nick Collins**: the breakbeat-cutting grammars this one leans on.
 
 ## License
 
