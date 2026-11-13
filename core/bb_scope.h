@@ -17,6 +17,14 @@
 // samples are never read. 0x62 is answered on the CONTROL thread from a
 // single snapshot of the index. Nothing here touches hardware or allocates;
 // the ring memory belongs to the shell.
+//
+// A tier read at decimation 1 answers its samples; at any other decimation
+// it answers each group's MINIMUM AND MAXIMUM (two bytes a point), so the
+// trace is the signal's envelope and nothing above the decimated rate folds
+// down into a waveform that was never there (picking one sample in `decim`
+// aliased everything above 24 kHz / decim: at ×16 a hat drew as a 1 kHz
+// wobble). The audio callback is untouched — the rings stay full rate and
+// the groups are read on the control thread.
 #include <cstdint>
 
 namespace bb {
@@ -32,18 +40,20 @@ constexpr int      kScopeCvGuard   = 16;         // oldest CV samples left alone
 constexpr int      kScopeCvUsable  = kScopeCvRing - kScopeCvGuard;
 constexpr uint32_t kScopeWrap      = (uint32_t)kScopeCvDiv * (1u << 26);   // 1 610 612 736: 24 · 2^26 (the audio clock)
 constexpr uint32_t kScopeCvWrap    = 1u << 26;                              // the cv clock = the audio clock / 24
-constexpr int      kScopeMaxN      = 512;        // samples per channel per reply
+constexpr int      kScopeMaxN      = 512;        // points per channel per reply (a point is one sample, or a min/max pair)
 constexpr int      kScopeMaxDecim  = 16;         // audio: 512 × 16 = 171 ms
 constexpr int      kScopeCvMaxDecim = 64;        // cv: 512 × 64 / 2 kHz = 16 s > the ring; 32 = 8 s
-constexpr int      kScopeHdr       = 10;         // reply: status mask decim n(2) flags pos(4)
-constexpr int      kScopeHdrExt    = 4;          // … + maskHi cvDecim cvDiv trigSrc (with kScopeExt)
+constexpr int      kScopeHdr       = 14;         // reply: status mask decim n(2) flags pos(4) level(4)
+constexpr int      kScopeHdrExt    = 8;          // … + maskHi cvDecim cvDiv trigSrc cvPos(4) (with kScopeExt)
 constexpr int      kScopeReqMin    = 5;          // request: mask decim n(2) flags
 constexpr int      kScopeReqPos    = 9;          // … + u32 pos (with kScopeAt)
-constexpr int      kScopeReqExt    = 13;         // … + u8 maskHi, u8 cvDecim, i8 trigLevel, u8 trigSrc (with kScopeExt; pos present, used with kScopeAt)
+constexpr int      kScopeReqExt    = 17;         // … + u8 maskHi, u8 cvDecim, i8 trigLevel, u8 trigSrc, u32 cvPos (with kScopeExt; pos and cvPos present, used with kScopeAt)
 constexpr uint8_t  kScopeTrigAuto  = 0;          // trigSrc: the first selected channel (audio before cv)
 constexpr uint8_t  kScopeTrigSet   = 0x80;       // trigSrc: | 0..3 an audio channel, 4..9 J3..J8 (need not be selected)
 constexpr uint8_t  kScopeTrigNone  = 255;        // reply trigSrc when no trigger ran
 constexpr int8_t   kScopeHyst      = 4;          // trigger hysteresis, int8 units (≈ 3 % of full scale, 0.16 V on a CV)
+constexpr int      kScopeTrigHold  = 4800;       // an AUDIO trigger looks back span + max(span, this) samples (100 ms: down to 10 Hz), then free-runs
+constexpr int      kScopeLevelSpan = 2048;       // the reply's four audio levels: peak |x| over the newest 43 ms
 constexpr float    kScopeCvPerVolt = 25.4f;      // int8 per volt: ±5 V = ±127
 constexpr float    kScopeCvGain    = 0.165f;     // |dV_pin / dV_jack| — alchemy::kV2CvInGainDesign
 constexpr float    kScopeCvVdda    = 3.30f;      // alchemy::kV2VddaDesign (the fallback)
@@ -53,10 +63,11 @@ static_assert((kScopeWrap / (uint32_t)kScopeCvDiv) % (uint32_t)kScopeCvRing == 0
 
 /* Request flags. */
 enum : uint8_t {
-    kScopeTrig = 1,   // align the window to the most recent rising crossing of the trigger level on the first selected channel
-    kScopePeak = 2,   // each output sample = the max-magnitude sample of its decim group (else the first)
-    kScopeAt   = 4,   // the request carries u32 pos: start there (a second request of the same frame)
-    kScopeExt  = 8,   // the request carries maskHi (J3..J8), cvDecim and trigLevel; the reply carries the ext header
+    kScopeTrig = 1,   // align the window to the most recent rising crossing of the trigger level on the trigger channel
+    kScopeFrame = 2,  // the first request of a frame split over requests: place the window for BOTH tiers (the audio at decim, and with
+                      // kScopeExt the cv at cvDecim) though this request selects channels of one — the rest of the frame is pinned to it
+    kScopeAt   = 4,   // the request carries u32 pos (and with kScopeExt u32 cvPos): each tier starts there (a later request of the same frame)
+    kScopeExt  = 8,   // the request carries maskHi (J3..J8), cvDecim, trigLevel, trigSrc and cvPos; the reply carries the ext header
 };
 /* Reply flags. */
 enum : uint8_t {
@@ -104,32 +115,40 @@ struct ScopeReq
 {
     uint8_t  mask    = 0;   // b0 out L · b1 out R · b2 in L · b3 in R
     uint8_t  decim   = 1;   // audio: 1..16
-    uint16_t n       = 0;   // samples per channel
+    uint16_t n       = 0;   // points per channel
     uint8_t  flags   = 0;
     uint32_t pos     = 0;   // with kScopeAt
     uint8_t  maskHi  = 0;   // with kScopeExt: b0..b5 = J3..J8
     uint8_t  cvDecim = 1;   // with kScopeExt: 1..64, on the CV ring
     int8_t   level   = 0;   // with kScopeExt: trigger level (audio: full scale 127; cv: 25.4 per volt)
     uint8_t  trig    = 0;   // with kScopeExt: kScopeTrigAuto, or kScopeTrigSet | channel 0..9
+    uint32_t cvPos   = 0;   // with kScopeExt and kScopeAt: the cv tier's start, on the cv clock
+    /* the tiers the window is placed for: those with a channel selected — and, in the first request of a split frame, both */
+    bool UseA() const { return mask   != 0u || (!(flags & kScopeAt) && (flags & kScopeFrame)); }
+    bool UseC() const { return maskHi != 0u || (!(flags & kScopeAt) && (flags & kScopeFrame) && (flags & kScopeExt)); }
     int Hdr()   const { return kScopeHdr + ((flags & kScopeExt) ? kScopeHdrExt : 0); }
     int Chans() const { return ScopeChanCount(mask) + ScopeChanCount(maskHi); }
-    int SpanA() const { return mask   ? (int)n * (int)decim   : 0; }   // audio samples the window covers
-    int SpanC() const { return maskHi ? (int)n * (int)cvDecim : 0; }   // cv samples the window covers
+    int BppA()  const { return decim   > 1u ? 2 : 1; }                  // bytes a point: a sample, or min + max of its group
+    int BppC()  const { return cvDecim > 1u ? 2 : 1; }
+    int PointBytes() const { return ScopeChanCount(mask) * BppA() + ScopeChanCount(maskHi) * BppC(); }   // one point of every selected channel
+    int SpanA() const { return UseA() ? (int)n * (int)decim   : 0; }   // audio samples the window covers
+    int SpanC() const { return UseC() ? (int)n * (int)cvDecim : 0; }   // cv samples the window covers
 };
 
 /* CONTROL: parse and clamp a 0x62 request body (len ≥ 1; the empty body is
  * the pre-SCOPE reply and is handled by the caller). false = BAD_ARGS:
  * short body, no channel at all, mask bits above the four audio channels
- * or the six CV jacks, decim 0 / > 16, cvDecim 0 / > 64, n 0. n is then
- * clamped to kScopeMaxN, to what fits `maxBody` beside the header, and to
- * each selected tier's usable ring at its decimation — the reply says what
- * it got. */
+ * or the six CV jacks, decim 0 / > 16, cvDecim 0 / > 64, n 0, an at-pos past
+ * its clock's wrap. n is then
+ * clamped to kScopeMaxN, to what fits `maxBody` beside the header (a channel
+ * costs n bytes at decimation 1, 2n above), and to each selected tier's
+ * usable ring at its decimation — the reply says what it got. */
 inline bool ScopeParse(const uint8_t* body, int len, int maxBody, ScopeReq& r)
 {
     if(len < kScopeReqMin) return false;
     r.mask = body[0]; r.decim = body[1];
     r.n = (uint16_t)(body[2] | (body[3] << 8)); r.flags = body[4];
-    r.maskHi = 0u; r.cvDecim = 1u; r.level = 0; r.pos = 0u; r.trig = kScopeTrigAuto;
+    r.maskHi = 0u; r.cvDecim = 1u; r.level = 0; r.pos = 0u; r.trig = kScopeTrigAuto; r.cvPos = 0u;
     if((r.mask & ~((1u << kScopeChans) - 1u)) != 0u) return false;
     if(r.decim == 0u || r.decim > kScopeMaxDecim || r.n == 0u) return false;
     if(r.flags & (kScopeAt | kScopeExt))
@@ -145,14 +164,16 @@ inline bool ScopeParse(const uint8_t* body, int len, int maxBody, ScopeReq& r)
         if((r.maskHi & ~((1u << kScopeCvChans) - 1u)) != 0u) return false;
         if(r.cvDecim == 0u || r.cvDecim > kScopeCvMaxDecim) return false;
         if((r.trig & kScopeTrigSet) ? (r.trig & 0x7fu) >= (uint8_t)(kScopeChans + kScopeCvChans) : r.trig != kScopeTrigAuto) return false;
+        r.cvPos = (uint32_t)body[13] | ((uint32_t)body[14] << 8) | ((uint32_t)body[15] << 16) | ((uint32_t)body[16] << 24);
+        if((r.flags & kScopeAt) && r.cvPos >= kScopeCvWrap) return false;
     }
     if(r.mask == 0u && r.maskHi == 0u) return false;
     int n = r.n;
     if(n > kScopeMaxN) n = kScopeMaxN;
-    const int fit = (maxBody - r.Hdr()) / r.Chans();
+    const int fit = (maxBody - r.Hdr()) / r.PointBytes();
     if(n > fit) n = fit;
-    if(r.mask)   { const int s = kScopeUsable   / r.decim;   if(n > s) n = s; }
-    if(r.maskHi) { const int s = kScopeCvUsable / r.cvDecim; if(n > s) n = s; }
+    if(r.UseA()) { const int s = kScopeUsable   / r.decim;   if(n > s) n = s; }
+    if(r.UseC()) { const int s = kScopeCvUsable / r.cvDecim; if(n > s) n = s; }
     if(n < 1) n = 1;
     r.n = (uint16_t)n;
     return true;
@@ -212,7 +233,9 @@ inline uint32_t ScopeCrossing(const int8_t* ring, int ringLen, int usable, uint3
  * starts at the same instant when it can hold it; a tier that cannot
  * (its start is older than its usable ring, or newer than its span allows)
  * shows its newest window and the reply says kScopeDetached — an audio
- * ring of 1.4 s cannot follow a CV window that starts seconds ago. */
+ * ring of 1.4 s cannot follow a CV window that starts seconds ago. The
+ * reply carries both starts, and a later request of the frame (kScopeAt)
+ * asks for each tier at its own. */
 struct ScopeWin { uint32_t pos = 0; uint32_t cvPos = 0; uint8_t flags = 0; };
 
 inline bool ScopeHoldsA(uint32_t wpos, uint32_t pos, int span)   { const uint32_t a = ScopeAge(wpos, pos); return a >= (uint32_t)span && a <= (uint32_t)kScopeUsable; }
@@ -232,8 +255,8 @@ inline ScopeWin ScopePlace(uint32_t wpos, uint32_t pos, const ScopeReq& r, uint8
     ScopeWin w; w.flags = flags;
     const uint32_t cvW = ScopeCvPos(wpos);
     w.pos = pos; w.cvPos = ScopeCvPos(pos);
-    if(r.mask   && !ScopeHoldsA(wpos, w.pos, r.SpanA()))  { w.pos   = ScopeSub(wpos, (uint32_t)r.SpanA()); w.flags |= kScopeDetached; }
-    if(r.maskHi && !ScopeHoldsC(cvW, w.cvPos, r.SpanC()))  { w.cvPos = ScopeSub(cvW, (uint32_t)r.SpanC(), kScopeCvWrap); w.flags |= kScopeDetached; }
+    if(r.UseA() && !ScopeHoldsA(wpos, w.pos, r.SpanA()))  { w.pos   = ScopeSub(wpos, (uint32_t)r.SpanA()); w.flags |= kScopeDetached; }
+    if(r.UseC() && !ScopeHoldsC(cvW, w.cvPos, r.SpanC()))  { w.cvPos = ScopeSub(cvW, (uint32_t)r.SpanC(), kScopeCvWrap); w.flags |= kScopeDetached; }
     return w;
 }
 
@@ -241,13 +264,15 @@ inline ScopeWin ScopeWindow(const int8_t* const audio[kScopeChans], const int8_t
 {
     const uint32_t cvW = ScopeCvPos(wpos);
     /* the newest instant every selected tier can start at: the older of the two newest starts */
-    uint32_t newest = r.mask ? ScopeSub(wpos, (uint32_t)r.SpanA()) : wpos;
-    if(r.maskHi) { const uint32_t nc = ScopeSub(cvW, (uint32_t)r.SpanC(), kScopeCvWrap) * (uint32_t)kScopeCvDiv; if(ScopeAge(wpos, nc) > ScopeAge(wpos, newest)) newest = nc; }
+    uint32_t newest = r.UseA() ? ScopeSub(wpos, (uint32_t)r.SpanA()) : wpos;
+    if(r.UseC()) { const uint32_t nc = ScopeSub(cvW, (uint32_t)r.SpanC(), kScopeCvWrap) * (uint32_t)kScopeCvDiv; if(ScopeAge(wpos, nc) > ScopeAge(wpos, newest)) newest = nc; }
     if(r.flags & kScopeAt)
     {
+        /* each tier at its own start: a frame whose audio tier detached has two (the first reply gave both) */
+        const uint32_t cvAt = (r.flags & kScopeExt) ? r.cvPos : ScopeCvPos(r.pos);
         const bool okA = !r.mask   || ScopeHoldsA(wpos, r.pos, r.SpanA());
-        const bool okC = !r.maskHi || ScopeHoldsC(cvW, ScopeCvPos(r.pos), r.SpanC());
-        if(okA && okC) { ScopeWin w; w.pos = r.pos; w.cvPos = ScopeCvPos(r.pos); w.flags = kScopeAtHonoured; return w; }
+        const bool okC = !r.maskHi || ScopeHoldsC(cvW, cvAt, r.SpanC());
+        if(okA && okC) { ScopeWin w; w.pos = r.pos; w.cvPos = cvAt; w.flags = kScopeAtHonoured; return w; }
         return ScopePlace(wpos, newest, r, 0u);
     }
     if(r.flags & kScopeTrig)
@@ -258,10 +283,13 @@ inline ScopeWin ScopeWindow(const int8_t* const audio[kScopeChans], const int8_t
         {
             /* the window must leave room for BOTH tiers after the crossing — a cv window longer
              * than the audio ring cannot be aligned, so ask only for the audio span then (cv detaches) */
-            int need = r.SpanA(); if(r.maskHi && r.SpanC() * kScopeCvDiv > need) need = r.SpanC() * kScopeCvDiv;
+            int need = r.SpanA(); if(r.SpanC() * kScopeCvDiv > need) need = r.SpanC() * kScopeCvDiv;
             if(need > kScopeUsable) need = r.SpanA() > 0 ? r.SpanA() : kScopeUsable;
             if(need < 1) need = 1;
-            const uint32_t c = ScopeCrossing(audio[src], kScopeRing, kScopeUsable, kScopeWrap, wpos, need, r.level, kScopeHyst, found);
+            /* an audio trigger gives up after span + max(span, kScopeTrigHold): when the signal stops, the
+             * window free-runs on what is there NOW instead of standing on a crossing up to 1.4 s old */
+            int look = need + (need > kScopeTrigHold ? need : kScopeTrigHold); if(look > kScopeUsable) look = kScopeUsable;
+            const uint32_t c = ScopeCrossing(audio[src], kScopeRing, look, kScopeWrap, wpos, need, r.level, kScopeHyst, found);
             if(found) return ScopePlace(wpos, c, r, kScopeTriggered);
         }
         else if(src >= kScopeChans)
@@ -276,31 +304,51 @@ inline ScopeWin ScopeWindow(const int8_t* const audio[kScopeChans], const int8_t
     return ScopePlace(wpos, newest, r, 0u);
 }
 
-/* CONTROL: n output samples from a ring starting at `start` (the tier's own
- * clock), one per `decim` source samples: the first of the group, or with
- * `peak` the one of largest magnitude (so a click never falls between
- * picks). `ringLen` and `wrap` are the tier's ring size and clock wrap. */
-inline void ScopeExtract(const int8_t* ring, int ringLen, uint32_t wrap, uint32_t start, int n, int decim, bool peak, int8_t* out)
+/* CONTROL: n points from a ring starting at `start` (the tier's own clock),
+ * one per `decim` source samples. decim 1: the samples, n bytes. Otherwise
+ * each point is its group's minimum then its maximum, 2n bytes — the
+ * envelope, so a click, a hat or a 6 ms gate is never between picks and
+ * nothing aliases. Returns the bytes written (`out` holds 2 · kScopeMaxN).
+ * `ringLen` and `wrap` are the tier's ring size and clock wrap. */
+inline int ScopeExtract(const int8_t* ring, int ringLen, uint32_t wrap, uint32_t start, int n, int decim, int8_t* out)
 {
     const uint32_t m = (uint32_t)(ringLen - 1);
-    if(!peak || decim == 1)
-    {
-        uint32_t p = start;
-        for(int i = 0; i < n; i++) { out[i] = ring[p & m]; p = ScopeAdd(p, (uint32_t)decim, wrap); }
-        return;
-    }
     uint32_t p = start;
+    if(decim == 1)
+    {
+        for(int i = 0; i < n; i++) { out[i] = ring[p & m]; p = ScopeNext(p, wrap); }
+        return n;
+    }
     for(int i = 0; i < n; i++)
     {
-        int8_t best = 0; int mag = -1; uint32_t q = p;
-        for(int k = 0; k < decim; k++)
+        int8_t lo = ring[p & m], hi = lo; p = ScopeNext(p, wrap);
+        for(int k = 1; k < decim; k++)
         {
-            const int8_t v = ring[q & m];
-            const int mg = v < 0 ? -(int)v : (int)v;
-            if(mg > mag) { mag = mg; best = v; }
-            q = ScopeNext(q, wrap);
+            const int8_t v = ring[p & m];
+            if(v < lo) lo = v; else if(v > hi) hi = v;
+            p = ScopeNext(p, wrap);
         }
-        out[i] = best; p = ScopeAdd(p, (uint32_t)decim, wrap);
+        out[2 * i] = lo; out[2 * i + 1] = hi;
+    }
+    return 2 * n;
+}
+
+/* CONTROL: the reply's four audio levels — peak |x| of each audio channel
+ * over the newest kScopeLevelSpan samples, selected or not, so the page
+ * knows an input carries a signal without fetching its trace. */
+inline void ScopeLevels(const int8_t* const audio[kScopeChans], uint32_t wpos, uint8_t out[kScopeChans])
+{
+    const uint32_t start = ScopeSub(wpos, (uint32_t)kScopeLevelSpan);
+    for(int c = 0; c < kScopeChans; c++)
+    {
+        int pk = 0; uint32_t p = start;
+        for(int i = 0; i < kScopeLevelSpan; i++)
+        {
+            const int v = audio[c][ScopeSlot(p)]; const int a = v < 0 ? -v : v;
+            if(a > pk) pk = a;
+            p = ScopeNext(p);
+        }
+        out[c] = (uint8_t)(pk > 127 ? 127 : pk);
     }
 }
 

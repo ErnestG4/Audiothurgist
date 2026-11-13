@@ -6,8 +6,9 @@
 // A miniature of the shell: four audio rings and six CV rings under one
 // sample clock, fed by a fake audio thread block by block (24 samples, one CV
 // sample per block), then read the way the 0x62 handler reads them — parse,
-// window (trigger / at-pos / newest, aligned or detached), extract per
-// channel — and the pre-SCOPE (empty body) reply beside it.
+// window (trigger / at-pos / newest, aligned or detached), the four levels,
+// extract per channel (samples at decimation 1, min/max groups above) — and
+// the pre-SCOPE (empty body) reply beside it.
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -66,20 +67,24 @@ static int Handle(const Rings& R, const uint8_t* body, int len, int maxBody, uin
     int o = 0;
     out[o++] = 0; out[o++] = q.mask; out[o++] = q.decim; out[o++] = (uint8_t)q.n; out[o++] = (uint8_t)(q.n >> 8); out[o++] = (uint8_t)(win.flags | (ext ? kScopeExtReply : 0));
     out[o++] = (uint8_t)win.pos; out[o++] = (uint8_t)(win.pos >> 8); out[o++] = (uint8_t)(win.pos >> 16); out[o++] = (uint8_t)(win.pos >> 24);
-    if(ext) { out[o++] = q.maskHi; out[o++] = q.cvDecim; out[o++] = (uint8_t)kScopeCvDiv; const int ts = ScopeTrigSource(q); out[o++] = (uint8_t)((q.flags & kScopeTrig) && !(q.flags & kScopeAt) && ts >= 0 ? ts : kScopeTrigNone); }
+    { const int8_t* const Ac[kScopeChans] = { R.a[0], R.a[1], R.a[2], R.a[3] }; ScopeLevels(Ac, wpos, out + o); o += kScopeChans; }
+    if(ext) { out[o++] = q.maskHi; out[o++] = q.cvDecim; out[o++] = (uint8_t)kScopeCvDiv; const int ts = ScopeTrigSource(q); out[o++] = (uint8_t)((q.flags & kScopeTrig) && !(q.flags & kScopeAt) && ts >= 0 ? ts : kScopeTrigNone);
+              out[o++] = (uint8_t)win.cvPos; out[o++] = (uint8_t)(win.cvPos >> 8); out[o++] = (uint8_t)(win.cvPos >> 16); out[o++] = (uint8_t)(win.cvPos >> 24); }
     for(int ch = 0; ch < kScopeChans; ch++)
-        if(q.mask & (1u << ch)) { ScopeExtract(R.a[ch], kScopeRing, kScopeWrap, win.pos, q.n, q.decim, (q.flags & kScopePeak) != 0, (int8_t*)out + o); o += q.n; }
+        if(q.mask & (1u << ch)) o += ScopeExtract(R.a[ch], kScopeRing, kScopeWrap, win.pos, q.n, q.decim, (int8_t*)out + o);
     for(int ch = 0; ch < kScopeCvChans; ch++)
-        if(q.maskHi & (1u << ch)) { ScopeExtract(R.c[ch], kScopeCvRing, kScopeCvWrap, win.cvPos, q.n, q.cvDecim, (q.flags & kScopePeak) != 0, (int8_t*)out + o); o += q.n; }
+        if(q.maskHi & (1u << ch)) o += ScopeExtract(R.c[ch], kScopeCvRing, kScopeCvWrap, win.cvPos, q.n, q.cvDecim, (int8_t*)out + o);
     return o;
 }
 static uint32_t U32(const uint8_t* b) { return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24); }
-static int Req(uint8_t* b, uint8_t mask, uint8_t decim, uint16_t n, uint8_t flags, uint32_t pos = 0, uint8_t maskHi = 0, uint8_t cvDecim = 1, int8_t level = 0, uint8_t trig = 0)
+static int Req(uint8_t* b, uint8_t mask, uint8_t decim, uint16_t n, uint8_t flags, uint32_t pos = 0, uint8_t maskHi = 0, uint8_t cvDecim = 1, int8_t level = 0, uint8_t trig = 0, uint32_t cvPos = 0xffffffffu)
 {
+    if(cvPos == 0xffffffffu) cvPos = pos / 24u;   /* an aligned frame: the cv start is the audio one / 24 */
+    b[13] = (uint8_t)cvPos; b[14] = (uint8_t)(cvPos >> 8); b[15] = (uint8_t)(cvPos >> 16); b[16] = (uint8_t)(cvPos >> 24);
     b[0] = mask; b[1] = decim; b[2] = (uint8_t)n; b[3] = (uint8_t)(n >> 8); b[4] = flags;
     b[5] = (uint8_t)pos; b[6] = (uint8_t)(pos >> 8); b[7] = (uint8_t)(pos >> 16); b[8] = (uint8_t)(pos >> 24);
     b[9] = maskHi; b[10] = cvDecim; b[11] = (uint8_t)level; b[12] = trig;
-    return (flags & kScopeExt) ? 13 : (flags & kScopeAt) ? 9 : 5;
+    return (flags & kScopeExt) ? 17 : (flags & kScopeAt) ? 9 : 5;
 }
 /* the forward Schmitt walk — the reference the backward search must agree with */
 static uint32_t ForwardCrossing(const int8_t* ring, int ringLen, int usable, uint32_t wpos, int span, int level, int hyst, bool& found)
@@ -105,18 +110,20 @@ static uint32_t ForwardCrossing(const int8_t* ring, int ringLen, int usable, uin
 
 int main()
 {
-    static uint8_t out[8192]; uint8_t body[13];
+    static uint8_t out[8192]; uint8_t body[17];
     const float kPi = 3.14159265f;
 
     SECTION("parse + clamps");
     {
         ScopeReq q; int L;
         L = Req(body, 0x0f, 4, 512, 0);
-        CHECK(ScopeParse(body, L, 2048, q) && q.n == 509 && q.mask == 0x0f && q.decim == 4, "4 ch at 2048 → 509 (got %d)", q.n);
-        CHECK(ScopeParse(body, L, 1024, q) && q.n == 253, "4 ch at 1024 → 253 (got %d)", q.n);
-        CHECK(ScopeParse(body, L, 512, q) && q.n == 125, "4 ch at 512 → 125 (got %d)", q.n);
+        CHECK(ScopeParse(body, L, 2048, q) && q.n == 254 && q.mask == 0x0f && q.decim == 4 && q.BppA() == 2 && q.PointBytes() == 8, "4 ch of min/max pairs at 2048 → 254 (got %d)", q.n);
+        CHECK(ScopeParse(body, L, 1024, q) && q.n == 126, "4 ch of pairs at 1024 → 126 (got %d)", q.n);
+        CHECK(ScopeParse(body, L, 512, q) && q.n == 62, "4 ch of pairs at 512 → 62 (got %d)", q.n);
+        L = Req(body, 0x0f, 1, 512, 0);
+        CHECK(ScopeParse(body, L, 2048, q) && q.n == 508 && q.BppA() == 1 && ScopeParse(body, L, 1024, q) && q.n == 252, "4 ch of samples (×1): 508 at 2048, 252 at 1024 (got %d)", q.n);
         L = Req(body, 0x03, 4, 512, 0);
-        CHECK(ScopeParse(body, L, 2048, q) && q.n == 512, "2 ch at 2048 → 512 (got %d)", q.n);
+        CHECK(ScopeParse(body, L, 2048, q) && q.n == 508, "2 ch of pairs at 2048 → 508 (got %d)", q.n);
         L = Req(body, 0x01, 16, 9999, 0);
         CHECK(ScopeParse(body, L, 2048, q) && q.n == 512, "×16 × 512 fits the 64 K ring: 512 (got %d)", q.n);
         L = Req(body, 0x00, 4, 256, 0); CHECK(!ScopeParse(body, L, 2048, q), "mask 0 → BAD_ARGS");
@@ -130,8 +137,9 @@ int main()
         L = Req(body, 0x01, 4, 256, kScopeAt, kScopeWrap); CHECK(!ScopeParse(body, L, 2048, q), "pos past the wrap → BAD_ARGS");
         /* the ext form: CV jacks, their decimation, the trigger level */
         L = Req(body, 0x01, 4, 512, kScopeExt, 0, 0x3f, 8, 25);
-        CHECK(ScopeParse(body, L, 1024, q) && q.maskHi == 0x3f && q.cvDecim == 8 && q.level == 25 && q.Chans() == 7 && q.Hdr() == 14 && q.n == (1024 - 14) / 7, "ext: 1 + 6 ch at 1024 → %d", q.n);
-        CHECK(!ScopeParse(body, 12, 1024, q), "ext with a short body → BAD_ARGS");
+        CHECK(ScopeParse(body, L, 1024, q) && q.maskHi == 0x3f && q.cvDecim == 8 && q.level == 25 && q.Chans() == 7 && q.Hdr() == 22 && q.PointBytes() == 14 && q.n == (1024 - 22) / 14, "ext: 1 + 6 ch of pairs at 1024 → %d", q.n);
+        CHECK(!ScopeParse(body, 16, 1024, q), "ext with a short body → BAD_ARGS");
+        L = Req(body, 0x01, 4, 256, kScopeAt | kScopeExt, 240, 0x01, 1, 0, 0, kScopeCvWrap); CHECK(!ScopeParse(body, L, 1024, q), "an at-cvPos past the cv wrap → BAD_ARGS");
         L = Req(body, 0x01, 4, 512, kScopeExt, 0, 0x08, 1, 25, kScopeTrigSet | 7);
         CHECK(ScopeParse(body, L, 1024, q) && q.trig == (kScopeTrigSet | 7) && ScopeTrigSource(q) == 7, "ext: explicit trigger source J6 (7)");
         L = Req(body, 0x01, 4, 512, kScopeExt, 0, 0x08, 1, 25, kScopeTrigSet | 10); CHECK(!ScopeParse(body, L, 1024, q), "trigger source 10 → BAD_ARGS");
@@ -139,12 +147,12 @@ int main()
         L = Req(body, 0x0a, 4, 512, kScopeExt, 0, 0x08, 1, 25, 0); CHECK(ScopeParse(body, L, 1024, q) && ScopeTrigSource(q) == 1, "auto trigger source = first selected audio channel");
         L = Req(body, 0x00, 4, 512, kScopeExt, 0, 0x28, 1, 25, 0); CHECK(ScopeParse(body, L, 1024, q) && ScopeTrigSource(q) == 7, "auto trigger source = first selected cv when no audio");
         L = Req(body, 0x00, 4, 512, kScopeExt, 0, 0x08, 64, 0);
-        CHECK(ScopeParse(body, L, 1024, q) && q.mask == 0 && q.n == kScopeCvUsable / 64 && q.SpanA() == 0 && q.SpanC() == q.n * 64, "cv only at ×64: held to the cv ring (%d)", q.n);
+        CHECK(ScopeParse(body, L, 1024, q) && q.BppC() == 2 && q.mask == 0 && q.n == kScopeCvUsable / 64 && q.SpanA() == 0 && q.SpanC() == q.n * 64, "cv only at ×64: held to the cv ring (%d)", q.n);
         L = Req(body, 0x00, 4, 512, kScopeExt, 0, 0x00, 1, 0); CHECK(!ScopeParse(body, L, 1024, q), "ext with no channel at all → BAD_ARGS");
         L = Req(body, 0x00, 4, 512, kScopeExt, 0, 0x40, 1, 0); CHECK(!ScopeParse(body, L, 1024, q), "maskHi bit 6 → BAD_ARGS");
         L = Req(body, 0x00, 4, 512, kScopeExt, 0, 0x01, 0, 0); CHECK(!ScopeParse(body, L, 1024, q), "cvDecim 0 → BAD_ARGS");
         L = Req(body, 0x00, 4, 512, kScopeExt, 0, 0x01, 65, 0); CHECK(!ScopeParse(body, L, 1024, q), "cvDecim 65 → BAD_ARGS");
-        L = Req(body, 0x01, 4, 512, 0); CHECK(ScopeParse(body, L, 1024, q) && q.maskHi == 0 && q.cvDecim == 1 && q.level == 0 && q.Hdr() == 10, "the 5-byte form leaves the ext fields at their defaults");
+        L = Req(body, 0x01, 4, 512, 0); CHECK(ScopeParse(body, L, 1024, q) && q.maskHi == 0 && q.cvDecim == 1 && q.level == 0 && q.Hdr() == 14, "the 5-byte form leaves the ext fields at their defaults");
         CHECK(ScopeChanCount(0x0f) == 4 && ScopeChanCount(0x3f) == 6 && ScopeChanCount(0x0a) == 2 && ScopeFirstChan(0x0a) == 1 && ScopeFirstChan(0x08) == 3 && ScopeFirstChan(0) == -1, "mask helpers");
         CHECK(ScopeI8(1.5f) == 127 && ScopeI8(-1.5f) == -127 && ScopeI8(0.5f) == 63 && ScopeI8(0.f) == 0, "float → i8 saturates");
         /* the clock: wrap arithmetic */
@@ -182,20 +190,21 @@ int main()
         }
         int L = Req(body, 0x0f, 1, 512, kScopeTrig);
         const int len = Handle(R, body, L, 2048, out);
-        CHECK(len == 10 + 4 * 509, "4 ch × 509 + header = %d", len);
-        CHECK(out[0] == 0 && out[1] == 0x0f && out[2] == 1 && (out[3] | (out[4] << 8)) == 509, "header echoes the clamped request");
+        CHECK(len == 14 + 4 * 508, "4 ch × 508 + header = %d", len);
+        CHECK(out[0] == 0 && out[1] == 0x0f && out[2] == 1 && (out[3] | (out[4] << 8)) == 508, "header echoes the clamped request");
         CHECK(out[5] & kScopeTriggered, "triggered flag");
         const uint32_t pos = U32(out + 6);
-        const int8_t* oL = (const int8_t*)out + 10;
-        const int8_t* oR = oL + 509; const int8_t* iL = oR + 509; const int8_t* iR = iL + 509;
+        const int8_t* oL = (const int8_t*)out + 14;
+        const int8_t* oR = oL + 508; const int8_t* iL = oR + 508; const int8_t* iR = iL + 508;
+        CHECK(out[10] == 101 && out[11] == 101 && out[12] == 63 && out[13] == 63, "the four levels: peak |x| of each channel over the newest 43 ms (%u %u %u %u)", out[10], out[11], out[12], out[13]);
         CHECK(oL[0] >= 0 && R.a[0][ScopeSlot(pos - 1)] < 0, "starts at a rising crossing: prev %d, first %d", R.a[0][ScopeSlot(pos - 1)], oL[0]);
         CHECK(pos % 480 == 0, "crossing on the 100 Hz grid: pos %u", pos);
         CHECK(ScopeAge(R.w, pos) >= 512, "window fits: %u after", ScopeAge(R.w, pos));
         bool later = false; for(uint32_t p = pos + 480; ScopeAge(R.w, p) >= 512 && p < R.w; p += 480) later = true;
         CHECK(!later, "the most recent crossing that fits");
-        bool aligned = true; for(int i = 0; i < 509; i++) if(oR[i] != -oL[i]) { aligned = false; break; }
+        bool aligned = true; for(int i = 0; i < 508; i++) if(oR[i] != -oL[i]) { aligned = false; break; }
         CHECK(aligned, "out R == -out L across the window");
-        bool ramp = true; for(int i = 0; i < 509; i += 7) { const int want = ScopeI8((float)((pos + i) % 480) / 480.f - 0.5f); if(iR[i] != want) { ramp = false; break; } }
+        bool ramp = true; for(int i = 0; i < 508; i += 7) { const int want = ScopeI8((float)((pos + i) % 480) / 480.f - 0.5f); if(iR[i] != want) { ramp = false; break; } }
         CHECK(ramp, "in R ramp aligned to pos");
         CHECK(iL[100] != oL[100] || iL[200] != oL[200], "in L is its own signal");
         L = Req(body, 0x01, 1, 512, 0);
@@ -244,6 +253,29 @@ int main()
         Handle(O, body, L, 2048, out);
         CHECK(!(out[5] & kScopeTriggered), "a crossing older than the usable ring is not used");
         delete Op;
+        /* an AUDIO trigger gives up after span + max(span, kScopeTrigHold): a pulse 5000 samples back still triggers a
+         * 256-sample window, one 5200 back does not (the scope free-runs on now); a long window looks back twice its span */
+        for(int back = 5000; back <= 5200; back += 200)
+        {
+            Rings* Hp = NewRings(); Rings& H = *Hp;
+            for(int i = 0; i < 12000; i++) { float v = 0; const int k = i - (12000 - back - 40); if(k >= 0 && k < 40) v = -0.5f; if(k >= 40 && k < 80) v = 0.5f; H.Push(v, 0, 0, 0); }
+            Handle(H, body, L, 2048, out);
+            const bool trg = (out[5] & kScopeTriggered) != 0;
+            CHECK(back == 5000 ? (trg && ScopeAge(H.w, U32(out + 6)) == 5000u) : (!trg && U32(out + 6) == H.w - 256), "a crossing %d samples back: %s (look-back 256 + %d)", back, trg ? "triggered" : "free-running", kScopeTrigHold);
+            if(back == 5200)
+            {
+                const int L16 = Req(body, 0x01, 16, 400, kScopeTrig);   /* span 6400: looks back 12800 */
+                Handle(H, body, L16, 2048, out);
+                CHECK(!(out[5] & kScopeTriggered), "…and the crossing 5200 back cannot leave a 6400 span");
+                for(int i = 0; i < 7008; i++) H.Push(0, 0, 0, 0);
+                Handle(H, body, L16, 2048, out);
+                CHECK((out[5] & kScopeTriggered) && ScopeAge(H.w, U32(out + 6)) == 12208u, "a 6400 span looks back 12800: the crossing 12208 back triggers (age %u)", ScopeAge(H.w, U32(out + 6)));
+                for(int i = 0; i < 720; i++) H.Push(0, 0, 0, 0);
+                Handle(H, body, L16, 2048, out);
+                CHECK(!(out[5] & kScopeTriggered), "…and 12928 back it is let go");
+            }
+            delete Hp;
+        }
         /* backward == forward on random-ish signals, at both levels, with the same hysteresis */
         Rings* Xp = NewRings(); Rings& X = *Xp; uint32_t seed = 12345u; int agree = 0, trials = 0, foundN = 0;
         auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return (float)(seed >> 8) / 16777216.f * 2.f - 1.f; };
@@ -261,48 +293,60 @@ int main()
         delete Rp;
     }
 
-    SECTION("decimation: plain pick and peak");
+    SECTION("decimation: the samples at ×1, each group's min and max above — nothing aliases");
     {
         Rings* Rp = NewRings(); Rings& R = *Rp;
         for(int i = 0; i < 8192; i++) { float v = 0; if(i % 64 == 37) v = 0.9f; if(i % 64 == 38) v = -0.3f; R.Push(v, (float)((i % 128) - 64) / 128.f, 0, 0); }
         int L = Req(body, 0x01, 16, 100, 0);
+        int len = Handle(R, body, L, 2048, out);
+        const int8_t* s = (const int8_t*)out + 14;
+        int clicks = 0; bool pairOk = true;
+        for(int i = 0; i < 100; i++) { const int lo = s[2 * i], hi = s[2 * i + 1]; if(hi != 0 || lo != 0) { clicks++; if(hi != ScopeI8(0.9f) || lo != ScopeI8(-0.3f)) pairOk = false; } }
+        CHECK(len == 14 + 200 && clicks == 25 && pairOk, "×16: a two-sample click is in every 4th group, both its sides (min −0.3, max +0.9): %d clicks, %d bytes", clicks, len);
+        L = Req(body, 0x02, 8, 200, 0);
         Handle(R, body, L, 2048, out);
-        const uint32_t start = U32(out + 6); const int8_t* s = (const int8_t*)out + 10;
-        bool plainOk = true; for(int i = 0; i < 100; i++) if(s[i] != R.a[0][ScopeSlot(start + i * 16)]) plainOk = false;
-        CHECK(plainOk, "plain pick = the first sample of each group");
-        L = Req(body, 0x01, 16, 100, kScopePeak);
-        Handle(R, body, L, 2048, out);
-        int clicks = 0; bool signOk = true;
-        for(int i = 0; i < 100; i++) { if(s[i] != 0) { clicks++; if(s[i] != ScopeI8(0.9f)) signOk = false; } }
-        CHECK(clicks == 25 && signOk, "peak keeps the click in every 4th group: %d clicks", clicks);
-        L = Req(body, 0x02, 8, 200, kScopePeak);
-        Handle(R, body, L, 2048, out);
-        const uint32_t st2 = U32(out + 6); bool pk = true;
-        for(int i = 0; i < 200 && pk; i++) { int best = 0, mag = -1; for(int k = 0; k < 8; k++) { const int v = R.a[1][ScopeSlot(st2 + i * 8 + k)]; const int m = v < 0 ? -v : v; if(m > mag) { mag = m; best = v; } } if(s[i] != best) pk = false; }
-        CHECK(pk, "peak = max-magnitude sample of each group");
-        L = Req(body, 0x02, 1, 300, kScopePeak);
-        Handle(R, body, L, 2048, out);
+        const uint32_t st2 = U32(out + 6); bool mm = true;
+        for(int i = 0; i < 200 && mm; i++) { int lo = 127, hi = -128; for(int k = 0; k < 8; k++) { const int v = R.a[1][ScopeSlot(st2 + i * 8 + k)]; if(v < lo) lo = v; if(v > hi) hi = v; } if(s[2 * i] != lo || s[2 * i + 1] != hi) mm = false; }
+        CHECK(mm, "×8: each point = (min, max) of its eight samples");
+        L = Req(body, 0x02, 1, 300, 0);
+        len = Handle(R, body, L, 2048, out);
         const uint32_t st3 = U32(out + 6); bool copy = true; for(int i = 0; i < 300; i++) if(s[i] != R.a[1][ScopeSlot(st3 + i)]) copy = false;
-        CHECK(copy, "×1 peak = the samples");
+        CHECK(len == 14 + 300 && copy, "×1 = the samples, one byte each");
         delete Rp;
+        /* what picking one sample in sixteen did: a 2900 Hz tone at ×16 (3 kHz picks) read as a 100 Hz sine of the same
+         * height. The min/max groups show it for what it is — a band at the tone's amplitude, the same in every point */
+        Rings* Ap = NewRings(); Rings& A = *Ap;
+        for(int i = 0; i < 20000; i++) A.Push(0.7f * sinf(2 * kPi * 2900.f * i / kSr), 0, 0, 0);
+        L = Req(body, 0x01, 16, 400, 0);
+        Handle(A, body, L, 2048, out);
+        const uint32_t sa = U32(out + 6); int pickSwing = 0, bandMin = 127, bandMax = 0, prev = 0, flips = 0;
+        for(int i = 0; i < 400; i++)
+        {
+            const int pick = A.a[0][ScopeSlot(sa + i * 16)]; if(i && ((pick < 0) != (prev < 0))) flips++; prev = pick;
+            if(pick > pickSwing) pickSwing = pick;
+            const int lo = s[2 * i], hi = s[2 * i + 1]; if(hi < bandMin) bandMin = hi; if(-lo < bandMin) bandMin = -lo; if(hi > bandMax) bandMax = hi; if(-lo > bandMax) bandMax = -lo;
+        }
+        CHECK(flips >= 25 && flips <= 28 && pickSwing >= 85, "one sample in 16 of a 2900 Hz tone draws ~13 cycles of a 100 Hz sine (%d sign flips, swing %d) — the alias", flips, pickSwing);
+        CHECK(bandMin >= 80 && bandMax <= 89, "the min/max groups draw a level band at the tone's amplitude: every point within %d..%d of ±88", bandMin, bandMax);
+        delete Ap;
     }
 
     SECTION("at-pos: a second request of the same frame lands on the same samples");
     {
         Rings* Rp = NewRings(); Rings& R = *Rp;
         for(int i = 0; i < 30000; i++) { const float t = i / kSr; R.Push(0.7f * sinf(2 * kPi * 60.f * t), 0.2f * sinf(2 * kPi * 1000.f * t), 0.3f * sinf(2 * kPi * 150.f * t), 0); }
-        int L = Req(body, 0x01, 2, 500, kScopeTrig);
+        int L = Req(body, 0x01, 2, 300, kScopeTrig);
         Handle(R, body, L, 2048, out);
         const uint32_t pos = U32(out + 6); CHECK(out[5] & kScopeTriggered, "first request triggers");
-        int8_t first[500]; memcpy(first, out + 10, 500);
+        int8_t first[600]; memcpy(first, out + 14, 600);
         for(int i = 0; i < 240; i++) R.Push(0, 0, 0, 0);   /* the audio thread runs on ten blocks, as between two requests */
-        L = Req(body, 0x0e, 2, 500, kScopeAt, pos);
+        L = Req(body, 0x0e, 2, 300, kScopeAt, pos);
         const int len = Handle(R, body, L, 2048, out);
-        CHECK(len == 10 + 3 * 500 && (out[5] & kScopeAtHonoured) && !(out[5] & kScopeTriggered) && U32(out + 6) == pos, "second request honoured at pos (flags %u)", out[5]);
-        int8_t ref[500]; ScopeExtract(R.a[1], kScopeRing, kScopeWrap, pos, 500, 2, false, ref);
-        CHECK(memcmp(out + 10, ref, 500) == 0, "out R at the same pos");
-        int8_t again[500]; ScopeExtract(R.a[0], kScopeRing, kScopeWrap, pos, 500, 2, false, again);
-        CHECK(memcmp(again, first, 500) == 0, "out L unchanged at pos");
+        CHECK(len == 14 + 3 * 600 && (out[5] & kScopeAtHonoured) && !(out[5] & kScopeTriggered) && U32(out + 6) == pos, "second request honoured at pos (flags %u)", out[5]);
+        int8_t ref[600]; CHECK(ScopeExtract(R.a[1], kScopeRing, kScopeWrap, pos, 300, 2, ref) == 600, "300 points at ×2 are 600 bytes");
+        CHECK(memcmp(out + 14, ref, 600) == 0, "out R at the same pos");
+        int8_t again[600]; ScopeExtract(R.a[0], kScopeRing, kScopeWrap, pos, 300, 2, again);
+        CHECK(memcmp(again, first, 600) == 0, "out L unchanged at pos");
         L = Req(body, 0x01, 1, 256, kScopeAt, ScopeSub(R.w, 70000u));
         Handle(R, body, L, 2048, out);
         CHECK(!(out[5] & kScopeAtHonoured) && U32(out + 6) == R.w - 256, "pos too old → newest, not honoured");
@@ -331,36 +375,36 @@ int main()
         /* cv only: J6 (bit 3) triggered at 1 V, ×1 → 512 samples = 256 ms, aligned to the gate's rise */
         int L = Req(body, 0x00, 1, 512, kScopeTrig | kScopeExt, 0, 0x08, 1, 25);
         int len = Handle(R, body, L, 1024, out);
-        CHECK(len == 14 + 512 && (out[5] & (kScopeTriggered | kScopeExtReply)) == (kScopeTriggered | kScopeExtReply) && out[10] == 0x08 && out[11] == 1 && out[12] == kScopeCvDiv, "cv-only frame: ext header, triggered (flags %u, len %d)", out[5], len);
-        const uint32_t posC = U32(out + 6); const int8_t* g = (const int8_t*)out + 14;
+        CHECK(len == 22 + 512 && (out[5] & (kScopeTriggered | kScopeExtReply)) == (kScopeTriggered | kScopeExtReply) && out[14] == 0x08 && out[15] == 1 && out[16] == kScopeCvDiv, "cv-only frame: ext header, triggered (flags %u, len %d)", out[5], len);
+        const uint32_t posC = U32(out + 6); const int8_t* g = (const int8_t*)out + 22;
         CHECK(posC % 24 == 0 && (posC / 24) % (stepLen / 24) == 0, "the gate's rise is on a block and on the step grid: pos %u", posC);
         CHECK(g[0] == 127 && g[11] == 127 && g[12] == 0 && g[100] == 0 && g[250] == 127, "the 6 ms gate reads 12 samples of +5 V at 2 kHz, the next gate 250 samples on (%d %d %d %d %d)", g[0], g[11], g[12], g[100], g[250]);
         /* the LFO on J4 at ×32: 512 samples = 8.2 s, 1.6 periods of the 0.2 Hz sine, ±127 */
         L = Req(body, 0x00, 1, 512, kScopeExt, 0, 0x02, 32, 0);
-        len = Handle(R, body, L, 1024, out);
-        int mn = 127, mx = -127; for(int i = 0; i < (out[3] | (out[4] << 8)); i++) { if(g[i] < mn) mn = g[i]; if(g[i] > mx) mx = g[i]; }
-        CHECK((out[3] | (out[4] << 8)) == kScopeCvUsable / 32 && mn <= -125 && mx >= 125, "LFO at ×32: n %d, range %d..%d", out[3] | (out[4] << 8), mn, mx);
+        len = Handle(R, body, L, 2048, out);
+        int mn = 127, mx = -127; bool ordered = true; for(int i = 0; i < (out[3] | (out[4] << 8)); i++) { if(g[2 * i] < mn) mn = g[2 * i]; if(g[2 * i + 1] > mx) mx = g[2 * i + 1]; if(g[2 * i] > g[2 * i + 1]) ordered = false; }
+        CHECK(len == 22 + 2 * (kScopeCvUsable / 32) && ordered && (out[3] | (out[4] << 8)) == kScopeCvUsable / 32 && mn <= -125 && mx >= 125, "LFO at ×32: n %d, range %d..%d", out[3] | (out[4] << 8), mn, mx);
         /* audio + cv, triggered on out L (first selected): both tiers start at the same instant, and the audio trigger
          * left room for the cv window too (512 cv samples = 12288 audio samples) */
         L = Req(body, 0x01, 4, 512, kScopeTrig | kScopeExt, 0, 0x08, 1, 0);
         len = Handle(R, body, L, 2048, out);
         const uint32_t posA = U32(out + 6); const int n2 = out[3] | (out[4] << 8);
-        CHECK(len == 14 + 2 * n2 && (out[5] & kScopeTriggered) && !(out[5] & kScopeDetached) && out[13] == 0, "audio-triggered mixed frame, both tiers aligned (flags %u, src %u)", out[5], out[13]);
+        CHECK(len == 22 + 3 * n2 && n2 == 512 && (out[5] & kScopeTriggered) && !(out[5] & kScopeDetached) && out[17] == 0, "audio-triggered mixed frame, both tiers aligned (flags %u, src %u)", out[5], out[17]);
         CHECK(ScopeAge(R.w, posA) >= 512u * 24u, "the audio trigger left the cv span (age %u)", ScopeAge(R.w, posA));
-        const int8_t* aL = (const int8_t*)out + 14; const int8_t* j6 = aL + n2;
-        CHECK(aL[0] >= 0 && R.a[0][ScopeSlot(posA - 1)] < 0, "audio starts on the crossing");
+        const int8_t* aL = (const int8_t*)out + 22; const int8_t* j6 = aL + 2 * n2;   /* audio ×4: pairs; cv ×1: samples */
+        CHECK(aL[1] >= 0 && R.a[0][ScopeSlot(posA - 1)] < 0, "audio starts on the crossing");
         /* the crossing is somewhere in the kick burst; the next step's gate rises (6000 − pos % 6000) samples on, i.e. that many / 24 cv samples in */
         { const int k = (int)((stepLen - posA % stepLen) / 24); CHECK(k < n2 && j6[k] == 127 && (k == 0 || j6[k - 1] == 0 || posA % stepLen < 200), "the next gate rises at cv index %d (%d, %d)", k, j6[k], k ? j6[k - 1] : -1); }
         /* the same frame re-read at pos: honoured on both tiers */
         L = Req(body, 0x02, 4, n2, kScopeAt | kScopeExt, posA, 0x08, 1, 0);
         len = Handle(R, body, L, 2048, out);
-        CHECK((out[5] & kScopeAtHonoured) && U32(out + 6) == posA && memcmp(out + 14 + n2, j6, n2) == 0, "at-pos honours both tiers, J6 identical");
+        CHECK((out[5] & kScopeAtHonoured) && U32(out + 6) == posA && memcmp(out + 22 + 2 * n2, j6, n2) == 0, "at-pos honours both tiers, J6 identical");
         /* cv-triggered (explicit source J6) mixed frame: the gate that leaves 256 ms is ≥ 256 ms old — the audio ring
          * (1.37 s) still holds it, so both tiers align and the audio window shows the kick under its gate */
         L = Req(body, 0x01, 4, 512, kScopeTrig | kScopeExt, 0, 0x08, 1, 25, kScopeTrigSet | 7);
         len = Handle(R, body, L, 2048, out);
-        CHECK((out[5] & kScopeTriggered) && !(out[5] & kScopeDetached) && out[13] == 7 && U32(out + 6) % 24 == 0 && ScopeAge(R.w, U32(out + 6)) >= 512 * 24, "cv-triggered mixed frame within the audio ring: aligned (flags %u, src %u, age %u)", out[5], out[13], ScopeAge(R.w, U32(out + 6)));
-        const int8_t* aL2 = (const int8_t*)out + 14; const int8_t* j62 = aL2 + (out[3] | (out[4] << 8));
+        CHECK((out[5] & kScopeTriggered) && !(out[5] & kScopeDetached) && out[17] == 7 && U32(out + 6) % 24 == 0 && ScopeAge(R.w, U32(out + 6)) >= 512 * 24, "cv-triggered mixed frame within the audio ring: aligned (flags %u, src %u, age %u)", out[5], out[17], ScopeAge(R.w, U32(out + 6)));
+        const int8_t* aL2 = (const int8_t*)out + 22; const int8_t* j62 = aL2 + 2 * (out[3] | (out[4] << 8));
         CHECK(j62[0] == 127 && (out[3] | (out[4] << 8)) == 512 && U32(out + 6) % stepLen == 0, "the gate opens the cv window at a step start, n 512 (got %d, pos %% step %u)", out[3] | (out[4] << 8), U32(out + 6) % stepLen);
         { int first = -1; for(int i = 0; i < 100; i++) if(aL2[i] != 0) { first = i; break; } CHECK(first >= 0 && first < 30, "the kick starts with the gate in the audio window (first non-zero at %d)", first); }
         /* …but a cv window of 4 s (×16) starts long before the audio ring: the audio tier detaches to its newest window */
@@ -368,8 +412,36 @@ int main()
         len = Handle(R, body, L, 2048, out);
         const int n3 = out[3] | (out[4] << 8);
         CHECK((out[5] & kScopeTriggered) && (out[5] & kScopeDetached) && U32(out + 6) == ScopeSub(R.w, (uint32_t)(n3 * 4)), "cv window older than the audio ring: audio detached to newest (flags %u)", out[5]);
-        const int8_t* j63 = (const int8_t*)out + 14 + n3;
-        CHECK(j63[0] == 127, "the cv tier still starts on its trigger");
+        const int8_t* j63 = (const int8_t*)out + 22 + 2 * n3;
+        CHECK(n3 == (2048 - 22) / 4 && j63[0] == 0 && j63[1] == 127, "the cv tier still starts on its trigger: the first ×16 group holds the 6 ms gate, min 0 max 127 (n %d)", n3);
+        /* the same detached frame SPLIT over two requests: the first selects out L alone but carries kScopeFrame, so the
+         * window is placed for both tiers; its reply gives both starts and the second request asks for J6 at the cv one */
+        L = Req(body, 0x01, 4, 400, kScopeTrig | kScopeFrame | kScopeExt, 0, 0x00, 16, 25, kScopeTrigSet | 7);
+        len = Handle(R, body, L, 1024, out);
+        const uint32_t dA = U32(out + 6), dC = U32(out + 18); const int nd = out[3] | (out[4] << 8);
+        CHECK(len == 22 + 2 * nd && nd == 400 && (out[5] & kScopeTriggered) && (out[5] & kScopeDetached) && dA == ScopeSub(R.w, (uint32_t)(nd * 4)) && dC != ScopeCvPos(dA) && ScopeAge(ScopeCvPos(R.w), dC, kScopeCvWrap) >= 400u * 16u,
+              "split + detached, first request: audio at its newest, the cv start its own (pos %u, cvPos %u, flags %u)", dA, dC, out[5]);
+        for(int i = 0; i < 240; i++) R.Push(0, 0, 0, 0);
+        L = Req(body, 0x00, 4, 400, kScopeAt | kScopeExt, dA, 0x08, 16, 0, 0, dC);
+        len = Handle(R, body, L, 1024, out);
+        CHECK(len == 22 + 800 && (out[5] & kScopeAtHonoured) && U32(out + 6) == dA && U32(out + 18) == dC && ((const int8_t*)out)[22] == 0 && ((const int8_t*)out)[23] == 127, "…second request: J6 honoured at the cv tier's own start, on its gate");
+        L = Req(body, 0x00, 4, 400, kScopeAt | kScopeExt, dA, 0x08, 16, 0, 0);   /* cvPos = pos / 24: the audio's newest — the cv window does not fit after it */
+        Handle(R, body, L, 1024, out);
+        CHECK(!(out[5] & kScopeAtHonoured), "…and at pos / 24 it would not be (the frame would tear)");
+        /* a split frame that is NOT detached: the audio-only first request must leave the cv span after its crossing */
+        L = Req(body, 0x01, 4, 400, kScopeTrig | kScopeFrame | kScopeExt, 0, 0x00, 1, 0);
+        Handle(R, body, L, 1024, out);
+        const uint32_t sA = U32(out + 6);
+        CHECK((out[5] & kScopeTriggered) && !(out[5] & kScopeDetached) && U32(out + 18) == ScopeCvPos(sA) && ScopeAge(R.w, sA) >= 400u * 24u, "split, first request (out L, frame flag): the trigger left the cv span too (age %u)", ScopeAge(R.w, sA));
+        L = Req(body, 0x00, 4, 400, kScopeAt | kScopeExt, sA, 0x08, 1, 0, 0);
+        Handle(R, body, L, 1024, out);
+        CHECK((out[5] & kScopeAtHonoured) && U32(out + 6) == sA, "…so the cv request of the frame is honoured");
+        L = Req(body, 0x01, 4, 400, kScopeTrig | kScopeExt, 0, 0x00, 1, 0);   /* without the flag: placed for the audio alone */
+        Handle(R, body, L, 1024, out);
+        const uint32_t nA = U32(out + 6);
+        L = Req(body, 0x00, 4, 400, kScopeAt | kScopeExt, nA, 0x08, 1, 0, 0);
+        Handle(R, body, L, 1024, out);
+        CHECK(ScopeAge(R.w, nA) < 400u * 24u && !(out[5] & kScopeAtHonoured), "without the frame flag the audio-only crossing is too recent for the cv window (age %u): torn", ScopeAge(R.w, nA));
         /* free-running mixed frame: both tiers at the older of the two newest starts (the cv one here) */
         L = Req(body, 0x01, 4, 512, kScopeExt, 0, 0x08, 1, 0);
         len = Handle(R, body, L, 2048, out);
@@ -381,12 +453,12 @@ int main()
         CHECK(!(out[5] & kScopeAtHonoured), "at-pos needs every selected tier to hold pos");
         /* the staircase on J5 (bit 2) and the clock on J3 (bit 0), free-running ×4 (1 s): four steps visible, 8 pulses */
         L = Req(body, 0x00, 1, 512, kScopeExt, 0, 0x05, 4, 0);
-        len = Handle(R, body, L, 1024, out);
-        const int8_t* j3 = (const int8_t*)out + 14; const int8_t* j5 = j3 + 505;
-        int pulses = 0; for(int i = 1; i < 505; i++) if(j3[i] == 127 && j3[i - 1] == 0) pulses++;
-        int levels[4] = {0, 0, 0, 0}; for(int i = 0; i < 505; i++) { const int lv = (int)((ScopeCvVolts(j5[i]) + 0.5f)); if(lv >= 0 && lv < 4) levels[lv]++; }
-        CHECK((out[3] | (out[4] << 8)) == 505 && pulses >= 7 && pulses <= 9 && levels[0] && levels[1] && levels[2] && levels[3], "J3 pulses %d, J5 levels %d/%d/%d/%d", pulses, levels[0], levels[1], levels[2], levels[3]);
-        CHECK(((const int8_t*)out + 14)[0] == j3[0] && j5[0] >= 0, "channel order: audio in mask order, then J3..J8 in bit order");
+        len = Handle(R, body, L, 2048, out);
+        const int8_t* j3 = (const int8_t*)out + 22; const int8_t* j5 = j3 + 2 * 506;
+        int pulses = 0; for(int i = 1; i < 506; i++) if(j3[2 * i + 1] == 127 && j3[2 * i - 1] == 0) pulses++;   /* the groups' maxima */
+        int levels[4] = {0, 0, 0, 0}; for(int i = 0; i < 506; i++) { const int lv = (int)((ScopeCvVolts(j5[2 * i + 1]) + 0.5f)); if(lv >= 0 && lv < 4) levels[lv]++; }
+        CHECK((out[3] | (out[4] << 8)) == 506 && pulses >= 7 && pulses <= 9 && levels[0] && levels[1] && levels[2] && levels[3], "J3 pulses %d, J5 levels %d/%d/%d/%d", pulses, levels[0], levels[1], levels[2], levels[3]);
+        CHECK(((const int8_t*)out + 22)[0] == j3[0] && j5[0] >= 0, "channel order: audio in mask order, then J3..J8 in bit order");
         delete Rp;
     }
 
@@ -415,10 +487,11 @@ int main()
         Handle(W, body, L, 2048, out);
         const uint32_t p = U32(out + 6);
         CHECK((out[5] & kScopeTriggered) && !(out[5] & kScopeDetached) && ScopeAge(W.w, p) >= 512u * 24u && p > W.w, "trigger across the wrap (pos %u, w %u)", p, W.w);
-        bool ok = true; for(int i = 0; i < 256; i++) if((int8_t)out[14 + i] != W.a[0][ScopeSlot(ScopeAdd(p, (uint32_t)i))]) ok = false;
+        bool ok = true; for(int i = 0; i < 256; i++) if((int8_t)out[22 + i] != W.a[0][ScopeSlot(ScopeAdd(p, (uint32_t)i))]) ok = false;
         CHECK(ok, "audio samples read through the wrap");
-        const int8_t* j3 = (const int8_t*)out + 14 + 256; bool cvOk = true; for(int i = 0; i < 256; i++) if(j3[i] != W.c[0][ScopeCvSlot(ScopeAdd(ScopeCvPos(p), (uint32_t)(2 * i), kScopeCvWrap))]) cvOk = false;
-        int hi = 0; for(int i = 0; i < 256; i++) if(j3[i] == 127) hi++;
+        const int8_t* j3 = (const int8_t*)out + 22 + 256; bool cvOk = true;
+        for(int i = 0; i < 256; i++) { const int a = W.c[0][ScopeCvSlot(ScopeAdd(ScopeCvPos(p), (uint32_t)(2 * i), kScopeCvWrap))], b = W.c[0][ScopeCvSlot(ScopeAdd(ScopeCvPos(p), (uint32_t)(2 * i + 1), kScopeCvWrap))]; if(j3[2 * i] != (a < b ? a : b) || j3[2 * i + 1] != (a > b ? a : b)) cvOk = false; }
+        int hi = 0; for(int i = 0; i < 256; i++) if(j3[2 * i + 1] == 127) hi++;
         CHECK(cvOk && hi > 0, "cv samples read through the wrap (%d high)", hi);
         L = Req(body, 0x01, 1, 256, kScopeAt | kScopeExt, p, 0x01, 2, 0);
         Handle(W, body, L, 2048, out);

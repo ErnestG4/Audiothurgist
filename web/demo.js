@@ -1164,8 +1164,8 @@ class FakeDevice {
         if (first >= 64) { U8(2); break; }
         U8(0); U8(first); U8(n); for (let i = 0; i < n * 16; i++) U8(this.env[first * 16 + i]); break; }
       /* SCOPE: the firmware's 0x62 — the empty body is the small output trace, a body is the
-       * ten-channel one with the same parse / clamp / window / trigger / at-pos / decimation
-       * rules as core/bb_scope.h (kept in step by hand: selftest.mjs pins both). */
+       * ten-channel one with the same parse / clamp / window / trigger (and its look-back) / at-pos /
+       * levels / min-max decimation rules as core/bb_scope.h (kept in step by hand: selftest.mjs pins both). */
       case CMD.scope: {
         const wpos = this.scopePos(), cvW = Math.floor(wpos / SC.cvDiv);
         const sub = (p, k, wrap) => { k %= wrap; return p >= k ? p - k : p + (wrap - k); }, add = (p, k, wrap) => (p + k) % wrap;
@@ -1175,7 +1175,7 @@ class FakeDevice {
           break;
         }
         if (body.length < SC.reqMin) { U8(2); break; }
-        const mask = body[0], decim = body[1], flags = body[4]; let n = u16(body, 2), pos = 0, maskHi = 0, cvDecim = 1, level = 0, trig = 0;
+        const mask = body[0], decim = body[1], flags = body[4]; let n = u16(body, 2), pos = 0, maskHi = 0, cvDecim = 1, level = 0, trig = 0, cvAt = 0;
         if (mask > 15 || !decim || decim > SC.maxDecim || !n) { U8(2); break; }
         if (flags & (SC.at | SC.ext)) { if (body.length < SC.reqPos) { U8(2); break; } pos = u32(body, 5); if ((flags & SC.at) && pos >= SC.wrap) { U8(2); break; } }
         if (flags & SC.ext) {
@@ -1183,28 +1183,31 @@ class FakeDevice {
           maskHi = body[9]; cvDecim = body[10]; level = body[11] > 127 ? body[11] - 256 : body[11]; trig = body[12];
           if (maskHi > 63 || !cvDecim || cvDecim > SC.cvMaxDecim) { U8(2); break; }
           if ((trig & SC.trigSet) ? (trig & 0x7f) >= 10 : trig !== 0) { U8(2); break; }
-        }
+          cvAt = u32(body, 13); if ((flags & SC.at) && cvAt >= SC.cvWrap) { U8(2); break; }
+        } else cvAt = Math.floor(pos / SC.cvDiv);
+        /* the tiers the window is placed for: those selected — and both, in the first request of a split frame (SC.frame) */
+        const frame = !(flags & SC.at) && (flags & SC.frame), useA = !!mask || !!frame, useC = !!maskHi || !!(frame && (flags & SC.ext));
         if (!mask && !maskHi) { U8(2); break; }
         const count = m => { let c = 0; for (let i = 0; i < 8; i++) if (m & (1 << i)) c++; return c; }, first = m => { for (let i = 0; i < 8; i++) if (m & (1 << i)) return i; return -1; };
         const hdr = SC.hdr + ((flags & SC.ext) ? SC.hdrExt : 0);
-        n = Math.min(n, SC.maxN, Math.floor((MAX_BODY - hdr) / (count(mask) + count(maskHi))));
-        if (mask) n = Math.min(n, Math.floor(SC.usable / decim)); if (maskHi) n = Math.min(n, Math.floor(SC.cvUsable / cvDecim)); n = Math.max(1, n);
-        const spanA = mask ? n * decim : 0, spanC = maskHi ? n * cvDecim : 0;
+        n = Math.min(n, SC.maxN, Math.floor((MAX_BODY - hdr) / (count(mask) * (decim > 1 ? 2 : 1) + count(maskHi) * (cvDecim > 1 ? 2 : 1))));
+        if (useA) n = Math.min(n, Math.floor(SC.usable / decim)); if (useC) n = Math.min(n, Math.floor(SC.cvUsable / cvDecim)); n = Math.max(1, n);
+        const spanA = useA ? n * decim : 0, spanC = useC ? n * cvDecim : 0;
         const holdsA = p => { const a = HL.scopeAge(wpos, p); return a >= spanA && a <= SC.usable; }, holdsC = k => { const a = HL.scopeAge(cvW, k, SC.cvWrap); return a >= spanC && a <= SC.cvUsable; };
         const place = (p, fl) => { const w = { pos: p, cvPos: Math.floor(p / SC.cvDiv), flags: fl };
-          if (mask && !holdsA(w.pos)) { w.pos = sub(wpos, spanA, SC.wrap); w.flags |= SC.detached; }
-          if (maskHi && !holdsC(w.cvPos)) { w.cvPos = sub(cvW, spanC, SC.cvWrap); w.flags |= SC.detached; } return w; };
-        let newest = mask ? sub(wpos, spanA, SC.wrap) : wpos;
-        if (maskHi) { const nc = sub(cvW, spanC, SC.cvWrap) * SC.cvDiv; if (HL.scopeAge(wpos, nc) > HL.scopeAge(wpos, newest)) newest = nc; }
+          if (useA && !holdsA(w.pos)) { w.pos = sub(wpos, spanA, SC.wrap); w.flags |= SC.detached; }
+          if (useC && !holdsC(w.cvPos)) { w.cvPos = sub(cvW, spanC, SC.cvWrap); w.flags |= SC.detached; } return w; };
+        let newest = useA ? sub(wpos, spanA, SC.wrap) : wpos;
+        if (useC) { const nc = sub(cvW, spanC, SC.cvWrap) * SC.cvDiv; if (HL.scopeAge(wpos, nc) > HL.scopeAge(wpos, newest)) newest = nc; }
         const src = (trig & SC.trigSet) ? (trig & 0x7f) : first(mask) >= 0 ? first(mask) : first(maskHi) >= 0 ? 4 + first(maskHi) : -1;
         let win;
         if (flags & SC.at) {
-          if ((!mask || holdsA(pos)) && (!maskHi || holdsC(Math.floor(pos / SC.cvDiv)))) win = { pos, cvPos: Math.floor(pos / SC.cvDiv), flags: SC.atHonoured };
+          if ((!mask || holdsA(pos)) && (!maskHi || holdsC(cvAt))) win = { pos, cvPos: cvAt, flags: SC.atHonoured };   /* each tier at its own start */
           else win = place(newest, 0);
         } else if ((flags & SC.trig) && src >= 0) {
           if (src < 4) {
-            let need = spanA; if (maskHi && spanC * SC.cvDiv > need) need = spanC * SC.cvDiv; if (need > SC.usable) need = spanA > 0 ? spanA : SC.usable; need = Math.max(1, need);
-            const c = this.scopeCrossing(p => this.scopeAud(src, p), SC.usable, SC.wrap, wpos, need, level);
+            let need = spanA; if (spanC * SC.cvDiv > need) need = spanC * SC.cvDiv; if (need > SC.usable) need = spanA > 0 ? spanA : SC.usable; need = Math.max(1, need);
+            const c = this.scopeCrossing(p => this.scopeAud(src, p), Math.min(SC.usable, need + Math.max(need, SC.trigHold)), SC.wrap, wpos, need, level);   /* an audio trigger gives up after span + 100 ms */
             win = c >= 0 ? place(c, SC.triggered) : place(newest, 0);
           } else {
             let need = spanC; const fromA = Math.ceil(spanA / SC.cvDiv); if (fromA > need) need = fromA; need = Math.max(1, Math.min(need, SC.cvUsable));
@@ -1213,11 +1216,15 @@ class FakeDevice {
           }
         } else win = place(newest, 0);
         U8(0); U8(mask); U8(decim); U16(n); U8(win.flags | ((flags & SC.ext) ? SC.extReply : 0)); U32(win.pos);
-        if (flags & SC.ext) { U8(maskHi); U8(cvDecim); U8(SC.cvDiv); U8((flags & SC.trig) && !(flags & SC.at) && src >= 0 ? src : SC.trigNone); }
+        for (let c = 0; c < 4; c++) { let pk = 0, p = sub(wpos, SC.levelSpan, SC.wrap); for (let i = 0; i < SC.levelSpan; i++) { const a = Math.abs(this.scopeAud(c, p)); if (a > pk) pk = a; p = add(p, 1, SC.wrap); } U8(Math.min(127, pk)); }   /* the four levels */
+        if (flags & SC.ext) { U8(maskHi); U8(cvDecim); U8(SC.cvDiv); U8((flags & SC.trig) && !(flags & SC.at) && src >= 0 ? src : SC.trigNone); U32(win.cvPos); }
+        /* decimation 1: the samples; above: each group's minimum then its maximum */
         const extract = (get, wrap, start, dec) => { let p = start;
-          for (let i = 0; i < n; i++) { let v = get(p);
-            if ((flags & SC.peak) && dec > 1) { let mag = -1, q = p; for (let k = 0; k < dec; k++) { const x = get(q), m = Math.abs(x); if (m > mag) { mag = m; v = x; } q = add(q, 1, wrap); } }
-            U8(v); p = add(p, dec, wrap); } };
+          for (let i = 0; i < n; i++) {
+            if (dec === 1) { U8(get(p)); p = add(p, 1, wrap); continue; }
+            let lo = get(p), hi = lo; p = add(p, 1, wrap);
+            for (let k = 1; k < dec; k++) { const x = get(p); if (x < lo) lo = x; else if (x > hi) hi = x; p = add(p, 1, wrap); }
+            U8(lo); U8(hi); } };
         for (let c = 0; c < 4; c++) if (mask & (1 << c)) extract(p => this.scopeAud(c, p), SC.wrap, win.pos, decim);
         for (let j = 0; j < 6; j++) if (maskHi & (1 << j)) extract(k => this.scopeCv(j, k), SC.cvWrap, win.cvPos, cvDecim);
         break; }

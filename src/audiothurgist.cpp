@@ -3167,30 +3167,37 @@ static void ServiceLoad()
  *   0x62 SCOPE      ← (empty)  → u8 status, u16 n(256), i8 samples[256]: (out L + out R) / 2,
  *                     ×4 decimated, the newest 21 ms — the page's small output scope
  *                   ← u8 chanMask (b0 out L · b1 out R · b2 in L · b3 in R), u8 decim (1..16),
- *                     u16 n (samples per channel; clamped to 512, to what fits max_body beside
- *                     the header, and to each tier's ring at its decimation), u8 flags (b0 trigger:
+ *                     u16 n (points per channel; clamped to 512, to what fits max_body beside
+ *                     the header — a channel is n bytes at decimation 1, 2n above — and to each
+ *                     tier's ring at its decimation), u8 flags (b0 trigger:
  *                     start the window on the most recent rising crossing of the trigger level on
  *                     the trigger channel — the first selected, audio before cv, unless the ext
  *                     body names one — that leaves every selected tier's span after it, Schmitt
- *                     hysteresis ±4 · b1 peak: each sample = the max-magnitude one of its decim
- *                     group, else the first · b2 at: + u32 pos — start there instead (a second
- *                     request of the same frame: the channels of one frame can be split over
- *                     requests and stay sample-aligned) · b3 ext: the body continues after u32
- *                     pos (present, read only with b2) with u8 maskHi (b0..b5 = J3..J8, the six
- *                     CV jacks DC-coupled at ±5 V = ±127, one sample per audio block = 2 kHz),
- *                     u8 cvDecim (1..64, on the cv ring), i8 trigLevel (0 for audio, 25 ≈ 1 V
- *                     for a gate), u8 trigSrc (0 = first selected · 0x80 | 0..3 an audio channel
- *                     · 0x80 | 4..9 = J3..J8; need not be selected))
+ *                     hysteresis ±4; an audio trigger looks back span + max(span, 100 ms) and
+ *                     then free-runs · b1 frame: the first request of a frame split over requests
+ *                     — place the window for both tiers though this request selects one · b2 at:
+ *                     + u32 pos — start there instead (a later request of the same frame: the
+ *                     channels of one frame can be split over requests and stay sample-aligned)
+ *                     · b3 ext: the body continues after u32 pos (present, read only with b2)
+ *                     with u8 maskHi (b0..b5 = J3..J8, the six CV jacks DC-coupled at ±5 V =
+ *                     ±127, one sample per audio block = 2 kHz), u8 cvDecim (1..64, on the cv
+ *                     ring), i8 trigLevel (0 for audio, 25 ≈ 1 V for a gate), u8 trigSrc (0 =
+ *                     first selected · 0x80 | 0..3 an audio channel · 0x80 | 4..9 = J3..J8; need
+ *                     not be selected), u32 cvPos (read only with b2: the cv tier's own start))
  *                   → u8 status, u8 chanMask, u8 decim, u16 n, u8 flags (b0 triggered · b1 pos
  *                     honoured · b2 ext header follows · b3 detached: one tier could not hold the
  *                     window's start — an audio ring of 1.4 s under a cv window that starts
  *                     seconds ago — and shows its newest window), u32 pos (the window start on
  *                     the audio sample clock, wrapping at 1 610 612 736 = 24·2^26; the cv start is
- *                     pos / 24), [ext: u8 maskHi, u8 cvDecim, u8 cvDiv (24), u8 trigSrc (the
- *                     channel the trigger ran on, 255 none)], then n × i8 per selected audio
- *                     channel in mask order, then per selected cv jack J3..J8. BAD_ARGS: no
+ *                     pos / 24), u8 level[4] (peak |x| of out L · out R · in L · in R over the
+ *                     newest 43 ms, selected or not), [ext: u8 maskHi, u8 cvDecim, u8 cvDiv (24),
+ *                     u8 trigSrc (the channel the trigger ran on, 255 none), u32 cvPos (the cv
+ *                     tier's start on the cv clock — pos / 24 unless detached)], then per selected
+ *                     audio channel in mask order, then per selected cv jack J3..J8: n × i8 when
+ *                     its tier's decimation is 1, else n × (i8 min, i8 max) of each group of
+ *                     `decim` samples — the envelope, so nothing aliases. BAD_ARGS: no
  *                     channel, mask bits past the channels, decim 0 / > 16, cvDecim 0 / > 64,
- *                     n 0, a bad trigSrc, a short body. core/bb_scope.h has the rules;
+ *                     n 0, a bad trigSrc, a pos past its wrap, a short body. core/bb_scope.h has the rules;
  *                     docs/packages/scope.md.
  *   0x63 ACTION     ← u8 op [,args]: 0 dice · 1 reslice · (2 free: the transport is 35) ·
  *                     3 punch(u8 step, u8 slice) · 4 flow(u8 on) ·
@@ -4108,7 +4115,7 @@ struct StateExt : hostlink::IHostlinkExtension
          * everything below (the commands, the ops, the state body). It refuses any other with one message —
          * flash the matching .bin — so there is no partial mode to keep working. Bump it with any change to the
          * wire, and HL.API in web/hostlink.js with it (the selftest's descriptor parity holds them equal). */
-        return "\"audiothurgist\":{\"api\":3}";   /* 3: LOOPVIEW — 0x6A GET_LOOP, the tail to 328 (2: ENV's KEY_PARAMS / GET_KEYS, RECLAIM's 0x68 op 4, sets saved packed) */
+        return "\"audiothurgist\":{\"api\":4}";   /* 4: SCOPE — min/max groups above decimation 1, the four levels in the reply, no peak flag; 3: LOOPVIEW — 0x6A GET_LOOP, the tail to 328 (2: ENV's KEY_PARAMS / GET_KEYS, RECLAIM's 0x68 op 4, sets saved packed) */
     }
     /* WEB: one float → i8 (±127), saturating. */
     static int8_t ToI8(float v)
@@ -4232,8 +4239,9 @@ struct StateExt : hostlink::IHostlinkExtension
             }
             /* SCOPE: one snapshot of the sample clock serves every channel of both tiers (time-aligned);
              * the pure routines in core/bb_scope.h do the window, trigger and decimation. Worst case:
-             * a backward trigger walk over the usable ring (65 K samples in silence ≈ 0.3 ms) plus
-             * ≤ 10 × 512 × 64 ring reads for a peak-decimated frame — comparable to GET_WAVE. */
+             * a backward trigger walk over the usable ring (a cv trigger: 16 K; an audio one gives up after
+             * span + 100 ms) plus ≤ 10 × 512 × 64 ring reads for the min/max groups and 4 × 2048 for the
+             * levels — comparable to GET_WAVE. */
             case 0x62u:
             {
                 const uint32_t wpos = gScopeW;
@@ -4251,25 +4259,24 @@ struct StateExt : hostlink::IHostlinkExtension
                 const bb::ScopeWin win = bb::ScopeWindow(A, C, wpos, q);
                 const bool ext = (q.flags & bb::kScopeExt) != 0u;
                 w.U8(0u); w.U8(q.mask); w.U8(q.decim); w.U16(q.n); w.U8((uint8_t)(win.flags | (ext ? bb::kScopeExtReply : 0u))); w.U32(win.pos);
+                { uint8_t lv[bb::kScopeChans]; bb::ScopeLevels(A, wpos, lv); w.Bytes(lv, (size_t)bb::kScopeChans); }
                 if(ext)
                 {
                     const int ts = bb::ScopeTrigSource(q);
                     w.U8(q.maskHi); w.U8(q.cvDecim); w.U8((uint8_t)bb::kScopeCvDiv);
                     w.U8((uint8_t)(((q.flags & bb::kScopeTrig) && !(q.flags & bb::kScopeAt) && ts >= 0) ? ts : bb::kScopeTrigNone));
+                    w.U32(win.cvPos);
                 }
-                const bool peak = (q.flags & bb::kScopePeak) != 0u;
-                int8_t buf[bb::kScopeMaxN];
+                int8_t buf[2 * bb::kScopeMaxN];
                 for(int c = 0; c < bb::kScopeChans; c++)
                 {
                     if(!(q.mask & (1u << c))) continue;
-                    bb::ScopeExtract(gScopeRing[c], bb::kScopeRing, bb::kScopeWrap, win.pos, q.n, q.decim, peak, buf);
-                    w.Bytes((const uint8_t*)buf, (size_t)q.n);
+                    w.Bytes((const uint8_t*)buf, (size_t)bb::ScopeExtract(gScopeRing[c], bb::kScopeRing, bb::kScopeWrap, win.pos, q.n, q.decim, buf));
                 }
                 for(int c = 0; c < bb::kScopeCvChans; c++)
                 {
                     if(!(q.maskHi & (1u << c))) continue;
-                    bb::ScopeExtract(gScopeCv[c], bb::kScopeCvRing, bb::kScopeCvWrap, win.cvPos, q.n, q.cvDecim, peak, buf);
-                    w.Bytes((const uint8_t*)buf, (size_t)q.n);
+                    w.Bytes((const uint8_t*)buf, (size_t)bb::ScopeExtract(gScopeCv[c], bb::kScopeCvRing, bb::kScopeCvWrap, win.cvPos, q.n, q.cvDecim, buf));
                 }
                 return;
             }
