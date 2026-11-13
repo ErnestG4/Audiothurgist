@@ -276,15 +276,20 @@ how it powers up), never an older firmware: there is none to model.
   (256 ms … 8 s), **Gain** ×1…×8 with a clip pill, **Trigger** on any
   channel (auto = the first shown; a Schmitt level trigger, 0 for audio and
   1 V for a jack, that leaves room for every shown tier — the marker at the
-  left edge in the trigger channel's colour), **Peak** decimation (each
-  point the largest sample of its group, so hats and 6 ms gates survive a
-  long window), **Afterglow**, **Freeze**, and the **Audio · CV · Gates**
+  left edge in the trigger channel's colour; an audio channel that has not
+  crossed for 100 ms free-runs, so the trace is never an old one),
+  **Afterglow**, **Freeze**, and the **Audio · CV · Gates**
   presets (the CV preset turns on the jacks in input mode under the current
   map; Gates shows J6/J7/J8 over out L, triggered on J6). Pills: achieved
-  frames/s · requests per frame · KB/s · last round trip, and `n = 252,
-  audio ×16 → 84 ms, cv ×2 → 252 ms · triggered on J6`. A cv window longer
-  than the audio ring (1.4 s) detaches the audio tier to its newest window
-  and says so.
+  frames/s · requests per frame · KB/s · last round trip, and `n = 250,
+  audio ×16 min/max → 83 ms, cv ×2 min/max → 250 ms · triggered on J6`.
+  Above ×1 every point is the lowest and highest sample of its group and
+  the trace is that band, filled — nothing aliases, and a hat or a 6 ms
+  gate is never between picks; at ×1 the audio is the smooth curve through
+  its samples. Only the channels that show are fetched (the reply's level
+  bytes wake an input on auto), up to 50 frames a second. A cv window
+  longer than the audio ring (1.4 s) detaches the audio tier to its newest
+  window and says so.
 - **Options tab:** every enum field of the module's Options block, labels
   and names straight from the descriptor, grouped Pattern / Sound / Looper
   (Quantize) / Jacks & CV / Recording (Sampling, Record Source, Record) /
