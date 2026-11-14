@@ -546,7 +546,7 @@
 <script src="demo.js"></script>
 <script>
 'use strict';
-const { CMD, ACT, REC, KEYS, ZONE_MULT, keyName, Link, hello, getDescriptor, getLive, setLive, parseState, fetchEnv, parseScope, SCOPE, SCOPE_CH, SCOPE_JACK_ROLE, SCOPE_JACK_IN, scopeVolts, scopeSmooth, scopePlan, fetchScopeFrame, fetchWave, fetchTable, fetchHits, fieldLabels, pagerInfo, optionsInfo, manualInfo, SET_STATE, SET_RESULT, setNameOk, setLabelName, saveSet, loadSet, playKey, setMute, CARD } = HL;
+const { CMD, ACT, REC, KEYS, ZONE_MULT, keyName, Link, hello, getDescriptor, getLive, setLive, parseState, fetchEnv, SCOPE, SCOPE_CH, SCOPE_JACK_ROLE, SCOPE_JACK_IN, scopeVolts, scopeSmooth, scopePlan, fetchScopeFrame, fetchWave, fetchTable, fetchHits, fieldLabels, pagerInfo, optionsInfo, manualInfo, SET_STATE, SET_RESULT, setNameOk, setLabelName, saveSet, loadSet, playKey, setMute, CARD } = HL;
 const $ = id => document.getElementById(id);
 const CLS_NAME = ['kick', 'snare', 'hat', 'other'];
 const SR = 48000;   /* the engine's rate: lengths and positions are shown in seconds */
@@ -694,7 +694,19 @@ function drawAll(m) {
   if (m & D.kitwave) { drawKitWave(); drawHist(); }
   if (m & D.scope) {
     const [g, w, h] = ctx($('outscope')); g.clearRect(0, 0, w, h); g.strokeStyle = TOK['cv-grid']; g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
-    if (scope) { g.strokeStyle = TOK['cv-ok']; g.lineWidth = 1.5; g.beginPath(); for (let i = 0; i < scope.length; i++) { const x = i / (scope.length - 1) * w, y = h / 2 - scope[i] / 127 * h / 2 * 0.95; i ? g.lineTo(x, y) : g.moveTo(x, y); } g.stroke(); }
+    /* out L and out R, each the min / max band of its groups (the Scope tab's trace, OUT_DECIM wide), triggered */
+    if (scope) {
+      const mid = h / 2, Y = v => mid - v / 127 * mid * 0.95;
+      for (const c of [0, 1]) {
+        const lo = scope.lo[c], hi = scope.hi[c]; if (!hi) continue; const n = hi.length, dx = w / n, X = i => (i + 0.5) * dx;
+        const edge = a => { g.moveTo(0, Y(a[0])); for (let i = 0; i < n; i++) g.lineTo(X(i), Y(a[i])); g.lineTo(w, Y(a[n - 1])); };
+        g.strokeStyle = g.fillStyle = SC_COL[c]; g.lineWidth = 1.25;
+        g.beginPath(); edge(hi); g.lineTo(w, Y(lo[n - 1])); for (let i = n - 1; i >= 0; i--) g.lineTo(X(i), Y(lo[i])); g.lineTo(0, Y(lo[0])); g.closePath();
+        g.globalAlpha = 0.35; g.fill(); g.globalAlpha = 1; g.beginPath(); edge(hi); edge(lo); g.stroke();
+      }
+      g.fillStyle = TOK['cv-ink2']; g.font = '11px system-ui'; g.textAlign = 'left';
+      g.fillText(`out L · out R · ${(scope.n * scope.decim / SR * 1000).toFixed(0)} ms`, 6, h - 6);
+    }
   }
   if (m & D.text) drawText();
   if (m & D.controls) drawControls();
@@ -1295,7 +1307,8 @@ const popcount = n => { let c = 0; while (n) { c += n & 1; n >>= 1; } return c; 
  * Each stream keeps at most one request outstanding; user actions go out
  * `urgent` and are pumped before any queued poll. Paused while hidden. */
 const poll = { on: false, timer: null, tState: 0, tScope: 0, tLink: 0, tWave: 0, pState: null, pScope: null, pEnv: null, pLive: null, pTable: null, pHits: null, pWave: null, pLoop: null };
-const STATE_MS = 100, SCOPE_MS = 200, SCOPE_TAB_STATE_MS = 250;   /* the Scope tab eases the state poll to 4 Hz */
+const STATE_MS = 100, SCOPE_MS = 25, SCOPE_TAB_STATE_MS = 250;   /* the Play tab's trace: as fast as a frame lands, every tick at most */
+const OUT_DECIM = 16, OUT_N = 252;   /* the Play tab's trace: 252 min / max points of 16 → 84 ms, out L and out R, one request */   /* the Scope tab eases the state poll to 4 Hz */
 function startPolling() { poll.on = true; poll.tState = poll.tScope = 0; tick(); }
 function stopPolling() { poll.on = false; clearTimeout(poll.timer); }
 function tick() {
@@ -1303,7 +1316,7 @@ function tick() {
   const now = performance.now();
   if (document.visibilityState !== 'hidden') {
     if (!poll.pState && now - poll.tState >= (scopeShown ? SCOPE_TAB_STATE_MS : STATE_MS)) { poll.tState = now; poll.pState = link.request(CMD.state, undefined, { key: 'state' }).then(onState, e => warn('state', e)).finally(() => { poll.pState = null; }); }
-    if (!poll.pScope && scopeVisible && !kitShown && !scopeShown && now - poll.tScope >= SCOPE_MS) { poll.tScope = now; poll.pScope = link.request(CMD.scope, undefined, { key: 'scope' }).then(b => { scope = parseScope(b); invalidate(D.scope); }, e => warn('scope', e)).finally(() => { poll.pScope = null; }); }
+    if (!poll.pScope && scopeVisible && !kitShown && !scopeShown && info && now - poll.tScope >= SCOPE_MS) { poll.tScope = now; poll.pScope = fetchScopeFrame(link, scopePlan(info.maxBody, 0b11, OUT_DECIM, OUT_N, OUT_N), OUT_DECIM, SCOPE.trig, { key: 'outscope' }).then(f => { scope = f; invalidate(D.scope); }, e => warn('scope', e)).finally(() => { poll.pScope = null; }); }
     /* Waveform windows: only while the Kit tab shows, one at a time, ≤ 3/s. */
     if (kitShown && wave.queue.length && !poll.pWave && now - poll.tWave >= WAVE_MS && st && st.freePos) {
       const q = wave.queue.shift(); poll.tWave = now;

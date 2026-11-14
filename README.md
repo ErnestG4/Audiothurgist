@@ -767,7 +767,7 @@ number of bells, B2 rings the next change, Brain knobs unused).
 | option edits             | `0x12/0x13/0x14 BLOB_*` to `live` | audition; save a preset to keep it           |
 | bar / playhead / state   | `0x70 GET_STATE`                  | 10 Hz; the one 328-byte body                 |
 | waveform                 | `0x71 GET_ENV`                    | refetched when the material changes          |
-| scope (Play tab)         | `0x72 SCOPE` (empty body)         | 5 Hz while visible; 256 samples ×4 decimated |
+| scope (Play tab)         | `0x72 SCOPE` (body)               | while visible, a frame as soon as the last lands (≤ 40/s); out L + out R, 252 min/max points of 16 → 84 ms, triggered |
 | scope (Scope tab)        | `0x72 SCOPE` (body)               | ≤ 30 frames/s; audio 4 × 253 or out L + 3 jacks × 252 per request at max_body 1024; trigger, peak, at-pos, the jacks' own decimation |
 | buttons, punch, scrub    | `0x73 ACTION`                     | 0 dice · 1 reslice · 3 punch · 4 flow · 5 scrub · 6 load · 7 clear locks · 8 page · 9 rec arm(key) · 10 rec clear(key) · 11 key plays(0/1) · 12 looper undo · 13 looper clear · 14 save set · 15 load set |
 | slice editing            | `0x73 ACTION` 16–29               | the table ops with a gen, the audition voice, the tap mark — the table above; the Kit tab's editor drives them (`edit.js`) |
