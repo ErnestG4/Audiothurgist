@@ -15,7 +15,7 @@ panel that always says what B1/B2/B3 and the six knobs do right now**, a
 DC-coupled CV traces, zoom, trigger, ≤ 30 frames/s), the module's Options,
 and its manual. It speaks **HostLink over Web Serial** to
 the module's front USB-C — the same protocol Hermetic's `/program` uses —
-plus the firmware's `StateExt` (commands 0x60–0x6A: the state, the envelope,
+plus the firmware's `StateExt` (commands 0x70–0x7A: the state, the envelope,
 the scope, the actions, the Kit's wave / table / hits reads, the card, the
 pads, the keys' settings, Play's loop). No dependencies, four static files (plus the
 vendored Android polyfill), phone-friendly.
@@ -173,7 +173,7 @@ how it powers up), never an older firmware: there is none to model.
   16ths still play in Off and 8ths: they stay behind the lanes as faint
   blocks. With **Quantize 16ths** the looper is silent and the bar is the
   steps, drawn as in every other grammar (the line says the loop waits).
-  The page reads the loop with `0x6A GET_LOOP` whenever the state's
+  The page reads the loop with `0x7A GET_LOOP` whenever the state's
   `loopSeq` moves.
 - **The bar:** ring + strip with the playhead, plus grammar, classifier,
   chop, history, sample, page, **native BPM**, **grid** (bars · steps), the
@@ -507,10 +507,10 @@ loop — a hit, a release, an undo, a clear, a set load — so undo-then-record
 at the same count still moves it; `loopPhase` is the playhead (`barPhase` ×
 65535); `loopQuant` mirrors Options → Quantize (0 Off · 1 16ths · 2 8ths).
 
-## Play's loop (0x6A)
+## Play's loop (0x7A)
 
 ```
-0x6A GET_LOOP  ← [u16 offset]
+0x7A GET_LOOP  ← [u16 offset]
                → u8 status, u16 n (≤ 256), u8 seq, u8 gen (the pass being recorded into),
                  u8 flags (b0 something is recorded into it), u16 offset, u8 count,
                  count × { u16 phase × 65535, i8 key (−1 keyless), i8 slice,
@@ -528,19 +528,19 @@ B2's undo takes the highest `gen` present; `HL.loopNotes` pairs each held
 note-on with its key's next release round the loop and marks that pass
 `newest`.
 
-## The sample-mode commands (0x64–0x66)
+## The sample-mode commands (0x74–0x76)
 
 ```
-0x64 GET_WAVE   ← u32 start, u16 n (≤480), u8 plane (0 L · 1 R · 2 L+R), [u8 step 1..128]
+0x74 GET_WAVE   ← u32 start, u16 n (≤480), u8 plane (0 L · 1 R · 2 L+R), [u8 step 1..128]
                 → u8 status, u32 start, u16 n, u8 step, i8 x[n]
-0x65 GET_TABLE  ← [u8 first, u8 count (≤39)]
+0x75 GET_TABLE  ← [u8 first, u8 count (≤39)]
                 → u8 status, u8 nSlices, u8 nTable, then per entry (14 bytes)
                   u32 start, u32 len, i8 key (-1 grid / keyless), u8 cls, u8 sal, u8 hit, u8 dens,
                   u8 flags (b0 orange · b1 tombstone)
-0x66 GET_HITS   ← [u8 first]  → u8 status, u8 nTotal, u8 first, u32 pos[…] (≤127)
+0x76 GET_HITS   ← [u8 first]  → u8 status, u8 nTotal, u8 first, u32 pos[…] (≤127)
 ```
 
-## The card (0x67)
+## The card (0x77)
 
 The card is one folder, `Audiothurgist/` (`breaks/`, `sets/`, `presets/`); the
 module no longer reads the root. The **Card** panel on the Kit tab (and *Add
@@ -571,7 +571,7 @@ reads 3 while the module writes or copies. LIST is the module's list as it is
 now (the descriptor's dropdown is the boot one). Protocol and reasons:
 `docs/packages/card.md`.
 
-## Each key's own settings (ACTION 37 + 0x69)
+## Each key's own settings (ACTION 37 + 0x79)
 
 The Kit's row under the keys edits the **selected** key: Gain (−24 … +6 dB, ½ dB
 steps), Tune (semitones + cents, ±24 st), Plays (Follow Key Plays · One-shot ·
@@ -579,14 +579,14 @@ Held · Loop · Ratchet, and the ratchet's rate), ▶ hear (held while down) and
 reset. A key cell and a Play pad with settings say them in words in the
 accent's ink. The sliders send live, one request at a time, every send of a
 drag after its first with JOIN — one undo step, one history line. The 24 keys'
-settings are read through `0x69 GET_KEYS` whenever the state's `tableGen` moves
+settings are read through `0x79 GET_KEYS` whenever the state's `tableGen` moves
 (the state carries no copy of them). Wire format, the join rule, where the
 settings apply and why: `docs/packages/keyp.md`.
 
 ```
 ACTION 37 KEY_PARAMS ← u8 key, i8 gain ½ dB, i16 cents, u8 plays 0..4, u8 rate 0..6, u8 flags b0 join [, u8 gen]
                      → u8 status, u8 tableGen
-0x69 GET_KEYS        → u8 status, u8 24, 24 × { i8 gain, u8 plays, i16 cents, u8 rate }
+0x79 GET_KEYS        → u8 status, u8 24, 24 × { i8 gain, u8 plays, i16 cents, u8 rate }
 ```
 
 **Spread across keys** (ACTION 38): the row's last button,
@@ -604,7 +604,7 @@ spread chromatically (23 keys)"). Decisions and the bench check:
 ACTION 38 SPREAD_KEYS ← u8 root 0..23, u8 flags b0 keep pads [, u8 gen] → u8 status, u8 tableGen, u8 count
 ```
 
-## Samples onto pads (0x68)
+## Samples onto pads (0x78)
 
 Drop an audio file on a pad (Play) or a key cell (Kit) — or, on a phone,
 *Choose samples…* (Play, with *into [key]*) / *⤓ Load into …* (Kit, the selected
@@ -701,10 +701,10 @@ source (255 none), `keySeq` bumps per call; `autoK` the autoslice count last
 applied; `nMarkers` the live markers. `hostlink.js` has `playKey`,
 `keysFromMarkers`, `clearMarkers`, `setMute` and `autoslice`.
 
-## The scope (0x62)
+## The scope (0x72)
 
 ```
-0x62 SCOPE      ← (empty)  → u8 status, u16 256, i8 x[256]: (out L + out R) / 2, one in four,
+0x72 SCOPE      ← (empty)  → u8 status, u16 256, i8 x[256]: (out L + out R) / 2, one in four,
                              the newest 21 ms — the Play tab's trace
                 ← u8 chanMask (b0 out L · b1 out R · b2 in L · b3 in R), u8 decim (1..16),
                   u16 n, u8 flags (b0 trigger · b1 peak · b2 at · b3 ext), [u32 pos (with at or
@@ -765,21 +765,21 @@ number of bells, B2 rings the next change, Brain knobs unused).
 | labels, help, manual     | `0x02 GET_DESCRIPTOR`             | the module's own descriptor JSON; its `"api"` must be the page's |
 | option values            | `0x20 GET_LIVE`                   | at connect, before each write, on mismatch   |
 | option edits             | `0x12/0x13/0x14 BLOB_*` to `live` | audition; save a preset to keep it           |
-| bar / playhead / state   | `0x60 GET_STATE`                  | 10 Hz; the one 328-byte body                 |
-| waveform                 | `0x61 GET_ENV`                    | refetched when the material changes          |
-| scope (Play tab)         | `0x62 SCOPE` (empty body)         | 5 Hz while visible; 256 samples ×4 decimated |
-| scope (Scope tab)        | `0x62 SCOPE` (body)               | ≤ 30 frames/s; audio 4 × 253 or out L + 3 jacks × 252 per request at max_body 1024; trigger, peak, at-pos, the jacks' own decimation |
-| buttons, punch, scrub    | `0x63 ACTION`                     | 0 dice · 1 reslice · 3 punch · 4 flow · 5 scrub · 6 load · 7 clear locks · 8 page · 9 rec arm(key) · 10 rec clear(key) · 11 key plays(0/1) · 12 looper undo · 13 looper clear · 14 save set · 15 load set |
-| slice editing            | `0x63 ACTION` 16–29               | the table ops with a gen, the audition voice, the tap mark — the table above; the Kit tab's editor drives them (`edit.js`) |
-| undo / redo              | `0x63 ACTION` 30 / 31             | the module's journal (EDIT-UNDO); Undo enables from the state's `undoDepth`, Redo from `redoDepth` |
-| transport, pads, markers | `0x63 ACTION` 32–36               | SET_MUTE · PLAY_KEY per pointer · markers → keys · clear markers · autoslice (JOIN while dragging) |
-| key settings, spread     | `0x63 ACTION` 37 / 38, `0x69`     | KEY_PARAMS (JOIN while dragging) · SPREAD_KEYS · GET_KEYS when `tableGen` moves |
-| kit waveform             | `0x64 GET_WAVE`                   | on demand, ≤ 3/s, cached windows            |
-| slice table              | `0x65 GET_TABLE`                  | when the state's table signature changes    |
-| onset ticks              | `0x66 GET_HITS`                   | when `matGen` changes                        |
-| card: upload, copy, list | `0x67 CARD`                       | one job at a time; chunks of max_body − 24; state bytes 276.. report |
-| samples onto pads        | `0x68 PADS`                       | through the card's queue; raw PCM16; state bytes 293.. report |
-| Play's loop              | `0x6A GET_LOOP`                   | in Play, when the state's `loopSeq` moves; paged by offset (169 a reply) |
+| bar / playhead / state   | `0x70 GET_STATE`                  | 10 Hz; the one 328-byte body                 |
+| waveform                 | `0x71 GET_ENV`                    | refetched when the material changes          |
+| scope (Play tab)         | `0x72 SCOPE` (empty body)         | 5 Hz while visible; 256 samples ×4 decimated |
+| scope (Scope tab)        | `0x72 SCOPE` (body)               | ≤ 30 frames/s; audio 4 × 253 or out L + 3 jacks × 252 per request at max_body 1024; trigger, peak, at-pos, the jacks' own decimation |
+| buttons, punch, scrub    | `0x73 ACTION`                     | 0 dice · 1 reslice · 3 punch · 4 flow · 5 scrub · 6 load · 7 clear locks · 8 page · 9 rec arm(key) · 10 rec clear(key) · 11 key plays(0/1) · 12 looper undo · 13 looper clear · 14 save set · 15 load set |
+| slice editing            | `0x73 ACTION` 16–29               | the table ops with a gen, the audition voice, the tap mark — the table above; the Kit tab's editor drives them (`edit.js`) |
+| undo / redo              | `0x73 ACTION` 30 / 31             | the module's journal (EDIT-UNDO); Undo enables from the state's `undoDepth`, Redo from `redoDepth` |
+| transport, pads, markers | `0x73 ACTION` 32–36               | SET_MUTE · PLAY_KEY per pointer · markers → keys · clear markers · autoslice (JOIN while dragging) |
+| key settings, spread     | `0x73 ACTION` 37 / 38, `0x79`     | KEY_PARAMS (JOIN while dragging) · SPREAD_KEYS · GET_KEYS when `tableGen` moves |
+| kit waveform             | `0x74 GET_WAVE`                   | on demand, ≤ 3/s, cached windows            |
+| slice table              | `0x75 GET_TABLE`                  | when the state's table signature changes    |
+| onset ticks              | `0x76 GET_HITS`                   | when `matGen` changes                        |
+| card: upload, copy, list | `0x77 CARD`                       | one job at a time; chunks of max_body − 24; state bytes 276.. report |
+| samples onto pads        | `0x78 PADS`                       | through the card's queue; raw PCM16; state bytes 293.. report |
+| Play's loop              | `0x7A GET_LOOP`                   | in Play, when the state's `loopSeq` moves; paged by offset (169 a reply) |
 
 Flashing, presets and settings stay in `/program`; this page is deliberately
 the *instrument* view.

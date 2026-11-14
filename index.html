@@ -11,7 +11,7 @@
 <!--
   Audiothurgist — the instrument's face in a browser.
   Speaks HostLink over WebSerial (hostlink.js) plus the firmware's StateExt
-  (0x60–0x6F). No dependencies; serve web/ as static files from a secure
+  (0x70–0x7F). No dependencies; serve web/ as static files from a secure
   context (https:// or http://localhost) in a Chromium browser. On Chrome
   for Android, which has WebUSB but no Web Serial, Google's polyfill
   (vendor/web-serial-polyfill) speaks to the module's CDC interface
@@ -378,7 +378,7 @@
     <div class="row" style="margin-top:8px;gap:12px">
       <button id="k_rec" class="mini" title="arm a take into the selected key (ACTION 9); the panel's record gesture does the same">● Record into —</button>
       <button id="k_clr" class="mini" title="clear the selected key's recording (ACTION 10)">✕ Clear —</button>
-      <button id="k_load" class="mini" hidden title="choose an audio file for the selected key (0x68 PADS) — or drop one on any key">⤓ Load into —</button>
+      <button id="k_load" class="mini" hidden title="choose an audio file for the selected key (0x78 PADS) — or drop one on any key">⤓ Load into —</button>
       <label class="ctl inl">Key plays<select id="k_plays" class="inline" title="Options → Key Plays (ACTION 11): one-shot plays the slice; held reads on until the gate falls"><option value="0">One-shot (the slice)</option><option value="1">Held (until the gate falls)</option></select></label>
       <span id="k_recstate" class="pill">record —</span>
       <div class="bar meterbar idle" id="k_meterbox" title="input peak, last audio block"><i id="k_meter"></i></div>
@@ -1002,7 +1002,7 @@ const padEls = [], padDown = new Map();
     w.appendChild(el); w.appendChild(g); host.appendChild(w); padEls.push({ el, set: g, sub: el.querySelector('small'), kp: el.querySelector('em'), sig: '' });
   }
 })();
-/* ───────────── PADS (0x68): a sample dropped onto a pad ─────────────
+/* ───────────── PADS (0x78): a sample dropped onto a pad ─────────────
  * Drop audio files on a pad (Play) or a key cell (Kit), or choose them (phones): the browser decodes each (48 kHz, as
  * the card upload does), keeps it mono or stereo, cuts it to the room the module has left (the tail's pads.free, read
  * fresh before each one) and sends raw PCM16 (HL.uploadPad); the module converts it in place and publishes it as that
@@ -1095,7 +1095,7 @@ async function padUpload(job) {
     else padShow(job, 'failed: ' + m, 'bad', 0);
   }
 }
-/* RECLAIM (0x68 op 4): held memory back. The module moves the live recordings down over what replaced, deleted and
+/* RECLAIM (0x78 op 4): held memory back. The module moves the live recordings down over what replaced, deleted and
  * undone ones left (in its other buffer, swapped in at a block's start: what sounds goes on sounding); `mode` ALL takes
  * everything held and forgets the undo steps that need it, FREE only what no undo step needs. The history gets one
  * line that is no undo step (the forgotten steps greyed). Resolves the settled pads state. */
@@ -1109,7 +1109,7 @@ async function padReclaim(mode) {
 function reclaimButton(b, p, busy) {
   b.hidden = !p.held; if (!p.held) return;
   setText(b.id, `Reclaim ${padSecs(p.held)}`); b.disabled = busy || !link;
-  b.title = `0x68 RECLAIM: give the ${padSecs(p.held)} held back — the pads move down over it, everything plays as before` + (p.undoHeld ? `; ${padSecs(p.undoHeld)} of it is what Undo can still bring back, and those undo steps are forgotten (asks first)` : '');
+  b.title = `0x78 RECLAIM: give the ${padSecs(p.held)} held back — the pads move down over it, everything plays as before` + (p.undoHeld ? `; ${padSecs(p.undoHeld)} of it is what Undo can still bring back, and those undo steps are forgotten (asks first)` : '');
 }
 function reclaimClick() {
   const p = st && st.pads; if (!link || !p || !p.held) return;
@@ -1726,7 +1726,7 @@ function drawEditor() {
 $('k_rec').onclick = () => action(ACT.recArm, selKey); $('k_clr').onclick = () => action(ACT.recClear, selKey);
 $('k_plays').onchange = async e => { await action(ACT.keyPlays, +e.target.value); refreshLive(); };
 $('l_undo').onclick = () => action(ACT.looperUndo); $('l_clear').onclick = () => action(ACT.looperClear);
-/* ───────────── KEYP (ACTION 37 + 0x69): each key's own gain / tune / plays ─────────────
+/* ───────────── KEYP (ACTION 37 + 0x79): each key's own gain / tune / plays ─────────────
  * The selected key's settings in the row under the keys; the cells (and the Play pads) show a key's settings in words
  * when it has any. The sliders play live: each value goes out while you drag (one at a time — the newest waits for the
  * last reply), every send after the drag's first with JOIN, so a whole drag is one undo step (the autoslice slider's
@@ -1875,7 +1875,7 @@ function syncKit(s) {
       fieldSig = ''; invalidate(D.kit | D.kitwave | D.bar | D.wave);
     }, e => warn('table', e)).finally(() => { poll.pTable = null; });
   }
-  /* KEYP: the 24 keys' settings (0x69), read again whenever tableGen moves — every KEY_PARAMS, undo and load bumps it */
+  /* KEYP: the 24 keys' settings (0x79), read again whenever tableGen moves — every KEY_PARAMS, undo and load bumps it */
   if (s.tableGen !== keypGen && !poll.pKeyp) { const g = s.tableGen; poll.pKeyp = HL.fetchKeyParams(link, { key: 'keyp' }).then(a => { keyp = a; keypGen = g; if (kpOwnGen >= 0 && ((kpOwnGen - g) & 255) >= 128) kpTouch = -Infinity;   /* the settings moved past our last send (Undo, Redo, a spread, a load): the row lets go and shows them */ invalidate(D.kit | D.pads); }, e => warn('keys', e)).finally(() => { poll.pKeyp = null; }); }
   if (s.matGen !== hitsGen && !poll.pHits) { const gen = s.matGen; poll.pHits = fetchHits(link).then(hh => { hits = hh; hitsGen = gen; invalidate(D.kitwave | D.wave); }, e => warn('hits', e)).finally(() => { poll.pHits = null; }); }
 }
@@ -1913,7 +1913,7 @@ $('mk_clear').onclick = () => {
   if (confirm(`Delete all ${n} marker${n === 1 ? '' : 's'} (grey and orange)? Their keys go back to the grid. One undo step brings them back.`)) ed.clearMarkers();
 };
 /* ───────────── Scope tab ─────────────
- * The ten-channel scope: 0x62 with a body. Two tiers on one sample clock in the firmware — out L ·
+ * The ten-channel scope: 0x72 with a body. Two tiers on one sample clock in the firmware — out L ·
  * out R · in L · in R at 48 kHz, and J3..J8 DC-coupled at 2 kHz (one sample
  * per audio block), ±5 V = ±127 — one snapshot per frame, so every trace
  * starts at the same instant; each tier keeps its own window (audio n·decim
@@ -2152,7 +2152,7 @@ function buildManual() {
   host.innerHTML = h;
 }
 
-/* ───────────── Card (0x67) ─────────────
+/* ───────────── Card (0x77) ─────────────
  * Files dropped or picked here are decoded by the browser (decodeAudioData on a 48 kHz OfflineAudioContext decodes
  * and resamples in one step), cut to 17 s, kept stereo when stereo, encoded PCM16 (HL.encodeWav) and sent one chunk
  * per round trip (HL.uploadBreak). One card job on the wire at a time (HL.serial: Kyklophoria's putQueued), so two
