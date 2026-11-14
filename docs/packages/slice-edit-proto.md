@@ -16,7 +16,7 @@ undo (6), no panel gesture (7).*
 ## The protocol, as built
 
 Capability: `"edit":1` in the descriptor's `audiothurgist` object. Every
-op is `0x63 ACTION` with the op byte, its fields little-endian, then an
+op is `0x73 ACTION` with the op byte, its fields little-endian, then an
 **optional trailing `u8 gen`** — the `tableGen` the page last saw (state
 byte 255), 0 = unchecked. A body shorter than the fields is BAD_ARGS; a
 longer one is read for its gen. The reply is `u8 status`, then **on

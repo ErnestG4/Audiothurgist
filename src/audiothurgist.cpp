@@ -78,7 +78,7 @@
 #define BB_GIT_HASH "local"
 #endif
 #include <type_traits>
-#include "bb_scope.h"    /* SCOPE: four-channel rings, trigger, decimation behind 0x62 (pure, host-tested) */
+#include "bb_scope.h"    /* SCOPE: four-channel rings, trigger, decimation behind 0x72 (pure, host-tested) */
 #include "bb_panel_edit.h" /* EDIT-PANEL: the Edit page's walker, pickup, nudge plan, ring states (pure, host-tested) */
 #include <new>           /* SETS: placement-new for the NOLOAD SDRAM objects */
 
@@ -164,7 +164,7 @@ static uint8_t        gPendBands[bb::Engine::kMaxSlices];  /* band mask staged w
 static float          gPendDens[bb::Engine::kMaxSlices];   /* keyframe density per slice, staged with a load / re-slice */
 /* PLAY */
 
-/* ── Web frontend state (HostLink extension 0x60–0x6F, see StateExt) ────
+/* ── Web frontend state (HostLink extension 0x70–0x7F, see StateExt) ────
  * Per-slice envelope (8 min/max pairs, u8 with 128 = 0) computed at load on
  * the control thread. gMatGen bumps on every material swap so the page
  * knows when to refetch the envelope.
@@ -186,7 +186,7 @@ static float          gPendDens[bb::Engine::kMaxSlices];   /* keyframe density p
  *          calibration record's zero code and VDDA (design 32768 / 3.30).
  *          A jack in output mode reads back what its DAC drives (±50 mV).
  * gScopeW is the audio sample count, published once per block, wrapping at
- * bb::kScopeWrap (a multiple of the block and both rings). 0x62 snapshots it
+ * bb::kScopeWrap (a multiple of the block and both rings). 0x72 snapshots it
  * once and reads every channel from it (core/bb_scope.h). */
 static constexpr int kEnvPts = 8;
 static uint8_t ALCHEMY_SDRAM_BSS gEnv[bb::Engine::kMaxSlices][kEnvPts][2];
@@ -719,7 +719,7 @@ static PresetName*      gPresetName    = nullptr;
 /* ── CARD ── the one folder, uploads from the page, an old card copied in
  * (docs/packages/card.md; the rules are core/bb_card.h, the FatFs half
  * core/bb_cardfs.h). An upload arrives whole into gUpBuf (SDRAM: 17 s of
- * stereo PCM16 is 3.3 MB, there is room) — each 0x67 chunk is a memcpy and
+ * stereo PCM16 is 3.3 MB, there is room) — each 0x77 chunk is a memcpy and
  * nothing else, so the transfer never touches the card or the audio; once the
  * last byte is in, the main loop writes it as a set save writes (gSetState = 3:
  * every set-op guard holds, KeepClock runs the control loop at 25 Hz, the
@@ -743,7 +743,7 @@ static uint16_t         gCardCopied = 0, gCardSkipped = 0;
 static bb::CardSurvey   gSurvey;                      /* what the card holds, old and new (280..) */
 static uint8_t          CardProgress();               /* the op's progress byte (OnRender, the tail) */
 /* ── end CARD ──────────────────────────────────────────────────────────── */
-/* ── PADS ── a sample dropped onto a pad (docs/packages/pads.md; the rules are core/bb_pads.h). 0x68 PADS
+/* ── PADS ── a sample dropped onto a pad (docs/packages/pads.md; the rules are core/bb_pads.h). 0x78 PADS
  * receives PCM16 straight into the L plane past freePos — where nothing reads (every entry ends at or before
  * freePos; takes are refused while a drop is open; GET_WAVE and the audition stop at freePos) — each chunk a
  * memcpy (bb::UploadRx). Once the last byte is in, the main loop converts in place, writes the R plane, analyses
@@ -763,7 +763,7 @@ static bool             gPadTicking = false;          /* the main loop is inside
 static bool             gPadStereo  = false;          /* the last drop made the kit stereo (and Sampling → Stereo) */
 static bool             gNoBreak    = false;          /* the material is an empty kit's silent stub (no native tempo) */
 static bool PadBusy() { return gPadState != bb::kPadIdle || gPadReq != 0u; }
-/* RECLAIM (docs/packages/pads.md, "Held memory"; the rules are core/bb_reclaim.h): 0x68 op 4 gives held memory back.
+/* RECLAIM (docs/packages/pads.md, "Held memory"; the rules are core/bb_reclaim.h): 0x78 op 4 gives held memory back.
  * The main loop plans (the kept runs), copies them into the other buffer (gLoad: free while no load, loop take or
  * drop is in flight — all refused meanwhile) and asks the audio thread to swap them in at a block's start with every
  * position (ReclaimSwap); voices on what goes fade first (ReclaimFade, each block while gReclaimFade stands). Then the
@@ -2990,7 +2990,7 @@ static void ServiceCard()
     else { CardMerge(); CardSurveyNow(); CardFinish(bb::kCardOk); }
     gSetState = 0;
 }
-/* 0x67 CARD — every op answers u8 status first:
+/* 0x77 CARD — every op answers u8 status first:
  *   0 UP_BEGIN  ← u32 total, u8 flags (b0 overwrite), name[1..100] (the stem; ".wav" is the module's)
  *               → status, u32 the most one upload may be. BAD_ARGS a bad name / total 0 · BAD_STATE a set op,
  *               a take, a load, an upload being written or a copy · TOO_LARGE · 20 EXISTS (no overwrite) ·
@@ -3006,7 +3006,7 @@ static void ServiceCard()
  *   5 LIST      ← u8 first → status, u8 nFiles (≤ 255), u8 first, u8 n, then n × {u8 len, label} (the
  *               labels P5 and the page show, "<name> [set]" for a set) up to what fits max_body
  * The state tail from 276 reports state, progress, result and what the card holds. */
-static void CardTail(hostlink::FrameWriter& w)   /* the state tail's 276..292 (the 0x60 comment has the bytes) */
+static void CardTail(hostlink::FrameWriter& w)   /* the state tail's 276..292 (the 0x70 comment has the bytes) */
 {
     w.U8(gCardState); w.U8(CardProgress()); w.U8(gCardResult); w.U8(gCardSeq);          /* 276..279 */
     w.U8(bb::CardFlags(gSurvey, sd.CardState() == SdCard::State::Mounted));               /* 280 */
@@ -3150,9 +3150,9 @@ static void ServiceLoad()
 }
 
 /* ── StateExt: the web frontend's window into the instrument ────────────
- * HostLink extension claiming 0x60–0x6F. All handlers run on the control
+ * HostLink extension claiming 0x70–0x7F. All handlers run on the control
  * thread; engine arrays are read as-is (a torn read is one frame of pixels).
- *   0x60 GET_STATE  → u8 status, u8 nSlices, u8 curStep, u8 flags
+ *   0x70 GET_STATE  → u8 status, u8 nSlices, u8 curStep, u8 flags
  *                     (b0 muted b1 ext b2 locked b3 flowing b4 brainPage),
  *                     u8 matGen, u8 grammar, u8 classifier, u8 curFile,
  *                     u8 chop(0..255), u8 histN, u8 histDepth, u8 callFlash,
@@ -3161,10 +3161,10 @@ static void ServiceLoad()
  *                     u16 lockMask, f32 nativeBpm, u8 gridBars, u8 barsOpt,
  *                     u16 jitterUs, u8 multZone, u8 clkFlags, u16 jitterRmsUs (CLOCK, 164..169)
  *                     … u8 jackMap (175), u8 looperEvents (176, LOOPER)
- *   0x63 ACTION ops 7 clear locks · 8 page(u8 0/1)
- *   0x61 GET_ENV    ← u8 first, u8 count(≤30) → u8 status, u8 first, u8 n,
+ *   0x73 ACTION ops 7 clear locks · 8 page(u8 0/1)
+ *   0x71 GET_ENV    ← u8 first, u8 count(≤30) → u8 status, u8 first, u8 n,
  *                     then n × (8 × {u8 min, u8 max})
- *   0x62 SCOPE      ← (empty)  → u8 status, u16 n(256), i8 samples[256]: (out L + out R) / 2,
+ *   0x72 SCOPE      ← (empty)  → u8 status, u16 n(256), i8 samples[256]: (out L + out R) / 2,
  *                     ×4 decimated, the newest 21 ms — the page's small output scope
  *                   ← u8 chanMask (b0 out L · b1 out R · b2 in L · b3 in R), u8 decim (1..16),
  *                     u16 n (points per channel; clamped to 512, to what fits max_body beside
@@ -3199,7 +3199,7 @@ static void ServiceLoad()
  *                     channel, mask bits past the channels, decim 0 / > 16, cvDecim 0 / > 64,
  *                     n 0, a bad trigSrc, a pos past its wrap, a short body. core/bb_scope.h has the rules;
  *                     docs/packages/scope.md.
- *   0x63 ACTION     ← u8 op [,args]: 0 dice · 1 reslice · (2 free: the transport is 35) ·
+ *   0x73 ACTION     ← u8 op [,args]: 0 dice · 1 reslice · (2 free: the transport is 35) ·
  *                     3 punch(u8 step, u8 slice) · 4 flow(u8 on) ·
  *                     5 scrub(u8 depth) · 6 load(u8 fileIdx)      → u8 status */
 /* WEB ── sample-mode shell state the browser reads and the flags it raises.
@@ -3211,15 +3211,15 @@ static void ServiceLoad()
  * While gRecState stays 0 the state tail derives the record state from the
  * engine (recArmed / recPending / recKey), so the page shows engine-driven
  * takes even before RECORD lands.
- *   0x64 GET_WAVE   ← u32 start, u16 n (≤480), u8 plane (0 L · 1 R · 2 mono sum)
+ *   0x74 GET_WAVE   ← u32 start, u16 n (≤480), u8 plane (0 L · 1 R · 2 mono sum)
  *                     [, u8 step (1..128: each output byte = the largest-magnitude
  *                     sample of `step` source samples)]
  *                   → u8 status, u32 start, u16 n, u8 step, i8 x[n]   (BAD_ARGS past freePos)
- *   0x65 GET_TABLE  ← [u8 first, u8 count] → u8 status, u8 nSlices, u8 nTable, then per
+ *   0x75 GET_TABLE  ← [u8 first, u8 count] → u8 status, u8 nSlices, u8 nTable, then per
  *                     entry {u32 start, u32 len, i8 key, u8 cls, u8 sal, u8 hit, u8 dens, u8 flags
  *                     (b0 orange · b1 tombstone)} (14 bytes; ≤39 per reply — chunk with first/count)
- *   0x66 GET_HITS   ← [u8 first] → u8 status, u8 nTotal, u8 first, u32 pos[…] (≤127 per reply)
- *   0x63 ACTION     9 rec arm(u8 key) · 10 rec clear(u8 key) · 11 key plays(u8 0/1) ·
+ *   0x76 GET_HITS   ← [u8 first] → u8 status, u8 nTotal, u8 first, u32 pos[…] (≤127 per reply)
+ *   0x73 ACTION     9 rec arm(u8 key) · 10 rec clear(u8 key) · 11 key plays(u8 0/1) ·
  *                   12 looper undo · 13 looper clear ·
  *                   SETS: 14 save set(name bytes) · 15 load set(name bytes)
  *   state tail      176 u8 looperEvents (LOOPER) · 177 u8 recState · 178 u8 recKey ·
@@ -3232,7 +3232,7 @@ static void ServiceLoad()
  *                   thread once per block) · 262 u8 redoDepth
  *   EDIT (docs/packages/slice-edit-proto.md; every body may carry a trailing u8 gen, 0 = unchecked, else it
  *   must equal tableGen or the op is BAD_STATE):
- *   0x63 ACTION     16 SET_BOUNDARY(u8 i, u32 pos) · 17 SET_ENTRY(u8 t, u32 start, u32 len) ·
+ *   0x73 ACTION     16 SET_BOUNDARY(u8 i, u32 pos) · 17 SET_ENTRY(u8 t, u32 start, u32 len) ·
  *                   18 ADD_ENTRY(u8 key | 255 none, u32 start, u32 len, u8 flags b0 orange) ·
  *                   19 SPLIT(u8 t, u32 pos) · 20 MERGE(u8 t) · 21 TOMBSTONE(u8 t) ·
  *                   22 SET_KEY(u8 key, u8 t) · 23 SWAP_KEYS(u8 a, u8 b) · 24 NUDGE_ALL(i16 ms, u8 which
@@ -3252,7 +3252,7 @@ static void ServiceLoad()
  *                   trailing gen as the others); one journal step either way → u8 status (2 BAD_ARGS = nothing to
  *                   undo / redo, or a history something went past; 3 BAD_STATE as the other ops), u8 tableGen.
  *   BETA (docs/packages/beta-fw.md):
- *   0x63 ACTION     32 PLAY_KEY(u8 key 0..23, u8 down 1 / up 0) → u8 status: the key as a CV note plays it (plain,
+ *   0x73 ACTION     32 PLAY_KEY(u8 key 0..23, u8 down 1 / up 0) → u8 status: the key as a CV note plays it (plain,
  *                   Key Plays honoured), any grammar; an up releases a held key, a no-op for one-shot
  *                   33 KEYS_FROM_MARKERS([u8 gen]) → u8 status, u8 tableGen, u8 count: live markers in time order →
  *                   keys 0.. (keys holding a recording skipped and kept, the rest back to their span slice); one
@@ -3269,29 +3269,29 @@ static void ServiceLoad()
  *   state tail      263 u8 flags2 (b0 srcValid · b1 keys follow markers) · 264 u16 loadAvg · 266 u16 loadMax (‰ of
  *                   the 24-sample block budget, the last second) · 268 i16 j4mV · 270 u8 j4Key · 271 u8 j5Style (255 in
  *                   the Brain map) · 272 u8 keyFlash (255 none) · 273 u8 keySeq · 274 u8 autoK · 275 u8 nMarkers — ends at 276
- *   CARD (docs/packages/card.md): 0x67 CARD — upload a break, copy an old card in, rescan,
- *                   the list (HandleCard has the ops); state tail 276..292 (StateExt's 0x60 has the bytes) — ends at 293
- *   PADS (docs/packages/pads.md): 0x68 PADS — a PCM16 sample dropped onto a pad (BEGIN / DATA /
+ *   CARD (docs/packages/card.md): 0x77 CARD — upload a break, copy an old card in, rescan,
+ *                   the list (HandleCard has the ops); state tail 276..292 (StateExt's 0x70 has the bytes) — ends at 293
+ *   PADS (docs/packages/pads.md): 0x78 PADS — a PCM16 sample dropped onto a pad (BEGIN / DATA /
  *                   ABORT, committed as EditOp::Record: one undo step), NEW_KIT (no break, Pads), RECLAIM (held
  *                   memory back); state tail 293..323 (state, progress, result, seq, key, flags, free, total, held,
  *                   the pads' key mask; RECLAIM: undoHeld, the last reclaim's frames and forgotten steps) — ends at 324
  *   KEYP (docs/packages/keyp.md): per-key gain / tune / plays, ENV: the amp envelope and the choke group —
- *   0x63 ACTION     37 KEY_PARAMS(u8 key 0..23, i8 gain ½ dB −48..+12, i16 cents ±2400, u8 plays 0 follow Key
+ *   0x73 ACTION     37 KEY_PARAMS(u8 key 0..23, i8 gain ½ dB −48..+12, i16 cents ±2400, u8 plays 0 follow Key
  *                   Plays · 1 one-shot · 2 held · 3 loop · 4 ratchet, u8 rate 0 the entry · 1 ½ · 2 ¼ · 3 ⅛ · 4 an 8th
  *                   · 5 a 16th · 6 a 32nd, u16 attack ms ≤ 2000, u16 decay ms ≤ 4000, u8 sustain dB below full ≤ 60
  *                   (60 = none), u16 release ms ≤ 4000, u8 choke group 0 none · 1..4, u8 flags b0 join [, u8 gen])
  *                   → u8 status, u8 tableGen; one undo step (b0: folded into this key's previous step — a slider's drag)
- *   0x69 GET_KEYS   → u8 status, u8 n = 24, n × {i8 gain, u8 plays, i16 cents, u8 rate, u16 attack, u16 decay,
+ *   0x79 GET_KEYS   → u8 status, u8 n = 24, n × {i8 gain, u8 plays, i16 cents, u8 rate, u16 attack, u16 decay,
  *                   u8 sustain, u16 release, u8 group} (13 bytes a key)
  *   LOOPVIEW (docs/packages/sample-looper.md, "The page's read"): Play's loop on the page —
- *   0x6A GET_LOOP   ← [u16 offset] → u8 status, u16 n (events, ≤ 256), u8 seq, u8 gen (being recorded into), u8 flags
+ *   0x7A GET_LOOP   ← [u16 offset] → u8 status, u16 n (events, ≤ 256), u8 seq, u8 gen (being recorded into), u8 flags
  *                   (b0 dirty: something recorded into gen this pass), u16 offset, u8 count, then count × {u16 phase ×
  *                   65535, i8 key (−1 keyless), i8 slice, u8 style (bb::Looper's bits, & 0x7F), u8 gen} (6 bytes; ≤ 169
  *                   a reply — page with offset; an offset at or past n answers count 0). B2's undo takes the highest
  *                   gen present. state tail 324 u8 loopSeq (bumps with every change to the list) · 325 u16 loopPhase
  *                   (the playhead: barPhase × 65535) · 327 u8 loopQuant (Options → Quantize) — ends at 328
  *   CHROMA (docs/packages/chroma.md): one sample played chromatically —
- *   0x63 ACTION     38 SPREAD_KEYS(u8 root 0..23, u8 flags b0 keep pads [, u8 gen]) → u8 status, u8 tableGen, u8 count:
+ *   0x73 ACTION     38 SPREAD_KEYS(u8 root 0..23, u8 flags b0 keep pads [, u8 gen]) → u8 status, u8 tableGen, u8 count:
  *                   every key j ≠ root plays the root's entry, tuned (j − root) × 100 + the root's cents (clamped to
  *                   ±2400), the root's gain and Plays (and ratchet rate); b0 leaves a key that plays a recording other
  *                   than the root's as it is. count = the keys on the root's entry besides it. One undo step (the key
@@ -3512,7 +3512,7 @@ static BB_COLD void HandleSpread(EditBody& b, hostlink::FrameWriter& w)
     w.U8(0u); w.U8(engine.tableGen); w.U8((uint8_t)(n < 0 ? 255 : n));
 }
 /* ACTION 16..31, and BETA's table ops 33 / 34 / 36 (32 PLAY_KEY and 35 SET_MUTE are not table ops: the
- * 0x63 switch answers them); KEYP's 37, CHROMA's 38. Writes the whole reply. */
+ * 0x73 switch answers them); KEYP's 37, CHROMA's 38. Writes the whole reply. */
 static inline __attribute__((always_inline)) void HandleEdit(uint8_t op, const hostlink::ParsedFrame& f, hostlink::FrameWriter& w)   /* one caller: kept inline (ENV grew it past GCC's limit, +0.3 KB out of line) */
 {
     using bb::EditOp; using bb::EditReq; using bb::EditStatus;
@@ -3859,7 +3859,7 @@ static void ServicePanel()
 }
 /* ── end EDIT-PANEL ────────────────────────────────────────────────────── */
 
-/* ── PADS: the main loop's half and the 0x68 command (docs/packages/pads.md) ─────────────────────────── */
+/* ── PADS: the main loop's half and the 0x78 command (docs/packages/pads.md) ─────────────────────────── */
 #pragma GCC push_options
 #pragma GCC optimize("Os")   /* PADS: like the card code, nothing here is time-critical (it yields) — built for size */
 static void PadFinish(uint8_t r)
@@ -4006,7 +4006,7 @@ static void ServicePads()
     else if(req == 2u) PadNewKit();
     else if(req == 4u) PadReclaim();   /* RECLAIM */
 }
-/* 0x68 PADS — every op answers u8 status first:
+/* 0x78 PADS — every op answers u8 status first:
  *   0 BEGIN    ← u8 key (0..23), u8 ch (1 | 2), u32 frames (48 kHz) → status, u32 room (frames free past freePos
  *              now), u32 bufCap. BAD_ARGS a key / channel count / fewer than 480 frames · TOO_LARGE more frames
  *              than the room (the reply says how many fit) · BAD_STATE a set op, a load, a take (armed, running,
@@ -4023,7 +4023,7 @@ static void ServicePads()
  *              voices with them; one ringing on what goes fades). BAD_STATE as a begin, or while a drop arrives. The
  *              tail's seq says when; 319 / 323 what it freed and what Undo forgot.
  * The state tail from 293 reports state, progress, result, the key, the kit's flags and the room. */
-static void PadsTail(hostlink::FrameWriter& w)   /* the state tail's 293..314 (the 0x60 comment has the bytes) */
+static void PadsTail(hostlink::FrameWriter& w)   /* the state tail's 293..314 (the 0x70 comment has the bytes) */
 {
     const bb::PadRoom room = bb::PadRoomOf(engine);
     uint32_t prog = gPadProg;
@@ -4091,7 +4091,7 @@ static void HandlePads(const hostlink::ParsedFrame& f, hostlink::FrameWriter& w)
 #pragma GCC pop_options
 /* ── end PADS ──────────────────────────────────────────────────────────── */
 
-/* LOOPVIEW: 0x6A GET_LOOP ← [u16 offset] → u8 status, then a page of Play's loop (bb::Looper::WritePage has the
+/* LOOPVIEW: 0x7A GET_LOOP ← [u16 offset] → u8 status, then a page of Play's loop (bb::Looper::WritePage has the
  * bytes). Read as the audio thread leaves it, unlocked (the display rule; WritePage clamps n and the phases); the
  * page refetches whenever the tail's loopSeq moves. Out of line and built for size: a few reads a second at most. */
 static BB_COLD void HandleLoop(const hostlink::ParsedFrame& f, hostlink::FrameWriter& w)
@@ -4100,22 +4100,22 @@ static BB_COLD void HandleLoop(const hostlink::ParsedFrame& f, hostlink::FrameWr
     w.U8(0u);
     engine.looper.WritePage(w, off, (int)hostlink::kMaxBody - 1 - bb::Looper::kWireHead);
 }
-static BB_COLD void LoopTail(hostlink::FrameWriter& w)   /* the state tail's 324..327 (the 0x60 comment has the bytes) */
+static BB_COLD void LoopTail(hostlink::FrameWriter& w)   /* the state tail's 324..327 (the 0x70 comment has the bytes) */
 {
     w.U8(engine.looper.seq); w.U16(bb::Looper::WirePhase(engine.barPhase)); w.U8((uint8_t)gQuantize.sel);
 }
 
 struct StateExt : hostlink::IHostlinkExtension
 {
-    uint8_t FirstCmd() const override { return 0x60u; }
-    uint8_t LastCmd()  const override { return 0x6Fu; }
+    uint8_t FirstCmd() const override { return 0x70u; }
+    uint8_t LastCmd()  const override { return 0x7Fu; }
     const char* DescriptorRootJson() const override
     {
         /* The page (web/) ships with this firmware and checks one number on connect: "api", the version of
          * everything below (the commands, the ops, the state body). It refuses any other with one message —
          * flash the matching .bin — so there is no partial mode to keep working. Bump it with any change to the
          * wire, and HL.API in web/hostlink.js with it (the selftest's descriptor parity holds them equal). */
-        return "\"audiothurgist\":{\"api\":4}";   /* 4: SCOPE — min/max groups above decimation 1, the four levels in the reply, no peak flag; 3: LOOPVIEW — 0x6A GET_LOOP, the tail to 328 (2: ENV's KEY_PARAMS / GET_KEYS, RECLAIM's 0x68 op 4, sets saved packed) */
+        return "\"audiothurgist\":{\"api\":5}";   /* 5: the commands move to 0x70–0x7F (the SDK's diagnostics own 0x60–0x63 from v0.13); 4: SCOPE — min/max groups above decimation 1, the four levels in the reply, no peak flag; 3: LOOPVIEW — 0x7A GET_LOOP, the tail to 328 (2: ENV's KEY_PARAMS / GET_KEYS, RECLAIM's 0x78 op 4, sets saved packed) */
     }
     /* WEB: one float → i8 (±127), saturating. */
     static int8_t ToI8(float v)
@@ -4129,7 +4129,7 @@ struct StateExt : hostlink::IHostlinkExtension
         gHostSeenMs = daisy::System::GetNow();   /* the page is there (ServicePadHolds) */
         switch(f.type)
         {
-            case 0x60u:
+            case 0x70u:
             {
                 w.U8(0u);
                 const int ns = engine.nSlices;
@@ -4221,12 +4221,12 @@ struct StateExt : hostlink::IHostlinkExtension
                  * undoForgot (undo steps it dropped) — ends at 324. State 4: reclaiming. */
                 PadsTail(w);
                 /* LOOPVIEW tail (324..327, docs/packages/sample-looper.md): u8 loopSeq (bumps with every change to the
-                 * loop: the page reads 0x6A again) · u16 loopPhase (barPhase × 65535: the playhead the page sweeps) ·
+                 * loop: the page reads 0x7A again) · u16 loopPhase (barPhase × 65535: the playhead the page sweeps) ·
                  * u8 loopQuant (Options → Quantize: 0 Off · 1 16ths, the looper silent · 2 8ths) — ends at 328. */
                 LoopTail(w);
                 return;
             }
-            case 0x61u:
+            case 0x71u:
             {
                 const uint8_t first = f.len >= 1 ? f.body[0] : 0u;
                 uint8_t n = f.len >= 2 ? f.body[1] : 30u;
@@ -4242,7 +4242,7 @@ struct StateExt : hostlink::IHostlinkExtension
              * a backward trigger walk over the usable ring (a cv trigger: 16 K; an audio one gives up after
              * span + 100 ms) plus ≤ 10 × 512 × 64 ring reads for the min/max groups and 4 × 2048 for the
              * levels — comparable to GET_WAVE. */
-            case 0x62u:
+            case 0x72u:
             {
                 const uint32_t wpos = gScopeW;
                 if(f.len == 0)   /* the pre-SCOPE reply, byte for byte in shape: 256 × (L + R) / 2, ×4 */
@@ -4280,7 +4280,7 @@ struct StateExt : hostlink::IHostlinkExtension
                 }
                 return;
             }
-            case 0x63u:
+            case 0x73u:
             {
                 if(f.len < 1) { w.U8(2u); return; }   /* BAD_ARGS */
                 const uint8_t op = f.body[0];
@@ -4395,10 +4395,10 @@ struct StateExt : hostlink::IHostlinkExtension
                 w.U8(0u);
                 return;
             }
-            /* WEB: 0x64 GET_WAVE — the material buffer, windowed and optionally decimated.
+            /* WEB: 0x74 GET_WAVE — the material buffer, windowed and optionally decimated.
              * Bounded by freePos (recordings live past bufLen); a take in flight is not
              * exposed until it is committed. ≤ 480 × 128 source samples per call (~1 ms). */
-            case 0x64u:
+            case 0x74u:
             {
                 if(f.len < 7) { w.U8(2u); return; }   /* BAD_ARGS */
                 uint32_t start = (uint32_t)f.body[0] | ((uint32_t)f.body[1] << 8) | ((uint32_t)f.body[2] << 16) | ((uint32_t)f.body[3] << 24);
@@ -4429,9 +4429,9 @@ struct StateExt : hostlink::IHostlinkExtension
                 }
                 return;
             }
-            /* WEB: 0x65 GET_TABLE — every table entry, grid then recorded, 13 bytes each;
+            /* WEB: 0x75 GET_TABLE — every table entry, grid then recorded, 13 bytes each;
              * EDIT: a third request byte (form 1) appends u8 flags (b0 orange · b1 tombstone) → 14. */
-            case 0x65u:
+            case 0x75u:
             {
                 const int nt = engine.nTable;
                 int first = f.len >= 1 ? f.body[0] : 0;
@@ -4455,9 +4455,9 @@ struct StateExt : hostlink::IHostlinkExtension
                 }
                 return;
             }
-            /* WEB: 0x66 GET_HITS — the shell's onset table for the current material
+            /* WEB: 0x76 GET_HITS — the shell's onset table for the current material
              * (gPendOnsets / gPendN: refilled by every load and re-slice, read after apply). */
-            case 0x66u:
+            case 0x76u:
             {
                 int n = gPendN; if(n < 0) n = 0; if(n > kMaxOnsets) n = kMaxOnsets;
                 int first = f.len >= 1 ? f.body[0] : 0;
@@ -4467,12 +4467,12 @@ struct StateExt : hostlink::IHostlinkExtension
                 for(int i = first; i < first + count; i++) w.U32((uint32_t)(gPendOnsets[i] < 0 ? 0 : gPendOnsets[i]));
                 return;
             }
-            case 0x67u: HandleCard(f, w); return;   /* CARD: uploads, the old card copied in, the list */
-            case 0x68u: HandlePads(f, w); return;   /* PADS: a sample dropped onto a pad, New empty kit */
-            /* KEYP: 0x69 GET_KEYS → u8 status, u8 n (24), then per key i8 gain (½ dB), u8 plays, i16 cents, u8 ratchet rate, ENV: u16
+            case 0x77u: HandleCard(f, w); return;   /* CARD: uploads, the old card copied in, the list */
+            case 0x78u: HandlePads(f, w); return;   /* PADS: a sample dropped onto a pad, New empty kit */
+            /* KEYP: 0x79 GET_KEYS → u8 status, u8 n (24), then per key i8 gain (½ dB), u8 plays, i16 cents, u8 ratchet rate, ENV: u16
              * attack, u16 decay, u8 sustain, u16 release, u8 group (13 bytes). The page reads it again whenever tableGen moves (every
              * KEY_PARAMS, undo, load bumps it). */
-            case 0x69u:
+            case 0x79u:
             {
                 w.U8(0u); w.U8((uint8_t)bb::Engine::kKeys);
                 for(int k = 0; k < bb::Engine::kKeys; k++)
@@ -4483,7 +4483,7 @@ struct StateExt : hostlink::IHostlinkExtension
                 }
                 return;
             }
-            case 0x6Au: HandleLoop(f, w); return;   /* LOOPVIEW: GET_LOOP — Play's loop, a page of events */
+            case 0x7Au: HandleLoop(f, w); return;   /* LOOPVIEW: GET_LOOP — Play's loop, a page of events */
             default: w.U8(1u); return;   /* UNSUPPORTED */
         }
     }
@@ -4666,7 +4666,7 @@ int main()
 
     presets.SetYield([](void*) { KeepClock(); }, nullptr);   /* QSPI erase/program: keep the clock alive */
     presets.Init();
-    presets.BootLoad();   /* HostLink starts here: descriptor + panel USB up */
+    presets.BootLoad();   /* HostLink starts at the loop's first Poll (SDK v0.12+), after every Extend above */
     /* SETS: slots the flash no longer honours (a schema bump, an erase) come
      * back from presets/<slot>.json; slot 0 is re-loaded so the live state is
      * the boot preset's whatever was restored. */

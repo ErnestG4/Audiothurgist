@@ -274,7 +274,7 @@ struct Looper
         return (int)x;
     }
 
-    /* LOOPVIEW (0x6A GET_LOOP, docs/packages/sample-looper.md "The page's read"): one page of the list for the web
+    /* LOOPVIEW (0x7A GET_LOOP, docs/packages/sample-looper.md "The page's read"): one page of the list for the web
      * page, written after the reply's status byte: u16 n, u8 seq, u8 gen, u8 flags (b0 dirty: something is
      * recorded into `gen` this pass), u16 offset, u8 count (kWireHead = 8 bytes), then count × {u16 phase × 65535,
      * i8 key, i8 slice, u8 style & kWire, u8 gen} (kWireEvent = 6) — as many as `room` bytes hold after the head.

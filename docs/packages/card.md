@@ -49,7 +49,7 @@ An upload arrives **whole into SDRAM** (`gUpBuf`, 3.27 MB: 17 s × 48 kHz ×
 stereo × 2 bytes + 4 KB; SDRAM 59.0 % → 63.8 %), and only when the last byte is
 in does the main loop write it. So:
 
-- each 0x67 chunk is a bounds check and a `memcpy` — no card access in the
+- each 0x77 chunk is a bounds check and a `memcpy` — no card access in the
   HostLink handler, nothing for the 1 ms control loop to wait on during the
   transfer;
 - the write is **the set save's path**: `gSetState = 3` (every set-op guard
@@ -69,7 +69,7 @@ for the source).
 
 ## Protocol
 
-`0x67 CARD`. Every reply starts with
+`0x77 CARD`. Every reply starts with
 a status: HostLink's 0 OK · 2 BAD_ARGS · 3 BAD_STATE · 6 TOO_LARGE, then the
 card's own **20 EXISTS** (Kyklophoria's `kStatCardExists`) · **21 NO_CARD** ·
 **22 CARD_FULL**.

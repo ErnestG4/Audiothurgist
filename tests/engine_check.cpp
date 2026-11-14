@@ -1828,7 +1828,7 @@ int main()
         CHECK(e.looper.n == 5 && e.looper.ev[2].gen == 0 && e.looper.ev[3].gen == 1, "…with five events in two generations");
     }
 
-    /* ── LOOPVIEW: the page's read of the loop (0x6A GET_LOOP, Looper::WritePage) and the tail's change byte ── */
+    /* ── LOOPVIEW: the page's read of the loop (0x7A GET_LOOP, Looper::WritePage) and the tail's change byte ── */
     struct PageW   // hostlink::FrameWriter's Bytes, into a vector
     {
         std::vector<uint8_t> b;

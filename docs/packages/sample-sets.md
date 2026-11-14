@@ -86,8 +86,8 @@ every card for a release.
 ## Protocol
 
 ```
-0x63 ACTION 14  save set   ← u8 14, name bytes (1..31 of [A-Za-z0-9_-])  → u8 status
-0x63 ACTION 15  load set   ← u8 15, name bytes                            → u8 status
+0x73 ACTION 14  save set   ← u8 14, name bytes (1..31 of [A-Za-z0-9_-])  → u8 status
+0x73 ACTION 15  load set   ← u8 15, name bytes                            → u8 status
 ```
 Both answer at once: BAD_ARGS for a bad name, BAD_STATE while an op runs,
 a load waits or (save) a take is armed / running. The work happens in the

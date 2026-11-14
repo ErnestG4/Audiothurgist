@@ -1,5 +1,5 @@
 #pragma once
-// SCOPE: the ten-channel oscilloscope behind HostLink 0x62, pure so the
+// SCOPE: the ten-channel oscilloscope behind HostLink 0x72, pure so the
 // host suite can test it (tests/scope_check.cpp) — docs/packages/scope.md.
 //
 // Two ring tiers on ONE sample clock, both written by the AUDIO callback:
@@ -14,7 +14,7 @@
 // Positions wrap at kScopeWrap (a multiple of the block and of both rings,
 // not 2^32, so a CV slot never jumps at the wrap). The audio thread keeps
 // writing while a reply is built, so the oldest kScopeGuard / kScopeCvGuard
-// samples are never read. 0x62 is answered on the CONTROL thread from a
+// samples are never read. 0x72 is answered on the CONTROL thread from a
 // single snapshot of the index. Nothing here touches hardware or allocates;
 // the ring memory belongs to the shell.
 //
@@ -135,7 +135,7 @@ struct ScopeReq
     int SpanC() const { return UseC() ? (int)n * (int)cvDecim : 0; }   // cv samples the window covers
 };
 
-/* CONTROL: parse and clamp a 0x62 request body (len ≥ 1; the empty body is
+/* CONTROL: parse and clamp a 0x72 request body (len ≥ 1; the empty body is
  * the pre-SCOPE reply and is handled by the caller). false = BAD_ARGS:
  * short body, no channel at all, mask bits above the four audio channels
  * or the six CV jacks, decim 0 / > 16, cvDecim 0 / > 64, n 0, an at-pos past

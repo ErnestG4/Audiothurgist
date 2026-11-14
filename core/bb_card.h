@@ -1,7 +1,7 @@
 #pragma once
 // CARD — the pure pieces of the card layout, the upload receiver and the
 // copy plan (docs/packages/card.md). The FatFs half is core/bb_cardfs.h; the
-// shell's plumbing (the 0x67 command, the state tail, the main-loop service)
+// shell's plumbing (the 0x77 command, the state tail, the main-loop service)
 // is src/audiothurgist.cpp. Host-tested in tests/card_check.cpp.
 //
 //   * One folder. Everything the module reads or writes lives under
@@ -39,7 +39,7 @@ constexpr int    kEntryMax     = 128;          // a list entry incl. NUL (gFiles
 constexpr int    kEntryNameMax = 120;          // longest card name the scan lists
 constexpr size_t kCardPathMax  = 300;          // a copy path: 24 + 255 (FAT LFN) + ".part"
 
-/* 0x67 reply statuses (HostLink's own 0 / 2 / 3 / 6, then the card's) */
+/* 0x77 reply statuses (HostLink's own 0 / 2 / 3 / 6, then the card's) */
 constexpr uint8_t kStOk = 0u, kStBadArgs = 2u, kStBadState = 3u, kStTooLarge = 6u;
 constexpr uint8_t kStExists = 20u, kStNoCard = 21u, kStFull = 22u;   // Kyklophoria's kStatCardExists = 20
 

@@ -1,6 +1,6 @@
 #pragma once
 // RECLAIM — held sample memory comes back (docs/packages/pads.md, "Held memory"). The pure half; the shell's
-// plumbing (0x68 op 4, the main loop's copy, the audio thread's swap, the card map beside a set) is
+// plumbing (0x78 op 4, the main loop's copy, the audio thread's swap, the card map beside a set) is
 // src/audiothurgist.cpp. Host-tested in tests/reclaim_check.cpp.
 //
 //   * A PLAN is the kept runs over [0, freePos): the break [0, bufLen), every live entry's span and — when Undo is

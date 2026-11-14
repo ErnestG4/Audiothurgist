@@ -127,14 +127,14 @@ same planes keeps them; a set brings its own back.
     call), so they are in. They follow the tempo at the call; a tempo change
     mid-ratchet takes effect at the next press.
 
-## Protocol — ACTION 37 and `0x69 GET_KEYS`
+## Protocol — ACTION 37 and `0x79 GET_KEYS`
 
-The state carries no copy of the settings: the page reads 0x69 whenever the
+The state carries no copy of the settings: the page reads 0x79 whenever the
 state's `tableGen` (byte 255) moves, and every KEY_PARAMS, undo, redo and load
 moves it.
 
 ```
-0x63 ACTION 37 KEY_PARAMS ← u8 key 0..23, i8 gain (½ dB, −48 … +12), i16 cents (±2400),
+0x73 ACTION 37 KEY_PARAMS ← u8 key 0..23, i8 gain (½ dB, −48 … +12), i16 cents (±2400),
                             u8 plays (0 follow · 1 one-shot · 2 held · 3 loop · 4 ratchet),
                             u8 rate (0 the entry · 1 ½ · 2 ¼ · 3 ⅛ · 4 an 8th · 5 a 16th · 6 a 32nd),
                             ENV: u16 attack ms (≤ 2000), u16 decay ms (≤ 4000),
@@ -142,7 +142,7 @@ moves it.
                                  u8 choke group (0 none · 1..4),
                             u8 flags (b0 join) [, u8 gen]                        (15 field bytes)
                           → u8 status, u8 tableGen
-0x69 GET_KEYS             ← (nothing)
+0x79 GET_KEYS             ← (nothing)
                           → u8 status, u8 n = 24, n × { i8 gain, u8 plays, i16 cents, u8 rate,
                             u16 attack, u16 decay, u8 sustain, u16 release, u8 group }   (13 bytes a key)
 ```

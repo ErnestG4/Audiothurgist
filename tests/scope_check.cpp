@@ -5,7 +5,7 @@
 //
 // A miniature of the shell: four audio rings and six CV rings under one
 // sample clock, fed by a fake audio thread block by block (24 samples, one CV
-// sample per block), then read the way the 0x62 handler reads them — parse,
+// sample per block), then read the way the 0x72 handler reads them — parse,
 // window (trigger / at-pos / newest, aligned or detached), the four levels,
 // extract per channel (samples at decimation 1, min/max groups above) — and
 // the pre-SCOPE (empty body) reply beside it.
@@ -48,7 +48,7 @@ struct Rings
 };
 static Rings* NewRings() { Rings* r = new Rings(); return r; }
 
-/* The 0x62 handler, as the shell runs it: one snapshot, header, ext header, channels in mask order. */
+/* The 0x72 handler, as the shell runs it: one snapshot, header, ext header, channels in mask order. */
 static int Handle(const Rings& R, const uint8_t* body, int len, int maxBody, uint8_t* out)
 {
     const uint32_t wpos = R.w;

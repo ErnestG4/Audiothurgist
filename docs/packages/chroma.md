@@ -90,7 +90,7 @@ one-sample instrument". This is a call for the bench (§10f.6, Calls 8).
 ## Protocol — ACTION 38
 
 ```
-0x63 ACTION 38 SPREAD_KEYS ← u8 root 0..23, u8 flags (b0 keep pads) [, u8 gen]
+0x73 ACTION 38 SPREAD_KEYS ← u8 root 0..23, u8 flags (b0 keep pads) [, u8 gen]
                            → u8 status, u8 tableGen, u8 count (keys now on the root's entry, besides it)
 ```
 
@@ -102,8 +102,8 @@ one-sample instrument". This is a call for the bench (§10f.6, Calls 8).
   thread with no edit in flight): a spread that changes nothing answers OK
   with the same tableGen and posts nothing — no empty undo step
   (KEYS_FROM_MARKERS' rule). A stale gen is BAD_STATE even then.
-- No bytes added to the 0x60 state: the spread moves `tableGen`, and the page
-  reads the map (0x60) and the settings (0x69) again, as for KEY_PARAMS.
+- No bytes added to the 0x70 state: the spread moves `tableGen`, and the page
+  reads the map (0x70) and the settings (0x79) again, as for KEY_PARAMS.
 
 ## The journal
 

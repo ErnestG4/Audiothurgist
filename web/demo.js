@@ -435,7 +435,7 @@ class FakeDevice {
     const g = this.grammar; this.options[O['grammar.mode']] = GRAM.pads; this.setGrammar(GRAM.pads, g);
     this.matGen = (this.matGen + 1) & 0xff; this.bumpGen(); this.padFinish(0);
   }
-  /* 0x68 — the firmware's HandlePads */
+  /* 0x78 — the firmware's HandlePads */
   padHandle(body, U8, U32) {
     const op = body[0], o = this.padOp, u = this.padUp, room = this.padRoom();
     switch (op) {
@@ -483,7 +483,7 @@ class FakeDevice {
       o.copied = copied; o.skipped = skipped; this.cardMerge(); this.survey = this.cardSurvey(); this.cardFinish(copied + skipped ? 0 : 10);
     } else { this.cardMerge(); this.survey = this.cardSurvey(); this.cardFinish(0); }
   }
-  /* 0x67 — the firmware's HandleCard */
+  /* 0x77 — the firmware's HandleCard */
   cardHandle(body, U8, U32) {
     const op = body[0], o = this.cardOp, u = this.cardUp;
     switch (op) {
@@ -957,7 +957,7 @@ class FakeDevice {
       { phase: 0.5625, key: 14, slice: this.keySlice[14], style: LOOP.held, gen: 2, skip: null }, { phase: 0.75, key: 14, slice: -1, style: LOOP.release, gen: 2, skip: null }];
     L.gen = 3; L.dirty = false; L.held = 0; L.seq = (L.seq + 1) & 255;
   }
-  /* 0x6A GET_LOOP: the firmware's Looper::WritePage — n, seq, gen, dirty, the offset, then ≤ 169 events of 6 bytes */
+  /* 0x7A GET_LOOP: the firmware's Looper::WritePage — n, seq, gen, dirty, the offset, then ≤ 169 events of 6 bytes */
   loopPage(body, U8, U16) {
     this.loopTick(); const L = this.loop, n = Math.min(LOOP.max, L.ev.length);
     const off = Math.min(n, body.length >= 2 ? u16(body, 0) : 0), cnt = Math.min(n - off, Math.floor((MAX_BODY - LOOP.head) / LOOP.ev));
@@ -1163,7 +1163,7 @@ class FakeDevice {
         const first = body[0] || 0, n = Math.min(body[1] || 30, 30, 64 - first);
         if (first >= 64) { U8(2); break; }
         U8(0); U8(first); U8(n); for (let i = 0; i < n * 16; i++) U8(this.env[first * 16 + i]); break; }
-      /* SCOPE: the firmware's 0x62 — the empty body is the small output trace, a body is the
+      /* SCOPE: the firmware's 0x72 — the empty body is the small output trace, a body is the
        * ten-channel one with the same parse / clamp / window / trigger (and its look-back) / at-pos /
        * levels / min-max decimation rules as core/bb_scope.h (kept in step by hand: selftest.mjs pins both). */
       case CMD.scope: {
@@ -1270,11 +1270,11 @@ class FakeDevice {
         U8(ok ? 0 : 2); break; }
       case CMD.card: this.cardHandle(body, U8, U32); break;   /* CARD */
       case CMD.pads: this.padHandle(body, U8, U32); break;    /* PADS */
-      case CMD.keys:   /* KEYP: 0x69 GET_KEYS → status, 24, then i8 gain · u8 plays · i16 cents · u8 rat (ENV: · u16 atk · u16 dec · u8 sus · u16 rel · u8 grp) per key */
+      case CMD.keys:   /* KEYP: 0x79 GET_KEYS → status, 24, then i8 gain · u8 plays · i16 cents · u8 rat (ENV: · u16 atk · u16 dec · u8 sus · u16 rel · u8 grp) per key */
         U8(0); U8(KEYS);
         for (const p of this.keyp) { U8(p.gain & 0xff); U8(p.plays); U8(p.cents & 0xff); U8((p.cents >> 8) & 0xff); U8(p.rat | 0); U16(p.atk | 0); U16(p.dec | 0); U8(p.sus | 0); U16(p.rel | 0); U8(p.grp | 0); }
         break;
-      case CMD.loop: this.loopPage(body, U8, U16); break;   /* LOOPVIEW: 0x6A GET_LOOP */
+      case CMD.loop: this.loopPage(body, U8, U16); break;   /* LOOPVIEW: 0x7A GET_LOOP */
       default: U8(1);
     }
     return Uint8Array.from(w);

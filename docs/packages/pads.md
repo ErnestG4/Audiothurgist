@@ -62,9 +62,9 @@ regression*: a break at **192 kHz** now loads its first 8.5 s (the staging is
 17 s at 96 kHz), where it got 12.5 s before; 96 kHz and below still get 17 s,
 and everything the page uploads is 48 kHz.
 
-## Protocol — `0x68 PADS`
+## Protocol — `0x78 PADS`
 
-A new command beside `0x67 CARD` (whose machinery it reuses: `bb::UploadRx`,
+A new command beside `0x77 CARD` (whose machinery it reuses: `bb::UploadRx`,
 the `max_body − 24` chunks, the 5 s silence drop, `HL.serial`), because a drop
 never touches the card. Every reply starts with a status: 0 OK · 2 BAD_ARGS ·
 3 BAD_STATE · 6 TOO_LARGE.
@@ -363,7 +363,7 @@ every `start` a position in it — so a set loads with nothing held. An older
 set with held memory in its WAV loads as before; the held part then reclaims
 like any other.
 
-**Protocol (api 2).** `0x68 op 4 RECLAIM ← u8 mode (0 FREE · 1 ALL) →
+**Protocol (api 2).** `0x78 op 4 RECLAIM ← u8 mode (0 FREE · 1 ALL) →
 status` (BAD_STATE as a BEGIN: a set op, a load, a take, a card job, a drop,
 a set's recordings still to commit); `padState` 4 = reclaiming; the tail grows
 to 324 bytes: `315 u32 undoHeld · 319 u32 reclaimed · 323 u8 undoForgot` (the

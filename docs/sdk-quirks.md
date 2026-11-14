@@ -2,7 +2,9 @@
 
 Each entry: symptom · cause · evidence · what to do · upstream ask. Line
 numbers are alchemy-sdk v0.11.0 (`7b1cf0c`) plus our local `817d632` unless
-stated. Kyklophoria keeps the same register (`docs/sdk-quirks.md` there);
+stated. Since 2026-11-13 the build uses v0.13.0 (`c8b8925`) on the branch
+`local/v0.13` (the worktree `../alchemy-sdk-0.13`): the boost patch again
+(`a3f108c`) and the USB statics (`72cd24f`, below). Kyklophoria keeps the same register (`docs/sdk-quirks.md` there);
 entries marked *(K)* were found there first and checked here.
 
 ## `System::GetUs()` wraps every 21.5 s (17.9 s boosted)
@@ -20,10 +22,30 @@ Luke confirmed the bug 2026-09-06.
 ## Boost needs a local patch
 
 `AlchemyLabV2::Init` calls `seed.Init()` with the default `boost = false`.
-Our `817d632` adds `Init(sr, block, boost)`. **What to do.** Keep the branch
-`local/v0.11-boost` until Hermetic's point release lands, then rebase and
-drop it. Luke approved boost 2026-09-06; the release has not appeared as of
-2026-09-15.
+Our patch adds `Init(sr, block, boost)` (`817d632` on v0.11, `a3f108c` on
+v0.13). **What to do.** Carry it on `local/v0.13` until Hermetic's point
+release takes it. Luke approved boost 2026-09-06; v0.12 and v0.13 shipped
+without it.
+
+## v0.13's USB statics cost 19 KB of SRAM
+
+**Symptom.** Moving to v0.13 overflowed SRAM by 22.8 KB. **Cause.** The
+shared composite USB device (`usb::Device::Shared()`, two 32-entry transmit
+queues, 14.6 KB) and the HostLink CDC transport (4.8 KB) are
+constant-initialised statics with a few nonzero member initialisers, so they
+sit in `.data`; on BOOT_SRAM the `.data` load image lives in SRAM beside the
+code. **What to do.** `72cd24f` builds both at first use in a zeroed `.bss`
+buffer (placement new): 19.4 KB back. The rest of v0.13's growth (code, about
+20 KB) is paid by building the SDK's cold files for size (`SDK_COLD` in the
+Makefile, `-Os`), which saves about 42 KB: SRAM 92.2 % on v0.13 against
+96.7 % on v0.11. **Upstream ask.** The same two-line change in the SDK; every
+BOOT_SRAM firmware pays the 19 KB.
+
+## v0.13's diagnostics own 0x60–0x63
+
+The SDK's opt-in `hostlink::Diagnostics` extension claims 0x60–0x63, where
+our StateExt was. StateExt moved to 0x70–0x7F (api 5), so the two can share a
+link; we don't register Diagnostics today.
 
 ## Static initialisers into `.sdram_bss` *(K, with a correction)*
 
@@ -89,7 +111,7 @@ output. **Upstream** candidate; local copy possible for our own CRCs.
 One option change is `BLOB_BEGIN` + N × `BLOB_DATA` + `BLOB_COMMIT` over the
 whole managed blob (~12 KB here with motion locks), stop-and-wait; anything
 shorter is `SCHEMA_MISMATCH`. That is why an option edit holds the page for
-up to a second. The StateExt (0x60–0x6F) is the sanctioned escape for
+up to a second. The StateExt (0x70–0x7F) is the sanctioned escape for
 everything performance-rated. **Upstream.** `SET_COMPONENT idx, bytes`.
 
 ## `Pager::SetStored` dereferences `phys` unchecked *(K)*

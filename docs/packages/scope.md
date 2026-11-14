@@ -2,7 +2,7 @@
 
 *Branch `pkg3/scope`, 2026-09-08. Owns the `/* SCOPE */` lines in
 `src/audiothurgist.cpp` (the rings, the AudioCb stores, the ADC pointers and
-calibration constants, the 0x62 handler, the descriptor capability), the
+calibration constants, the 0x72 handler, the descriptor capability), the
 pure `core/bb_scope.h` with `tests/scope_check.cpp`, the `max_body` line in
 the Makefile, and on the web side `scopeReq / parseScope2 / scopePlan /
 fetchScopeFrame` and the jack tables in `hostlink.js`, the fake module's
@@ -47,9 +47,10 @@ of the band (a 9 kHz tone: 15 % and more, beating).
    on what is there now (`kScopeTrigHold`). A trigger on a jack keeps the
    whole cv ring: a clock or a gate is meant to stand still.
 2. *Every frame carried all four audio channels.* in L / in R on auto were
-   fetched always, to find out whether they carried a signal. The SDK's CDC
-   pump sends one 256-byte chunk per 1 ms control poll, so a reply's size
-   *is* its latency: 1022 bytes ≈ 5 polls. The reply now carries **four
+   fetched always, to find out whether they carried a signal. SDK v0.11's
+   CDC pump sent one 256-byte chunk per 1 ms control poll, so a reply's size
+   was its latency: 1022 bytes ≈ 5 polls. (From v0.13 the next chunk goes
+   out from the transmit-complete interrupt, back to back.) The reply now carries **four
    level bytes** (peak |x| of every audio channel over the newest 43 ms,
    fetched or not), and the page fetches only the channels that show.
 3. *The page waited.* The next request was floored at 33 ms after the last
@@ -83,7 +84,7 @@ Now the firmware keeps **ten channels on one sample clock** in two tiers:
   (2 kHz), int8 rings of 16 K samples (8.2 s), read straight from ADC1's
   DMA buffer in the audio callback.
 
-0x62 grew a body: channel masks, a decimation per tier, samples per
+0x72 grew a body: channel masks, a decimation per tier, samples per
 channel, trigger / frame / at flags, a trigger level and source. A **Scope tab**
 on the page draws the traces in their own colours over a time grid — 1 V
 per division once a jack shows — with time zoom per tier (audio ×1 = 11 ms
@@ -95,7 +96,7 @@ current jack map with its present voltage — and it polls **as fast as the
 link allows** (≤ 50 frames/s) while it shows. The empty body still answers
 the Play tab's small trace.
 
-## Protocol (0x62, api 4)
+## Protocol (0x72, api 4)
 
 ```
 ← (empty)                → u8 status, u16 256, i8 x[256]           the Play tab's small trace:
@@ -329,11 +330,11 @@ in `src/audiothurgist.cpp`.
 - Frame rate: on the fake port (6 ms latency) the tab runs past 30
   frames/s for one-request frames (the self-test holds it to that). On the
   module the usual frame — out L + out R — is one 1022-byte reply, ~1.05 KB
-  on the wire; the SDK's CDC transport sends one 256-byte chunk per 1 ms
-  control poll, so a frame is ~5 ms of transfer plus the request and the
-  poll that picks it up: **expect 40–50 frames/s** for one-request frames,
-  half that for two requests (the inputs showing too), and the pill will
-  say what it got. Not measured on hardware from this worktree.
+  on the wire. On SDK v0.13 the CDC transport sends its 256-byte chunks
+  back to back from the transmit-complete interrupt, so a frame is about a
+  millisecond of transfer plus the request and the poll that answers it;
+  the 20 ms floor sets the rate: **expect 45–50 frames/s** for one-request
+  frames, somewhat less for two, and the pill says what it got.
 - The above list is the package as first built (2026-09); the api 4
   additions to both suites are in the section at the top and in the files.
 

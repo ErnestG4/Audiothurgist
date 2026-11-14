@@ -4,10 +4,10 @@
  * alchemy-sdk's tools/hostlink-cli/hostlink.mjs), a single-outstanding-
  * request Link with a priority queue and round-trip measurement, the
  * standard commands the page needs (HELLO, GET_DESCRIPTOR, GET_LIVE, live
- * BLOB writes) and the firmware's StateExt parsers (0x60–0x66: state, envelope,
+ * BLOB writes) and the firmware's StateExt parsers (0x70–0x76: state, envelope,
  * scope — the small output trace and the ten-channel SCOPE body —, actions, the
- * sample-mode wave / table / hits reads, the set save / load, and CARD's 0x67:
- * a break uploaded from a file the browser decoded, an old card copied in; LOOPVIEW's 0x6A: Play's loop).
+ * sample-mode wave / table / hits reads, the set save / load, and CARD's 0x77:
+ * a break uploaded from a file the browser decoded, an old card copied in; LOOPVIEW's 0x7A: Play's loop).
  *
  * Plain script in the browser (globals via window.HL); CommonJS in node so
  * selftest.mjs can pin it to the SDK's golden vectors. No dependencies.
@@ -19,14 +19,14 @@ const PROTO = 1;
 /* The version of the firmware's side of everything below (the commands, the ops, the state body), from its descriptor
  * ("audiothurgist": { "api": n }, StateExt::DescriptorRootJson). The page and the firmware ship together; on connect the
  * page refuses any other number with one message — flash the matching .bin. Bump both with any change to the wire. */
-const API = 4;   /* 4: SCOPE — min/max groups above decimation 1, the four levels in the reply, no peak flag; 3: LOOPVIEW — 0x6A GET_LOOP, the state body to 328 (2: ENV's KEY_PARAMS / GET_KEYS, RECLAIM's 0x68 op 4, sets saved packed) */
+const API = 5;   /* 5: the commands at 0x70–0x7F (SDK v0.13's diagnostics own 0x60–0x63); 4: SCOPE — min/max groups above decimation 1, the four levels in the reply, no peak flag; 3: LOOPVIEW — 0x7A GET_LOOP, the state body to 328 (2: ENV's KEY_PARAMS / GET_KEYS, RECLAIM's 0x78 op 4, sets saved packed) */
 const apiOf = desc => (desc && desc.audiothurgist && Number.isInteger(desc.audiothurgist.api)) ? desc.audiothurgist.api : null;
 const CMD = {
   hello: 0x01, getDescriptor: 0x02, blobBegin: 0x12, blobData: 0x13, blobCommit: 0x14,
   getLive: 0x20, reboot: 0x40,
-  state: 0x60, env: 0x61, scope: 0x62, action: 0x63, wave: 0x64, table: 0x65, hits: 0x66, card: 0x67, pads: 0x68,
-  keys: 0x69,   /* KEYP: GET_KEYS — every key's gain / tune / plays (ENV: envelope, choke group) */
-  loop: 0x6A,   /* LOOPVIEW: GET_LOOP — Play's loop, a page of events */
+  state: 0x70, env: 0x71, scope: 0x72, action: 0x73, wave: 0x74, table: 0x75, hits: 0x76, card: 0x77, pads: 0x78,
+  keys: 0x79,   /* KEYP: GET_KEYS — every key's gain / tune / plays (ENV: envelope, choke group) */
+  loop: 0x7A,   /* LOOPVIEW: GET_LOOP — Play's loop, a page of events */
 };
 const ACT = { dice: 0, reslice: 1, punch: 3, flow: 4, scrub: 5, load: 6, clearLocks: 7, page: 8,
   recArm: 9, recClear: 10, keyPlays: 11, looperUndo: 12, looperClear: 13, saveSet: 14, loadSet: 15,
@@ -64,7 +64,7 @@ const NOTE_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A'
 const keyName = k => NOTE_NAMES[k % 12] + (1 + Math.floor(k / 12));
 const STATUS = ['OK', 'UNSUPPORTED', 'BAD_ARGS', 'BAD_STATE', 'BAD_CRC', 'BAD_SLOT', 'TOO_LARGE',
   'SCHEMA_MISMATCH', 'FLASH_FAIL', 'BUSY', 'FRAME_ERROR'];
-STATUS[20] = 'EXISTS'; STATUS[21] = 'NO_CARD'; STATUS[22] = 'CARD_FULL';   /* CARD (0x67): the card's own answers (Kyklophoria's 20) */
+STATUS[20] = 'EXISTS'; STATUS[21] = 'NO_CARD'; STATUS[22] = 'CARD_FULL';   /* CARD (0x77): the card's own answers (Kyklophoria's 20) */
 
 /* ───────────── codecs ───────────── */
 const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let i = 0; i < 256; i++) { let c = i; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[i] = c >>> 0; } return t; })();
@@ -324,7 +324,7 @@ async function setLive(link, info, bytes) {
 }
 function concat(parts) { const all = new Uint8Array(parts.reduce((s, p) => s + p.length, 0)); let o = 0; for (const p of parts) { all.set(p, o); o += p.length; } return all; }
 
-/* ───────────── StateExt (0x60–0x63) ─────────────
+/* ───────────── StateExt (0x70–0x73) ─────────────
  * GET_STATE body (after status), STATE_LEN bytes, every field always there: anything else is not this firmware's
  * (null). */
 const STATE_LEN = 328;
@@ -510,7 +510,7 @@ const setMute        = (link, stopped)                     => editOp(link, ACT.s
  * previous AUTOSLICE's undo step (every send of one slider drag after the first: a whole drag is one undo step) */
 const autoslice      = (link, k, reroll = false, gen = 0, join = false) => editOp(link, ACT.autoslice, [Math.max(0, Math.min(KEYS.autoMax, Math.round(k))) & 0xff, (reroll ? KEYS.reroll : 0) | (join ? KEYS.join : 0)], gen);
 
-/* ───────────── KEYP (ACTION 37 + 0x69 GET_KEYS) ─────────────
+/* ───────────── KEYP (ACTION 37 + 0x79 GET_KEYS) ─────────────
  * Each of the 24 keys has a gain (½ dB steps, −24 … +6 dB), a tune (cents, ±24 semitones) and how it plays: 0 follow
  * Options → Key Plays · 1 one-shot · 2 held (until the gate falls / the pad comes up) · 3 loop (held, the entry looping)
  * · 4 ratchet (held, the entry again from its start every `rat`: 0 its whole length · 1 ½ · 2 ¼ · 3 ⅛ of it · 4 an 8th
@@ -583,7 +583,7 @@ function spreadPlan(keySlice, entries, nSlices, root) {
 /* key j's cents after a spread of a root tuned `rootCents` */
 const spreadCents = (j, root, rootCents = 0) => Math.max(-KEYP.centsMax, Math.min(KEYP.centsMax, (j - root) * 100 + rootCents));
 
-/* ───────────── LOOPVIEW (0x6A GET_LOOP) ─────────────
+/* ───────────── LOOPVIEW (0x7A GET_LOOP) ─────────────
  * Play's loop as the module holds it (core/bb_looper.h): ≤ 256 events sorted by phase, each { phase 0..1, key (-1 a
  * keyless call), slice (the entry it was called with), style (LOOP's bits), gen (the pass it was recorded in) }. A
  * reply is u8 status, u16 n, u8 seq, u8 gen (the pass being recorded into), u8 flags (b0 dirty: something is recorded
@@ -635,7 +635,7 @@ function loopNotes(events) {
   return { notes, top, newest };
 }
 
-/* ───────────── CARD (0x67) ─────────────
+/* ───────────── CARD (0x77) ─────────────
  * The card is one folder, Audiothurgist/: breaks/*.wav (the list), sets/, presets/. The page turns any file the
  * browser can decode into what the module loads — at most 17 s, 48 kHz, mono or stereo, PCM16 WAV — and sends it in
  * order from byte 0, one chunk per round trip: UP_BEGIN(total, overwrite, name), then UP_DATA(total, offset, bytes)
@@ -728,7 +728,7 @@ async function cardList(link) {
   return out;
 }
 
-/* ───────────── PADS (0x68) ─────────────
+/* ───────────── PADS (0x78) ─────────────
  * A sample dropped onto a pad: the page decodes the file (48 kHz, as the card upload does), keeps two channels at most,
  * cuts it to the room the module has left past freePos (the state tail's pads.free) and sends raw PCM16 — little-endian,
  * interleaved L R for stereo, no header — in order from byte 0, one chunk per round trip: BEGIN(key, ch, frames), then
@@ -824,7 +824,7 @@ async function fetchEnv(link, n) {
 }
 const parseScope = b => Int8Array.from(b.subarray(3, 3 + u16(b, 1)));
 
-/* ───────────── SCOPE (0x62 with a body) ─────────────
+/* ───────────── SCOPE (0x72 with a body) ─────────────
  * Ten channels on one sample clock in the firmware's rings: four audio at
  * 48 kHz — out L · out R · in L (J1) · in R (J2), 64 K samples — and six CV
  * jacks J3..J8 DC-coupled at ±5 V = ±127, one sample per audio block (2 kHz,

@@ -136,7 +136,7 @@ didn't show on the page live."* The page had the count (tail 176) and nothing
 else; the free looper writes no steps, so Play's strip stayed empty. Now the
 page reads the list and draws it.
 
-**`0x6A GET_LOOP`** ← `[u16 offset]` → `u8 status, u16 n, u8 seq, u8 gen,
+**`0x7A GET_LOOP`** ← `[u16 offset]` → `u8 status, u16 n, u8 seq, u8 gen,
 u8 flags (b0 dirty), u16 offset, u8 count`, then `count ×` 6 bytes
 `{u16 phase × 65535, i8 key, i8 slice, u8 style & 0x7F, u8 gen}` — sorted by
 phase, ≤ 169 a reply at max_body 1024, so a full loop is two pages; an offset

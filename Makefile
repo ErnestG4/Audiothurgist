@@ -3,7 +3,9 @@
 # The final form of BreakFix: a sampling / slicing / rearranging toolkit.
 #
 # Expects sibling clones in the parent directory (like alchemy-template):
-#   ../alchemy-sdk   (github.com/hermetic-modular/alchemy-sdk)
+#   ../alchemy-sdk   (github.com/hermetic-modular/alchemy-sdk v0.13.0, plus the
+#                    local boost and USB-statics patches, docs/sdk-quirks.md;
+#                    ../alchemy-sdk-0.13 is used instead when it exists)
 #   ../DaisySP       (github.com/electro-smith/DaisySP, for DaisySP-LGPL reverb)
 #
 #   make libdaisy      — build the SDK's vendored libDaisy once after cloning
@@ -16,7 +18,7 @@ TARGET = audiothurgist
 
 BOARD ?= v2
 
-ALCHEMY_DIR  = ../alchemy-sdk
+ALCHEMY_DIR  = $(firstword $(wildcard ../alchemy-sdk-0.13) ../alchemy-sdk)
 LIBDAISY_DIR = $(ALCHEMY_DIR)/vendor/libDaisy
 DAISYSP_LGPL = ../DaisySP/DaisySP-LGPL
 
@@ -63,6 +65,14 @@ CPP_STANDARD = -std=gnu++17
 
 SYSTEM_FILES_DIR = $(LIBDAISY_DIR)/core
 include $(SYSTEM_FILES_DIR)/Makefile
+
+# The SDK's cold code (descriptor and preset plumbing, file transfer, USB
+# setup, calibration) is built for size: on BOOT_SRAM the code shares the
+# 480 KB SRAM with everything else, and none of it is on the audio path.
+SDK_COLD = describe descriptor json_check host host_link fast_values diagnostics \
+           fs_extension sd_card presets preset_gesture_ui v2_calibration \
+           v2_factory_cal device device_class cdc_transport settings
+$(addprefix $(BUILD_DIR)/,$(addsuffix .o,$(SDK_COLD))): OPT = -Os
 
 BOARD_STAMP := $(BUILD_DIR)/.board-$(BOARD)
 ifeq ($(wildcard $(BOARD_STAMP)),)

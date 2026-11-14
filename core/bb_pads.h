@@ -1,6 +1,6 @@
 #pragma once
 // PADS — the pure pieces of a sample dropped onto a pad, and of a kit with no
-// break (docs/packages/pads.md). The shell's plumbing (the 0x68 command, the
+// break (docs/packages/pads.md). The shell's plumbing (the 0x78 command, the
 // state tail, the main-loop commit) is src/audiothurgist.cpp; the engine's
 // half is EditOp::Record (core/bb_edit.h), Engine::AdoptR and Engine::OwnRate
 // (core/bb_engine.h). Host-tested in tests/pads_check.cpp.
@@ -37,7 +37,7 @@ constexpr int kPadStubSlices  = 16;
 constexpr int kPadAnalyseMax  = 48000;    // a pad's class / salience / density / hit come from its first second
 constexpr uint8_t kPadMaxCh   = 2;
 
-/* 0x68 PADS op state (state tail 293) and the last op's result (295) */
+/* 0x78 PADS op state (state tail 293) and the last op's result (295) */
 enum PadState : uint8_t { kPadIdle = 0, kPadReceiving = 1, kPadCommitting = 2, kPadClearing = 3, kPadReclaiming = 4 /* RECLAIM: op 4 */ };
 enum PadResult : uint8_t
 {
