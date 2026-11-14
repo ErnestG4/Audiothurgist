@@ -7,8 +7,8 @@ proves the ground under the next, so **stop and report at the first
 failure**. Write **ok** or what you saw next to each box. "Listen for" is what
 tells pass from fail.
 
-Setup: `audiothurgist-beta9-loopview-7e0b9ba.bin` from the Desktop's
-`Audiothurgist-flash/` flashed (md5 149c0aad…), and the page from the same
+Setup: `audiothurgist-beta11-sdk13-fc01080.bin` from the Desktop's
+`Audiothurgist-flash/` flashed (md5 d9cab537…), and the page from the same
 commit (GitHub Pages after the push). The page checks the firmware's api
 number and refuses any other build, so the two always go together.
 **Flashing it drops the saved presets once**: each slot that has a backup on
@@ -491,6 +491,26 @@ a second or more) and one long file (10 s or more).
        (J5 style 7) — the take ends Undo's history — and drop a file that does
        not fit: it reclaims without "Undo forgot". *Call*: should the Reclaim
        button also do this gentler reclaim first and ask only for the rest? ____
+
+## 10i. SDK v0.13 (8 min)
+
+beta11 is the first build on alchemy-sdk v0.13 (two local patches:
+`docs/sdk-quirks.md`), and its commands moved to 0x70–0x7F (api 5).
+
+- [ ] Power-up: the breathing pulse, then the panel. Connect: the page
+      connects at once, with no "flash the matching build" message.
+- [ ] The panel's knobs at power-up: each pot picks up where the preset
+      left it (v0.13 holds a seeded value until the knob reaches it).
+- [ ] The Options knobs that choose from a list (Grammar, Start In, Key
+      Plays, Clock): sweep each slowly; the LED ring and the page agree on
+      every choice, and the zones look evenly spaced.
+- [ ] A clock into J3 at 120 BPM for two minutes: no stumble at all
+      (the SDK's 21 s wrap fix sits beside ours).
+- [ ] Scope tab, out L/R only: the fps pill reads 40 or more.
+- [ ] Hermetic's `/program` with the page closed: it connects, reads the
+      presets and the manual, and its Device console opens without error.
+- [ ] A card upload and a pad drop: both complete at the usual speed or
+      faster.
 
 ## 11. Scope (3 min)
 
