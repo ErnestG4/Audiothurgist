@@ -1,0 +1,85 @@
+From 72cd24f316226df966c9bff00602080a0c04750a Mon Sep 17 00:00:00 2001
+From: Combust <combust@thespot.chat>
+Date: Fri, 13 Nov 2026 16:24:16 -0800
+Subject: [PATCH 2/2] LOCAL: build usb::Device::Shared() and the HostLink CDC
+ transport at first use in zeroed storage
+
+Both were constant-initialised statics with a few nonzero member initialisers,
+so they landed in .data. On a BOOT_SRAM app the .data load image lives in the
+480 KB SRAM beside the code, and these two cost 19.4 KB of it (14.6 KB for the
+shared USB device with its two 32-entry transmit queues, 4.8 KB for the
+transport). Placement-new into a .bss buffer at first use keeps the same
+objects and the same order of construction, and the image is gone.
+---
+ framework/src/host_link/host.cpp | 15 +++++++++++----
+ framework/src/usb/device.cpp     | 10 +++++++++-
+ 2 files changed, 20 insertions(+), 5 deletions(-)
+
+diff --git a/framework/src/host_link/host.cpp b/framework/src/host_link/host.cpp
+index 29bd386..7108541 100644
+--- a/framework/src/host_link/host.cpp
++++ b/framework/src/host_link/host.cpp
+@@ -33,7 +33,14 @@ static uint8_t DSY_SDRAM_BSS s_factory[kPresetBlobCapacity];
+ static uint8_t DSY_SDRAM_BSS s_staging [kPresetBlobCapacity];
+ static uint8_t DSY_SDRAM_BSS s_snapshot[kPresetBlobCapacity];
+ 
+-static CdcUsbTransport  s_cdc;
++/* Built at first use in zeroed storage, not as a constant-initialised static:
++ * that put it in .data, whose load image costs RAM on a BOOT_SRAM app. */
++static CdcUsbTransport& Cdc()
++{
++    alignas(CdcUsbTransport) static uint8_t storage[sizeof(CdcUsbTransport)];
++    static CdcUsbTransport* cdc = new (storage) CdcUsbTransport();
++    return *cdc;
++}
+ 
+ static void DefaultReboot(uint8_t mode, void*)
+ {
+@@ -206,13 +213,13 @@ void Host::Start()
+          * exposes the Seed's onboard port.  The product string is what
+          * the OS and the browser's port picker display. */
+ #if defined(ALCHEMY_BOARD_V2)
+-        configuration_ok_ = s_cdc.Init( daisy::UsbHandle::FS_EXTERNAL,
++        configuration_ok_ = Cdc().Init( daisy::UsbHandle::FS_EXTERNAL,
+                    product_, name_) && configuration_ok_;
+ #else
+-        configuration_ok_ = s_cdc.Init( daisy::UsbHandle::FS_INTERNAL,
++        configuration_ok_ = Cdc().Init( daisy::UsbHandle::FS_INTERNAL,
+                    product_, name_) && configuration_ok_;
+ #endif
+-        transport_ = &s_cdc;
++        transport_ = &Cdc();
+     }
+ 
+ #if defined(ALCHEMY_BOARD_V2)
+diff --git a/framework/src/usb/device.cpp b/framework/src/usb/device.cpp
+index bdaffee..7e5fbd5 100644
+--- a/framework/src/usb/device.cpp
++++ b/framework/src/usb/device.cpp
+@@ -8,6 +8,7 @@ extern USBD_HandleTypeDef hUsbDeviceFS, hUsbDeviceHS;
+ extern HCD_HandleTypeDef hhcd_USB_OTG_HS;
+ }
+ #include <cstring>
++#include <new>
+ 
+ namespace alchemy::usb {
+ namespace {
+@@ -34,7 +35,14 @@ bool ValidProduct(const char* value) {
+     return true;
+ }
+ }
+-Device& Device::Shared() { static Device value; return value; }
++/* Built at first use in zeroed storage: a static Device with a few nonzero
++ * member initializers lands in .data, whose ~14 KB load image costs RAM on a
++ * BOOT_SRAM app (code and .data images both live in SRAM). */
++Device& Device::Shared() {
++    alignas(Device) static uint8_t storage[sizeof(Device)];
++    static Device* value = new (storage) Device();
++    return *value;
++}
+ bool Device::Configure(daisy::UsbHandle::UsbPeriph peripheral, const char* product, Identity identity) {
+     if (initialized_ || (peripheral != daisy::UsbHandle::FS_INTERNAL && peripheral != daisy::UsbHandle::FS_EXTERNAL) || !ValidProduct(product)) return false;
+     peripheral_ = peripheral; identity_configured_ = true;
+-- 
+2.43.0
+

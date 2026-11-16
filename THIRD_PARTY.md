@@ -29,9 +29,11 @@ of use in the source.
 
 ## Hermetic Modular alchemy-sdk, libDaisy, DaisySP-LGPL
 
-Sibling checkouts referenced by the Makefile (`../alchemy-sdk`,
-`../DaisySP/DaisySP-LGPL`); see their own licenses. `reverbsc` is from
-DaisySP-LGPL.
+Sibling checkouts referenced by the Makefile (`../alchemy-sdk-0.13` or
+`../alchemy-sdk`, `../DaisySP/DaisySP-LGPL`); see their own licenses.
+`reverbsc` is from DaisySP-LGPL. `sdk-patches/` holds two patches to the
+alchemy-sdk (MIT, Hermetic Modular LLC); the SDK code they touch keeps that
+licence, and the changes are Audiothurgist's (AGPL-3.0).
 
 ## Google web-serial-polyfill
 

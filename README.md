@@ -261,8 +261,8 @@ More in `web/README.md`.
 Siblings expected next to this repo:
 [`alchemy-sdk`](https://github.com/hermetic-modular/alchemy-sdk) v0.13.0
 with its vendored libDaisy, plus two small local patches (the 480 MHz boost in
-`AlchemyLabV2::Init`, and the USB statics moved out of `.data`; both in
-`docs/sdk-quirks.md`), and `DaisySP/DaisySP-LGPL`. The Makefile uses
+`AlchemyLabV2::Init`, and the USB statics moved out of `.data`; the patches
+and the setup are in `sdk-patches/`, the why in `docs/sdk-quirks.md`), and `DaisySP/DaisySP-LGPL`. The Makefile uses
 `../alchemy-sdk-0.13` when it exists, otherwise `../alchemy-sdk`. Then:
 
 ```sh

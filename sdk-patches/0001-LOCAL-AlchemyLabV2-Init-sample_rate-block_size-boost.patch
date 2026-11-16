@@ -1,0 +1,56 @@
+From a3f108c390ea275188f26b03d11f706f401e1332 Mon Sep 17 00:00:00 2001
+From: Combust <will@beanz>
+Date: Mon, 7 Sep 2026 16:11:10 -0700
+Subject: [PATCH 1/2] =?UTF-8?q?LOCAL:=20AlchemyLabV2::Init(sample=5Frate,?=
+ =?UTF-8?q?=20block=5Fsize,=20boost)=20=E2=80=94=20pass=20boost=20to=20Dai?=
+ =?UTF-8?q?sySeed::Init=20(pending=20Hermetic's=20point=20release)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../alchemy-lab/v2/include/alchemy/hw/alchemy_lab_v2.h    | 8 +++++---
+ hardware/alchemy-lab/v2/src/alchemy_lab_v2.cpp            | 5 +++--
+ 2 files changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/hardware/alchemy-lab/v2/include/alchemy/hw/alchemy_lab_v2.h b/hardware/alchemy-lab/v2/include/alchemy/hw/alchemy_lab_v2.h
+index 4784e74..8e17888 100644
+--- a/hardware/alchemy-lab/v2/include/alchemy/hw/alchemy_lab_v2.h
++++ b/hardware/alchemy-lab/v2/include/alchemy/hw/alchemy_lab_v2.h
+@@ -143,9 +143,11 @@ class AlchemyLabV2
+      *   10. SDMMC1 @ MEDIUM_SLOW / BITS_1
+      *   11. FatFS lazy mount on volume "0:"
+      */
+-    void Init(daisy::SaiHandle::Config::SampleRate sample_rate
+-                  = daisy::SaiHandle::Config::SampleRate::SAI_48KHZ,
+-              uint32_t block_size = kEngineBlockSamples);
++    /** @param boost  true = 480 MHz core (libDaisy DaisySeed::Init(boost)).
++     *  LOCAL PATCH (2026-09-07) pending Hermetic's point release with the same option. */
++    void Init(daisy::SaiHandle::Config::SampleRate sample_rate = daisy::SaiHandle::Config::SampleRate::SAI_48KHZ,
++              uint32_t block_size = kEngineBlockSamples,
++              bool boost = false);
+ 
+     /**
+      * Update all control state. Pots + CV via daisy::AnalogControl::Process,
+diff --git a/hardware/alchemy-lab/v2/src/alchemy_lab_v2.cpp b/hardware/alchemy-lab/v2/src/alchemy_lab_v2.cpp
+index c895227..d7b54e9 100644
+--- a/hardware/alchemy-lab/v2/src/alchemy_lab_v2.cpp
++++ b/hardware/alchemy-lab/v2/src/alchemy_lab_v2.cpp
+@@ -23,11 +23,12 @@ AlchemyLabV2* AlchemyLabV2::s_instance_ = nullptr;
+ static constexpr float kPotLpCoeff = 0.1181f; /* 1 - exp(-2π·20/1000) */
+ 
+ void AlchemyLabV2::Init(daisy::SaiHandle::Config::SampleRate sample_rate,
+-                        uint32_t                             block_size)
++                        uint32_t                             block_size,
++                        bool                                 boost)
+ {
+     /* 1) Seed bring-up + audio params ─────────────────────────────────── */
+     seed.Configure();
+-    seed.Init();
++    seed.Init(boost);   /* LOCAL PATCH: 480 MHz when asked */
+     seed.SetAudioBlockSize(block_size);
+     seed.SetAudioSampleRate(sample_rate);
+     sample_rate_hz_ = seed.AudioSampleRate();
+-- 
+2.43.0
+

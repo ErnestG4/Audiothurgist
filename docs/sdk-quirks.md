@@ -4,7 +4,8 @@ Each entry: symptom · cause · evidence · what to do · upstream ask. Line
 numbers are alchemy-sdk v0.11.0 (`7b1cf0c`) plus our local `817d632` unless
 stated. Since 2026-11-13 the build uses v0.13.0 (`c8b8925`) on the branch
 `local/v0.13` (the worktree `../alchemy-sdk-0.13`): the boost patch again
-(`a3f108c`) and the USB statics (`72cd24f`, below). Kyklophoria keeps the same register (`docs/sdk-quirks.md` there);
+(`a3f108c`) and the USB statics (`72cd24f`, below). Both are in
+`sdk-patches/` with the setup. Kyklophoria keeps the same register (`docs/sdk-quirks.md` there);
 entries marked *(K)* were found there first and checked here.
 
 ## `System::GetUs()` wraps every 21.5 s (17.9 s boosted)
